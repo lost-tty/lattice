@@ -1,0 +1,16 @@
+[package]
+name = "lattice-core"
+description = "Core types for Lattice: nodes, sigchains, entries, and vector clocks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+prost = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

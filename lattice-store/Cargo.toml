@@ -1,0 +1,15 @@
+[package]
+name = "lattice-store"
+description = "Log-based KV store with snapshots and watermarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-core = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
