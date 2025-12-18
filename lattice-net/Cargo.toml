@@ -1,0 +1,18 @@
+[package]
+name = "lattice-net"
+description = "Networking layer for Lattice using Iroh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-core = { workspace = true }
+iroh = { workspace = true }
+iroh-gossip = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

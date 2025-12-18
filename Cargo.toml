@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "lattice-core",
+    "lattice-net",
+    "lattice-store",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Workspace crates
+lattice-core = { path = "lattice-core" }
+lattice-net = { path = "lattice-net" }
+lattice-store = { path = "lattice-store" }
+
+# Networking (Iroh)
+iroh = "0.95"
+iroh-gossip = "0.95"
+
+# Cryptography
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+
+# Serialization
+prost = "0.13"
+prost-types = "0.13"
+prost-build = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Utilities
+thiserror = "2"
+tracing = "0.1"
+bytes = "1"
+
+# Testing
+tokio-test = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"

@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package lattice;
+
+// 1. The Wrapper (What flies over the wire)
+message SignedEntry {
+  // The serialized bytes of the 'Entry' message.
+  // We keep this as raw bytes so the signature verification is stable.
+  bytes entry_bytes = 1;
+  
+  // Ed25519 Signature of 'entry_bytes'
+  bytes signature = 2;
+  
+  // Public Key of the author (32 bytes)
+  bytes author_id = 3;
+}
+
+// 2. The Log Entry (The Atomic Unit)
+message Entry {
+  // Versioning allows us to change the format radically later if needed
+  uint32 version = 1;
+
+  // Ordering Metadata
+  bytes prev_hash = 2;   // Link to previous entry (32 bytes)
+  uint64 seq = 3;        // Monotonic sequence number
+  HLC timestamp = 4;     // Hybrid Logical Clock
+
+  // The Batch of Operations
+  repeated Operation ops = 5;
+}
+
+// Hybrid Logical Clock
+message HLC {
+  uint64 wall_time = 1;  // Unix timestamp (ms)
+  uint32 counter = 2;    // Logical counter for same-ms ordering
+}
+
+// 3. The Operation (The Change)
+message Operation {
+  // "oneof" is how Protobuf handles Rust Enums
+  oneof op_type {
+    PutOp put = 1;
+    DeleteOp delete = 2;
+    // Future: MergeOp merge = 3;
+  }
+}
+
+message PutOp {
+  string key = 1;
+  bytes value = 2; // Raw bytes allows storing images, JSON, binary, etc.
+}
+
+message DeleteOp {
+  string key = 1;
+}
+
+// 4. The Sync Handshake (Vector Clocks)
+message SyncState {
+  repeated Frontier frontiers = 1;
+  HLC sender_hlc = 2;  // Sender's current clock (for peer time awareness)
+}
+
+message Frontier {
+  bytes author_id = 1;  // Ed25519 public key (32 bytes)
+  uint64 max_seq = 2;   // Highest sequence number seen from this author
+}
