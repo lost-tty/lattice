@@ -65,3 +65,9 @@ message Frontier {
   uint64 max_seq = 2;   // Highest sequence number seen from this author
   bytes last_hash = 3;  // Hash of the last entry (for chain verification)
 }
+
+// 5. Log File Record (wrapper for storage)
+message LogRecord {
+  bytes hash = 1;         // BLAKE3 hash of entry_bytes (32 bytes)
+  bytes entry_bytes = 2;  // Serialized SignedEntry
+}
