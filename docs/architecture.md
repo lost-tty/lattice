@@ -114,3 +114,46 @@ meta            String                  Vec<u8>                    System metada
 - All nodes keep all logs (own + others) for redundancy until watermark consensus.
 - Once all peers have acknowledged entries, they can be pruned and replaced by the snapshot.
 - If a node is offline too long, it re-bootstraps with a fresh snapshot when it reconnects.
+
+### Rich CRDTs (Future)
+
+Instead of a generic scripting language, use specific data types that merge better than LWW.
+
+Extend value types in redb:
+
+```rust
+enum ReplicatedValue {
+    LWW(Vec<u8>),          // Standard Last-Write-Wins (current model)
+    Counter(i64),          // PN-Counter (Increment/Decrement)
+    Set(HashSet<Vec<u8>>), // OR-Set (Observed-Remove Set)
+}
+```
+
+**Counter** (for "storage used" etc.):
+- State is `{node_id: value}` map. Merge = sum all nodes. No conflicts possible.
+
+**OR-Set** (for group membership etc.):
+- Merge = union. Element present if add timestamp > remove timestamp.
+
+**Op Code Compromise**: Use commutative operations instead of a VM:
+
+```protobuf
+message Entry {
+  oneof operation {
+    PutOp put = 1;
+    DeleteOp delete = 2;
+    MergeOp merge = 3;
+  }
+}
+
+message MergeOp {
+  string key = 1;
+  oneof payload {
+    int64 counter_delta = 2;
+    bytes set_add_member = 3;
+    bytes set_remove_member = 4;
+  }
+}
+```
+
+Recommendation: Use Put/Delete for 90% of data. Add CRDT primitives only when needed (concurrent counters, lists) rather than a scripting language.
