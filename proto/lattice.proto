@@ -63,4 +63,5 @@ message SyncState {
 message Frontier {
   bytes author_id = 1;  // Ed25519 public key (32 bytes)
   uint64 max_seq = 2;   // Highest sequence number seen from this author
+  bytes last_hash = 3;  // Hash of the last entry (for chain verification)
 }

@@ -11,6 +11,11 @@ rand = { workspace = true }
 prost = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
+dirs = { workspace = true }
+blake3 = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
