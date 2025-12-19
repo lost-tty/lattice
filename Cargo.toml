@@ -37,6 +37,8 @@ tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 tracing = "0.1"
 bytes = "1"
+dirs = "5"
+blake3 = "1"
 
 # Testing
 tokio-test = "0.4"

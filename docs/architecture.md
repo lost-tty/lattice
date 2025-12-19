@@ -52,6 +52,10 @@ Networking modes:
   - `disabled`: Permanently removed from mesh.
 - Sync priority: Low-power clients prefer peers marked as `server` or recently active.
 
+Future:
+- Key rotation: Allow nodes to rotate their keypair. Old key signs a "rotation" entry pointing to new key.
+- Secure storage: Support platform keystores (macOS Keychain, Linux Secret Service, TPM) for private key protection.
+
 ### Data Model
 
 - Keys are flat strings using path conventions (e.g., `/nodes/{pubkey}`, `/config/sync/interval`).
@@ -95,12 +99,12 @@ data/
 #### state.db Tables (redb)
 
 ```
-Table           Key                     Value           Purpose
+Table           Key                     Value                      Purpose
 ─────────────────────────────────────────────────────────────────────────────
-kv              String (path)           Vec<u8>         Replicated key-value data
-vector_clocks   [u8; 32] (author_id)    u64 (max seq)   Track sync state per author
-entry_index     (author_id, seq)        u64 (offset)    Fast entry lookup by position
-meta            String                  Vec<u8>         System metadata (own_seq, watermark, etc.)
+kv              String (path)           Vec<u8>                    Replicated key-value data
+vector_clocks   [u8; 32] (author_id)    (u64 seq, [u8; 32] hash)   Track sync state + chain verification
+entry_index     (author_id, seq)        u64 (offset)               Fast entry lookup by position
+meta            String                  Vec<u8>                    System metadata (own_seq, watermark, etc.)
 ```
 
 ### Watermarks
