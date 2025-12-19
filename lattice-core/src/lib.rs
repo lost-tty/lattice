@@ -10,6 +10,7 @@
 //! - **Proto**: Generated protobuf types from lattice.proto
 //! - **DataDir**: Platform-specific data directory paths
 //! - **SignedEntry**: Entry creation, signing, and verification
+//! - **Log**: Append-only log file I/O
 
 pub mod node;
 pub mod sigchain;
@@ -20,6 +21,11 @@ pub mod clock;
 pub mod proto;
 pub mod data_dir;
 pub mod signed_entry;
+pub mod log;
+
+// Constants
+/// Maximum size of a serialized SignedEntry (16 MB)
+pub const MAX_ENTRY_SIZE: usize = 16 * 1024 * 1024;
 
 pub use node::Node;
 pub use sigchain::SigChain;
@@ -29,3 +35,4 @@ pub use hlc::HLC;
 pub use clock::{Clock, SystemClock, MockClock};
 pub use data_dir::DataDir;
 pub use signed_entry::{EntryBuilder, sign_entry, verify_signed_entry, hash_signed_entry};
+pub use log::{append_entry, read_entries, LogReader};
