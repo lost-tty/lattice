@@ -76,6 +76,12 @@ impl EntryBuilder {
         });
         self
     }
+    
+    /// Add a raw operation
+    pub fn operation(mut self, op: Operation) -> Self {
+        self.ops.push(op);
+        self
+    }
 
     /// Build the Entry proto message
     pub fn build(self) -> Entry {

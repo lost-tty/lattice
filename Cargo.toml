@@ -39,6 +39,7 @@ tracing = "0.1"
 bytes = "1"
 dirs = "5"
 blake3 = "1"
+hex = "0.4"
 
 # Testing
 tokio-test = "0.4"

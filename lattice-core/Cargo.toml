@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 bytes = { workspace = true }
 dirs = { workspace = true }
 blake3 = { workspace = true }
+hex = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
