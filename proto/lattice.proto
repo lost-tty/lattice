@@ -20,6 +20,9 @@ message Entry {
   // Versioning allows us to change the format radically later if needed
   uint32 version = 1;
 
+  // Store this entry belongs to (16-byte UUID)
+  bytes store_id = 6;
+
   // Ordering Metadata
   bytes prev_hash = 2;   // Link to previous entry (32 bytes)
   uint64 seq = 3;        // Monotonic sequence number

@@ -23,6 +23,9 @@ pub enum SigChainError {
     #[error("Wrong author: expected {expected}, got {got}")]
     WrongAuthor { expected: String, got: String },
     
+    #[error("Wrong store_id: expected {expected}, got {got}")]
+    WrongStoreId { expected: String, got: String },
+    
     #[error("Invalid sequence: expected {expected}, got {got}")]
     InvalidSequence { expected: u64, got: u64 },
     
@@ -34,10 +37,13 @@ pub enum SigChainError {
 }
 
 /// An append-only log where each entry is cryptographically signed
-/// and hash-linked to the previous entry.
+/// and hash-linked to the previous entry, scoped to a specific store.
 pub struct SigChain {
     /// Path to the log file
     log_path: PathBuf,
+    
+    /// Store UUID (16 bytes)
+    store_id: [u8; 16],
     
     /// Author's public key (32 bytes)
     author_id: [u8; 32],
@@ -50,10 +56,11 @@ pub struct SigChain {
 }
 
 impl SigChain {
-    /// Create a new empty sigchain for an author
-    pub fn new(log_path: impl AsRef<Path>, author_id: [u8; 32]) -> Self {
+    /// Create a new empty sigchain for a (store, author) pair
+    pub fn new(log_path: impl AsRef<Path>, store_id: [u8; 16], author_id: [u8; 32]) -> Self {
         Self {
             log_path: log_path.as_ref().to_path_buf(),
+            store_id,
             author_id,
             next_seq: 1,
             last_hash: [0u8; 32],
@@ -61,11 +68,11 @@ impl SigChain {
     }
     
     /// Load a sigchain from an existing log file
-    pub fn from_log(log_path: impl AsRef<Path>, author_id: [u8; 32]) -> Result<Self, SigChainError> {
+    pub fn from_log(log_path: impl AsRef<Path>, store_id: [u8; 16], author_id: [u8; 32]) -> Result<Self, SigChainError> {
         let log_path = log_path.as_ref().to_path_buf();
         let entries = read_entries(&log_path)?;
         
-        let mut chain = Self::new(&log_path, author_id);
+        let mut chain = Self::new(&log_path, store_id, author_id);
         
         for signed_entry in entries {
             // Verify signature
@@ -84,6 +91,18 @@ impl SigChain {
             
             // Decode Entry
             let entry = Entry::decode(&signed_entry.entry_bytes[..])?;
+            
+            // Validate store_id
+            // Note: Empty/malformed store_id becomes [0u8;16], which fails validation
+            // against any real UUID store. This intentionally rejects legacy entries.
+            let entry_store: [u8; 16] = entry.store_id.clone().try_into()
+                .unwrap_or([0u8; 16]);
+            if entry_store != store_id {
+                return Err(SigChainError::WrongStoreId {
+                    expected: hex::encode(store_id),
+                    got: hex::encode(entry_store),
+                });
+            }
             
             // Validate sequence
             if entry.seq != chain.next_seq {
@@ -156,6 +175,18 @@ impl SigChain {
         // Decode entry
         let entry = Entry::decode(&signed_entry.entry_bytes[..])?;
         
+        // Validate store_id
+        // Note: Empty/malformed store_id becomes [0u8;16], which fails validation
+        // against any real UUID store. This intentionally rejects legacy entries.
+        let entry_store: [u8; 16] = entry.store_id.clone().try_into()
+            .unwrap_or([0u8; 16]);
+        if entry_store != self.store_id {
+            return Err(SigChainError::WrongStoreId {
+                expected: hex::encode(self.store_id),
+                got: hex::encode(entry_store),
+            });
+        }
+        
         // Validate sequence
         if entry.seq != self.next_seq {
             return Err(SigChainError::InvalidSequence {
@@ -201,6 +232,7 @@ impl SigChain {
         let hlc = HLC::now_with_clock(&SystemClock);
         
         let mut builder = EntryBuilder::new(self.next_seq, hlc)
+            .store_id(self.store_id.to_vec())
             .prev_hash(self.last_hash.to_vec());
         
         // Add operations
@@ -230,12 +262,14 @@ mod tests {
         temp_dir().join(format!("lattice_sigchain_test_{}.log", name))
     }
 
+    const TEST_STORE: [u8; 16] = [1u8; 16];
+
     #[test]
     fn test_new_sigchain() {
         let path = temp_log_path("new");
         let author = [1u8; 32];
         
-        let chain = SigChain::new(&path, author);
+        let chain = SigChain::new(&path, TEST_STORE, author);
         
         assert_eq!(chain.author_id(), &author);
         assert_eq!(chain.next_seq(), 1);
@@ -251,10 +285,11 @@ mod tests {
         
         let node = Node::generate();
         let author = node.public_key_bytes();
-        let mut chain = SigChain::new(&path, author);
+        let mut chain = SigChain::new(&path, TEST_STORE, author);
         
         let clock = MockClock::new(1000);
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
             .put("/key", b"value".to_vec())
             .sign(&node);
@@ -275,11 +310,12 @@ mod tests {
         
         let node = Node::generate();
         let author = node.public_key_bytes();
-        let mut chain = SigChain::new(&path, author);
+        let mut chain = SigChain::new(&path, TEST_STORE, author);
         let clock = MockClock::new(1000);
         
         for i in 1..=3 {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+                .store_id(TEST_STORE.to_vec())
                 .prev_hash(chain.last_hash.to_vec())
                 .put(format!("/key/{}", i), format!("value{}", i).into_bytes())
                 .sign(&node);
@@ -303,9 +339,10 @@ mod tests {
         
         // Write some entries
         {
-            let mut chain = SigChain::new(&path, author);
+            let mut chain = SigChain::new(&path, TEST_STORE, author);
             for i in 1..=3 {
                 let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+                    .store_id(TEST_STORE.to_vec())
                     .prev_hash(chain.last_hash.to_vec())
                     .put("/key", b"val".to_vec())
                     .sign(&node);
@@ -314,7 +351,7 @@ mod tests {
         }
         
         // Reload from log
-        let chain = SigChain::from_log(&path, author).unwrap();
+        let chain = SigChain::from_log(&path, TEST_STORE, author).unwrap();
         
         assert_eq!(chain.len(), 3);
         assert_eq!(chain.next_seq(), 4);
@@ -329,11 +366,12 @@ mod tests {
         
         let node = Node::generate();
         let author = node.public_key_bytes();
-        let mut chain = SigChain::new(&path, author);
+        let mut chain = SigChain::new(&path, TEST_STORE, author);
         let clock = MockClock::new(1000);
         
         // Try to append with wrong seq (2 instead of 1)
         let entry = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
             .put("/key", b"val".to_vec())
             .sign(&node);
@@ -352,11 +390,12 @@ mod tests {
         
         let node = Node::generate();
         let author = node.public_key_bytes();
-        let mut chain = SigChain::new(&path, author);
+        let mut chain = SigChain::new(&path, TEST_STORE, author);
         let clock = MockClock::new(1000);
         
         // First entry
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
             .put("/key", b"v1".to_vec())
             .sign(&node);
@@ -364,6 +403,7 @@ mod tests {
         
         // Second entry with wrong prev_hash
         let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
             .prev_hash([99u8; 32].to_vec()) // Wrong!
             .put("/key", b"v2".to_vec())
             .sign(&node);
@@ -382,11 +422,12 @@ mod tests {
         
         let node = Node::generate();
         let other_author = [99u8; 32]; // Different author
-        let mut chain = SigChain::new(&path, other_author);
+        let mut chain = SigChain::new(&path, TEST_STORE, other_author);
         let clock = MockClock::new(1000);
         
         // Entry signed by node but chain expects other_author
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
             .put("/key", b"val".to_vec())
             .sign(&node);
@@ -405,7 +446,7 @@ mod tests {
         
         let node = Node::generate();
         let author = node.public_key_bytes();
-        let mut chain = SigChain::new(&path, author);
+        let mut chain = SigChain::new(&path, TEST_STORE, author);
         
         let ops = vec![
             Operation {
@@ -426,5 +467,38 @@ mod tests {
         assert_eq!(entries[0].entry_bytes, signed.entry_bytes);
         
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_reject_wrong_store_id() {
+        let path_a = temp_log_path("storeid_a");
+        let path_b = temp_log_path("storeid_b");
+        std::fs::remove_file(&path_a).ok();
+        std::fs::remove_file(&path_b).ok();
+        
+        let node = Node::generate();
+        let author = node.public_key_bytes();
+        let clock = MockClock::new(1000);
+        
+        let store_a = [0xAAu8; 16];
+        let store_b = [0xBBu8; 16];
+        
+        // Create valid entry for store A
+        let mut chain_a = SigChain::new(&path_a, store_a, author);
+        let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(store_a.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/key", b"val".to_vec())
+            .sign(&node);
+        chain_a.append(&entry).unwrap();
+        
+        // Try to replay that entry into store B's chain
+        let mut chain_b = SigChain::new(&path_b, store_b, author);
+        let result = chain_b.append(&entry);
+        
+        assert!(matches!(result, Err(SigChainError::WrongStoreId { .. })));
+        
+        std::fs::remove_file(&path_a).ok();
+        std::fs::remove_file(&path_b).ok();
     }
 }

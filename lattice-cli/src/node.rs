@@ -1,18 +1,18 @@
-//! Lattice Node API
-//! 
-//! A programmatic interface to a local Lattice node.
+//! Local Lattice node API with multi-store support
 
 use lattice_core::{
-    DataDir, EntryBuilder, Node, SigChain, Store,
+    DataDir, EntryBuilder, MetaStore, Node, SigChain, Store, Uuid,
     hlc::HLC,
     log::LogError,
+    meta_store::MetaStoreError,
     sigchain::SigChainError,
     store::StoreError,
 };
 use std::path::Path;
+use std::rc::Rc;
+use std::cell::RefCell;
 use thiserror::Error;
 
-/// Errors that can occur during node operations
 #[derive(Error, Debug)]
 pub enum NodeError {
     #[error("IO error: {0}")]
@@ -20,6 +20,9 @@ pub enum NodeError {
     
     #[error("Store error: {0}")]
     Store(#[from] StoreError),
+    
+    #[error("MetaStore error: {0}")]
+    MetaStore(#[from] MetaStoreError),
     
     #[error("SigChain error: {0}")]
     SigChain(#[from] SigChainError),
@@ -29,43 +32,36 @@ pub enum NodeError {
     
     #[error("Node error: {0}")]
     Node(#[from] lattice_core::node::NodeError),
+    
+    #[error("Already initialized")]
+    AlreadyInitialized,
 }
 
-/// Info returned when building a node
 pub struct NodeInfo {
     pub node_id: String,
     pub data_path: String,
     pub is_new: bool,
+    pub root_store: Option<Uuid>,
+    pub stores: Vec<Uuid>,
+}
+
+pub struct StoreInfo {
+    pub store_id: Uuid,
     pub entries_replayed: u64,
 }
 
-/// Status information about the node
-pub struct NodeStatus {
-    pub node_id: String,
-    pub data_dir: String,
-    pub log_seq: u64,
-    pub applied_seq: u64,
-}
-
-/// Builder for creating a fully initialized LatticeNode
 pub struct LatticeNodeBuilder {
-    data_dir: DataDir,
+    pub data_dir: DataDir,
 }
 
 impl LatticeNodeBuilder {
-    /// Create a builder with the default data directory
     pub fn new() -> Self {
-        Self {
-            data_dir: DataDir::default(),
-        }
+        Self { data_dir: DataDir::default() }
     }
 
-    /// Build and initialize the node
     pub fn build(self) -> Result<(LatticeNode, NodeInfo), NodeError> {
-        // Create directories
         self.data_dir.ensure_dirs()?;
 
-        // Load or create node identity
         let key_path = self.data_dir.identity_key();
         let is_new = !key_path.exists();
         let node = if key_path.exists() {
@@ -76,113 +72,164 @@ impl LatticeNodeBuilder {
             node
         };
 
-        let author_id_hex = hex::encode(node.public_key_bytes());
-        
-        // Load or create sigchain
-        let log_path = self.data_dir.log_file(&author_id_hex);
-        let sigchain = if log_path.exists() {
-            SigChain::from_log(&log_path, node.public_key_bytes())?
-        } else {
-            SigChain::new(&log_path, node.public_key_bytes())
-        };
-
-        // Open store and replay log
-        let store = Store::open(self.data_dir.state_db())?;
-        let entries_replayed = if log_path.exists() {
-            store.replay_log(&log_path)?
-        } else {
-            0
-        };
+        let meta = MetaStore::open(self.data_dir.meta_db())?;
+        let root_store = meta.root_store()?;
+        let stores = meta.list_stores()?;
 
         let info = NodeInfo {
             node_id: hex::encode(node.public_key_bytes()),
             data_path: self.data_dir.base().display().to_string(),
             is_new,
-            entries_replayed,
+            root_store,
+            stores,
         };
 
         Ok((LatticeNode {
             data_dir: self.data_dir,
-            node,
-            sigchain,
-            store,
+            node: Rc::new(node),
+            meta,
         }, info))
     }
 }
 
 impl Default for LatticeNodeBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
-/// A fully initialized Lattice node
-/// 
-/// Use `LatticeNodeBuilder` to create an instance.
+/// A local Lattice node (manages identity and store registry)
 pub struct LatticeNode {
     data_dir: DataDir,
-    node: Node,
-    sigchain: SigChain,
-    store: Store,
+    node: Rc<Node>,
+    meta: MetaStore,
 }
 
 impl LatticeNode {
-    /// Get the node's public key as hex
     pub fn node_id(&self) -> String {
         hex::encode(self.node.public_key_bytes())
     }
 
-    /// Get the path to the data directory
     pub fn data_path(&self) -> &Path {
         self.data_dir.base()
     }
 
-    /// Get the current status of the node
-    pub fn status(&self) -> NodeStatus {
-        NodeStatus {
-            node_id: self.node_id(),
-            data_dir: self.data_dir.base().display().to_string(),
-            log_seq: self.sigchain.len(),
-            applied_seq: self.store.last_seq().unwrap_or(0),
+    /// Get the root store ID
+    pub fn root_store(&self) -> Result<Option<Uuid>, NodeError> {
+        Ok(self.meta.root_store()?)
+    }
+
+    /// Open the root store if set
+    pub fn open_root_store(&self) -> Result<Option<(StoreHandle, StoreInfo)>, NodeError> {
+        match self.meta.root_store()? {
+            Some(id) => Ok(Some(self.open_store(id)?)),
+            None => Ok(None),
         }
     }
 
-    /// Put a key-value pair
-    pub fn put(&mut self, key: &str, value: &[u8]) -> Result<u64, NodeError> {
-        let entry = EntryBuilder::new(self.sigchain.next_seq(), HLC::now())
-            .prev_hash(self.sigchain.last_hash().to_vec())
-            .put(key, value.to_vec())
-            .sign(&self.node);
-
-        self.commit_entry(entry)
+    /// Initialize the node with a root store (fails if already initialized)
+    pub fn init(&self) -> Result<Uuid, NodeError> {
+        if self.meta.root_store()?.is_some() {
+            return Err(NodeError::AlreadyInitialized);
+        }
+        let store_id = self.create_store()?;
+        self.meta.set_root_store(store_id)?;
+        Ok(store_id)
     }
 
-    /// Get a value by key
+    pub fn list_stores(&self) -> Result<Vec<Uuid>, NodeError> {
+        Ok(self.meta.list_stores()?)
+    }
+
+    pub fn create_store(&self) -> Result<Uuid, NodeError> {
+        let store_id = Uuid::new_v4();
+        self.data_dir.ensure_store_dirs(store_id)?;
+        let _ = Store::open(self.data_dir.store_state_db(store_id))?;
+        self.meta.add_store(store_id)?;
+        Ok(store_id)
+    }
+
+    pub fn open_store(&self, store_id: Uuid) -> Result<(StoreHandle, StoreInfo), NodeError> {
+        self.data_dir.ensure_store_dirs(store_id)?;
+        
+        let author_id_hex = hex::encode(self.node.public_key_bytes());
+        let log_path = self.data_dir.store_log_file(store_id, &author_id_hex);
+        
+        let sigchain = if log_path.exists() {
+            SigChain::from_log(&log_path, *store_id.as_bytes(), self.node.public_key_bytes())?
+        } else {
+            SigChain::new(&log_path, *store_id.as_bytes(), self.node.public_key_bytes())
+        };
+        
+        let store = Store::open(self.data_dir.store_state_db(store_id))?;
+        let entries_replayed = if log_path.exists() {
+            store.replay_log(&log_path)?
+        } else {
+            0
+        };
+        
+        let info = StoreInfo { store_id, entries_replayed };
+        let handle = StoreHandle {
+            store_id,
+            node: Rc::clone(&self.node),
+            sigchain: RefCell::new(sigchain),
+            store,
+        };
+        
+        Ok((handle, info))
+    }
+}
+
+/// A handle to a specific store with KV operations
+pub struct StoreHandle {
+    store_id: Uuid,
+    node: Rc<Node>,
+    sigchain: RefCell<SigChain>,
+    store: Store,
+}
+
+impl StoreHandle {
+    pub fn id(&self) -> Uuid { self.store_id }
+
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, NodeError> {
         Ok(self.store.get(key)?)
     }
 
-    /// List all key-value pairs
     pub fn list(&self) -> Result<Vec<(String, Vec<u8>)>, NodeError> {
         Ok(self.store.list_all()?)
     }
 
-    /// Delete a key
-    pub fn delete(&mut self, key: &str) -> Result<u64, NodeError> {
-        let entry = EntryBuilder::new(self.sigchain.next_seq(), HLC::now())
-            .prev_hash(self.sigchain.last_hash().to_vec())
-            .delete(key)
-            .sign(&self.node);
-
-        self.commit_entry(entry)
+    pub fn log_seq(&self) -> u64 {
+        self.sigchain.borrow().len()
     }
 
-    /// Commit a signed entry: append to log via sigchain, then apply to store
-    fn commit_entry(&mut self, entry: lattice_core::proto::SignedEntry) -> Result<u64, NodeError> {
-        self.sigchain.append(&entry)?;
-        self.store.apply_entry(&entry)?;
+    pub fn applied_seq(&self) -> Result<u64, NodeError> {
+        Ok(self.store.last_seq()?)
+    }
 
-        Ok(self.sigchain.len())
+    pub fn put(&self, key: &str, value: &[u8]) -> Result<u64, NodeError> {
+        self.commit_entry(|b| b.put(key, value.to_vec()))
+    }
+
+    pub fn delete(&self, key: &str) -> Result<u64, NodeError> {
+        self.commit_entry(|b| b.delete(key))
+    }
+
+    fn commit_entry<F>(&self, build: F) -> Result<u64, NodeError>
+    where
+        F: FnOnce(EntryBuilder) -> EntryBuilder,
+    {
+        let mut sigchain = self.sigchain.borrow_mut();
+        let seq = sigchain.len() + 1;
+        let prev_hash = sigchain.last_hash();
+        
+        let builder = EntryBuilder::new(seq, HLC::now())
+            .store_id(self.store_id.as_bytes().to_vec())
+            .prev_hash(prev_hash.to_vec());
+        let entry = build(builder).sign(&self.node);
+        
+        sigchain.append(&entry)?;
+        self.store.apply_entry(&entry)?;
+        
+        Ok(seq)
     }
 }
 
@@ -193,77 +240,111 @@ mod tests {
 
     fn temp_data_dir(name: &str) -> DataDir {
         let path = temp_dir().join(format!("lattice_node_test_{}", name));
-        // Clean up from previous runs
         let _ = std::fs::remove_dir_all(&path);
         DataDir::new(path)
     }
 
     #[test]
-    fn test_put_survives_restart() {
-        let data_dir = temp_data_dir("restart");
+    fn test_create_and_open_store() {
+        let data_dir = temp_data_dir("meta_store");
         
-        // First session: put a value
-        {
-            let (mut node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
-                .build()
-                .expect("Failed to create node");
-            
-            node.put("/test/key", b"hello").expect("put failed");
-            assert_eq!(node.get("/test/key").unwrap(), Some(b"hello".to_vec()));
-        }
+        let (node, info) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("Failed to create node");
         
-        // Second session: value should still be there
-        {
-            let (node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
-                .build()
-                .expect("Failed to create node on restart");
-            
-            assert_eq!(node.get("/test/key").unwrap(), Some(b"hello".to_vec()));
-            assert_eq!(node.status().log_seq, 1);
-        }
+        assert!(info.stores.is_empty());
         
-        // Cleanup
+        let store_id = node.create_store().expect("Failed to create store");
+        
+        // Verify it's in the list
+        let stores = node.list_stores().expect("list failed");
+        assert!(stores.contains(&store_id));
+        
+        let (handle, _) = node.open_store(store_id).expect("Failed to open store");
+        handle.put("/key", b"value").expect("put failed");
+        assert_eq!(handle.get("/key").unwrap(), Some(b"value".to_vec()));
+        
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
     #[test]
-    fn test_log_replay_after_db_deletion() {
-        let data_dir = temp_data_dir("replay");
+    fn test_store_isolation() {
+        let data_dir = temp_data_dir("meta_isolation");
         
-        // First session: put some values
-        {
-            let (mut node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
-                .build()
-                .expect("Failed to create node");
-            
-            node.put("/key1", b"value1").expect("put failed");
-            node.put("/key2", b"value2").expect("put failed");
-            node.delete("/key1").expect("delete failed");
+        let (node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("Failed to create node");
+        
+        let store_a = node.create_store().expect("create A");
+        let store_b = node.create_store().expect("create B");
+        
+        let (handle_a, _) = node.open_store(store_a).expect("open A");
+        handle_a.put("/key", b"from A").expect("put A");
+        
+        let (handle_b, _) = node.open_store(store_b).expect("open B");
+        assert_eq!(handle_b.get("/key").unwrap(), None);
+        
+        assert_eq!(handle_a.get("/key").unwrap(), Some(b"from A".to_vec()));
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+
+    #[test]
+    fn test_init_creates_root_store() {
+        let data_dir = temp_data_dir("init_root");
+        
+        let (node, info) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        
+        // Initially no root store
+        assert!(info.root_store.is_none());
+        
+        // Init creates root store
+        let root_id = node.init().expect("init failed");
+        assert_eq!(node.root_store().unwrap(), Some(root_id));
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+
+    #[test]
+    fn test_duplicate_init_fails() {
+        let data_dir = temp_data_dir("init_dup");
+        
+        let (node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        
+        node.init().expect("first init");
+        
+        // Second init should fail
+        match node.init() {
+            Err(NodeError::AlreadyInitialized) => (),
+            other => panic!("Expected AlreadyInitialized, got {:?}", other),
         }
         
-        // Delete state.db but keep the log
-        let db_path = data_dir.state_db();
-        std::fs::remove_file(&db_path).expect("Failed to delete state.db");
-        assert!(!db_path.exists(), "state.db should be deleted");
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+
+    #[test]
+    fn test_root_store_in_info_after_init() {
+        let data_dir = temp_data_dir("init_info");
         
-        // Third session: log should be replayed to reconstruct state
-        {
-            let (node, info) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+        // First session: init
+        let root_id = {
+            let (node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
                 .build()
-                .expect("Failed to rebuild node from log");
-            
-            // Should have replayed 3 entries
-            assert_eq!(info.entries_replayed, 3);
-            // key1 was deleted
-            assert_eq!(node.get("/key1").unwrap(), None);
-            // key2 should still exist
-            assert_eq!(node.get("/key2").unwrap(), Some(b"value2".to_vec()));
-            // log seq should be 3 (put, put, delete)
-            assert_eq!(node.status().log_seq, 3);
-        }
+                .expect("create node");
+            node.init().expect("init")
+        };
         
-        // Cleanup
+        // Second session: root_store should be in info
+        let (_, info) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("reload node");
+        
+        assert_eq!(info.root_store, Some(root_id));
+        
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
 }
-

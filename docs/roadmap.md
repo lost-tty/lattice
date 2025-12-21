@@ -21,16 +21,15 @@
 - Can replay log to reconstruct KV state
 - All operations survive restart
 
-### Multi-KV Refactoring (before M2)
+### Multi-KV Refactoring (before M2) ✓
 
-Current code assumes single store. Changes needed:
-- [ ] DataDir → support `stores/{uuid}/` subdirectories
-- [ ] SigChain → scoped to (store_id, author_id)
-- [ ] Store → per-store state.db, not global
-- [ ] Log paths → `stores/{uuid}/logs/{author}.log`
-- [ ] Add global meta.db for stores table
-- [ ] Proto: SignedEntry/messages need store_id (UUID)
-- [ ] CLI → `create-store`, `list-stores`, `use <store>`
+- [x] DataDir → `stores/{uuid}/` subdirectories
+- [x] Store → per-store state.db
+- [x] Log paths → `stores/{uuid}/logs/{author}.log`
+- [x] Proto: Entry has store_id (UUID)
+- [x] CLI → `init`, `create-store`, `list-stores`, `use`
+- [x] meta.db stores table (MetaStore)
+- [x] SigChain → validate entry.store_id
 
 ---
 

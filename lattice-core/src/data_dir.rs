@@ -2,19 +2,26 @@
 //!
 //! Provides platform-specific paths for Lattice data storage:
 //! - `identity.key` — Ed25519 private key
-//! - `logs/` — Append-only log files per author
-//! - `state.db` — KV snapshot and indexes
+//! - `meta.db` — Global metadata (stores table)
+//! - `stores/{uuid}/logs/{author}.log` — Per-store, per-author logs
+//! - `stores/{uuid}/state.db` — Per-store KV state
 
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 const APP_NAME: &str = "lattice";
 
 /// Data directory configuration.
 ///
-/// Handles paths for:
-/// - `identity.key` — node's private key
-/// - `logs/{author_id}.log` — per-author log files
-/// - `state.db` — redb database
+/// Multi-store layout:
+/// ```text
+/// base/
+///   identity.key
+///   meta.db
+///   stores/{uuid}/
+///     logs/{author}.log
+///     state.db
+/// ```
 #[derive(Debug, Clone)]
 pub struct DataDir {
     base: PathBuf,
@@ -27,10 +34,6 @@ impl DataDir {
     }
 
     /// Create a DataDir using the platform-specific data directory.
-    ///
-    /// - Linux: `~/.local/share/lattice/`
-    /// - macOS: `~/Library/Application Support/lattice/`
-    /// - Windows: `C:\Users\<user>\AppData\Roaming\lattice\`
     pub fn default_location() -> Option<Self> {
         dirs::data_dir().map(|d| Self::new(d.join(APP_NAME)))
     }
@@ -45,25 +48,47 @@ impl DataDir {
         self.base.join("identity.key")
     }
 
-    /// Get the path to the logs directory.
-    pub fn logs_dir(&self) -> PathBuf {
-        self.base.join("logs")
+    /// Get the path to the global metadata database.
+    pub fn meta_db(&self) -> PathBuf {
+        self.base.join("meta.db")
     }
 
-    /// Get the path to a specific author's log file.
-    pub fn log_file(&self, author_id_hex: &str) -> PathBuf {
-        self.logs_dir().join(format!("{}.log", author_id_hex))
+    /// Get the path to the stores directory.
+    pub fn stores_dir(&self) -> PathBuf {
+        self.base.join("stores")
     }
 
-    /// Get the path to the state database.
-    pub fn state_db(&self) -> PathBuf {
-        self.base.join("state.db")
+    /// Get the path to a specific store's directory.
+    pub fn store_dir(&self, store_id: Uuid) -> PathBuf {
+        self.stores_dir().join(store_id.to_string())
     }
 
-    /// Ensure all required directories exist.
+    /// Get the path to a store's logs directory.
+    pub fn store_logs_dir(&self, store_id: Uuid) -> PathBuf {
+        self.store_dir(store_id).join("logs")
+    }
+
+    /// Get the path to a specific author's log file within a store.
+    pub fn store_log_file(&self, store_id: Uuid, author_id_hex: &str) -> PathBuf {
+        self.store_logs_dir(store_id).join(format!("{}.log", author_id_hex))
+    }
+
+    /// Get the path to a store's state database.
+    pub fn store_state_db(&self, store_id: Uuid) -> PathBuf {
+        self.store_dir(store_id).join("state.db")
+    }
+
+    /// Ensure base directory exists.
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.base)?;
-        std::fs::create_dir_all(self.logs_dir())?;
+        std::fs::create_dir_all(self.stores_dir())?;
+        Ok(())
+    }
+
+    /// Ensure directories for a specific store exist.
+    pub fn ensure_store_dirs(&self, store_id: Uuid) -> std::io::Result<()> {
+        self.ensure_dirs()?;
+        std::fs::create_dir_all(self.store_logs_dir(store_id))?;
         Ok(())
     }
 }
@@ -83,29 +108,31 @@ mod tests {
         let dd = DataDir::new("/custom/path");
         assert_eq!(dd.base(), Path::new("/custom/path"));
         assert_eq!(dd.identity_key(), PathBuf::from("/custom/path/identity.key"));
-        assert_eq!(dd.logs_dir(), PathBuf::from("/custom/path/logs"));
-        assert_eq!(dd.state_db(), PathBuf::from("/custom/path/state.db"));
+        assert_eq!(dd.meta_db(), PathBuf::from("/custom/path/meta.db"));
+        assert_eq!(dd.stores_dir(), PathBuf::from("/custom/path/stores"));
     }
 
     #[test]
-    fn test_log_file_path() {
+    fn test_store_paths() {
         let dd = DataDir::new("/data");
-        let path = dd.log_file("abc123");
-        assert_eq!(path, PathBuf::from("/data/logs/abc123.log"));
+        let store_id = Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
+        
+        assert_eq!(dd.store_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
+        assert_eq!(dd.store_logs_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/logs"));
+        assert_eq!(dd.store_log_file(store_id, "abc123"), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/logs/abc123.log"));
+        assert_eq!(dd.store_state_db(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/state.db"));
     }
 
     #[test]
     fn test_default_location_exists() {
         // On most systems, default_location should return Some
         let location = DataDir::default_location();
-        // Just verify it doesn't panic - actual path varies by platform
         assert!(location.is_some() || true);
     }
 
     #[test]
     fn test_default_impl() {
         let dd = DataDir::default();
-        // Should either be platform default or ./data fallback
         assert!(dd.base().to_str().is_some());
     }
 }
