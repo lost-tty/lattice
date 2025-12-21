@@ -66,50 +66,67 @@ impl Store {
         Ok(Self { db })
     }
     
-    /// Replay a log file and apply all entries to the store
+    /// Replay a log file and apply all entries to the store (batched)
     pub fn replay_log(&self, log_path: impl AsRef<Path>) -> Result<u64, StoreError> {
         let entries = read_entries(log_path)?;
-        let mut count = 0u64;
-        
-        for signed_entry in entries {
-            self.apply_entry(&signed_entry)?;
-            count += 1;
+        if entries.is_empty() {
+            return Ok(0);
         }
-        
-        Ok(count)
-    }
-    
-    /// Apply a single signed entry to the store
-    pub fn apply_entry(&self, signed_entry: &SignedEntry) -> Result<(), StoreError> {
-        let entry = Entry::decode(&signed_entry.entry_bytes[..])?;
         
         let write_txn = self.db.begin_write()?;
         {
             let mut kv_table = write_txn.open_table(KV_TABLE)?;
             let mut meta_table = write_txn.open_table(META_TABLE)?;
             
-            // Apply operations
-            for op in entry.ops {
-                if let Some(op_type) = op.op_type {
-                    match op_type {
-                        operation::OpType::Put(put) => {
-                            kv_table.insert(put.key.as_str(), put.value.as_slice())?;
-                        }
-                        operation::OpType::Delete(del) => {
-                            kv_table.remove(del.key.as_str())?;
-                        }
+            for signed_entry in &entries {
+                Self::apply_ops_to_tables(signed_entry, &mut kv_table, &mut meta_table)?;
+            }
+        }
+        write_txn.commit()?;
+        
+        Ok(entries.len() as u64)
+    }
+    
+    /// Apply a single signed entry to the store
+    pub fn apply_entry(&self, signed_entry: &SignedEntry) -> Result<(), StoreError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut kv_table = write_txn.open_table(KV_TABLE)?;
+            let mut meta_table = write_txn.open_table(META_TABLE)?;
+            Self::apply_ops_to_tables(signed_entry, &mut kv_table, &mut meta_table)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+    
+    /// Internal: apply operations from a signed entry to tables
+    fn apply_ops_to_tables(
+        signed_entry: &SignedEntry,
+        kv_table: &mut redb::Table<&str, &[u8]>,
+        meta_table: &mut redb::Table<&str, &[u8]>,
+    ) -> Result<(), StoreError> {
+        let entry = Entry::decode(&signed_entry.entry_bytes[..])?;
+        
+        // Apply operations
+        for op in entry.ops {
+            if let Some(op_type) = op.op_type {
+                match op_type {
+                    operation::OpType::Put(put) => {
+                        kv_table.insert(put.key.as_str(), put.value.as_slice())?;
+                    }
+                    operation::OpType::Delete(del) => {
+                        kv_table.remove(del.key.as_str())?;
                     }
                 }
             }
-            
-            // Update meta
-            meta_table.insert(META_LAST_SEQ, &entry.seq.to_le_bytes()[..])?;
-            
-            // Compute and store hash of this entry
-            let hash: [u8; 32] = blake3::hash(&signed_entry.entry_bytes).into();
-            meta_table.insert(META_LAST_HASH, &hash[..])?;
         }
-        write_txn.commit()?;
+        
+        // Update meta
+        meta_table.insert(META_LAST_SEQ, &entry.seq.to_le_bytes()[..])?;
+        
+        // Hash the full SignedEntry (includes signature), not just entry_bytes
+        let hash: [u8; 32] = blake3::hash(&signed_entry.encode_to_vec()).into();
+        meta_table.insert(META_LAST_HASH, &hash[..])?;
         
         Ok(())
     }
@@ -122,28 +139,17 @@ impl Store {
         Ok(table.get(key)?.map(|v| v.value().to_vec()))
     }
     
-    /// Put a value (use SigChain.create_entry for proper signing)
-    /// This is a low-level method for direct writes
-    pub fn put(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut table = write_txn.open_table(KV_TABLE)?;
-            table.insert(key, value)?;
+    /// List all key-value pairs
+    pub fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(KV_TABLE)?;
+        
+        let mut result = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            result.push((key.value().to_string(), value.value().to_vec()));
         }
-        write_txn.commit()?;
-        Ok(())
-    }
-    
-    /// Delete a key
-    pub fn delete(&self, key: &str) -> Result<bool, StoreError> {
-        let write_txn = self.db.begin_write()?;
-        let removed;
-        {
-            let mut table = write_txn.open_table(KV_TABLE)?;
-            removed = table.remove(key)?.is_some();
-        }
-        write_txn.commit()?;
-        Ok(removed)
+        Ok(result)
     }
     
     /// Get the last applied sequence number
@@ -222,33 +228,33 @@ mod tests {
     }
 
     #[test]
-    fn test_put_get() {
-        let (db_path, _) = temp_paths("put_get");
+    fn test_apply_entry() {
+        let (db_path, _) = temp_paths("apply_entry");
         std::fs::remove_file(&db_path).ok();
         
         let store = Store::open(&db_path).unwrap();
+        let node = Node::generate();
+        let clock = MockClock::new(1000);
         
-        store.put("key1", b"value1").unwrap();
-        store.put("key2", b"value2").unwrap();
+        // Create and apply a put entry
+        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .prev_hash([0u8; 32].to_vec())
+            .put("/key1", b"value1".to_vec())
+            .sign(&node);
+        store.apply_entry(&entry1).unwrap();
         
-        assert_eq!(store.get("key1").unwrap(), Some(b"value1".to_vec()));
-        assert_eq!(store.get("key2").unwrap(), Some(b"value2".to_vec()));
-        assert_eq!(store.get("key3").unwrap(), None);
+        assert_eq!(store.get("/key1").unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(store.last_seq().unwrap(), 1);
         
-        std::fs::remove_file(&db_path).ok();
-    }
-
-    #[test]
-    fn test_delete() {
-        let (db_path, _) = temp_paths("delete");
-        std::fs::remove_file(&db_path).ok();
+        // Create and apply a delete entry
+        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+            .prev_hash([0u8; 32].to_vec()) // simplified for test
+            .delete("/key1")
+            .sign(&node);
+        store.apply_entry(&entry2).unwrap();
         
-        let store = Store::open(&db_path).unwrap();
-        
-        store.put("key", b"value").unwrap();
-        assert!(store.delete("key").unwrap());
-        assert_eq!(store.get("key").unwrap(), None);
-        assert!(!store.delete("key").unwrap()); // Already gone
+        assert_eq!(store.get("/key1").unwrap(), None);
+        assert_eq!(store.last_seq().unwrap(), 2);
         
         std::fs::remove_file(&db_path).ok();
     }
