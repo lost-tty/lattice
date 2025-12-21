@@ -11,6 +11,7 @@
 //! - **DataDir**: Platform-specific data directory paths
 //! - **SignedEntry**: Entry creation, signing, and verification
 //! - **Log**: Append-only log file I/O
+//! - **Store**: Persistent KV state from log replay
 
 pub mod node;
 pub mod sigchain;
@@ -22,6 +23,7 @@ pub mod proto;
 pub mod data_dir;
 pub mod signed_entry;
 pub mod log;
+pub mod store;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (16 MB)
@@ -36,3 +38,4 @@ pub use clock::{Clock, SystemClock, MockClock};
 pub use data_dir::DataDir;
 pub use signed_entry::{EntryBuilder, sign_entry, verify_signed_entry, hash_signed_entry};
 pub use log::{append_entry, read_entries, LogReader};
+pub use store::Store;

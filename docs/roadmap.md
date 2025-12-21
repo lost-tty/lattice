@@ -29,6 +29,10 @@ Current code assumes single store. Changes needed:
 - [ ] Store → per-store state.db, not global
 - [ ] Log paths → `stores/{uuid}/logs/{author}.log`
 - [ ] Add global meta.db for stores table
+- [ ] Proto: SignedEntry/messages need store_id (UUID)
+- [ ] Proto: Entry needs `parent_hashes` for DAG (not just `prev_hash`)
+- [ ] Store: keys/values → `Vec<u8>` (binary, not String)
+- [ ] Store: KV table value → `Vec<HeadInfo>` for DAG heads
 - [ ] CLI → `create-store`, `list-stores`, `use <store>`
 
 ---
@@ -74,3 +78,8 @@ Current code assumes single store. Changes needed:
 - Snapshots for fast bootstrap
 - FUSE filesystem mount
   - Note: FUSE requires u64 inode numbers → maintain `BiMap<u64, Hash>` in redb
+- Merkle-ized State
+  - state.db as Merkle tree with signed root hash
+  - O(1) sync checks (compare root), efficient binary-search diffing
+  - Light clients: fetch value + Merkle proof, verify without full state
+  - Trade-off: write amplification, requires deterministic tree (Patricia Trie / Merkle Search Tree)
