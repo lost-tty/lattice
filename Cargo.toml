@@ -46,6 +46,7 @@ dirs = "5"
 blake3 = "1"
 hex = "0.4"
 redb = "2"
+uuid = { version = "1", features = ["v4"] }
 
 # Testing
 tokio-test = "0.4"

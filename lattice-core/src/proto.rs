@@ -31,6 +31,7 @@ mod tests {
     fn test_entry_with_ops() {
         let entry = Entry {
             version: 1,
+            store_id: vec![1u8; 16],
             prev_hash: vec![0u8; 32],
             seq: 5,
             timestamp: Some(Hlc {

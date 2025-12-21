@@ -24,6 +24,7 @@ pub mod data_dir;
 pub mod signed_entry;
 pub mod log;
 pub mod store;
+pub mod meta_store;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (16 MB)
@@ -39,3 +40,5 @@ pub use data_dir::DataDir;
 pub use signed_entry::{EntryBuilder, sign_entry, verify_signed_entry, hash_signed_entry};
 pub use log::{append_entry, read_entries, LogReader};
 pub use store::Store;
+pub use meta_store::MetaStore;
+pub use uuid::Uuid;

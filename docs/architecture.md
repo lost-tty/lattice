@@ -187,14 +187,14 @@ Note: KV stores multiple heads per key to support DAG conflict resolution. Reads
 ```
 Table              Key                     Value                      Purpose
 ─────────────────────────────────────────────────────────────────────────────
-stores             UUID (store_id)         StoreInfo                  Known stores this node participates in
-meta               String                  Vec<u8>                    Global metadata (node_id, etc.)
+stores             [u8; 16] (UUID)         u64 (created_at_ms)        Known stores
+meta               "root_store"            [u8; 16] (UUID)            Root store ID (opened on startup)
 ```
 
-StoreInfo: `{ type: "manifest" | "data", name, created_at, ... }`
-- Manifest stores define mesh membership via KV entries (`/nodes/{pubkey}/...`)
+- **Root Store**: The primary/manifest store for this node, auto-opened on CLI startup
+- **Stores Table**: Tracks all stores this node participates in
+- Manifest stores define mesh membership via `/nodes/{pubkey}/...` entries
 - Data stores hold application data
-- Node's list of manifest store IDs = meshes it belongs to
 
 #### In-Memory Structures
 

@@ -32,6 +32,7 @@ pub enum EntryError {
 /// Builder for creating Entry messages
 pub struct EntryBuilder {
     version: u32,
+    store_id: Vec<u8>,
     prev_hash: Vec<u8>,
     seq: u64,
     timestamp: HLC,
@@ -43,11 +44,18 @@ impl EntryBuilder {
     pub fn new(seq: u64, timestamp: HLC) -> Self {
         Self {
             version: 1,
+            store_id: Vec::new(), // Empty = legacy single-store
             prev_hash: vec![0u8; 32], // Genesis or will be set
             seq,
             timestamp,
             ops: Vec::new(),
         }
+    }
+
+    /// Set the store ID (16-byte UUID)
+    pub fn store_id(mut self, id: impl Into<Vec<u8>>) -> Self {
+        self.store_id = id.into();
+        self
     }
 
     /// Set the previous entry hash (for chaining)
@@ -87,6 +95,7 @@ impl EntryBuilder {
     pub fn build(self) -> Entry {
         Entry {
             version: self.version,
+            store_id: self.store_id,
             prev_hash: self.prev_hash,
             seq: self.seq,
             timestamp: Some(Hlc {
