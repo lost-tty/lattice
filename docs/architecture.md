@@ -2,20 +2,38 @@
 
 ## Ideas
 
-- SigChains Ed25519-signed, hash-chained append-only logs per node. Trust via local signature verification.
-- Log-Based State: KV store derived by replaying entries. Watermarks enable safe log pruning + snapshots.
-- Offline-First: Iroh for networking. Vector clocks identify missing entries on reconnect—converges mathematically.
-- Full Replication: All nodes keep all logs until watermark consensus, then prune and snapshot.
+**Core:**
+- SigChains: Ed25519-signed, hash-chained append-only logs per node.
+- Offline-First: Iroh for networking. Vector clocks identify missing entries on reconnect.
+- Full Replication: All nodes keep all logs until watermark consensus, then prune.
+
+**State:**
+- Log-Based State: KV store derived from entries. Watermarks enable pruning + snapshots.
+- Merkle-ized State: state.db as Merkle tree. O(1) sync checks, efficient diffing, light clients.
+- DAG Conflict Resolution: Entries track ancestry. Forks merge on next write. Tips only in state.db.
+- KV Snapshots: Point-in-time snapshots for log pruning, fast bootstrap, time travel.
+
+**Operations:**
+- Atomic Batch Writes: Multiple key updates as single entry.
+- Conditional Updates (CAS): Update only if current value matches expected hash.
+
+**CRDTs:**
+- LWW-Register: Last-writer-wins for single values.
+- LWW-Element-Set: Set with add/remove, element present if add > remove timestamp.
 
 ## Concepts
 
-- Transitive Pairing. Nodes can introduce new nodes to the mesh.
+- Transitive Pairing: Nodes can introduce new nodes to the mesh.
+- Multi-Mesh: A node can participate in multiple meshes (clusters). Each mesh is a group of nodes sharing data.
+- Manifest Store: Joining a mesh means joining a special KV store of type "manifest" that defines the mesh membership. The manifest contains node info (`/nodes/{pubkey}/...`).
 
 ## Stack
 
 - rust
 - iroh
 - prost protocol buffers
+- redb (embedded KV store)
+- rustyline (interactive CLI)
 
 ### Bootstrap
 
@@ -58,11 +76,62 @@ Future:
 
 ### Data Model
 
-- Keys are flat strings using path conventions (e.g., `/nodes/{pubkey}`, `/config/sync/interval`).
-- Prefix queries via string matching (sorted map enables efficient range scans).
-- State is computed by replaying `Put`/`Delete` operations from all authors.
+- Multiple KV stores supported, identified by `store_id` (UUID).
+- Keys: Arbitrary byte arrays (`Vec<u8>`), sorted lexicographically.
+- Values: Arbitrary byte arrays (`Vec<u8>`).
+- Each store defines its own key/value format — applications know their schema.
+- Logs are per `(store_id, author_id)` tuple.
+- State is maintained by tracking the "frontier" (tips) of the causal graph for each key.
 - Entry ordering: by HLC timestamp, then by author ID as tiebreaker.
-- Conflicts resolved by last-write-wins (using the ordering above).
+
+**Sync vs Causality:**
+- Vector Clocks track log coverage ("I have entries from Node A up to seq 50") — syncing files.
+- DAG Parents track data causality ("This value replaces that value") — resolving key conflicts.
+
+#### DAG Conflict Resolution
+
+Instead of simple LWW where newest timestamp blindly overwrites, every entry tracks its ancestry:
+
+**Data Model:**
+- Each entry includes `parent_hashes` — references to the entries it supersedes
+- History forms a DAG (directed acyclic graph), not a linear chain
+- state.db stores only "tips" (heads) of the graph per key
+
+**Life Cycle:**
+
+1. **Write (normal):** New entry points to previous entry's hash as parent. History is a straight line.
+
+2. **Write (concurrent/offline):** Two nodes edit same key independently, both pointing to same old parent. History forks into two branches.
+
+3. **Read (forked):** System sees multiple valid values. Uses deterministic rule (highest HLC, then author_id tiebreaker) to return one "winner". No error thrown.
+
+4. **Merge (healing):** Next write to that key cites both existing branches as parents. Fork merges back to single tip.
+
+**Example: Partial Write (Branch Extension)**
+
+```
+Initial: Heads = {A, B} where A(ts:100), B(ts:105). Read winner = B.
+
+Offline node C wakes up, only knows A (hasn't seen B).
+C writes "v3" with parent = [A].
+
+Result: Heads = {C, B}. Conflict shifted, not resolved.
+        C(ts:110) > B(ts:105), so C wins reads.
+
+       ┌──> [A] ──> [C:110]
+[Root]─┤
+       └──> [B:105]
+
+Later: A synced node writes D with parents = [C, B].
+Result: Heads = {D}. Fork merged.
+```
+
+This preserves B's work even though C never saw it. Naive LWW would lose B forever.
+
+#### Store Consistency Modes
+
+- **Eventually consistent**: Default. Writes accepted locally, sync happens async. Fast, offline-capable.
+- **Strictly consistent**: Writes require quorum acknowledgment before commit. Slower, requires connectivity.
 
 ### Timestamps (Hybrid Logical Clocks)
 
@@ -86,26 +155,79 @@ Authors apply their own entries through the standard receive path to ensure cons
 Each node stores logs as one file per author:
 
 ```
-data/
-├── identity.key               # Local node's Ed25519 private key
-├── logs/
-│   └── {author_id_hex}.log    # Append-only SignedEntry stream per author
-└── state.db                   # redb: KV snapshot + vector clocks + indexes
+~/.local/share/lattice/
+├── identity.key                            # Ed25519 private key
+├── stores/
+│   └── {store_uuid}/
+│       ├── logs/
+│       │   └── {author_id_hex}.log         # Append-only SignedEntry stream
+│       └── state.db                        # redb: KV snapshot + frontiers
+└── meta.db                                 # redb: global metadata (known stores, peers)
 ```
 
-- Logs: Append-only binary files per author, containing serialized `SignedEntry` messages.
-- State DB (redb): Combined KV state, vector clocks, and indexes. Updated as entries are applied.
+- Logs: Append-only binary files per `(store, author)`, containing serialized `SignedEntry` messages.
+- State DB (redb): Per-store KV state and frontiers. Updated as entries are applied.
 
-#### state.db Tables (redb)
+#### state.db Tables (per store, redb)
 
 ```
-Table           Key                     Value                      Purpose
+Table              Key                     Value                      Purpose
 ─────────────────────────────────────────────────────────────────────────────
-kv              String (path)           Vec<u8>                    Replicated key-value data
-vector_clocks   [u8; 32] (author_id)    (u64 seq, [u8; 32] hash)   Track sync state + chain verification
-entry_index     (author_id, seq)        u64 (offset)               Fast entry lookup by position
-meta            String                  Vec<u8>                    System metadata (own_seq, watermark, etc.)
+kv                 Vec<u8> (key)           Vec<HeadInfo>              Current tips for each key
+applied_frontiers  [u8; 32] (author_id)    (u64 seq, [u8; 32] hash)   What's applied to this store
+meta               Vec<u8>                 Vec<u8>                    Store metadata (incl. merkle_root)
 ```
+
+`HeadInfo: { value: Vec<u8>, hlc: u64, author: [u8;32], hash: [u8;32] }`
+
+Note: KV stores multiple heads per key to support DAG conflict resolution. Reads pick winner deterministically.
+
+#### meta.db Tables (global, redb)
+
+```
+Table              Key                     Value                      Purpose
+─────────────────────────────────────────────────────────────────────────────
+stores             UUID (store_id)         StoreInfo                  Known stores this node participates in
+meta               String                  Vec<u8>                    Global metadata (node_id, etc.)
+```
+
+StoreInfo: `{ type: "manifest" | "data", name, created_at, ... }`
+- Manifest stores define mesh membership via KV entries (`/nodes/{pubkey}/...`)
+- Data stores hold application data
+- Node's list of manifest store IDs = meshes it belongs to
+
+#### In-Memory Structures
+
+- log_frontiers: `HashMap<AuthorId, (seq, hash)>` — rebuilt from log files on startup
+
+### Operation Flow (put/delete)
+
+```
+1. User calls put("/key", value)
+         │
+         ▼
+2. SigChain.create_entry()
+   - Build Entry with parent_hashes (current tips for key)
+   - Sign it → SignedEntry
+         │
+         ▼
+3. Append to log + Gossip (critical path)
+   - Write to author's log file
+   - Update log_frontiers (in-memory)
+   - Broadcast to peers
+         │
+         ▼
+4. Apply to state.db (background)
+   - Update kv heads (merge parent tips into new tip)
+   - Update applied_frontiers
+   - Update merkle_root hash
+```
+
+Fast path (1-3): durable + distributed. Background (4): queryable state.
+
+### Read Flow (get)
+
+`get(key)` reads directly from local state.db. Reads are eventually consistent — if state.db lags behind the log, the read may return slightly stale data.
 
 ### Watermarks
 
@@ -114,6 +236,11 @@ meta            String                  Vec<u8>                    System metada
 - All nodes keep all logs (own + others) for redundancy until watermark consensus.
 - Once all peers have acknowledged entries, they can be pruned and replaced by the snapshot.
 - If a node is offline too long, it re-bootstraps with a fresh snapshot when it reconnects.
+- Note: Consider preserving logs longer than required for redundancy — enables time travel (view state at any point in history).
+
+**Pruning and DAG Parents:**
+- If a new entry references a parent that was pruned, accept it only if strictly newer than snapshot timestamp.
+- Snapshots act as the base; entries referencing parents older than snapshot are roots relative to that snapshot.
 
 ### Rich CRDTs (Future)
 
@@ -157,3 +284,23 @@ message MergeOp {
 ```
 
 Recommendation: Use Put/Delete for 90% of data. Add CRDT primitives only when needed (concurrent counters, lists) rather than a scripting language.
+
+## Open Questions
+
+### Permissions
+
+Write permissions are enforceable cryptographically:
+- Every entry is signed by author
+- Nodes verify signature before accepting
+- Manifest defines allowed writers: `/nodes/{pubkey}/role` = `writer` | `reader`
+- Entries from non-writers are rejected
+
+Read permissions are not enforceable:
+- Sharing a store = granting read access
+- Encryption adds a layer but doesn't solve revocation (once you have the key, you can read past data)
+- True revocation is impossible — you can't "unread" data
+
+Practical model:
+- Share store = grant read
+- Write access defined in manifest
+- Read-only nodes replicate and verify but can't contribute entries

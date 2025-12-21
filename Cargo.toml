@@ -40,6 +40,7 @@ bytes = "1"
 dirs = "5"
 blake3 = "1"
 hex = "0.4"
+redb = "2"
 
 # Testing
 tokio-test = "0.4"
