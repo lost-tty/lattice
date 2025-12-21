@@ -4,6 +4,7 @@ members = [
     "lattice-core",
     "lattice-net",
     "lattice-store",
+    "lattice-cli",
 ]
 
 [workspace.package]
@@ -16,6 +17,10 @@ license = "MIT"
 lattice-core = { path = "lattice-core" }
 lattice-net = { path = "lattice-net" }
 lattice-store = { path = "lattice-store" }
+lattice-cli = { path = "lattice-cli" }
+
+# CLI
+rustyline = "17"
 
 # Networking (Iroh)
 iroh = "0.95"

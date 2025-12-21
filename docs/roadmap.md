@@ -12,7 +12,7 @@
 - [x] Log file I/O (append, read, hash verification)
 - [x] SigChain (validate entries before appending)
 - [x] Store (redb) — `kv` + `meta` tables, log replay
-- [ ] Interactive CLI: `init`, `put`, `get`, `delete`, `status`, `quit`
+- [x] Interactive CLI: `init`, `put`, `get`, `delete`, `status`, `quit`
 
 ### Success Criteria
 
@@ -30,10 +30,30 @@ Current code assumes single store. Changes needed:
 - [ ] Log paths → `stores/{uuid}/logs/{author}.log`
 - [ ] Add global meta.db for stores table
 - [ ] Proto: SignedEntry/messages need store_id (UUID)
-- [ ] Proto: Entry needs `parent_hashes` for DAG (not just `prev_hash`)
-- [ ] Store: keys/values → `Vec<u8>` (binary, not String)
-- [ ] Store: KV table value → `Vec<HeadInfo>` for DAG heads
 - [ ] CLI → `create-store`, `list-stores`, `use <store>`
+
+---
+
+## Milestone 1.5: DAG Conflict Resolution ← NEXT
+
+**Goal:** Upgrade store from simple LWW to DAG-based conflict resolution per architecture.md.
+
+### Deliverables
+
+- [ ] Proto: Add `repeated bytes parent_hashes` to Entry (for DAG causality, separate from sigchain `prev_hash`)
+- [ ] Store: keys → `Vec<u8>` (binary, not String)
+- [ ] Store: KV table schema → `Vec<u8> → Vec<HeadInfo>` where `HeadInfo = { value, hlc, author, hash }`
+- [ ] Store: `applied_frontiers` table → `author_id → (seq, hash)` per author
+- [ ] Store: `apply_entry` → track multiple heads, merge parent tips into new tip
+- [ ] Store: `get` → deterministic winner from heads (highest HLC, author_id tiebreaker)
+- [ ] EntryBuilder: `.parent_hashes(...)` method for DAG ancestry
+
+### Success Criteria
+
+- Concurrent writes to same key create multiple heads
+- Reads return deterministic winner
+- Next write citing both heads merges fork to single tip
+- All existing tests still pass
 
 ---
 
@@ -43,7 +63,6 @@ Current code assumes single store. Changes needed:
 
 ### Deliverables
 
-- [ ] Store: add `applied_frontiers` table (sync state per author)
 - [ ] VectorClock module (diff, merge, missing entries)
 - [ ] Sync protocol (push missing entries)
 - [ ] Iroh integration (peer discovery, connection)
