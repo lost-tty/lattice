@@ -126,16 +126,11 @@ pub fn commands() -> Vec<Command> {
 // --- Store management ---
 
 fn cmd_init(node: &LatticeNode, _store: Option<&StoreHandle>, _args: &[String]) -> CommandResult {
-    match node.init() {
-        Ok(store_id) => {
+    match block_async(node.init()) {
+        Ok((store_id, handle)) => {
             println!("Initialized with root store: {}", store_id);
-            match node.open_store(store_id) {
-                Ok((handle, _)) => CommandResult::SwitchTo(handle),
-                Err(e) => {
-                    eprintln!("Warning: {}", e);
-                    CommandResult::Ok
-                }
-            }
+            println!("Node pubkey stored in /nodes/{}/info", hex::encode(node.node_id()));
+            CommandResult::SwitchTo(handle)
         }
         Err(e) => {
             eprintln!("Error: {}", e);

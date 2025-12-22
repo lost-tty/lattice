@@ -115,7 +115,6 @@ impl LatticeNode {
     pub fn root_store(&self) -> Result<Option<Uuid>, NodeError> {
         Ok(self.meta.root_store()?)
     }
-
     /// Open the root store if set
     pub fn open_root_store(&self) -> Result<Option<(StoreHandle, StoreInfo)>, NodeError> {
         match self.meta.root_store()? {
@@ -124,14 +123,39 @@ impl LatticeNode {
         }
     }
 
-    /// Initialize the node with a root store (fails if already initialized)
-    pub fn init(&self) -> Result<Uuid, NodeError> {
+    /// Initialize the node with a root store (fails if already initialized).
+    /// Writes the node's pubkey to `/nodes/{pubkey}/info` in the root store.
+    pub async fn init(&self) -> Result<(Uuid, StoreHandle), NodeError> {
         if self.meta.root_store()?.is_some() {
             return Err(NodeError::AlreadyInitialized);
         }
         let store_id = self.create_store()?;
         self.meta.set_root_store(store_id)?;
-        Ok(store_id)
+        
+        // Open the store and write our node info
+        let (handle, _) = self.open_store(store_id)?;
+        let pubkey_hex = hex::encode(self.node.public_key_bytes());
+        let key = format!("/nodes/{}/info", pubkey_hex);
+        
+        // Store node metadata: name (hostname), added_at (timestamp)
+        let hostname = hostname::get()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let added_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let info = serde_json::json!({
+            "name": hostname,
+            "added_at": added_at
+        });
+        handle.put(key.as_bytes(), info.to_string().as_bytes()).await?;
+        
+        // Write status = active
+        let status_key = format!("/nodes/{}/status", pubkey_hex);
+        handle.put(status_key.as_bytes(), b"active").await?;
+        
+        Ok((store_id, handle))
     }
 
     pub fn list_stores(&self) -> Result<Vec<Uuid>, NodeError> {
@@ -341,8 +365,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[test]
-    fn test_init_creates_root_store() {
+    #[tokio::test]
+    async fn test_init_creates_root_store() {
         let data_dir = temp_data_dir("init_root");
         
         let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
@@ -353,42 +377,44 @@ mod tests {
         assert!(node.root_store().unwrap().is_none());
         
         // Init creates root store
-        let root_id = node.init().expect("init failed");
+        let (root_id, _handle) = node.init().await.expect("init failed");
         assert_eq!(node.root_store().unwrap(), Some(root_id));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[test]
-    fn test_duplicate_init_fails() {
+    #[tokio::test]
+    async fn test_duplicate_init_fails() {
         let data_dir = temp_data_dir("init_dup");
         
         let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
             .build()
             .expect("create node");
         
-        node.init().expect("first init");
+        node.init().await.expect("first init");
         
         // Second init should fail
-        match node.init() {
-            Err(NodeError::AlreadyInitialized) => (),
-            other => panic!("Expected AlreadyInitialized, got {:?}", other),
+        match node.init().await {
+            Ok(_) => panic!("Expected AlreadyInitialized error"),
+            Err(e) => match e {
+                NodeError::AlreadyInitialized => (),
+                _ => panic!("Expected AlreadyInitialized, got {:?}", e),
+            },
         }
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[test]
-    fn test_root_store_in_info_after_init() {
+    #[tokio::test]
+    async fn test_root_store_in_info_after_init() {
         let data_dir = temp_data_dir("init_info");
         
         // First session: init
-        let root_id = {
-            let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
-                .build()
-                .expect("create node");
-            node.init().expect("init")
-        };
+        let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        let (root_id, _) = node.init().await.expect("init");
+        drop(node);  // End first session
         
         // Second session: root_store should persist
         let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
@@ -407,26 +433,28 @@ mod tests {
         let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
             .build()
             .expect("create node");
-        let store_id = node.init().expect("init");
-        let (store, _) = node.open_store(store_id).expect("open store");
+        let (_, store) = node.init().await.expect("init");
+        
+        // Get baseline seq after init
+        let baseline = store.log_seq().await;
         
         // Put twice with same value - second should be idempotent
         let seq1 = store.put(b"/key", b"value").await.expect("put 1");
-        assert_eq!(seq1, 1);
+        assert_eq!(seq1, baseline + 1);
         
         let seq2 = store.put(b"/key", b"value").await.expect("put 2");
-        assert_eq!(seq2, 1, "Second put with same value should be idempotent (no new entry)");
+        assert_eq!(seq2, baseline + 1, "Second put should be idempotent (no new entry)");
         
-        assert_eq!(store.log_seq().await, 1, "Log should have 1 entry, not 2");
+        assert_eq!(store.log_seq().await, baseline + 1);
         
         // Delete twice - second should be idempotent
         let seq3 = store.delete(b"/key").await.expect("delete 1");
-        assert_eq!(seq3, 2);
+        assert_eq!(seq3, baseline + 2);
         
         let seq4 = store.delete(b"/key").await.expect("delete 2");
-        assert_eq!(seq4, 2, "Second delete should be idempotent (no new entry)");
+        assert_eq!(seq4, baseline + 2, "Second delete should be idempotent (no new entry)");
         
-        assert_eq!(store.log_seq().await, 2, "Log should have 2 entries, not 3");
+        assert_eq!(store.log_seq().await, baseline + 2);
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
