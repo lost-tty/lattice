@@ -90,11 +90,52 @@ message SyncState {
 message Frontier {
   bytes author_id = 1;  // Ed25519 public key (32 bytes)
   uint64 max_seq = 2;   // Highest sequence number seen from this author
-  bytes last_hash = 3;  // Hash of the last entry (for chain verification)
+  repeated bytes head_hashes = 3;  // All head hashes for this author
 }
 
 // 5. Log File Record (wrapper for storage)
 message LogRecord {
   bytes hash = 1;         // BLAKE3 hash of entry_bytes (32 bytes)
   bytes entry_bytes = 2;  // Serialized SignedEntry
+}
+
+// 6. Join Protocol Messages (new node joining existing mesh)
+message JoinRequest {
+  bytes node_pubkey = 1;  // Joining node's public key (32 bytes)
+}
+
+message JoinResponse {
+  bytes store_uuid = 1;   // Root store UUID (16 bytes) for new node to create
+  bytes inviter_pubkey = 2;  // Inviter's public key for verification
+}
+
+// 7. Sync Protocol Messages (bidirectional sync after join)
+message SyncRequest {
+  SyncState state = 1;    // Sender's sync state (for incremental sync)
+  bool full_sync = 2;     // If true, request all entries (for join)
+}
+
+message SyncResponse {
+  SyncState state = 1;    // Responder's sync state
+}
+
+message SyncEntry {
+  bytes signed_entry = 1; // Serialized SignedEntry
+  bytes hash = 2;         // Hash for verification
+}
+
+message SyncDone {
+  uint64 entries_sent = 1;
+}
+
+// 8. Peer Message Wrapper (for proper message type discrimination)
+message PeerMessage {
+  oneof message {
+    JoinRequest join_request = 1;
+    JoinResponse join_response = 2;
+    SyncRequest sync_request = 3;
+    SyncResponse sync_response = 4;
+    SyncEntry sync_entry = 5;
+    SyncDone sync_done = 6;
+  }
 }

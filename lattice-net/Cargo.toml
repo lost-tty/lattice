@@ -9,10 +9,13 @@ license.workspace = true
 lattice-core = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
+prost = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

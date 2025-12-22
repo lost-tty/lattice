@@ -12,6 +12,7 @@
 //! - **SignedEntry**: Entry creation, signing, and verification
 //! - **Log**: Append-only log file I/O
 //! - **Store**: Persistent KV state from log replay
+//! - **CausalIter**: Merge-sort iterator for HLC-ordered sync
 
 pub mod node;
 pub mod sigchain;
@@ -25,13 +26,14 @@ pub mod signed_entry;
 pub mod log;
 pub mod store;
 pub mod meta_store;
+pub mod causal_iter;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (16 MB)
 pub const MAX_ENTRY_SIZE: usize = 16 * 1024 * 1024;
 
 pub use node::Node;
-pub use sigchain::SigChain;
+pub use sigchain::{SigChain, SigChainManager};
 pub use entry::Entry;
 pub use sync_state::{SyncState, AuthorInfo, MissingRange};
 pub use hlc::HLC;
@@ -43,3 +45,5 @@ pub use store::Store;
 pub use meta_store::MetaStore;
 pub use proto::HeadInfo;
 pub use uuid::Uuid;
+pub use causal_iter::CausalEntryIter;
+

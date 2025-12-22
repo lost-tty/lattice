@@ -1,7 +1,7 @@
 //! Store Actor - dedicated thread that owns Store and processes commands via channel
 
 use lattice_core::{
-    EntryBuilder, HeadInfo, Node, SigChain, Store, Uuid,
+    EntryBuilder, HeadInfo, Node, SigChain, SigChainManager, Store, Uuid,
     hlc::HLC,
     proto::AuthorState,
     sigchain::SigChainError,
@@ -42,6 +42,19 @@ pub enum StoreCmd {
         author: [u8; 32],
         resp: oneshot::Sender<Result<Option<AuthorState>, StoreError>>,
     },
+    // Sync-related commands
+    SyncState {
+        resp: oneshot::Sender<Result<lattice_core::sync_state::SyncState, StoreError>>,
+    },
+    ReadEntriesAfter {
+        author: [u8; 32],
+        from_hash: Option<[u8; 32]>,
+        resp: oneshot::Sender<Result<Vec<lattice_core::proto::SignedEntry>, StoreError>>,
+    },
+    ApplyEntry {
+        entry: lattice_core::proto::SignedEntry,
+        resp: oneshot::Sender<Result<(), StoreError>>,
+    },
     Shutdown,
 }
 
@@ -74,11 +87,11 @@ impl std::fmt::Display for StoreActorError {
 
 impl std::error::Error for StoreActorError {}
 
-/// The store actor - runs in its own thread, owns Store and SigChain
+/// The store actor - runs in its own thread, owns Store and SigChainManager
 pub struct StoreActor {
     store_id: Uuid,
     store: Store,
-    sigchain: SigChain,
+    chain_manager: SigChainManager,  // Manages all authors' sigchains
     node: Node,
     rx: mpsc::Receiver<StoreCmd>,
 }
@@ -92,10 +105,21 @@ impl StoreActor {
         node: Node,
         rx: mpsc::Receiver<StoreCmd>,
     ) -> Self {
+        // Derive logs_dir from sigchain's log file path
+        let logs_dir = sigchain.log_path()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        
+        // Create chain manager and register the local node's sigchain
+        let mut chain_manager = SigChainManager::new(&logs_dir, *store_id.as_bytes());
+        let local_author = node.public_key_bytes();
+        chain_manager.get_or_create(local_author);  // Pre-initialize local chain
+        
         Self {
             store_id,
             store,
-            sigchain,
+            chain_manager,
             node,
             rx,
         }
@@ -124,7 +148,11 @@ impl StoreActor {
                     let _ = resp.send(result);
                 }
                 StoreCmd::LogSeq { resp } => {
-                    let _ = resp.send(self.sigchain.len());
+                    let local_author = self.node.public_key_bytes();
+                    let len = self.chain_manager.get(&local_author)
+                        .map(|c| c.len())
+                        .unwrap_or(0);
+                    let _ = resp.send(len);
                 }
                 StoreCmd::AppliedSeq { resp } => {
                     let author = self.node.public_key_bytes();
@@ -134,6 +162,25 @@ impl StoreActor {
                 }
                 StoreCmd::AuthorState { author, resp } => {
                     let _ = resp.send(self.store.author_state(&author));
+                }
+                StoreCmd::SyncState { resp } => {
+                    let _ = resp.send(self.store.sync_state());
+                }
+                StoreCmd::ReadEntriesAfter { author, from_hash, resp } => {
+                    // Read entries from the log file for this author
+                    let result = self.do_read_entries_after(&author, from_hash);
+                    let _ = resp.send(result);
+                }
+                StoreCmd::ApplyEntry { entry, resp } => {
+                    // Use SigChainManager to append to the correct author's log
+                    if let Err(e) = self.chain_manager.append_entry(&entry) {
+                        let _ = resp.send(Err(StoreError::from(e)));
+                        continue;
+                    }
+                    
+                    // Then apply to store
+                    let result = self.store.apply_entry(&entry);
+                    let _ = resp.send(result);
                 }
                 StoreCmd::Shutdown => {
                     break;
@@ -147,7 +194,8 @@ impl StoreActor {
         
         // Idempotency check (pure function)
         if !Store::needs_put(&heads, value) {
-            return Ok(self.sigchain.len());  // Idempotent, no new entry
+            let local_author = self.node.public_key_bytes();
+            return Ok(self.chain_manager.get(&local_author).map(|c| c.len()).unwrap_or(0));
         }
         
         let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
@@ -159,7 +207,8 @@ impl StoreActor {
         
         // Idempotency check (pure function)
         if !Store::needs_delete(&heads) {
-            return Ok(self.sigchain.len());  // Idempotent, no new entry
+            let local_author = self.node.public_key_bytes();
+            return Ok(self.chain_manager.get(&local_author).map(|c| c.len()).unwrap_or(0));
         }
         
         let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
@@ -170,8 +219,11 @@ impl StoreActor {
     where
         F: FnOnce(EntryBuilder) -> EntryBuilder,
     {
-        let seq = self.sigchain.len() + 1;
-        let prev_hash = self.sigchain.last_hash();
+        let local_author = self.node.public_key_bytes();
+        let sigchain = self.chain_manager.get_or_create(local_author);
+        
+        let seq = sigchain.len() + 1;
+        let prev_hash = *sigchain.last_hash();
 
         let builder = EntryBuilder::new(seq, HLC::now())
             .store_id(self.store_id.as_bytes().to_vec())
@@ -179,10 +231,30 @@ impl StoreActor {
             .parent_hashes(parent_hashes);
         let entry = build(builder).sign(&self.node);
 
-        self.sigchain.append(&entry)?;
+        // Append to local sigchain
+        let sigchain = self.chain_manager.get_or_create(local_author);
+        sigchain.append(&entry)?;
         self.store.apply_entry(&entry)?;
 
         Ok(seq)
+    }
+
+    fn do_read_entries_after(
+        &self,
+        author: &[u8; 32],
+        from_hash: Option<[u8; 32]>,
+    ) -> Result<Vec<lattice_core::proto::SignedEntry>, StoreError> {
+        // Build log path for this author
+        let author_hex = hex::encode(author);
+        let log_path = self.chain_manager.logs_dir().join(format!("{}.log", author_hex));
+        
+        if !log_path.exists() {
+            return Ok(Vec::new());  // No log file for this author
+        }
+        
+        // Use lattice_core's read_entries_after
+        lattice_core::log::read_entries_after(&log_path, from_hash)
+            .map_err(StoreError::from)
     }
 }
 

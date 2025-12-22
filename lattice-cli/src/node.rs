@@ -41,6 +41,36 @@ pub enum NodeError {
     Actor(String),
 }
 
+/// Peer status values used across the system
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PeerStatus {
+    /// Peer has been invited but hasn't joined yet
+    Invited,
+    /// Peer is active and can sync
+    Active,
+    /// Peer has been removed from the mesh
+    Removed,
+}
+
+impl PeerStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PeerStatus::Invited => "invited",
+            PeerStatus::Active => "active",
+            PeerStatus::Removed => "removed",
+        }
+    }
+    
+    pub fn from_str(s: &str) -> Option<PeerStatus> {
+        match s {
+            "invited" => Some(PeerStatus::Invited),
+            "active" => Some(PeerStatus::Active),
+            "removed" => Some(PeerStatus::Removed),
+            _ => None,
+        }
+    }
+}
+
 pub struct NodeInfo {
     pub node_id: String,
     pub data_path: String,
@@ -107,6 +137,11 @@ impl LatticeNode {
         self.node.public_key_bytes()
     }
 
+    /// Get the secret key bytes for Iroh integration (same Ed25519 key)
+    pub fn secret_key_bytes(&self) -> [u8; 32] {
+        self.node.secret_key_bytes()
+    }
+
     pub fn data_path(&self) -> &Path {
         self.data_dir.base()
     }
@@ -153,7 +188,7 @@ impl LatticeNode {
         
         // Write status = active
         let status_key = format!("/nodes/{}/status", pubkey_hex);
-        handle.put(status_key.as_bytes(), b"active").await?;
+        handle.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await?;
         
         Ok((store_id, handle))
     }
@@ -164,6 +199,21 @@ impl LatticeNode {
 
     pub fn create_store(&self) -> Result<Uuid, NodeError> {
         let store_id = Uuid::new_v4();
+        self.create_store_internal(store_id)
+    }
+    
+    /// Create a store with a specific UUID (for joining existing mesh)
+    pub fn create_store_with_uuid(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
+        self.create_store_internal(store_id)
+    }
+    
+    /// Set a store as the root store
+    pub fn set_root_store(&self, store_id: Uuid) -> Result<(), NodeError> {
+        self.meta.set_root_store(store_id)?;
+        Ok(())
+    }
+    
+    fn create_store_internal(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
         self.data_dir.ensure_store_dirs(store_id)?;
         let _ = Store::open(self.data_dir.store_state_db(store_id))?;
         self.meta.add_store(store_id)?;
@@ -214,6 +264,16 @@ pub struct StoreHandle {
     store_id: Uuid,
     tx: tokio::sync::mpsc::Sender<crate::store_actor::StoreCmd>,
     actor_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Clone for StoreHandle {
+    fn clone(&self) -> Self {
+        Self {
+            store_id: self.store_id,
+            tx: self.tx.clone(),
+            actor_handle: None, // Clones don't own the actor thread
+        }
+    }
 }
 
 impl StoreHandle {
@@ -276,6 +336,36 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
+    pub async fn sync_state(&self) -> Result<lattice_core::sync_state::SyncState, NodeError> {
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::SyncState { resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
+    pub async fn read_entries_after(&self, author: &[u8; 32], from_hash: Option<[u8; 32]>) -> Result<Vec<lattice_core::proto::SignedEntry>, NodeError> {
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::ReadEntriesAfter { author: *author, from_hash, resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
+    pub async fn apply_entry(&self, entry: lattice_core::proto::SignedEntry) -> Result<(), NodeError> {
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::ApplyEntry { entry, resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
     pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<u64, NodeError> {
         use crate::store_actor::StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -300,12 +390,12 @@ impl StoreHandle {
 
 impl Drop for StoreHandle {
     fn drop(&mut self) {
-        // Send shutdown command (non-blocking) and wait for actor to finish
-        // Use try_send to avoid panic in async context
-        let _ = self.tx.try_send(crate::store_actor::StoreCmd::Shutdown);
+        // Only send shutdown if we own the actor (non-cloned handle)
         if let Some(handle) = self.actor_handle.take() {
+            let _ = self.tx.try_send(crate::store_actor::StoreCmd::Shutdown);
             let _ = handle.join();
         }
+        // Clones (actor_handle = None) don't send shutdown - actor keeps running
     }
 }
 

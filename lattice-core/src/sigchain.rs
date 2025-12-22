@@ -146,6 +146,11 @@ impl SigChain {
         &self.last_hash
     }
     
+    /// Get the log file path
+    pub fn log_path(&self) -> &std::path::Path {
+        &self.log_path
+    }
+    
     /// Get the current length of the chain
     pub fn len(&self) -> u64 {
         self.next_seq - 1
@@ -245,6 +250,70 @@ impl SigChain {
         self.append(&signed)?;
         
         Ok(signed)
+    }
+}
+
+/// Manages multiple SigChains (one per author) for a store.
+/// Provides unified interface for appending entries from any author.
+pub struct SigChainManager {
+    /// Directory containing log files (one per author)
+    logs_dir: PathBuf,
+    
+    /// Store UUID (16 bytes)
+    store_id: [u8; 16],
+    
+    /// Cache of loaded SigChains by author
+    chains: std::collections::HashMap<[u8; 32], SigChain>,
+}
+
+impl SigChainManager {
+    /// Create a new manager for a store's logs directory
+    pub fn new(logs_dir: impl AsRef<Path>, store_id: [u8; 16]) -> Self {
+        Self {
+            logs_dir: logs_dir.as_ref().to_path_buf(),
+            store_id,
+            chains: std::collections::HashMap::new(),
+        }
+    }
+    
+    /// Get or create a SigChain for an author
+    pub fn get_or_create(&mut self, author: [u8; 32]) -> &mut SigChain {
+        self.chains.entry(author).or_insert_with(|| {
+            let author_hex = hex::encode(author);
+            let log_path = self.logs_dir.join(format!("{}.log", author_hex));
+            
+            // Try to load existing log, or create new
+            SigChain::from_log(&log_path, self.store_id, author)
+                .unwrap_or_else(|_| SigChain::new(&log_path, self.store_id, author))
+        })
+    }
+    
+    /// Get the local node's sigchain (for creating new entries)
+    pub fn get(&self, author: &[u8; 32]) -> Option<&SigChain> {
+        self.chains.get(author)
+    }
+    
+    /// Append an entry to the appropriate author's log
+    /// This is the main entry point for all entry writes (from put, sync, etc.)
+    pub fn append_entry(&mut self, entry: &SignedEntry) -> Result<(), SigChainError> {
+        let author: [u8; 32] = entry.author_id.clone()
+            .try_into()
+            .map_err(|_| SigChainError::WrongAuthor {
+                expected: "32 bytes".to_string(),
+                got: format!("{} bytes", entry.author_id.len()),
+            })?;
+        
+        // For synced entries, we can't validate seq/prev_hash since they may arrive
+        // out of order. Just append to the log file directly.
+        let chain = self.get_or_create(author);
+        append_entry(chain.log_path(), entry)?;
+        
+        Ok(())
+    }
+    
+    /// Get the logs directory path
+    pub fn logs_dir(&self) -> &Path {
+        &self.logs_dir
     }
 }
 
