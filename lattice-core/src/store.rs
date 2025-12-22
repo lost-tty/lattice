@@ -237,6 +237,23 @@ impl Store {
         }
         Ok(result)
     }
+    /// Check if a put operation is needed given current heads
+    /// Returns false if the winning head has the same value (idempotent)
+    pub fn needs_put(heads: &[HeadInfo], value: &[u8]) -> bool {
+        match Self::pick_winner(heads) {
+            Some(winner) => winner.value != value,  // Skip if winner already has value
+            None => true,  // No heads = need put
+        }
+    }
+    
+    /// Check if a delete operation is needed given current heads
+    /// Returns false if no heads or winning head is already a tombstone (idempotent)
+    pub fn needs_delete(heads: &[HeadInfo]) -> bool {
+        match Self::pick_winner(heads) {
+            Some(winner) => !winner.tombstone,  // Skip if winner is already tombstone
+            None => false,  // No heads = nothing to delete
+        }
+    }
     
     /// Get author state for a specific author
     pub fn author_state(&self, author: &[u8; 32]) -> Result<Option<AuthorState>, StoreError> {
@@ -951,5 +968,95 @@ mod tests {
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&backup_path);
         let _ = std::fs::remove_file(&log_path);
+    }
+
+    #[test]
+    fn test_needs_put_empty_heads() {
+        // No heads = need put
+        let heads: Vec<HeadInfo> = vec![];
+        assert!(Store::needs_put(&heads, b"value"));
+    }
+
+    #[test]
+    fn test_needs_put_same_value() {
+        // Single head with same value = idempotent, no put needed
+        let heads = vec![HeadInfo {
+            value: b"hello".to_vec(),
+            hlc: 1000,
+            author: [1u8; 32].to_vec(),
+            hash: [2u8; 32].to_vec(),
+            tombstone: false,
+        }];
+        assert!(!Store::needs_put(&heads, b"hello"));
+    }
+
+    #[test]
+    fn test_needs_put_different_value() {
+        // Single head with different value = need put
+        let heads = vec![HeadInfo {
+            value: b"hello".to_vec(),
+            hlc: 1000,
+            author: [1u8; 32].to_vec(),
+            hash: [2u8; 32].to_vec(),
+            tombstone: false,
+        }];
+        assert!(Store::needs_put(&heads, b"world"));
+    }
+
+    #[test]
+    fn test_needs_put_multiple_heads_winner_matches() {
+        // Multiple heads where WINNER has our value = idempotent
+        // Winner is highest HLC (1001), value "v2"
+        let heads = vec![
+            HeadInfo {
+                value: b"v1".to_vec(),
+                hlc: 1000,
+                author: [1u8; 32].to_vec(),
+                hash: [2u8; 32].to_vec(),
+                tombstone: false,
+            },
+            HeadInfo {
+                value: b"v2".to_vec(),
+                hlc: 1001,  // Winner (highest HLC)
+                author: [3u8; 32].to_vec(),
+                hash: [4u8; 32].to_vec(),
+                tombstone: false,
+            },
+        ];
+        assert!(!Store::needs_put(&heads, b"v2"));  // Winner has value = skip
+        assert!(Store::needs_put(&heads, b"v1"));   // Winner doesn't have value = put
+    }
+
+    #[test]
+    fn test_needs_delete_empty_heads() {
+        // No heads = idempotent, no delete needed
+        let heads: Vec<HeadInfo> = vec![];
+        assert!(!Store::needs_delete(&heads));
+    }
+
+    #[test]
+    fn test_needs_delete_with_heads() {
+        // Has non-tombstone heads = need delete
+        let heads = vec![HeadInfo {
+            value: b"data".to_vec(),
+            hlc: 1000,
+            author: [1u8; 32].to_vec(),
+            hash: [2u8; 32].to_vec(),
+            tombstone: false,
+        }];
+        assert!(Store::needs_delete(&heads));
+    }
+
+    #[test]
+    fn test_needs_delete_tombstone_is_winner() {
+        // Winning head is already tombstone = no delete needed
+        let heads = vec![HeadInfo {
+            value: vec![],
+            hlc: 1000,
+            author: [1u8; 32].to_vec(),
+            hash: [2u8; 32].to_vec(),
+            tombstone: true,
+        }];
+        assert!(!Store::needs_delete(&heads));
     }
 }

@@ -145,12 +145,24 @@ impl StoreActor {
 
     fn do_put(&mut self, key: &[u8], value: &[u8]) -> Result<u64, StoreActorError> {
         let heads = self.store.get_heads(key)?;
+        
+        // Idempotency check (pure function)
+        if !Store::needs_put(&heads, value) {
+            return Ok(self.sigchain.len());  // Idempotent, no new entry
+        }
+        
         let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
         self.commit_entry(parent_hashes, |b| b.put(key.to_vec(), value.to_vec()))
     }
 
     fn do_delete(&mut self, key: &[u8]) -> Result<u64, StoreActorError> {
         let heads = self.store.get_heads(key)?;
+        
+        // Idempotency check (pure function)
+        if !Store::needs_delete(&heads) {
+            return Ok(self.sigchain.len());  // Idempotent, no new entry
+        }
+        
         let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
         self.commit_entry(parent_hashes, |b| b.delete(key.to_vec()))
     }
