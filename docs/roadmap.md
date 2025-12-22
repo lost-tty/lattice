@@ -139,8 +139,7 @@
 
 **Post-M2 Refactoring:**
 - [ ] Unify `node.rs` from `lattice-cli` and `lattice-core`
-- [ ] Move `Store` code into `lattice-store` crate
-- [ ] Move `StoreActor` code into `lattice-store` crate
+- [ ] Use prost for node status in store
 
 ---
 
