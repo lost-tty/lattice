@@ -383,4 +383,35 @@ mod tests {
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
+
+    #[test]
+    fn test_idempotent_put_and_delete() {
+        let data_dir = temp_data_dir("idempotent");
+        
+        let (node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        let store_id = node.init().expect("init");
+        let (store, _) = node.open_store(store_id).expect("open store");
+        
+        // Put twice with same value - second should be idempotent
+        let seq1 = store.put(b"/key", b"value").expect("put 1");
+        assert_eq!(seq1, 1);
+        
+        let seq2 = store.put(b"/key", b"value").expect("put 2");
+        assert_eq!(seq2, 1, "Second put with same value should be idempotent (no new entry)");
+        
+        assert_eq!(store.log_seq(), 1, "Log should have 1 entry, not 2");
+        
+        // Delete twice - second should be idempotent
+        let seq3 = store.delete(b"/key").expect("delete 1");
+        assert_eq!(seq3, 2);
+        
+        let seq4 = store.delete(b"/key").expect("delete 2");
+        assert_eq!(seq4, 2, "Second delete should be idempotent (no new entry)");
+        
+        assert_eq!(store.log_seq(), 2, "Log should have 2 entries, not 3");
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
 }
