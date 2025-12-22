@@ -207,7 +207,7 @@ mod tests {
     use super::*;
     use crate::clock::MockClock;
     use crate::hlc::HLC;
-    use crate::node::Node;
+    use crate::node_identity::NodeIdentity;
     use crate::signed_entry::EntryBuilder;
     use std::env::temp_dir;
 
@@ -226,7 +226,7 @@ mod tests {
         let path = temp_log_path("single_v6");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         let hlc = HLC::now_with_clock(&clock);
         
@@ -248,7 +248,7 @@ mod tests {
         let path = temp_log_path("multiple_v6");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         for i in 1..=5 {
@@ -269,7 +269,7 @@ mod tests {
         let path = temp_log_path("after_v6");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         let mut entries = Vec::new();
@@ -301,7 +301,7 @@ mod tests {
         let path = temp_log_path("not_found_v6");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
@@ -321,7 +321,7 @@ mod tests {
         let path = temp_log_path("reader_hash_v6");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
@@ -368,7 +368,7 @@ mod tests {
         let path = temp_log_path("corrupted_v6");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
@@ -399,7 +399,7 @@ mod tests {
         let path = temp_log_path("truncated_v6");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
@@ -430,7 +430,7 @@ mod tests {
         let path = temp_log_path("too_large_v6");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         // Create payload larger than MAX_ENTRY_SIZE
@@ -455,7 +455,7 @@ mod tests {
         let path = temp_log_path("boundary_last_v6");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
@@ -506,7 +506,7 @@ mod tests {
         let path = temp_log_path("corruption_middle_v6");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         // Write 3 entries

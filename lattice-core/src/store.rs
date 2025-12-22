@@ -324,7 +324,7 @@ mod tests {
     use super::*;
     use crate::clock::MockClock;
     use crate::hlc::HLC;
-    use crate::node::Node;
+    use crate::node_identity::NodeIdentity;
     use crate::signed_entry::EntryBuilder;
     use std::env::temp_dir;
 
@@ -341,7 +341,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
@@ -391,7 +391,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         // First write
@@ -426,7 +426,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         
         // Create two heads
         let clock1 = MockClock::new(1000);
@@ -473,7 +473,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         
         // Create two concurrent heads
         let clock1 = MockClock::new(1000);
@@ -525,7 +525,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         
         // Create a single head
         let clock1 = MockClock::new(1000);
@@ -573,8 +573,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
-        let alice = Node::generate();
-        let bob = Node::generate();
+        let alice = NodeIdentity::generate();
+        let bob = NodeIdentity::generate();
         
         // Initial state: K = v1
         let clock1 = MockClock::new(1000);
@@ -632,9 +632,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
-        let alice = Node::generate();
-        let bob = Node::generate();
-        let charlie = Node::generate();
+        let alice = NodeIdentity::generate();
+        let bob = NodeIdentity::generate();
+        let charlie = NodeIdentity::generate();
         
         // Alice creates K = v1
         let clock1 = MockClock::new(1000);
@@ -692,7 +692,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         
         let clock1 = MockClock::new(1000);
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
@@ -725,7 +725,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         
         // First write: a = 1
         let clock1 = MockClock::new(1000);
@@ -788,7 +788,7 @@ mod tests {
         let _ = std::fs::remove_file(&log_path);
         
         let store = Store::open(&state_path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes());
         
         // First write: a = 1
@@ -850,7 +850,7 @@ mod tests {
         let _ = std::fs::remove_file(&log_path);
         
         let store = Store::open(&state_path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes());
         
@@ -898,7 +898,7 @@ mod tests {
         let _ = std::fs::remove_file(&log_path);
         
         let store = Store::open(&state_path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes());
         
@@ -957,7 +957,7 @@ mod tests {
         let _ = std::fs::remove_file(&log_path);
         
         let store = Store::open(&state_path).unwrap();
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes());
         
@@ -1125,7 +1125,7 @@ mod tests {
         
         // Node A writes some entries
         let store_a = Store::open(&path_a).unwrap();
-        let node_a = Node::generate();
+        let node_a = NodeIdentity::generate();
         
         // Write 3 entries on node A
         for i in 1u64..=3 {
@@ -1196,8 +1196,8 @@ mod tests {
         
         let store_a = Store::open(&path_a).unwrap();
         let store_b = Store::open(&path_b).unwrap();
-        let node_a = Node::generate();
-        let node_b = Node::generate();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
         
         // Node A writes entries
         for i in 1u64..=2 {
@@ -1283,9 +1283,9 @@ mod tests {
         let store_a = Store::open(&path_a).unwrap();
         let store_b = Store::open(&path_b).unwrap();
         let store_c = Store::open(&path_c).unwrap();
-        let node_a = Node::generate();
-        let node_b = Node::generate();
-        let node_c = Node::generate();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let node_c = NodeIdentity::generate();
         
         // Each node writes one entry
         let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))
@@ -1369,8 +1369,8 @@ mod tests {
         
         let store_a = Store::open(&path_a).unwrap();
         let store_b = Store::open(&path_b).unwrap();
-        let node_a = Node::generate();
-        let node_b = Node::generate();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
         
         // Both nodes write to the SAME key with different values
         // Use same HLC to force conflict (tie-break on author)
@@ -1435,8 +1435,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
-        let node_low = Node::generate();
-        let node_high = Node::generate();
+        let node_low = NodeIdentity::generate();
+        let node_high = NodeIdentity::generate();
         
         // Determine which node has "higher" author bytes
         let (high_node, low_node) = if node_high.public_key_bytes() > node_low.public_key_bytes() {
@@ -1494,9 +1494,9 @@ mod tests {
         let store_d = Store::open(&path_d).unwrap();
         
         // Create 3 nodes (virtual peers)
-        let node_a = Node::generate();
-        let node_b = Node::generate();
-        let node_c = Node::generate();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let node_c = NodeIdentity::generate();
         
         let clock = MockClock::new(1000);
         
@@ -1609,9 +1609,9 @@ mod tests {
         let store = Store::open(&path).unwrap();
         
         // Create 3 nodes
-        let node_a = Node::generate();
-        let node_b = Node::generate();
-        let node_c = Node::generate();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let node_c = NodeIdentity::generate();
         
         let clock = MockClock::new(1000);
         

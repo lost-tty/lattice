@@ -1,133 +1,401 @@
-//! Node identity and cryptographic keys
-//!
-//! Each node has an Ed25519 keypair:
-//! - Private key: stored locally in `identity.key` (never replicated)
-//! - Public key: serves as the node's identity (32 bytes)
+//! Local Lattice node API with multi-store support
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
-use std::fs;
-use std::io::{self, Read, Write};
+use crate::{
+    DataDir, MetaStore, NodeIdentity, PeerStatus, SigChain, Store, Uuid,
+    log::LogError,
+    meta_store::MetaStoreError,
+    sigchain::SigChainError,
+    store::StoreError,
+    spawn_store_actor, StoreCmd,
+    node_identity::NodeError as IdentityError,
+};
 use std::path::Path;
+use std::rc::Rc;
 use thiserror::Error;
 
-/// Errors that can occur during node operations
 #[derive(Error, Debug)]
 pub enum NodeError {
     #[error("IO error: {0}")]
-    Io(#[from] io::Error),
+    Io(#[from] std::io::Error),
     
-    #[error("Invalid key length: expected 32 bytes, got {0}")]
-    InvalidKeyLength(usize),
+    #[error("Store error: {0}")]
+    Store(#[from] StoreError),
     
-    #[error("Invalid signature")]
-    InvalidSignature,
+    #[error("MetaStore error: {0}")]
+    MetaStore(#[from] MetaStoreError),
+    
+    #[error("SigChain error: {0}")]
+    SigChain(#[from] SigChainError),
+    
+    #[error("Log error: {0}")]
+    Log(#[from] LogError),
+    
+    #[error("Node error: {0}")]
+    Node(#[from] IdentityError),
+    
+    #[error("Already initialized")]
+    AlreadyInitialized,
+    
+    #[error("Channel closed")]
+    ChannelClosed,
+    
+    #[error("Actor error: {0}")]
+    Actor(String),
 }
 
-/// A node in the Lattice mesh.
-///
-/// Each node has an Ed25519 keypair used for signing sigchain entries
-/// and establishing trust within the network.
-#[derive(Clone)]
+pub struct NodeInfo {
+    pub node_id: String,
+    pub data_path: String,
+    pub stores: Vec<Uuid>,
+}
+
+pub struct StoreInfo {
+    pub store_id: Uuid,
+    pub entries_replayed: u64,
+}
+
+pub struct NodeBuilder {
+    pub data_dir: DataDir,
+}
+
+impl NodeBuilder {
+    pub fn new() -> Self {
+        Self { data_dir: DataDir::default() }
+    }
+
+    pub fn build(self) -> Result<Node, NodeError> {
+        self.data_dir.ensure_dirs()?;
+
+        let key_path = self.data_dir.identity_key();
+        let is_new = !key_path.exists();
+        let node = if key_path.exists() {
+            NodeIdentity::load(&key_path)?
+        } else {
+            let node = NodeIdentity::generate();
+            node.save(&key_path)?;
+            node
+        };
+
+        let meta = MetaStore::open(self.data_dir.meta_db())?;
+        
+        // Set hostname on first creation
+        if is_new {
+            let hostname = hostname::get()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let _ = meta.set_name(&hostname);
+        }
+
+        Ok(Node {
+            data_dir: self.data_dir,
+            node: Rc::new(node),
+            meta,
+        })
+    }
+}
+
+impl Default for NodeBuilder {
+    fn default() -> Self { Self::new() }
+}
+
+/// A local Lattice node (manages identity and store registry)
 pub struct Node {
-    signing_key: SigningKey,
+    data_dir: DataDir,
+    node: Rc<NodeIdentity>,
+    meta: MetaStore,
 }
 
 impl Node {
-    /// Generate a new node with a random keypair.
-    pub fn generate() -> Self {
-        let signing_key = SigningKey::generate(&mut OsRng);
-        Self { signing_key }
-    }
-
-    /// Create a node from an existing signing key.
-    pub fn from_signing_key(signing_key: SigningKey) -> Self {
-        Self { signing_key }
-    }
-
-    /// Load a node's identity from a key file, or generate and save if it doesn't exist.
-    pub fn load_or_generate(path: impl AsRef<Path>) -> Result<Self, NodeError> {
-        let path = path.as_ref();
-        if path.exists() {
-            Self::load(path)
-        } else {
-            let node = Self::generate();
-            node.save(path)?;
-            Ok(node)
+    pub fn info(&self) -> NodeInfo {
+        NodeInfo {
+            node_id: hex::encode(self.node.public_key_bytes()),
+            data_path: self.data_dir.base().display().to_string(),
+            stores: self.meta.list_stores().unwrap_or_default(),
         }
     }
 
-    /// Load a node's identity from a key file.
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, NodeError> {
-        let mut file = fs::File::open(path)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        
-        if bytes.len() != 32 {
-            return Err(NodeError::InvalidKeyLength(bytes.len()));
-        }
-        
-        let key_bytes: [u8; 32] = bytes.try_into().unwrap();
-        let signing_key = SigningKey::from_bytes(&key_bytes);
-        Ok(Self { signing_key })
+    pub fn node_id(&self) -> [u8; 32] {
+        self.node.public_key_bytes()
     }
 
-    /// Save the node's private key to a file.
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), NodeError> {
-        let path = path.as_ref();
+    /// Get the secret key bytes for Iroh integration (same Ed25519 key)
+    pub fn secret_key_bytes(&self) -> [u8; 32] {
+        self.node.secret_key_bytes()
+    }
+
+    pub fn data_path(&self) -> &Path {
+        self.data_dir.base()
+    }
+
+    /// Get the node's display name (from meta.db, set on creation)
+    pub fn name(&self) -> Option<String> {
+        self.meta.name().ok().flatten()
+    }
+    
+    /// Set the node's display name.
+    /// Updates meta.db and if a store handle is provided, also updates /nodes/{pubkey}/name
+    pub async fn set_name(&self, name: &str, store: Option<&StoreHandle>) -> Result<(), NodeError> {
+        // Update meta.db
+        self.meta.set_name(name)?;
         
-        // Create parent directories if they don't exist
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        // If store provided, update there too
+        if let Some(handle) = store {
+            let pubkey_hex = hex::encode(self.node.public_key_bytes());
+            let name_key = format!("/nodes/{}/name", pubkey_hex);
+            handle.put(name_key.as_bytes(), name.as_bytes()).await?;
         }
         
-        let mut file = fs::File::create(path)?;
-        file.write_all(self.signing_key.as_bytes())?;
         Ok(())
     }
 
-    /// Get the node's public key (identity).
-    pub fn public_key(&self) -> VerifyingKey {
-        self.signing_key.verifying_key()
+    /// Get the root store ID
+    pub fn root_store(&self) -> Result<Option<Uuid>, NodeError> {
+        Ok(self.meta.root_store()?)
+    }
+    /// Open the root store if set
+    pub fn open_root_store(&self) -> Result<Option<(StoreHandle, StoreInfo)>, NodeError> {
+        match self.meta.root_store()? {
+            Some(id) => Ok(Some(self.open_store(id)?)),
+            None => Ok(None),
+        }
     }
 
-    /// Get the node's public key as bytes (32 bytes).
-    pub fn public_key_bytes(&self) -> [u8; 32] {
-        self.signing_key.verifying_key().to_bytes()
+    /// Initialize the node with a root store (fails if already initialized).
+    /// Writes the node's pubkey to `/nodes/{pubkey}/info` in the root store.
+    pub async fn init(&self) -> Result<(Uuid, StoreHandle), NodeError> {
+        if self.meta.root_store()?.is_some() {
+            return Err(NodeError::AlreadyInitialized);
+        }
+        let store_id = self.create_store()?;
+        self.meta.set_root_store(store_id)?;
+        
+        // Open the store and write our node info as separate keys
+        let (handle, _) = self.open_store(store_id)?;
+        let pubkey_hex = hex::encode(self.node.public_key_bytes());
+        
+        // Store node metadata as separate keys
+        if let Some(name) = self.name() {
+            let name_key = format!("/nodes/{}/name", pubkey_hex);
+            handle.put(name_key.as_bytes(), name.as_bytes()).await?;
+        }
+        
+        let added_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let added_at_key = format!("/nodes/{}/added_at", pubkey_hex);
+        handle.put(added_at_key.as_bytes(), added_at.to_string().as_bytes()).await?;
+        
+        // Write status = active
+        let status_key = format!("/nodes/{}/status", pubkey_hex);
+        handle.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await?;
+        
+        Ok((store_id, handle))
     }
 
-    /// Get the signing key for creating signatures.
-    pub fn signing_key(&self) -> &SigningKey {
-        &self.signing_key
+    pub fn list_stores(&self) -> Result<Vec<Uuid>, NodeError> {
+        Ok(self.meta.list_stores()?)
     }
 
-    /// Get the secret key bytes (32 bytes) for Iroh integration.
-    /// WARNING: Handle with care - this exposes the private key material.
-    pub fn secret_key_bytes(&self) -> [u8; 32] {
-        self.signing_key.to_bytes()
+    pub fn create_store(&self) -> Result<Uuid, NodeError> {
+        let store_id = Uuid::new_v4();
+        self.create_store_internal(store_id)
+    }
+    
+    /// Create a store with a specific UUID (for joining existing mesh)
+    pub fn create_store_with_uuid(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
+        self.create_store_internal(store_id)
+    }
+    
+    /// Set a store as the root store
+    pub fn set_root_store(&self, store_id: Uuid) -> Result<(), NodeError> {
+        self.meta.set_root_store(store_id)?;
+        Ok(())
+    }
+    
+    fn create_store_internal(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
+        self.data_dir.ensure_store_dirs(store_id)?;
+        let _ = Store::open(self.data_dir.store_state_db(store_id))?;
+        self.meta.add_store(store_id)?;
+        Ok(store_id)
     }
 
-    /// Sign a message.
-    pub fn sign(&self, message: &[u8]) -> Signature {
-        self.signing_key.sign(message)
+    pub fn open_store(&self, store_id: Uuid) -> Result<(StoreHandle, StoreInfo), NodeError> {
+        self.data_dir.ensure_store_dirs(store_id)?;
+        
+        let author_id_hex = hex::encode(self.node.public_key_bytes());
+        let log_path = self.data_dir.store_log_file(store_id, &author_id_hex);
+        
+        let sigchain = if log_path.exists() {
+            SigChain::from_log(&log_path, *store_id.as_bytes(), self.node.public_key_bytes())?
+        } else {
+            SigChain::new(&log_path, *store_id.as_bytes(), self.node.public_key_bytes())
+        };
+        
+        let store = Store::open(self.data_dir.store_state_db(store_id))?;
+        let entries_replayed = if log_path.exists() {
+            store.replay_log(&log_path)?
+        } else {
+            0
+        };
+        
+        let info = StoreInfo { store_id, entries_replayed };
+        
+        // Spawn actor thread - actor owns store, sigchain, and node copy
+        let (tx, actor_handle) = spawn_store_actor(
+            store_id,
+            store,
+            sigchain,
+            (*self.node).clone(),
+        );
+        
+        let handle = StoreHandle {
+            store_id,
+            tx,
+            actor_handle: Some(actor_handle),
+        };
+        
+        Ok((handle, info))
+    }
+}
+
+/// A handle to a specific store - wraps channel to actor thread
+pub struct StoreHandle {
+    store_id: Uuid,
+    tx: tokio::sync::mpsc::Sender<StoreCmd>,
+    actor_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Clone for StoreHandle {
+    fn clone(&self) -> Self {
+        Self {
+            store_id: self.store_id,
+            tx: self.tx.clone(),
+            actor_handle: None, // Clones don't own the actor thread
+        }
+    }
+}
+
+impl StoreHandle {
+    pub fn id(&self) -> Uuid { self.store_id }
+
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::Get { key: key.to_vec(), resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
     }
 
-    /// Verify a signature against this node's public key.
-    pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), NodeError> {
-        self.public_key()
-            .verify(message, signature)
-            .map_err(|_| NodeError::InvalidSignature)
+    pub async fn get_heads(&self, key: &[u8]) -> Result<Vec<crate::HeadInfo>, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::GetHeads { key: key.to_vec(), resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
     }
 
-    /// Verify a signature using a raw public key.
-    pub fn verify_with_key(
-        public_key: &VerifyingKey,
-        message: &[u8],
-        signature: &Signature,
-    ) -> Result<(), NodeError> {
-        public_key
-            .verify(message, signature)
-            .map_err(|_| NodeError::InvalidSignature)
+    pub async fn list(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::List { resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
+    pub async fn log_seq(&self) -> u64 {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(StoreCmd::LogSeq { resp: resp_tx }).await;
+        resp_rx.await.unwrap_or(0)
+    }
+
+    pub async fn applied_seq(&self) -> Result<u64, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::AppliedSeq { resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
+    pub async fn author_state(&self, author: &[u8; 32]) -> Result<Option<crate::proto::AuthorState>, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::AuthorState { author: *author, resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
+    pub async fn sync_state(&self) -> Result<crate::sync_state::SyncState, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::SyncState { resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
+    pub async fn read_entries_after(&self, author: &[u8; 32], from_hash: Option<[u8; 32]>) -> Result<Vec<crate::proto::SignedEntry>, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::ReadEntriesAfter { author: *author, from_hash, resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
+    pub async fn apply_entry(&self, entry: crate::proto::SignedEntry) -> Result<(), NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::ApplyEntry { entry, resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
+    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<u64, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::Put { key: key.to_vec(), value: value.to_vec(), resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(|e| NodeError::Actor(e.to_string()))
+    }
+
+    pub async fn delete(&self, key: &[u8]) -> Result<u64, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::Delete { key: key.to_vec(), resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(|e| NodeError::Actor(e.to_string()))
+    }
+
+}
+
+impl Drop for StoreHandle {
+    fn drop(&mut self) {
+        // Only send shutdown if we own the actor (non-cloned handle)
+        if let Some(handle) = self.actor_handle.take() {
+            let _ = self.tx.try_send(StoreCmd::Shutdown);
+            let _ = handle.join();
+        }
+        // Clones (actor_handle = None) don't send shutdown - actor keeps running
     }
 }
 
@@ -136,87 +404,183 @@ mod tests {
     use super::*;
     use std::env::temp_dir;
 
-    #[test]
-    fn test_generate() {
-        let node = Node::generate();
-        let pk = node.public_key_bytes();
-        assert_eq!(pk.len(), 32);
+    fn temp_data_dir(name: &str) -> DataDir {
+        let path = temp_dir().join(format!("lattice_node_test_{}", name));
+        let _ = std::fs::remove_dir_all(&path);
+        DataDir::new(path)
     }
 
-    #[test]
-    fn test_sign_and_verify() {
-        let node = Node::generate();
-        let message = b"hello lattice";
+    #[tokio::test]
+    async fn test_create_and_open_store() {
+        let data_dir = temp_data_dir("meta_store");
         
-        let signature = node.sign(message);
-        assert!(node.verify(message, &signature).is_ok());
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("Failed to create node");
+        
+        assert!(node.info().stores.is_empty());
+        
+        let store_id = node.create_store().expect("Failed to create store");
+        
+        // Verify it's in the list
+        let stores = node.list_stores().expect("list failed");
+        assert!(stores.contains(&store_id));
+        
+        let (handle, _) = node.open_store(store_id).expect("Failed to open store");
+        handle.put(b"/key", b"value").await.expect("put failed");
+        assert_eq!(handle.get(b"/key").await.unwrap(), Some(b"value".to_vec()));
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[test]
-    fn test_verify_wrong_message() {
-        let node = Node::generate();
-        let signature = node.sign(b"original");
+    #[tokio::test]
+    async fn test_store_isolation() {
+        let data_dir = temp_data_dir("meta_isolation");
         
-        assert!(node.verify(b"tampered", &signature).is_err());
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("Failed to create node");
+        
+        let store_a = node.create_store().expect("create A");
+        let store_b = node.create_store().expect("create B");
+        
+        let (handle_a, _) = node.open_store(store_a).expect("open A");
+        handle_a.put(b"/key", b"from A").await.expect("put A");
+        
+        let (handle_b, _) = node.open_store(store_b).expect("open B");
+        assert_eq!(handle_b.get(b"/key").await.unwrap(), None);
+        
+        assert_eq!(handle_a.get(b"/key").await.unwrap(), Some(b"from A".to_vec()));
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[test]
-    fn test_verify_with_different_key() {
-        let node1 = Node::generate();
-        let node2 = Node::generate();
+    #[tokio::test]
+    async fn test_init_creates_root_store() {
+        let data_dir = temp_data_dir("init_root");
         
-        let signature = node1.sign(b"message");
-        assert!(node2.verify(b"message", &signature).is_err());
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        
+        // Initially no root store
+        assert!(node.root_store().unwrap().is_none());
+        
+        // Init creates root store
+        let (root_id, _handle) = node.init().await.expect("init failed");
+        assert_eq!(node.root_store().unwrap(), Some(root_id));
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[test]
-    fn test_save_and_load() {
-        let temp_path = temp_dir().join("lattice_test_identity.key");
+    #[tokio::test]
+    async fn test_duplicate_init_fails() {
+        let data_dir = temp_data_dir("init_dup");
         
-        // Generate and save
-        let node1 = Node::generate();
-        let pk1 = node1.public_key_bytes();
-        node1.save(&temp_path).unwrap();
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
         
-        // Load and verify same key
-        let node2 = Node::load(&temp_path).unwrap();
-        let pk2 = node2.public_key_bytes();
+        node.init().await.expect("first init");
         
-        assert_eq!(pk1, pk2);
+        // Second init should fail
+        match node.init().await {
+            Ok(_) => panic!("Expected AlreadyInitialized error"),
+            Err(e) => match e {
+                NodeError::AlreadyInitialized => (),
+                _ => panic!("Expected AlreadyInitialized, got {:?}", e),
+            },
+        }
         
-        // Cleanup
-        fs::remove_file(&temp_path).ok();
+        let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[test]
-    fn test_load_or_generate() {
-        let temp_path = temp_dir().join("lattice_test_identity2.key");
+    #[tokio::test]
+    async fn test_root_store_in_info_after_init() {
+        let data_dir = temp_data_dir("init_info");
         
-        // Remove if exists
-        fs::remove_file(&temp_path).ok();
+        // First session: init
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        let (root_id, _) = node.init().await.expect("init");
+        drop(node);  // End first session
         
-        // First call: generates
-        let node1 = Node::load_or_generate(&temp_path).unwrap();
-        let pk1 = node1.public_key_bytes();
+        // Second session: root_store should persist
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("reload node");
         
-        // Second call: loads existing
-        let node2 = Node::load_or_generate(&temp_path).unwrap();
-        let pk2 = node2.public_key_bytes();
+        assert_eq!(node.root_store().unwrap(), Some(root_id));
         
-        assert_eq!(pk1, pk2);
-        
-        // Cleanup
-        fs::remove_file(&temp_path).ok();
+        let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[test]
-    fn test_verify_with_key_static() {
-        let node = Node::generate();
-        let pk = node.public_key();
-        let message = b"test message";
+    #[tokio::test]
+    async fn test_idempotent_put_and_delete() {
+        let data_dir = temp_data_dir("idempotent");
         
-        let signature = node.sign(message);
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        let (_, store) = node.init().await.expect("init");
         
-        assert!(Node::verify_with_key(&pk, message, &signature).is_ok());
+        // Get baseline seq after init
+        let baseline = store.log_seq().await;
+        
+        // Put twice with same value - second should be idempotent
+        let seq1 = store.put(b"/key", b"value").await.expect("put 1");
+        assert_eq!(seq1, baseline + 1);
+        
+        let seq2 = store.put(b"/key", b"value").await.expect("put 2");
+        assert_eq!(seq2, baseline + 1, "Second put should be idempotent (no new entry)");
+        
+        assert_eq!(store.log_seq().await, baseline + 1);
+        
+        // Delete twice - second should be idempotent
+        let seq3 = store.delete(b"/key").await.expect("delete 1");
+        assert_eq!(seq3, baseline + 2);
+        
+        let seq4 = store.delete(b"/key").await.expect("delete 2");
+        assert_eq!(seq4, baseline + 2, "Second delete should be idempotent (no new entry)");
+        
+        assert_eq!(store.log_seq().await, baseline + 2);
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+    
+    #[tokio::test]
+    async fn test_set_name_updates_store() {
+        let data_dir = temp_data_dir("set_name");
+        
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        
+        // Set initial name
+        assert!(node.name().is_some());
+        let initial_name = node.name().unwrap();
+        
+        // Init creates root store
+        let (_, store) = node.init().await.expect("init");
+        
+        // Verify initial name is in store
+        let pubkey_hex = hex::encode(node.node_id());
+        let name_key = format!("/nodes/{}/name", pubkey_hex);
+        let stored_name = store.get(name_key.as_bytes()).await.unwrap();
+        assert_eq!(stored_name, Some(initial_name.as_bytes().to_vec()));
+        
+        // Change name
+        let new_name = "my-custom-name";
+        node.set_name(new_name, Some(&store)).await.expect("set_name");
+        
+        // Verify meta.db updated
+        assert_eq!(node.name(), Some(new_name.to_string()));
+        
+        // Verify store updated
+        let stored_name = store.get(name_key.as_bytes()).await.unwrap();
+        assert_eq!(stored_name, Some(new_name.as_bytes().to_vec()));
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
     }
 }

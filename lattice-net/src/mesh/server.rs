@@ -1,12 +1,13 @@
-//! Accept handler for incoming Iroh connections
+//! Server - handle incoming peer connections for join and sync
 
-use lattice_net::{MessageSink, MessageStream};
-use crate::node::{StoreHandle, PeerStatus};
+use crate::{MessageSink, MessageStream};
+use lattice_core::{StoreHandle, PeerStatus};
 use iroh::Endpoint;
 use iroh::endpoint::Connection;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use lattice_core::proto::{PeerMessage, peer_message, JoinResponse};
+use super::protocol;
 
 /// Spawn the accept loop for incoming connections.
 pub fn spawn_accept_loop(
@@ -151,11 +152,11 @@ async fn handle_sync_request(
         .map(|s| lattice_core::sync_state::SyncState::from_proto(&s))
         .unwrap_or_default();
     
-    let entries_sent = crate::sync_protocol::send_missing_entries(&mut sink, store, &my_state, &peer_state).await?;
+    let entries_sent = protocol::send_missing_entries(&mut sink, store, &my_state, &peer_state).await?;
     println!("[Sync] Sent {} entries, now receiving from peer...", entries_sent);
     
     // 3. Receive entries from requester (bidirectional)
-    let (entries_applied, _) = crate::sync_protocol::receive_entries(&mut stream, store).await?;
+    let (entries_applied, _) = protocol::receive_entries(&mut stream, store).await?;
     
     sink.finish().await?;
     

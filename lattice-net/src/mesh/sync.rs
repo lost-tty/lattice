@@ -1,12 +1,10 @@
-//! Sync networking operations for LatticeNode
-//!
-//! Provides async methods for joining meshes and syncing with peers.
+//! Sync - outgoing mesh join and sync operations
 
-use lattice_net::{MessageSink, MessageStream};
-use crate::node::{LatticeNode, NodeError, StoreHandle, PeerStatus};
+use crate::{MessageSink, MessageStream, LatticeEndpoint, parse_node_id};
+use lattice_core::{Node, NodeError, StoreHandle, PeerStatus};
 use lattice_core::proto::{peer_message, PeerMessage, JoinRequest, SignedEntry};
-use lattice_net::LatticeEndpoint;
 use prost::Message;
+use super::protocol;
 
 /// Result of a sync operation with a peer
 pub struct SyncResult {
@@ -18,7 +16,7 @@ pub struct SyncResult {
 /// Returns the new StoreHandle on success.
 /// After joining, automatically syncs with the peer to get initial data.
 pub async fn join_mesh(
-    node: &LatticeNode,
+    node: &Node,
     endpoint: &LatticeEndpoint,
     peer_id: iroh::PublicKey,
 ) -> Result<StoreHandle, NodeError> {
@@ -72,6 +70,14 @@ pub async fn join_mesh(
                 }
             }
             
+            // Write our name to the store (separate key, not JSON)
+            // Note: inviter sets our status to 'active' via server.rs
+            let pubkey_hex = hex::encode(node.node_id());
+            if let Some(name) = node.name() {
+                let name_key = format!("/nodes/{}/name", pubkey_hex);
+                let _ = handle.put(name_key.as_bytes(), name.as_bytes()).await;
+            }
+            
             Ok(handle)
         }
         _ => Err(NodeError::Actor("Unexpected response message type".to_string())),
@@ -81,7 +87,7 @@ pub async fn join_mesh(
 /// Sync with a specific peer (bidirectional).
 /// Both sides exchange states and send missing entries to each other.
 pub async fn sync_with_peer(
-    node: &LatticeNode,
+    node: &Node,
     endpoint: &LatticeEndpoint,
     store: &StoreHandle,
     peer_id: iroh::PublicKey,
@@ -144,29 +150,11 @@ pub async fn sync_with_peer(
     }
     
     // 3. Send entries peer is missing (using shared protocol)
-    let entries_sent = crate::sync_protocol::send_missing_entries(&mut sink, store, &my_state, &peer_state).await
+    let entries_sent = protocol::send_missing_entries(&mut sink, store, &my_state, &peer_state).await
         .map_err(|e| NodeError::Actor(e))?;
     
     sink.finish().await
         .map_err(|e| NodeError::Actor(format!("Failed to finish: {}", e)))?;
-    
-    // Update own node info if we applied entries
-    if entries_applied > 0 {
-        let pubkey_hex = hex::encode(node.node_id());
-        let info_key = format!("/nodes/{}/info", pubkey_hex);
-        let info_val = serde_json::json!({
-            "name": hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_default(),
-            "added_at": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        }).to_string();
-        let _ = store.put(info_key.as_bytes(), info_val.as_bytes()).await;
-        
-        // Set own status to 'active' (we're now a fully synced peer)
-        let status_key = format!("/nodes/{}/status", pubkey_hex);
-        let _ = store.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await;
-    }
     
     println!("[Sync] Applied {} entries, sent {} entries", entries_applied, entries_sent);
     
@@ -178,7 +166,7 @@ pub async fn sync_with_peer(
 
 /// Sync with all active peers from the store.
 pub async fn sync_all(
-    node: &LatticeNode,
+    node: &Node,
     endpoint: &LatticeEndpoint,
     store: &StoreHandle,
 ) -> Result<Vec<SyncResult>, NodeError> {
@@ -193,7 +181,7 @@ pub async fn sync_all(
         if key_str.ends_with("/status") && value == PeerStatus::Active.as_str().as_bytes() {
             if let Some(pubkey) = key_str.strip_prefix("/nodes/").and_then(|s| s.strip_suffix("/status")) {
                 if pubkey != my_pubkey {
-                    if let Ok(id) = lattice_net::parse_node_id(pubkey) {
+                    if let Ok(id) = parse_node_id(pubkey) {
                         peer_ids.push(id);
                     }
                 }
