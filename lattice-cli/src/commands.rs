@@ -12,6 +12,13 @@ pub enum CommandResult {
     SwitchTo(StoreHandle),
 }
 
+/// Helper to call async code from sync command handlers
+fn block_async<F: std::future::Future>(f: F) -> F::Output {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(f)
+    })
+}
+
 pub type Handler = fn(&LatticeNode, Option<&StoreHandle>, &[String]) -> CommandResult;
 
 pub struct Command {
@@ -232,8 +239,8 @@ fn cmd_status(node: &LatticeNode, store: Option<&StoreHandle>, _args: &[String])
     }
     if let Some(h) = store {
         println!("Store:    {}", h.id());
-        println!("Log Seq:  {}", h.log_seq());
-        println!("Applied:  {}", h.applied_seq().unwrap_or(0));
+        println!("Log Seq:  {}", block_async(h.log_seq()));
+        println!("Applied:  {}", block_async(h.applied_seq()).unwrap_or(0));
     } else {
         println!("Store:    (none)");
     }
@@ -248,7 +255,7 @@ fn cmd_put(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String]) ->
         return CommandResult::Ok;
     };
     let start = Instant::now();
-    match h.put(args[0].as_bytes(), args[1].as_bytes()) {
+    match block_async(h.put(args[0].as_bytes(), args[1].as_bytes())) {
         Ok(seq) => println!("OK (seq: {}, {:.2?})", seq, start.elapsed()),
         Err(e) => eprintln!("Error: {}", e),
     }
@@ -266,7 +273,7 @@ fn cmd_get(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String]) ->
     
     if verbose {
         // Show all heads
-        match h.get_heads(key) {
+        match block_async(h.get_heads(key)) {
             Ok(heads) if heads.is_empty() => println!("(nil)"),
             Ok(heads) => {
                 for (i, head) in heads.iter().enumerate() {
@@ -289,9 +296,9 @@ fn cmd_get(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String]) ->
             Err(e) => eprintln!("Error: {}", e),
         }
     } else {
-        match h.get(key) {
+        match block_async(h.get(key)) {
             Ok(Some(v)) => {
-                let heads = h.get_heads(key).unwrap_or_default();
+                let heads = block_async(h.get_heads(key)).unwrap_or_default();
                 if heads.len() > 1 {
                     println!("{} (⚠ {} heads)", format_value(&v), heads.len());
                 } else {
@@ -312,7 +319,7 @@ fn cmd_delete(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String])
         return CommandResult::Ok;
     };
     let start = Instant::now();
-    match h.delete(args[0].as_bytes()) {
+    match block_async(h.delete(args[0].as_bytes())) {
         Ok(seq) => println!("OK (seq: {}, {:.2?})", seq, start.elapsed()),
         Err(e) => eprintln!("Error: {}", e),
     }
@@ -326,7 +333,7 @@ fn cmd_list(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String]) -
     };
     let verbose = args.first().map(|a| a == "-v").unwrap_or(false);
     let start = Instant::now();
-    match h.list() {
+    match block_async(h.list()) {
         Ok(entries) => {
             if entries.is_empty() {
                 println!("(empty)");
@@ -335,7 +342,7 @@ fn cmd_list(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String]) -
                     let key_str = format_value(k);
                     if verbose {
                         // Show all heads for this key
-                        let heads = h.get_heads(k).unwrap_or_default();
+                        let heads = block_async(h.get_heads(k)).unwrap_or_default();
                         println!("{}:", key_str);
                         for (i, head) in heads.iter().enumerate() {
                             let winner = if i == 0 { "→" } else { " " };
@@ -391,7 +398,7 @@ fn cmd_author_state(node: &LatticeNode, store: Option<&StoreHandle>, args: &[Str
         }
     };
 
-    match store.author_state(&author_bytes) {
+    match block_async(store.author_state(&author_bytes)) {
         Ok(Some(state)) => {
             println!("Author: {}", hex::encode(&author_bytes));
             println!("  seq: {}", state.seq);

@@ -7,40 +7,40 @@ use lattice_core::{
     sigchain::SigChainError,
     store::StoreError,
 };
-use std::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::{mpsc, oneshot};
 use std::thread::{self, JoinHandle};
 
 /// Commands sent to the store actor
 pub enum StoreCmd {
     Get {
         key: Vec<u8>,
-        resp: std::sync::mpsc::Sender<Result<Option<Vec<u8>>, StoreError>>,
+        resp: oneshot::Sender<Result<Option<Vec<u8>>, StoreError>>,
     },
     GetHeads {
         key: Vec<u8>,
-        resp: std::sync::mpsc::Sender<Result<Vec<HeadInfo>, StoreError>>,
+        resp: oneshot::Sender<Result<Vec<HeadInfo>, StoreError>>,
     },
     List {
-        resp: std::sync::mpsc::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError>>,
+        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError>>,
     },
     Put {
         key: Vec<u8>,
         value: Vec<u8>,
-        resp: std::sync::mpsc::Sender<Result<u64, StoreActorError>>,
+        resp: oneshot::Sender<Result<u64, StoreActorError>>,
     },
     Delete {
         key: Vec<u8>,
-        resp: std::sync::mpsc::Sender<Result<u64, StoreActorError>>,
+        resp: oneshot::Sender<Result<u64, StoreActorError>>,
     },
     LogSeq {
-        resp: std::sync::mpsc::Sender<u64>,
+        resp: oneshot::Sender<u64>,
     },
     AppliedSeq {
-        resp: std::sync::mpsc::Sender<Result<u64, StoreError>>,
+        resp: oneshot::Sender<Result<u64, StoreError>>,
     },
     AuthorState {
         author: [u8; 32],
-        resp: std::sync::mpsc::Sender<Result<Option<AuthorState>, StoreError>>,
+        resp: oneshot::Sender<Result<Option<AuthorState>, StoreError>>,
     },
     Shutdown,
 }
@@ -80,7 +80,7 @@ pub struct StoreActor {
     store: Store,
     sigchain: SigChain,
     node: Node,
-    rx: Receiver<StoreCmd>,
+    rx: mpsc::Receiver<StoreCmd>,
 }
 
 impl StoreActor {
@@ -90,7 +90,7 @@ impl StoreActor {
         store: Store,
         sigchain: SigChain,
         node: Node,
-        rx: Receiver<StoreCmd>,
+        rx: mpsc::Receiver<StoreCmd>,
     ) -> Self {
         Self {
             store_id,
@@ -102,8 +102,9 @@ impl StoreActor {
     }
 
     /// Run the actor loop - processes commands until Shutdown received
+    /// Uses blocking_recv since redb is sync and we run in spawn_blocking
     pub fn run(mut self) {
-        while let Ok(cmd) = self.rx.recv() {
+        while let Some(cmd) = self.rx.blocking_recv() {
             match cmd {
                 StoreCmd::Get { key, resp } => {
                     let _ = resp.send(self.store.get(&key));
@@ -186,13 +187,14 @@ impl StoreActor {
 }
 
 /// Spawn a store actor in a new thread, returns (sender, join_handle)
+/// Uses std::thread since redb is blocking
 pub fn spawn_store_actor(
     store_id: Uuid,
     store: Store,
     sigchain: SigChain,
     node: Node,
-) -> (Sender<StoreCmd>, JoinHandle<()>) {
-    let (tx, rx) = mpsc::channel();
+) -> (mpsc::Sender<StoreCmd>, JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel(32);
     let actor = StoreActor::new(store_id, store, sigchain, node, rx);
     let handle = thread::spawn(move || actor.run());
     (tx, handle)

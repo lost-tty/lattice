@@ -68,16 +68,16 @@
 - [x] StoreHandle wraps channel sender, keeps current API
 - [x] Validate: CLI works as before with actor
 
-**Phase 2: Async Runtime**
-- [ ] Add tokio runtime (`#[tokio::main]`)
-- [ ] Migrate `std::sync::mpsc` → `tokio::sync::mpsc`
-- [ ] Async CLI using `tokio::io::stdin()` or `rustyline` async
+**Phase 2: Async Runtime** ✓
+- [x] Add tokio runtime (`#[tokio::main]`)
+- [x] Migrate `std::sync::mpsc` → `tokio::sync::mpsc`
+- [x] Async CLI using `block_in_place` for sync handlers
 
 ### Success Criteria
 
 - [x] CLI still works as before
 - [x] Store operations serialized (no data races)
-- [ ] Ready for concurrent network tasks
+- [x] Ready for concurrent network tasks
 
 ---
 
