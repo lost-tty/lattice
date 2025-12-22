@@ -304,3 +304,6 @@ Practical model:
 - Share store = grant read
 - Write access defined in manifest
 - Read-only nodes replicate and verify but can't contribute entries
+
+Future:
+- Capability-based permissions: Explore finer-grained write access (e.g., per-key or per-prefix permissions) via capabilities. Exact mechanism TBD.

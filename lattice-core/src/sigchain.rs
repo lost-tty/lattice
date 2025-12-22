@@ -451,7 +451,7 @@ mod tests {
         let ops = vec![
             Operation {
                 op_type: Some(operation::OpType::Put(PutOp {
-                    key: "/test".to_string(),
+                    key: b"/test".to_vec(),
                     value: b"hello".to_vec(),
                 })),
             },

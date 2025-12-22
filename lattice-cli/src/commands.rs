@@ -67,10 +67,10 @@ pub fn commands() -> Vec<Command> {
         },
         Command {
             name: "get",
-            args: "<key>",
+            args: "<key> [-v]",
             description: "Retrieve a value by key",
             min_args: 1,
-            max_args: 1,
+            max_args: 2,
             handler: cmd_get,
         },
         Command {
@@ -240,7 +240,7 @@ fn cmd_put(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String]) ->
         return CommandResult::Ok;
     };
     let start = Instant::now();
-    match h.put(&args[0], args[1].as_bytes()) {
+    match h.put(args[0].as_bytes(), args[1].as_bytes()) {
         Ok(seq) => println!("OK (seq: {}, {:.2?})", seq, start.elapsed()),
         Err(e) => eprintln!("Error: {}", e),
     }
@@ -252,14 +252,48 @@ fn cmd_get(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String]) ->
         println!("No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
+    let verbose = args.get(1).map(|a| a == "-v").unwrap_or(false);
     let start = Instant::now();
-    match h.get(&args[0]) {
-        Ok(Some(v)) => {
-            println!("{}", format_value(&v));
-            println!("({:.2?})", start.elapsed());
+    let key = args[0].as_bytes();
+    
+    if verbose {
+        // Show all heads
+        match h.get_heads(key) {
+            Ok(heads) if heads.is_empty() => println!("(nil)"),
+            Ok(heads) => {
+                for (i, head) in heads.iter().enumerate() {
+                    let winner = if i == 0 { "→" } else { " " };
+                    let tombstone = if head.tombstone { "⊗" } else { "" };
+                    let author_short = hex::encode(&head.author).chars().take(8).collect::<String>();
+                    if head.tombstone {
+                        println!("{} {} (deleted) (hlc:{}, author:{})", 
+                            winner, tombstone, head.hlc, author_short);
+                    } else {
+                        println!("{} {} (hlc:{}, author:{})", 
+                            winner, format_value(&head.value), head.hlc, author_short);
+                    }
+                }
+                if heads.len() > 1 {
+                    println!("⚠ {} heads (conflict)", heads.len());
+                }
+                println!("({:.2?})", start.elapsed());
+            }
+            Err(e) => eprintln!("Error: {}", e),
         }
-        Ok(None) => println!("(nil)"),
-        Err(e) => eprintln!("Error: {}", e),
+    } else {
+        match h.get(key) {
+            Ok(Some(v)) => {
+                let heads = h.get_heads(key).unwrap_or_default();
+                if heads.len() > 1 {
+                    println!("{} (⚠ {} heads)", format_value(&v), heads.len());
+                } else {
+                    println!("{}", format_value(&v));
+                }
+                println!("({:.2?})", start.elapsed());
+            }
+            Ok(None) => println!("(nil)"),
+            Err(e) => eprintln!("Error: {}", e),
+        }
     }
     CommandResult::Ok
 }
@@ -270,7 +304,7 @@ fn cmd_delete(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String])
         return CommandResult::Ok;
     };
     let start = Instant::now();
-    match h.delete(&args[0]) {
+    match h.delete(args[0].as_bytes()) {
         Ok(seq) => println!("OK (seq: {}, {:.2?})", seq, start.elapsed()),
         Err(e) => eprintln!("Error: {}", e),
     }
@@ -290,10 +324,24 @@ fn cmd_list(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String]) -
                 println!("(empty)");
             } else {
                 for (k, v) in &entries {
+                    let key_str = format_value(k);
                     if verbose {
-                        println!("{} = {} ({} bytes)", k, format_value(v), v.len());
+                        // Show all heads for this key
+                        let heads = h.get_heads(k).unwrap_or_default();
+                        println!("{}:", key_str);
+                        for (i, head) in heads.iter().enumerate() {
+                            let winner = if i == 0 { "→" } else { " " };
+                            let author_short = hex::encode(&head.author).chars().take(8).collect::<String>();
+                            if head.tombstone {
+                                println!("  {} ⊗ (deleted) (hlc:{}, author:{})", 
+                                    winner, head.hlc, author_short);
+                            } else {
+                                println!("  {} {} (hlc:{}, author:{})", 
+                                    winner, format_value(&head.value), head.hlc, author_short);
+                            }
+                        }
                     } else {
-                        println!("{} = {}", k, format_value(v));
+                        println!("{} = {}", key_str, format_value(v));
                     }
                 }
                 println!("({} keys, {:.2?})", entries.len(), start.elapsed());

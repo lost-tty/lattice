@@ -24,12 +24,36 @@ message Entry {
   bytes store_id = 6;
 
   // Ordering Metadata
-  bytes prev_hash = 2;   // Link to previous entry (32 bytes)
+  bytes prev_hash = 2;   // Link to previous sigchain entry (32 bytes)
   uint64 seq = 3;        // Monotonic sequence number
   HLC timestamp = 4;     // Hybrid Logical Clock
 
+  // DAG ancestry: hashes of entries this supersedes (separate from sigchain)
+  repeated bytes parent_hashes = 7;
+
   // The Batch of Operations
   repeated Operation ops = 5;
+}
+
+// HeadInfo: a tip/head in the DAG for a key
+message HeadInfo {
+  bytes value = 1;       // The value at this head
+  uint64 hlc = 2;        // Combined HLC for ordering (wall_time_ms << 16 | counter)
+  bytes author = 3;      // Author's public key (32 bytes)
+  bytes hash = 4;        // Hash of the SignedEntry that created this head
+  bool tombstone = 5;    // True if this head represents a delete
+}
+
+// HeadList: wrapper for storing multiple heads per key in state.db
+message HeadList {
+  repeated HeadInfo heads = 1;
+}
+
+// AuthorState: tracks last applied entry per author for replay optimization
+message AuthorState {
+  uint64 seq = 1;        // Last applied seq for this author's sigchain
+  bytes hash = 2;        // Hash of last applied entry
+  uint64 log_offset = 3; // Byte offset in log file for fast resume
 }
 
 // Hybrid Logical Clock
@@ -49,12 +73,12 @@ message Operation {
 }
 
 message PutOp {
-  string key = 1;
-  bytes value = 2; // Raw bytes allows storing images, JSON, binary, etc.
+  bytes key = 1;
+  bytes value = 2;
 }
 
 message DeleteOp {
-  string key = 1;
+  bytes key = 1;
 }
 
 // 4. The Sync Handshake (Vector Clocks)

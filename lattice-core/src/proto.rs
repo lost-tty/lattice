@@ -33,6 +33,7 @@ mod tests {
             version: 1,
             store_id: vec![1u8; 16],
             prev_hash: vec![0u8; 32],
+            parent_hashes: vec![],
             seq: 5,
             timestamp: Some(Hlc {
                 wall_time: 1000,
@@ -41,7 +42,7 @@ mod tests {
             ops: vec![
                 Operation {
                     op_type: Some(operation::OpType::Put(PutOp {
-                        key: "/nodes/abc".to_string(),
+                        key: b"/nodes/abc".to_vec(),
                         value: b"hello".to_vec(),
                     })),
                 },
