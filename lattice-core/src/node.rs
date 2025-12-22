@@ -28,6 +28,7 @@ pub enum NodeError {
 ///
 /// Each node has an Ed25519 keypair used for signing sigchain entries
 /// and establishing trust within the network.
+#[derive(Clone)]
 pub struct Node {
     signing_key: SigningKey,
 }

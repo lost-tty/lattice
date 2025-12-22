@@ -57,6 +57,30 @@
 
 ---
 
+## Milestone 1.9: Async Refactor
+
+**Goal:** Prepare codebase for concurrent CLI + network operation.
+
+### Deliverables
+
+**Phase 1: Store Actor (sync)** ✓
+- [x] Store actor pattern: dedicated thread owns Store, receives commands via `std::sync::mpsc`
+- [x] StoreHandle wraps channel sender, keeps current API
+- [x] Validate: CLI works as before with actor
+
+**Phase 2: Async Runtime**
+- [ ] Add tokio runtime (`#[tokio::main]`)
+- [ ] Migrate `std::sync::mpsc` → `tokio::sync::mpsc`
+- [ ] Async CLI using `tokio::io::stdin()` or `rustyline` async
+
+### Success Criteria
+
+- [x] CLI still works as before
+- [x] Store operations serialized (no data races)
+- [ ] Ready for concurrent network tasks
+
+---
+
 ## Milestone 2: Two-Node Sync
 
 **Goal:** Two nodes can sync their logs over the network.
@@ -68,6 +92,7 @@
 - [ ] Iroh integration (peer discovery, connection)
 - [ ] Multi-author log merging
 - [ ] CLI: `peers`, `connect`/`join` commands
+- [ ] Background sync task (tokio::spawn)
 
 ### Success Criteria
 

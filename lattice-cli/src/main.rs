@@ -2,6 +2,7 @@
 
 mod node;
 mod commands;
+mod store_actor;
 
 use commands::CommandResult;
 use node::{LatticeNodeBuilder, StoreHandle};
