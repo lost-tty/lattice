@@ -206,25 +206,40 @@ impl Store {
         }
     }
     
-    /// Get all heads for a key (for conflict inspection)
+    /// Get all heads for a key (for conflict inspection).
+    /// Heads are sorted deterministically: highest HLC first, ties broken by author.
     pub fn get_heads(&self, key: &[u8]) -> Result<Vec<HeadInfo>, StoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(KV_TABLE)?;
         
         match table.get(key)? {
-            Some(v) => Ok(HeadList::decode(v.value())?.heads),
+            Some(v) => {
+                let mut heads = HeadList::decode(v.value())?.heads;
+                // Sort by winner criteria: highest HLC first, then highest author (deterministic)
+                heads.sort_by(|a, b| {
+                    b.hlc.cmp(&a.hlc)
+                        .then_with(|| b.author.cmp(&a.author))
+                });
+                Ok(heads)
+            }
             None => Ok(Vec::new()),
         }
     }
     
-    /// Pick deterministic winner from heads: highest HLC, then highest author bytes
+    /// Pick deterministic winner from heads: highest HLC, then highest author bytes.
+    /// Heads should already be sorted by get_heads(), so winner is first.
     fn pick_winner(heads: &[HeadInfo]) -> Option<&HeadInfo> {
-        heads.iter().max_by(|a, b| {
-            match a.hlc.cmp(&b.hlc) {
-                std::cmp::Ordering::Equal => a.author.cmp(&b.author),
-                ord => ord,
-            }
-        })
+        // If heads are already sorted (via get_heads), first is winner
+        // If not sorted, compute winner via max
+        if heads.is_empty() {
+            None
+        } else {
+            // Use max_by for correctness even on unsorted input
+            heads.iter().max_by(|a, b| {
+                a.hlc.cmp(&b.hlc)
+                    .then_with(|| a.author.cmp(&b.author))
+            })
+        }
     }
     
     /// List all key-value pairs (winner values only)
@@ -270,6 +285,34 @@ impl Store {
             None => Ok(None),
         }
     }
+
+    /// Get sync state for all authors (for reconciliation).
+    ///
+    /// Returns a SyncState with each author's highest seen sequence number and hash.
+    pub fn sync_state(&self) -> Result<crate::sync_state::SyncState, StoreError> {
+        use crate::sync_state::SyncState;
+        
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(AUTHOR_TABLE)?;
+        
+        let mut state = SyncState::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            if key.value().len() == 32 {
+                if let Ok(author_state) = AuthorState::decode(value.value()) {
+                    let mut author = [0u8; 32];
+                    author.copy_from_slice(key.value());
+                    let mut hash = [0u8; 32];
+                    if author_state.hash.len() == 32 {
+                        hash.copy_from_slice(&author_state.hash);
+                    }
+                    state.set(author, author_state.seq, hash);
+                }
+            }
+        }
+        
+        Ok(state)
+    }
 }
 
 #[cfg(test)]
@@ -282,7 +325,8 @@ mod tests {
     use std::env::temp_dir;
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
-        temp_dir().join(format!("lattice_dag_store_test_{}.db", name))
+        let tid = std::thread::current().id();
+        temp_dir().join(format!("lattice_dag_store_test_{}_{:?}.db", name, tid))
     }
 
     const TEST_STORE: [u8; 16] = [1u8; 16];
@@ -1063,5 +1107,366 @@ mod tests {
             tombstone: true,
         }];
         assert!(!Store::needs_delete(&heads));
+    }
+
+    #[test]
+    fn test_sync_state_diff_and_apply() {
+        // Test that two stores can compute diff and sync entries
+        let path_a = temp_db_path("sync_a");
+        let path_b = temp_db_path("sync_b");
+        let log_path_a = temp_db_path("sync_a_log");
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+        let _ = std::fs::remove_file(&log_path_a);
+        
+        // Node A writes some entries
+        let store_a = Store::open(&path_a).unwrap();
+        let node_a = Node::generate();
+        
+        // Write 3 entries on node A
+        for i in 1u64..=3 {
+            let clock = MockClock::new(1000 + i * 100);
+            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+                .store_id(TEST_STORE.to_vec())
+                .prev_hash([0u8; 32].to_vec())
+                .put(format!("/key{}", i), format!("value{}", i).into_bytes())
+                .sign(&node_a);
+            store_a.apply_entry(&entry).unwrap();
+            crate::log::append_entry(&log_path_a, &entry).unwrap();
+        }
+        
+        // Node B is empty
+        let store_b = Store::open(&path_b).unwrap();
+        
+        // Get sync states
+        let sync_a = store_a.sync_state().unwrap();
+        let sync_b = store_b.sync_state().unwrap();
+        
+        // Compute diff: B needs entries from A
+        let missing = sync_b.diff(&sync_a);
+        
+        // Should need entries for author A
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].author, node_a.public_key_bytes());
+        assert_eq!(missing[0].from_seq, 0);  // B has nothing
+        assert_eq!(missing[0].to_seq, 3);    // A has 3 entries
+        
+        // Fetch entries from A's log (using from_hash = 0 means read all)
+        let entries = crate::log::read_entries_after(
+            &log_path_a,
+            if missing[0].from_hash == [0u8; 32] { None } else { Some(missing[0].from_hash) }
+        ).unwrap();
+        assert_eq!(entries.len(), 3);
+        
+        // Apply entries to B
+        for entry in &entries {
+            store_b.apply_entry(entry).unwrap();
+        }
+        
+        // Verify B has same KV state as A
+        assert_eq!(store_b.get(b"/key1").unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(store_b.get(b"/key2").unwrap(), Some(b"value2".to_vec()));
+        assert_eq!(store_b.get(b"/key3").unwrap(), Some(b"value3".to_vec()));
+        
+        // Verify sync states now match
+        let sync_a_after = store_a.sync_state().unwrap();
+        let sync_b_after = store_b.sync_state().unwrap();
+        assert!(sync_b_after.diff(&sync_a_after).is_empty());
+        
+        let _ = std::fs::remove_file(path_a);
+        let _ = std::fs::remove_file(path_b);
+        let _ = std::fs::remove_file(log_path_a);
+    }
+
+    #[test]
+    fn test_bidirectional_sync() {
+        // Test that two stores can sync in both directions
+        let path_a = temp_db_path("bidir_a");
+        let path_b = temp_db_path("bidir_b");
+        let log_path_a = temp_db_path("bidir_log_a");
+        let log_path_b = temp_db_path("bidir_log_b");
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+        let _ = std::fs::remove_file(&log_path_a);
+        let _ = std::fs::remove_file(&log_path_b);
+        
+        let store_a = Store::open(&path_a).unwrap();
+        let store_b = Store::open(&path_b).unwrap();
+        let node_a = Node::generate();
+        let node_b = Node::generate();
+        
+        // Node A writes entries
+        for i in 1u64..=2 {
+            let clock = MockClock::new(1000 + i * 100);
+            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+                .store_id(TEST_STORE.to_vec())
+                .prev_hash([0u8; 32].to_vec())
+                .put(format!("/a{}", i), format!("from_a{}", i).into_bytes())
+                .sign(&node_a);
+            store_a.apply_entry(&entry).unwrap();
+            crate::log::append_entry(&log_path_a, &entry).unwrap();
+        }
+        
+        // Node B writes different entries
+        for i in 1u64..=2 {
+            let clock = MockClock::new(2000 + i * 100);
+            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+                .store_id(TEST_STORE.to_vec())
+                .prev_hash([0u8; 32].to_vec())
+                .put(format!("/b{}", i), format!("from_b{}", i).into_bytes())
+                .sign(&node_b);
+            store_b.apply_entry(&entry).unwrap();
+            crate::log::append_entry(&log_path_b, &entry).unwrap();
+        }
+        
+        // Get sync states
+        let sync_a = store_a.sync_state().unwrap();
+        let sync_b = store_b.sync_state().unwrap();
+        
+        // A needs B's entries
+        let a_needs = sync_a.diff(&sync_b);
+        assert_eq!(a_needs.len(), 1);
+        assert_eq!(a_needs[0].author, node_b.public_key_bytes());
+        
+        // B needs A's entries
+        let b_needs = sync_b.diff(&sync_a);
+        assert_eq!(b_needs.len(), 1);
+        assert_eq!(b_needs[0].author, node_a.public_key_bytes());
+        
+        // Sync A → B
+        let entries_a = crate::log::read_entries(&log_path_a).unwrap();
+        for entry in &entries_a {
+            store_b.apply_entry(entry).unwrap();
+        }
+        
+        // Sync B → A
+        let entries_b = crate::log::read_entries(&log_path_b).unwrap();
+        for entry in &entries_b {
+            store_a.apply_entry(entry).unwrap();
+        }
+        
+        // Both should now have all 4 keys
+        assert_eq!(store_a.get(b"/a1").unwrap(), Some(b"from_a1".to_vec()));
+        assert_eq!(store_a.get(b"/b1").unwrap(), Some(b"from_b1".to_vec()));
+        assert_eq!(store_b.get(b"/a1").unwrap(), Some(b"from_a1".to_vec()));
+        assert_eq!(store_b.get(b"/b1").unwrap(), Some(b"from_b1".to_vec()));
+        
+        // Sync states should match
+        let sync_a_after = store_a.sync_state().unwrap();
+        let sync_b_after = store_b.sync_state().unwrap();
+        assert!(sync_a_after.diff(&sync_b_after).is_empty());
+        assert!(sync_b_after.diff(&sync_a_after).is_empty());
+        
+        let _ = std::fs::remove_file(path_a);
+        let _ = std::fs::remove_file(path_b);
+        let _ = std::fs::remove_file(log_path_a);
+        let _ = std::fs::remove_file(log_path_b);
+    }
+
+    #[test]
+    fn test_three_way_sync() {
+        // Test that three stores can all sync with each other
+        let path_a = temp_db_path("three_a");
+        let path_b = temp_db_path("three_b");
+        let path_c = temp_db_path("three_c");
+        let log_path_a = temp_db_path("three_log_a");
+        let log_path_b = temp_db_path("three_log_b");
+        let log_path_c = temp_db_path("three_log_c");
+        for p in [&path_a, &path_b, &path_c, &log_path_a, &log_path_b, &log_path_c] {
+            let _ = std::fs::remove_file(p);
+        }
+        
+        let store_a = Store::open(&path_a).unwrap();
+        let store_b = Store::open(&path_b).unwrap();
+        let store_c = Store::open(&path_c).unwrap();
+        let node_a = Node::generate();
+        let node_b = Node::generate();
+        let node_c = Node::generate();
+        
+        // Each node writes one entry
+        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/key_a", b"from_a".to_vec())
+            .sign(&node_a);
+        store_a.apply_entry(&entry_a).unwrap();
+        crate::log::append_entry(&log_path_a, &entry_a).unwrap();
+        
+        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(2000)))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/key_b", b"from_b".to_vec())
+            .sign(&node_b);
+        store_b.apply_entry(&entry_b).unwrap();
+        crate::log::append_entry(&log_path_b, &entry_b).unwrap();
+        
+        let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(3000)))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/key_c", b"from_c".to_vec())
+            .sign(&node_c);
+        store_c.apply_entry(&entry_c).unwrap();
+        crate::log::append_entry(&log_path_c, &entry_c).unwrap();
+        
+        // Sync A ↔ B
+        for entry in crate::log::read_entries(&log_path_a).unwrap() {
+            store_b.apply_entry(&entry).unwrap();
+        }
+        for entry in crate::log::read_entries(&log_path_b).unwrap() {
+            store_a.apply_entry(&entry).unwrap();
+        }
+        
+        // Sync B ↔ C
+        for entry in crate::log::read_entries(&log_path_b).unwrap() {
+            store_c.apply_entry(&entry).unwrap();
+        }
+        for entry in crate::log::read_entries(&log_path_c).unwrap() {
+            store_b.apply_entry(&entry).unwrap();
+        }
+        
+        // Sync A ↔ C (A should get C's entry, C should get A's entry)
+        for entry in crate::log::read_entries(&log_path_a).unwrap() {
+            store_c.apply_entry(&entry).unwrap();
+        }
+        for entry in crate::log::read_entries(&log_path_c).unwrap() {
+            store_a.apply_entry(&entry).unwrap();
+        }
+        
+        // All three stores should have all three keys
+        for store in [&store_a, &store_b, &store_c] {
+            assert_eq!(store.get(b"/key_a").unwrap(), Some(b"from_a".to_vec()));
+            assert_eq!(store.get(b"/key_b").unwrap(), Some(b"from_b".to_vec()));
+            assert_eq!(store.get(b"/key_c").unwrap(), Some(b"from_c".to_vec()));
+        }
+        
+        // All sync states should match
+        let sync_a = store_a.sync_state().unwrap();
+        let sync_b = store_b.sync_state().unwrap();
+        let sync_c = store_c.sync_state().unwrap();
+        assert!(sync_a.diff(&sync_b).is_empty());
+        assert!(sync_b.diff(&sync_c).is_empty());
+        assert!(sync_c.diff(&sync_a).is_empty());
+        
+        for p in [path_a, path_b, path_c, log_path_a, log_path_b, log_path_c] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn test_conflict_deterministic_resolution() {
+        // Test that two nodes writing the same key resolve deterministically
+        let path_a = temp_db_path("conflict_a");
+        let path_b = temp_db_path("conflict_b");
+        let log_path_a = temp_db_path("conflict_log_a");
+        let log_path_b = temp_db_path("conflict_log_b");
+        for p in [&path_a, &path_b, &log_path_a, &log_path_b] {
+            let _ = std::fs::remove_file(p);
+        }
+        
+        let store_a = Store::open(&path_a).unwrap();
+        let store_b = Store::open(&path_b).unwrap();
+        let node_a = Node::generate();
+        let node_b = Node::generate();
+        
+        // Both nodes write to the SAME key with different values
+        // Use same HLC to force conflict (tie-break on author)
+        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/shared_key", b"value_from_a".to_vec())
+            .sign(&node_a);
+        store_a.apply_entry(&entry_a).unwrap();
+        crate::log::append_entry(&log_path_a, &entry_a).unwrap();
+        
+        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))  // Same HLC!
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/shared_key", b"value_from_b".to_vec())
+            .sign(&node_b);
+        store_b.apply_entry(&entry_b).unwrap();
+        crate::log::append_entry(&log_path_b, &entry_b).unwrap();
+        
+        // Before sync: A has A's value, B has B's value
+        assert_eq!(store_a.get(b"/shared_key").unwrap(), Some(b"value_from_a".to_vec()));
+        assert_eq!(store_b.get(b"/shared_key").unwrap(), Some(b"value_from_b".to_vec()));
+        
+        // Sync A → B and B → A
+        for entry in crate::log::read_entries(&log_path_a).unwrap() {
+            store_b.apply_entry(&entry).unwrap();
+        }
+        for entry in crate::log::read_entries(&log_path_b).unwrap() {
+            store_a.apply_entry(&entry).unwrap();
+        }
+        
+        // After sync: both should have SAME value (deterministic winner)
+        let value_a = store_a.get(b"/shared_key").unwrap();
+        let value_b = store_b.get(b"/shared_key").unwrap();
+        assert_eq!(value_a, value_b, "Conflict should resolve deterministically");
+        
+        // Both should have 2 heads for this key (conflict)
+        let heads_a = store_a.get_heads(b"/shared_key").unwrap();
+        let heads_b = store_b.get_heads(b"/shared_key").unwrap();
+        assert_eq!(heads_a.len(), 2, "Should have 2 heads (conflict)");
+        assert_eq!(heads_b.len(), 2, "Should have 2 heads (conflict)");
+        
+        // Both stores have the same heads in same order (deterministic)
+        assert_eq!(heads_a[0].value, heads_b[0].value, "Winner should be same");
+        assert_eq!(heads_a[0].author, heads_b[0].author, "Winner author should be same");
+        
+        // Verify tie-breaker: winner is the one with higher author bytes (deterministic)
+        // Since HLC is the same, the author with lexicographically higher bytes wins
+        let winner_author = &heads_a[0].author;
+        let loser_author = &heads_a[1].author;
+        assert!(winner_author > loser_author, "Winner should have higher author bytes");
+        
+        for p in [path_a, path_b, log_path_a, log_path_b] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn test_hlc_tiebreak_explicit() {
+        // Explicit test: equal HLC, winner determined by node ID (author bytes)
+        let path = temp_db_path("tiebreak");
+        let _ = std::fs::remove_file(&path);
+        
+        let store = Store::open(&path).unwrap();
+        let node_low = Node::generate();
+        let node_high = Node::generate();
+        
+        // Determine which node has "higher" author bytes
+        let (high_node, low_node) = if node_high.public_key_bytes() > node_low.public_key_bytes() {
+            (&node_high, &node_low)
+        } else {
+            (&node_low, &node_high)
+        };
+        
+        // Both entries have SAME HLC
+        let clock = MockClock::new(5000);
+        
+        let entry_low = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/tiebreak_key", b"from_low".to_vec())
+            .sign(low_node);
+        store.apply_entry(&entry_low).unwrap();
+        
+        let entry_high = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/tiebreak_key", b"from_high".to_vec())
+            .sign(high_node);
+        store.apply_entry(&entry_high).unwrap();
+        
+        // Winner should be the one with higher author bytes
+        let value = store.get(b"/tiebreak_key").unwrap();
+        assert_eq!(value, Some(b"from_high".to_vec()), "Higher author bytes should win");
+        
+        let heads = store.get_heads(b"/tiebreak_key").unwrap();
+        assert_eq!(heads.len(), 2);
+        assert_eq!(heads[0].value, b"from_high".to_vec(), "heads[0] should be winner");
+        assert_eq!(heads[0].author, high_node.public_key_bytes().to_vec());
+        
+        let _ = std::fs::remove_file(path);
     }
 }

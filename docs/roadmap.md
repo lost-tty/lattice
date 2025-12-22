@@ -87,10 +87,15 @@
 
 ### Deliverables
 
-- [ ] VectorClock module (diff, merge, missing entries)
-- [ ] Sync protocol (push missing entries)
+**Phase 1: Sync Logic (no network)** ✓
+- [x] SyncState with AuthorInfo (seq + hash) for hash-based log resumption
+- [x] `Store::sync_state()` → author-to-seq+hash map from AUTHOR_TABLE
+- [x] `SyncState::diff()` → `Vec<MissingRange>` with from_hash for `read_entries_after`
+- [x] Multi-store sync test: compute diff, fetch entries, apply, verify same state
+
+**Phase 2: Iroh Integration**
 - [ ] Iroh integration (peer discovery, connection)
-- [ ] Multi-author log merging
+- [ ] Sync protocol (push missing entries over network)
 - [ ] CLI: `peers`, `connect`/`join` commands
 - [ ] Background sync task (tokio::spawn)
 
