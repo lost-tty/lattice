@@ -138,8 +138,8 @@ pub enum PeerStatus {
     Invited,
     /// Peer is active and can sync
     Active,
-    /// Peer has been removed from the mesh
-    Removed,
+    /// Peer is temporarily inactive
+    Dormant,
 }
 
 impl PeerStatus {
@@ -147,7 +147,7 @@ impl PeerStatus {
         match self {
             PeerStatus::Invited => "invited",
             PeerStatus::Active => "active",
-            PeerStatus::Removed => "removed",
+            PeerStatus::Dormant => "dormant",
         }
     }
     
@@ -155,7 +155,7 @@ impl PeerStatus {
         match s {
             "invited" => Some(PeerStatus::Invited),
             "active" => Some(PeerStatus::Active),
-            "removed" => Some(PeerStatus::Removed),
+            "dormant" => Some(PeerStatus::Dormant),
             _ => None,
         }
     }

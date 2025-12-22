@@ -31,7 +31,7 @@ fn cmd_init(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&Lattic
         Ok(store_id) => {
             println!("Initialized with root store: {}", store_id);
             println!("Node info stored in /nodes/{}/*", hex::encode(node.node_id()));
-            match node.root_store().as_ref() {
+            match block_async(node.root_store()).as_ref() {
                 Some(h) => CommandResult::SwitchTo(h.clone()),
                 None => CommandResult::Ok,
             }
@@ -179,8 +179,8 @@ fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&Latti
         by_status.entry(peer.status).or_default().push(peer);
     }
     
-    // Print grouped by status in order: active, invited, removed
-    let status_order = [PeerStatus::Active, PeerStatus::Invited, PeerStatus::Removed];
+    // Print grouped by status in order: active, invited, dormant
+    let status_order = [PeerStatus::Active, PeerStatus::Invited, PeerStatus::Dormant];
     for status in &status_order {
         if let Some(peer_list) = by_status.get(status) {
             println!("\n[{}] ({}):", status.as_str(), peer_list.len());

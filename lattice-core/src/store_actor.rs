@@ -24,6 +24,12 @@ pub enum StoreCmd {
         resp: oneshot::Sender<Result<Vec<HeadInfo>, StoreError>>,
     },
     List {
+        include_deleted: bool,
+        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError>>,
+    },
+    ListByPrefix {
+        prefix: Vec<u8>,
+        include_deleted: bool,
         resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError>>,
     },
     Put {
@@ -142,8 +148,11 @@ impl StoreActor {
                 StoreCmd::GetHeads { key, resp } => {
                     let _ = resp.send(self.store.get_heads(&key));
                 }
-                StoreCmd::List { resp } => {
-                    let _ = resp.send(self.store.list_all());
+                StoreCmd::List { include_deleted, resp } => {
+                    let _ = resp.send(self.store.list_all(include_deleted));
+                }
+                StoreCmd::ListByPrefix { prefix, include_deleted, resp } => {
+                    let _ = resp.send(self.store.list_by_prefix(&prefix, include_deleted));
                 }
                 StoreCmd::Put { key, value, resp } => {
                     let result = self.do_put(&key, &value);

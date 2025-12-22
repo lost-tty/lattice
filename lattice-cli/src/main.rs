@@ -10,7 +10,6 @@ use lattice_core::{NodeBuilder, StoreHandle};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() {
@@ -18,7 +17,7 @@ async fn main() {
     println!("Type 'help' for commands, 'quit' to exit.\n");
 
     let node = match NodeBuilder::new().build() {
-        Ok(n) => n,
+        Ok(n) => Arc::new(n),
         Err(e) => {
             eprintln!("Failed to initialize: {}", e);
             return;
@@ -37,12 +36,9 @@ async fn main() {
         }
     };
     
-    // Shared store handle for accept loop (updated when store is opened/changed)
-    let shared_store: Arc<RwLock<Option<StoreHandle>>> = Arc::new(RwLock::new(None));
-    
     // Spawn accept loop for incoming connections
     if let Some(ref ep) = endpoint {
-        spawn_accept_loop(ep.endpoint().clone(), shared_store.clone());
+        spawn_accept_loop(node.clone(), ep.endpoint().clone());
     }
     
     let info = node.info();
@@ -53,18 +49,14 @@ async fn main() {
         println!("Stores:  {}", info.stores.len());
     }
 
-    let mut current_store: Option<StoreHandle> = match node.open_root_store() {
+    let mut current_store: Option<StoreHandle> = match node.open_root_store().await {
         Ok(Some(open_info)) => {
             if open_info.entries_replayed > 0 {
                 println!("Root:    {} (replayed {})", open_info.store_id, open_info.entries_replayed);
             } else {
                 println!("Root:    {}", open_info.store_id);
             }
-            let h = node.root_store().as_ref().cloned();
-            if let Some(ref handle) = h {
-                *shared_store.write().await = Some(handle.clone());
-            }
-            h
+            node.root_store().await.as_ref().cloned()
         }
         Ok(None) => {
             println!("Status:  Not initialized (use 'init')");
@@ -111,8 +103,6 @@ async fn main() {
                             match (cmd.handler)(&node, current_store.as_ref(), endpoint.as_ref(), cmd_args) {
                                 CommandResult::Ok => {}
                                 CommandResult::SwitchTo(h) => {
-                                    // Update shared store for accept loop
-                                    *shared_store.write().await = Some(h.clone());
                                     current_store = Some(h);
                                 }
                                 CommandResult::Quit => break,

@@ -10,7 +10,6 @@ use crate::{
     node_identity::NodeError as IdentityError,
 };
 use std::path::Path;
-use std::rc::Rc;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -52,6 +51,11 @@ pub struct NodeInfo {
 pub struct StoreInfo {
     pub store_id: Uuid,
     pub entries_replayed: u64,
+}
+
+/// Result of accepting a peer's join request
+pub struct JoinAcceptance {
+    pub store_id: Uuid,
 }
 
 /// Information about a peer in the mesh
@@ -97,9 +101,9 @@ impl NodeBuilder {
 
         Ok(Node {
             data_dir: self.data_dir,
-            node: Rc::new(node),
+            node: std::sync::Arc::new(node),
             meta,
-            root_store: std::cell::RefCell::new(None),
+            root_store: tokio::sync::RwLock::new(None),
         })
     }
 }
@@ -111,9 +115,9 @@ impl Default for NodeBuilder {
 /// A local Lattice node (manages identity and store registry)
 pub struct Node {
     data_dir: DataDir,
-    node: Rc<NodeIdentity>,
+    node: std::sync::Arc<NodeIdentity>,
     meta: MetaStore,
-    root_store: std::cell::RefCell<Option<StoreHandle>>,
+    root_store: tokio::sync::RwLock<Option<StoreHandle>>,
 }
 
 impl Node {
@@ -146,16 +150,21 @@ impl Node {
     /// Set the node's display name.
     /// Updates meta.db and if root store is open, also updates /nodes/{pubkey}/name
     pub async fn set_name(&self, name: &str) -> Result<(), NodeError> {
-        // Update meta.db
         self.meta.set_name(name)?;
-        
-        // If root store is open, update there too
-        if let Some(handle) = self.root_store.borrow().as_ref() {
-            let pubkey_hex = hex::encode(self.node.public_key_bytes());
-            let name_key = format!("/nodes/{}/name", pubkey_hex);
-            handle.put(name_key.as_bytes(), name.as_bytes()).await?;
+        self.publish_name().await
+    }
+    
+    /// Publish this node's name from meta.db to the root store.
+    /// Used after joining a mesh to announce ourselves.
+    pub async fn publish_name(&self) -> Result<(), NodeError> {
+        if let Some(name) = self.name() {
+            let guard = self.root_store.read().await;
+            if let Some(handle) = guard.as_ref() {
+                let pubkey_hex = hex::encode(self.node.public_key_bytes());
+                let name_key = format!("/nodes/{}/name", pubkey_hex);
+                handle.put(name_key.as_bytes(), name.as_bytes()).await?;
+            }
         }
-        
         Ok(())
     }
 
@@ -165,17 +174,17 @@ impl Node {
     }
     
     /// Get reference to the cached root store handle (if open)
-    pub fn root_store(&self) -> std::cell::Ref<'_, Option<StoreHandle>> {
-        self.root_store.borrow()
+    pub async fn root_store(&self) -> tokio::sync::RwLockReadGuard<'_, Option<StoreHandle>> {
+        self.root_store.read().await
     }
     
     /// Open the root store if set. Node owns the handle internally.
     /// Returns StoreInfo on success, or None if no root store is set.
-    pub fn open_root_store(&self) -> Result<Option<StoreInfo>, NodeError> {
+    pub async fn open_root_store(&self) -> Result<Option<StoreInfo>, NodeError> {
         match self.meta.root_store()? {
             Some(id) => {
                 let (handle, info) = self.open_store(id)?;
-                *self.root_store.borrow_mut() = Some(handle);
+                *self.root_store.write().await = Some(handle);
                 Ok(Some(info))
             }
             None => Ok(None),
@@ -213,17 +222,34 @@ impl Node {
         handle.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await?;
         
         // Store the handle - node owns it
-        *self.root_store.borrow_mut() = Some(handle);
+        *self.root_store.write().await = Some(handle);
         
         Ok(store_id)
+    }
+    
+    /// Complete joining a mesh - creates store with given UUID, sets as root, caches handle.
+    /// Called after receiving store_id from peer's JoinResponse.
+    pub async fn complete_join(&self, store_id: Uuid) -> Result<StoreHandle, NodeError> {
+        // Create local store with that UUID
+        self.create_store_with_uuid(store_id)?;
+        self.meta.set_root_store(store_id)?;
+        
+        // Open and cache the handle
+        let (handle, _) = self.open_store(store_id)?;
+        *self.root_store.write().await = Some(handle.clone());
+        
+        // Publish our name to the store
+        let _ = self.publish_name().await;
+        
+        Ok(handle)
     }
     
     // --- Peer Management ---
     
     /// Invite a peer to the mesh. Writes their info with status = invited.
     pub async fn invite_peer(&self, pubkey: &[u8; 32]) -> Result<(), NodeError> {
-        let store = self.root_store.borrow();
-        let store = store.as_ref()
+        let guard = self.root_store.read().await;
+        let store = guard.as_ref()
             .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
         
         let pubkey_hex = hex::encode(pubkey);
@@ -251,11 +277,11 @@ impl Node {
     
     /// List all peers in the mesh with their info
     pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, NodeError> {
-        let store = self.root_store.borrow();
-        let store = store.as_ref()
+        let guard = self.root_store.read().await;
+        let store = guard.as_ref()
             .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
         
-        let all = store.list().await?;
+        let all = store.list(false).await?;
         
         // Collect unique pubkeys with status
         let mut peers_map: std::collections::HashMap<String, PeerStatus> = std::collections::HashMap::new();
@@ -299,10 +325,10 @@ impl Node {
         Ok(peers)
     }
     
-    /// Remove a peer from the mesh (sets status to removed)
+    /// Remove a peer from the mesh (deletes all their /nodes/{pubkey}/* keys)
     pub async fn remove_peer(&self, pubkey: &[u8; 32]) -> Result<(), NodeError> {
-        let store = self.root_store.borrow();
-        let store = store.as_ref()
+        let guard = self.root_store.read().await;
+        let store = guard.as_ref()
             .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
         
         let pubkey_hex = hex::encode(pubkey);
@@ -312,28 +338,26 @@ impl Node {
             return Err(NodeError::Actor("Cannot remove yourself".to_string()));
         }
         
-        // Check if peer exists
-        let status_key = format!("/nodes/{}/status", pubkey_hex);
-        match store.get(status_key.as_bytes()).await? {
-            Some(status) if status == PeerStatus::Removed.as_str().as_bytes() => {
-                return Err(NodeError::Actor("Peer already removed".to_string()));
-            }
-            None => {
-                return Err(NodeError::Actor("Peer not found".to_string()));
-            }
-            _ => {}
+        // Find all keys for this peer using prefix search
+        let prefix = format!("/nodes/{}/", pubkey_hex);
+        let keys = store.list_by_prefix(prefix.as_bytes(), false).await?;
+        
+        if keys.is_empty() {
+            return Err(NodeError::Actor("Peer not found".to_string()));
         }
         
-        // Set status to removed
-        store.put(status_key.as_bytes(), PeerStatus::Removed.as_str().as_bytes()).await?;
+        // Delete all found keys
+        for (key, _) in keys {
+            store.delete(&key).await?;
+        }
         
         Ok(())
     }
     
     /// Get a peer's status
     pub async fn get_peer_status(&self, pubkey: &[u8; 32]) -> Result<Option<PeerStatus>, NodeError> {
-        let store = self.root_store.borrow();
-        let store = store.as_ref()
+        let guard = self.root_store.read().await;
+        let store = guard.as_ref()
             .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
         
         let pubkey_hex = hex::encode(pubkey);
@@ -346,6 +370,44 @@ impl Node {
             }
             None => Ok(None),
         }
+    }
+    
+    /// Set a peer's status
+    pub async fn set_peer_status(&self, pubkey: &[u8; 32], status: PeerStatus) -> Result<(), NodeError> {
+        let guard = self.root_store.read().await;
+        let store = guard.as_ref()
+            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        
+        let pubkey_hex = hex::encode(pubkey);
+        let status_key = format!("/nodes/{}/status", pubkey_hex);
+        store.put(status_key.as_bytes(), status.as_str().as_bytes()).await?;
+        Ok(())
+    }
+    
+    /// Verify a peer has one of the expected statuses
+    pub async fn verify_peer_status(&self, pubkey: &[u8; 32], expected: &[PeerStatus]) -> Result<(), NodeError> {
+        match self.get_peer_status(pubkey).await? {
+            Some(status) if expected.contains(&status) => Ok(()),
+            Some(status) => Err(NodeError::Actor(format!(
+                "Peer status is '{:?}', expected one of {:?}", status, expected
+            ))),
+            None => Err(NodeError::Actor("Peer not found".to_string())),
+        }
+    }
+    
+    /// Accept a peer's join request - verifies they're invited, sets active, returns join info
+    pub async fn accept_join(&self, pubkey: &[u8; 32]) -> Result<JoinAcceptance, NodeError> {
+        // Verify peer is invited
+        self.verify_peer_status(pubkey, &[PeerStatus::Invited]).await?;
+        
+        // Get root store ID
+        let store_id = self.meta.root_store()?
+            .ok_or_else(|| NodeError::Actor("No root store configured".to_string()))?;
+        
+        // Set peer status to active
+        self.set_peer_status(pubkey, PeerStatus::Active).await?;
+        
+        Ok(JoinAcceptance { store_id })
     }
 
     pub fn list_stores(&self) -> Result<Vec<Uuid>, NodeError> {
@@ -454,10 +516,20 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    pub async fn list(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
+    pub async fn list(&self, include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::List { resp: resp_tx }).await
+        self.tx.send(StoreCmd::List { include_deleted, resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
+    pub async fn list_by_prefix(&self, prefix: &[u8], include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::ListByPrefix { prefix: prefix.to_vec(), include_deleted, resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
         resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
@@ -627,7 +699,7 @@ mod tests {
             .expect("create node");
         
         // Initially no root store
-        assert!(node.root_store().is_none());
+        assert!(node.root_store().await.is_none());
         
         // Init creates root store
         let root_id = node.init().await.expect("init failed");
@@ -687,7 +759,7 @@ mod tests {
             .build()
             .expect("create node");
         node.init().await.expect("init");
-        let store = node.root_store();
+        let store = node.root_store().await;
         let store = store.as_ref().unwrap();
         
         // Get baseline seq after init
@@ -733,7 +805,7 @@ mod tests {
         let pubkey_hex = hex::encode(node.node_id());
         let name_key = format!("/nodes/{}/name", pubkey_hex);
         {
-            let store = node.root_store();
+            let store = node.root_store().await;
             let store = store.as_ref().unwrap();
             let stored_name = store.get(name_key.as_bytes()).await.unwrap();
             assert_eq!(stored_name, Some(initial_name.as_bytes().to_vec()));
@@ -748,7 +820,7 @@ mod tests {
         
         // Verify store updated
         {
-            let store = node.root_store();
+            let store = node.root_store().await;
             let store = store.as_ref().unwrap();
             let stored_name = store.get(name_key.as_bytes()).await.unwrap();
             assert_eq!(stored_name, Some(new_name.as_bytes().to_vec()));

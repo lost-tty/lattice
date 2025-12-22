@@ -59,14 +59,14 @@ Networking modes:
 - Identified by their Ed25519 public key.
 - Private key stored locally in `identity.key` (not replicated).
 - Node data stored in KV:
-  - `/nodes/{pubkey}/info` = static metadata (name, added_by, added_at)
-  - `/nodes/{pubkey}/status` = `active` | `dormant` | `disabled`
+  - `/nodes/{pubkey}/name` = display name
+  - `/nodes/{pubkey}/added_at` = timestamp when added
+  - `/nodes/{pubkey}/status` = `invited` | `active` | `dormant` (removal deletes keys)
   - `/nodes/{pubkey}/role` = `server` | `device` (optional, hints sync priority)
-  - `/nodes/{pubkey}/iroh` = Iroh NodeId for network connection
 - Peer invitation flow:
   1. Inviter runs `invite <peer_pubkey>` → writes `/nodes/{peer}/info` + `/status`
   2. Inviter shares their Iroh NodeId out-of-band (QR code, link, text)
-  3. Invited peer runs `connect <inviter_nodeid>` → syncs with inviter
+  3. Invited peer runs `join <inviter_nodeid>` → syncs with inviter
   4. Sync pulls `/nodes/{self}/info` + `/status` → peer is authorized
   5. `connect` implicitly adds inviter to peer's `/nodes/*` (mutual awareness)
 - Accepting = syncing. The invited peer discovers authorization by receiving the entries.
@@ -181,7 +181,7 @@ Each node stores logs as one file per author:
 Table              Key                     Value                      Purpose
 ─────────────────────────────────────────────────────────────────────────────
 kv                 Vec<u8> (key)           Vec<HeadInfo>              Current tips for each key
-applied_frontiers  [u8; 32] (author_id)    (u64 seq, [u8; 32] hash)   What's applied to this store
+AUTHOR_TABLE      [u8; 32] (author_id)    (u64 seq, [u8; 32] hash)   Per-author frontier tracking
 meta               Vec<u8>                 Vec<u8>                    Store metadata (incl. merkle_root)
 ```
 

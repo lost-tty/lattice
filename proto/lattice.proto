@@ -111,12 +111,14 @@ message JoinResponse {
 
 // 7. Sync Protocol Messages (bidirectional sync after join)
 message SyncRequest {
-  SyncState state = 1;    // Sender's sync state (for incremental sync)
-  bool full_sync = 2;     // If true, request all entries (for join)
+  bytes store_id = 1;     // Store UUID to sync (16 bytes)
+  SyncState state = 2;    // Sender's sync state (for incremental sync)
+  bool full_sync = 3;     // If true, request all entries (for join)
 }
 
 message SyncResponse {
-  SyncState state = 1;    // Responder's sync state
+  bytes store_id = 1;     // Store UUID being synced (16 bytes)
+  SyncState state = 2;    // Responder's sync state
 }
 
 message SyncEntry {
