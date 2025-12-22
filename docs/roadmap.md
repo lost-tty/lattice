@@ -94,16 +94,53 @@
 - [x] Multi-store sync test: compute diff, fetch entries, apply, verify same state
 
 **Phase 2: Iroh Integration**
+
+*Completed:*
 - [x] Node info in root store on init: `/nodes/{pubkey}/info` + `/status`
-- [ ] Iroh integration (peer discovery, connection)
-- [ ] Sync protocol (push missing entries over network)
-- [ ] CLI: `peers`, `connect`/`join` commands
-- [ ] Background sync task (tokio::spawn)
+- [x] CLI: `invite <pubkey>` to authorize peers
+- [x] CLI: `peers` to list known nodes (with name/added_at info, sorted)
+- [x] CLI: `remove <pubkey>` to remove a peer
+- [x] Iroh endpoint on startup (same Ed25519 key, mDNS + DNS discovery)
+- [x] CLI: `join <nodeid>` - connects to peer, verifies invited
+- [x] Peer verification via `/nodes/{pubkey}/status` check
+
+*Join Protocol (new→existing):* ✓
+- [x] Proto: `JoinRequest` / `JoinResponse` with store UUID
+- [x] Accept handler sends root store UUID in response
+- [x] Join command creates empty store with received UUID (no writes until sync)
+
+*Sync Protocol (bidirectional):* ✓
+- [x] Proto: `PeerMessage` wrapper with `oneof` for message type discrimination
+- [x] `framing.rs` with `MessageSink`/`MessageStream` using `LengthDelimitedCodec`
+- [x] Proto: `SyncRequest`/`SyncResponse` using `SyncState`
+- [x] `Store::read_entries_after(hash)` to fetch log chunks
+- [x] Accept handler: receive SyncState, compute diff, send missing entries
+- [x] Sync command: receive entries, apply to store via `apply_entry`
+- [x] CLI: `sync [nodeid]` command (syncs with all active peers if no nodeid)
+- [x] After sync: node updates own `/nodes/{pubkey}/info` with hostname
+
+*Cleanup*:
+- [x] Move core logic from cmd_join and cmd_sync out of commands.rs (now in `sync.rs`)
+- [x] Add 'invited' state: invite sets 'invited', peer sets 'active' after sync
+
+*Regressions:*
+- [x] Entry ordering: Per-author streaming is correct (hash chain per author, HLC for cross-author).
+- [x] Multi-head sync fixed: SyncState now tracks HashSet of head hashes per author.
+- [x] Sync entry ordering: Entries sent in HLC order (merge-sort across authors) to ensure causal order.
+
+*Background Sync:*
+- [ ] Periodic sync with known peers
+- [ ] Track last sync time per peer
 
 ### Success Criteria
 
 - Node A writes, Node B syncs, both have same state
 - Works offline-first (sync when connected)
+
+**Post-M2 Refactoring:**
+- [ ] Unify `node.rs` from `lattice-cli` and `lattice-core`
+- [ ] Move `Store` code into `lattice-store` crate
+- [ ] Move `StoreActor` code into `lattice-store` crate
 
 ---
 

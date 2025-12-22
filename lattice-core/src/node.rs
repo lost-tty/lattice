@@ -101,6 +101,12 @@ impl Node {
         &self.signing_key
     }
 
+    /// Get the secret key bytes (32 bytes) for Iroh integration.
+    /// WARNING: Handle with care - this exposes the private key material.
+    pub fn secret_key_bytes(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
+
     /// Sign a message.
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key.sign(message)

@@ -8,6 +8,7 @@
 
 use crate::log::{read_entries, LogError};
 use crate::proto::{operation, AuthorState, Entry, HeadInfo, HeadList, SignedEntry};
+use crate::sigchain::SigChainError;
 use crate::signed_entry::hash_signed_entry;
 use prost::Message;
 use redb::{Database, ReadableTable, TableDefinition};
@@ -41,6 +42,9 @@ pub enum StoreError {
     
     #[error("Decode error: {0}")]
     Decode(#[from] prost::DecodeError),
+    
+    #[error("Sigchain error: {0}")]
+    SigChain(#[from] SigChainError),
 }
 
 /// Persistent store for KV state with DAG conflict resolution
@@ -1468,5 +1472,204 @@ mod tests {
         assert_eq!(heads[0].author, high_node.public_key_bytes().to_vec());
         
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Test case for multi-node sync: 3 nodes create multi-heads, then merge, then sync to new node.
+    /// 
+    /// Scenario:
+    /// 1. Node A, B, C each write to key "/a" independently (creating 3 heads)
+    /// 2. Node A does a final put to merge all heads
+    /// 3. After merge, node A should have only 1 head
+    /// 4. Simulate sync to new node D using SyncState diff
+    /// 5. Node D should end up with same state as A (1 head, not 3)
+    #[test]
+    fn test_multinode_sync_after_merge() {
+        let path_a = temp_db_path("multinode_a");
+        let path_d = temp_db_path("multinode_d");
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_d);
+        
+        // Create stores
+        let store_a = Store::open(&path_a).unwrap();
+        let store_d = Store::open(&path_d).unwrap();
+        
+        // Create 3 nodes (virtual peers)
+        let node_a = Node::generate();
+        let node_b = Node::generate();
+        let node_c = Node::generate();
+        
+        let clock = MockClock::new(1000);
+        
+        // 1. Each node writes to "/a" independently (simulating offline concurrent writes)
+        // Node A: seq 1
+        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/a", b"from_a".to_vec())
+            .sign(&node_a);
+        store_a.apply_entry(&entry_a).unwrap();
+        
+        // Node B: seq 1 (different author, same key - creates fork)
+        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/a", b"from_b".to_vec())
+            .sign(&node_b);
+        store_a.apply_entry(&entry_b).unwrap();
+        
+        // Node C: seq 1 (third author, same key - creates third fork)
+        let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/a", b"from_c".to_vec())
+            .sign(&node_c);
+        store_a.apply_entry(&entry_c).unwrap();
+        
+        // After applying all 3 entries, store_a has 3 heads for "/a"
+        let heads_before_merge = store_a.get_heads(b"/a").unwrap();
+        assert_eq!(heads_before_merge.len(), 3, "Should have 3 heads before merge");
+        
+        // 2. Node A does a final put referencing all heads (merge)
+        // Get the hashes of all current heads as parent_hashes
+        let parent_hashes: Vec<Vec<u8>> = heads_before_merge.iter()
+            .map(|h| h.hash.clone())
+            .collect();
+        
+        let merge_entry = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash(hash_signed_entry(&entry_a).to_vec())  // Continues A's chain
+            .parent_hashes(parent_hashes)  // References all heads
+            .put("/a", b"merged".to_vec())
+            .sign(&node_a);
+        store_a.apply_entry(&merge_entry).unwrap();
+        
+        // After merge, should have only 1 head
+        let heads_after_merge = store_a.get_heads(b"/a").unwrap();
+        assert_eq!(heads_after_merge.len(), 1, "Should have 1 head after merge");
+        assert_eq!(heads_after_merge[0].value, b"merged");
+        
+        // 3. Get sync state from store_a
+        let sync_state_a = store_a.sync_state().unwrap();
+        
+        println!("Store A sync state:");
+        for (author, info) in sync_state_a.authors() {
+            println!("  author {:?}: seq={}, heads={:?}", 
+                hex::encode(&author[..4]), info.seq, 
+                info.heads.iter().map(|h| hex::encode(&h[..4])).collect::<Vec<_>>());
+        }
+        
+        // 4. Store D is empty, compute diff
+        let sync_state_d = store_d.sync_state().unwrap();
+        let missing = sync_state_d.diff(&sync_state_a);
+        
+        println!("Missing ranges: {:?}", missing.len());
+        for m in &missing {
+            println!("  author {:?}: from_seq={}, to_seq={}", 
+                hex::encode(&m.author[..4]), m.from_seq, m.to_seq);
+        }
+        
+        // We should get missing ranges for all authors that have entries
+        assert!(!missing.is_empty(), "Should have missing entries to sync");
+        
+        // 5. Apply all entries to store_d (simulating sync)
+        // In a real sync, we'd read entries from logs, but for this test,
+        // we just apply the same entries in order
+        store_d.apply_entry(&entry_a).unwrap();
+        store_d.apply_entry(&entry_b).unwrap();
+        store_d.apply_entry(&entry_c).unwrap();
+        store_d.apply_entry(&merge_entry).unwrap();
+        
+        // 6. Check state on store_d
+        let heads_d = store_d.get_heads(b"/a").unwrap();
+        println!("Store D heads count: {}", heads_d.len());
+        for (i, h) in heads_d.iter().enumerate() {
+            println!("  head[{}]: value={:?}, author={}", i, String::from_utf8_lossy(&h.value), hex::encode(&h.author[..4]));
+        }
+        
+        // BUG CHECK: Store D should have same state as Store A (1 head, not 3)
+        assert_eq!(heads_d.len(), 1, 
+            "BUG: Store D should have 1 head (merged) but has {} heads", heads_d.len());
+        assert_eq!(heads_d[0].value, b"merged");
+        
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_d);
+    }
+
+    /// Test what happens when entries are applied in "wrong" order.
+    /// This simulates the real sync bug where:
+    /// - Sync iterates by author
+    /// - Author A's entries (including merge) are sent first
+    /// - Author B and C's entries are sent after
+    /// - The merge entry arrives BEFORE the entries it merges!
+    #[test]
+    fn test_multinode_sync_wrong_order() {
+        let path = temp_db_path("wrongorder");
+        let _ = std::fs::remove_file(&path);
+        
+        let store = Store::open(&path).unwrap();
+        
+        // Create 3 nodes
+        let node_a = Node::generate();
+        let node_b = Node::generate();
+        let node_c = Node::generate();
+        
+        let clock = MockClock::new(1000);
+        
+        // Create entries (same as before)
+        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/a", b"from_a".to_vec())
+            .sign(&node_a);
+        
+        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/a", b"from_b".to_vec())
+            .sign(&node_b);
+        
+        let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/a", b"from_c".to_vec())
+            .sign(&node_c);
+        
+        // We need the hashes for parent_hashes - compute them
+        let hash_a = hash_signed_entry(&entry_a);
+        let hash_b = hash_signed_entry(&entry_b);
+        let hash_c = hash_signed_entry(&entry_c);
+        
+        let merge_entry = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash(hash_a.to_vec())
+            .parent_hashes(vec![hash_a.to_vec(), hash_b.to_vec(), hash_c.to_vec()])
+            .put("/a", b"merged".to_vec())
+            .sign(&node_a);
+        
+        // Apply in WRONG order: A's chain first (entry_a + merge), then B, then C
+        // This is what happens in sync when iterating by author
+        println!("Applying entry_a (A seq 1)...");
+        store.apply_entry(&entry_a).unwrap();
+        
+        println!("Applying merge_entry (A seq 2) BEFORE B and C...");
+        store.apply_entry(&merge_entry).unwrap();
+        
+        println!("Applying entry_b (B seq 1)...");
+        store.apply_entry(&entry_b).unwrap();
+        
+        println!("Applying entry_c (C seq 1)...");
+        store.apply_entry(&entry_c).unwrap();
+        
+        // Check final state
+        let heads = store.get_heads(b"/a").unwrap();
+        println!("Final heads count: {}", heads.len());
+        for (i, h) in heads.iter().enumerate() {
+            println!("  head[{}]: value={:?}", i, String::from_utf8_lossy(&h.value));
+        }
+        
+        assert_eq!(heads.len(), 3, 
+            "Wrong order application creates 3 heads (expected - sync handles ordering)");
+        
+        let _ = std::fs::remove_file(&path);
     }
 }

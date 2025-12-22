@@ -1,13 +1,19 @@
 //! Lattice Interactive CLI
 
+mod accept_handler;
 mod node;
 mod commands;
 mod store_actor;
+mod sync_protocol;
+mod sync;
 
+use accept_handler::spawn_accept_loop;
 use commands::CommandResult;
 use node::{LatticeNodeBuilder, StoreHandle};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() {
@@ -21,6 +27,26 @@ async fn main() {
             return;
         }
     };
+    
+    // Start Iroh endpoint using same Ed25519 identity
+    let endpoint = match lattice_net::LatticeEndpoint::new(node.secret_key_bytes()).await {
+        Ok(ep) => {
+            println!("Iroh:    {} (listening)", ep.public_key().fmt_short());
+            Some(ep)
+        }
+        Err(e) => {
+            eprintln!("Warning: Iroh failed to start: {}", e);
+            None
+        }
+    };
+    
+    // Shared store handle for accept loop (updated when store is opened/changed)
+    let shared_store: Arc<RwLock<Option<StoreHandle>>> = Arc::new(RwLock::new(None));
+    
+    // Spawn accept loop for incoming connections
+    if let Some(ref ep) = endpoint {
+        spawn_accept_loop(ep.endpoint().clone(), shared_store.clone());
+    }
     
     let info = node.info();
     println!("Node ID: {}", info.node_id);
@@ -37,6 +63,8 @@ async fn main() {
             } else {
                 println!("Root:    {}", open_info.store_id);
             }
+            // Update shared store for accept loop
+            *shared_store.write().await = Some(h.clone());
             Some(h)
         }
         Ok(None) => {
@@ -86,9 +114,13 @@ async fn main() {
                         if cmd_args.len() < cmd.min_args || cmd_args.len() > cmd.max_args {
                             println!("Usage: {} {}", cmd.name, cmd.args);
                         } else {
-                            match (cmd.handler)(&node, current_store.as_ref(), cmd_args) {
+                            match (cmd.handler)(&node, current_store.as_ref(), endpoint.as_ref(), cmd_args) {
                                 CommandResult::Ok => {}
-                                CommandResult::SwitchTo(h) => current_store = Some(h),
+                                CommandResult::SwitchTo(h) => {
+                                    // Update shared store for accept loop
+                                    *shared_store.write().await = Some(h.clone());
+                                    current_store = Some(h);
+                                }
                             }
                         }
                     }

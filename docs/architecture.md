@@ -62,7 +62,14 @@ Networking modes:
   - `/nodes/{pubkey}/info` = static metadata (name, added_by, added_at)
   - `/nodes/{pubkey}/status` = `active` | `dormant` | `disabled`
   - `/nodes/{pubkey}/role` = `server` | `device` (optional, hints sync priority)
-- Inviting a node = writing entries to `/nodes/{pubkey}/...`.
+  - `/nodes/{pubkey}/iroh` = Iroh NodeId for network connection
+- Peer invitation flow:
+  1. Inviter runs `invite <peer_pubkey>` → writes `/nodes/{peer}/info` + `/status`
+  2. Inviter shares their Iroh NodeId out-of-band (QR code, link, text)
+  3. Invited peer runs `connect <inviter_nodeid>` → syncs with inviter
+  4. Sync pulls `/nodes/{self}/info` + `/status` → peer is authorized
+  5. `connect` implicitly adds inviter to peer's `/nodes/*` (mutual awareness)
+- Accepting = syncing. The invited peer discovers authorization by receiving the entries.
 - Liveness: Each node tracks `last_seen` locally (from watermark gossip). UI alerts if a peer hasn't been seen for threshold (e.g., 30 days). User decides to mark dormant/disabled.
 - Status effects:
   - `active`: Normal sync participant, blocks watermark until acknowledged.
