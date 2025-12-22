@@ -65,6 +65,7 @@ impl Store {
     }
     
     /// Replay a log file and apply all entries to the store (batched)
+    /// Returns the number of newly applied entries (skipped entries not counted)
     pub fn replay_log(&self, log_path: impl AsRef<Path>) -> Result<u64, StoreError> {
         let entries = read_entries(log_path)?;
         if entries.is_empty() {
@@ -72,17 +73,20 @@ impl Store {
         }
         
         let write_txn = self.db.begin_write()?;
+        let mut applied = 0u64;
         {
             let mut kv_table = write_txn.open_table(KV_TABLE)?;
             let mut author_table = write_txn.open_table(AUTHOR_TABLE)?;
             
             for signed_entry in &entries {
-                Self::apply_ops_to_tables(signed_entry, &mut kv_table, &mut author_table)?;
+                if Self::apply_ops_to_tables(signed_entry, &mut kv_table, &mut author_table)? {
+                    applied += 1;
+                }
             }
         }
         write_txn.commit()?;
         
-        Ok(entries.len() as u64)
+        Ok(applied)
     }
     
     /// Apply a single signed entry to the store
@@ -98,11 +102,12 @@ impl Store {
     }
     
     /// Internal: apply operations from a signed entry to tables
+    /// Returns true if applied, false if skipped (already applied)
     fn apply_ops_to_tables(
         signed_entry: &SignedEntry,
         kv_table: &mut redb::Table<&[u8], &[u8]>,
         author_table: &mut redb::Table<&[u8], &[u8]>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let entry = Entry::decode(&signed_entry.entry_bytes[..])?;
         let entry_hash = hash_signed_entry(signed_entry);
         let entry_hlc = entry.timestamp.as_ref().map(|t| (t.wall_time << 16) | t.counter as u64).unwrap_or(0);
@@ -112,7 +117,7 @@ impl Store {
         if let Some(author_state_bytes) = author_table.get(&author[..])? {
             if let Ok(author_state) = AuthorState::decode(author_state_bytes.value()) {
                 if entry.seq <= author_state.seq {
-                    return Ok(());  // Already applied, skip
+                    return Ok(false);  // Already applied, skip
                 }
             }
         }
@@ -152,7 +157,7 @@ impl Store {
         };
         author_table.insert(&author[..], author_state.encode_to_vec().as_slice())?;
         
-        Ok(())
+        Ok(true)
     }
     
     /// Apply a new head to a key, removing ancestor heads (idempotent)
@@ -772,9 +777,9 @@ mod tests {
         let store = Store::open(&state_path).unwrap();  // Reopen existing state
         assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 2, "author seq persisted");
         
-        // Replay log - apply_head skips entries whose parents don't exist
+        // Replay log - entries already applied, skip all
         let replayed = store.replay_log(&log_path).unwrap();
-        assert_eq!(replayed, 2, "Replayed 2 entries from log");
+        assert_eq!(replayed, 0, "0 new entries (all skipped)");
         
         let final_heads = store.get_heads(b"/key").unwrap();
         assert_eq!(final_heads.len(), 1, 
@@ -824,8 +829,8 @@ mod tests {
         let store = Store::open(&state_path).unwrap();
         let replayed = store.replay_log(&log_path).unwrap();
         
-        // All 3 entries were replayed but skipped (seq check)
-        assert_eq!(replayed, 3, "Replayed 3 entries from log");
+        // All 3 entries were read but skipped (already applied)
+        assert_eq!(replayed, 0, "0 new entries (all skipped)");
         assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 3, "seq unchanged");
         assert_eq!(store.get_heads(b"/key3").unwrap().len(), 1, "heads unchanged");
         
@@ -876,7 +881,7 @@ mod tests {
         let store = Store::open(&state_path).unwrap();
         let replayed = store.replay_log(&log_path).unwrap();
         
-        assert_eq!(replayed, 5, "Replayed 5 entries from log");
+        assert_eq!(replayed, 2, "Only 2 new entries applied (3 skipped)");
         assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 5, "seq updated to 5");
         assert_eq!(store.get_heads(b"/key4").unwrap().len(), 1, "key4 now applied");
         assert_eq!(store.get_heads(b"/key5").unwrap().len(), 1, "key5 now applied");
@@ -956,9 +961,9 @@ mod tests {
         assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 3, "Restored to seq 3");
         assert!(store.get_heads(b"/key4").unwrap().is_empty(), "key4 not in restored state");
         
-        // Replay log - should apply entries 4 and 5
+        // Replay log - should apply entries 4 and 5 (skip 1-3)
         let replayed = store.replay_log(&log_path).unwrap();
-        assert_eq!(replayed, 5, "Replayed 5 entries from log");
+        assert_eq!(replayed, 2, "Only 2 new entries applied (3 skipped)");
         
         // Now seq should be 5 and keys 4-5 should exist
         assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 5, "seq updated to 5");

@@ -13,24 +13,20 @@ fn main() {
     println!("Lattice CLI v{}", env!("CARGO_PKG_VERSION"));
     println!("Type 'help' for commands, 'quit' to exit.\n");
 
-    let (node, info) = match LatticeNodeBuilder::new().build() {
-        Ok(result) => result,
+    let node = match LatticeNodeBuilder::new().build() {
+        Ok(n) => n,
         Err(e) => {
             eprintln!("Failed to initialize: {}", e);
             return;
         }
     };
     
+    let info = node.info();
     println!("Node ID: {}", info.node_id);
     println!("Data:    {}", info.data_path);
 
-    if info.is_new {
-        println!("Status:  New identity created");
-    } else if !info.stores.is_empty() {
+    if !info.stores.is_empty() {
         println!("Stores:  {}", info.stores.len());
-    }
-    if let Some(root) = info.root_store {
-        println!("Root:    {}", root);
     }
 
     let mut current_store: Option<StoreHandle> = match node.open_root_store() {
