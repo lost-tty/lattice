@@ -44,8 +44,6 @@ pub enum NodeError {
 pub struct NodeInfo {
     pub node_id: String,
     pub data_path: String,
-    pub is_new: bool,
-    pub root_store: Option<Uuid>,
     pub stores: Vec<Uuid>,
 }
 
@@ -63,11 +61,10 @@ impl LatticeNodeBuilder {
         Self { data_dir: DataDir::default() }
     }
 
-    pub fn build(self) -> Result<(LatticeNode, NodeInfo), NodeError> {
+    pub fn build(self) -> Result<LatticeNode, NodeError> {
         self.data_dir.ensure_dirs()?;
 
         let key_path = self.data_dir.identity_key();
-        let is_new = !key_path.exists();
         let node = if key_path.exists() {
             Node::load(&key_path)?
         } else {
@@ -77,22 +74,12 @@ impl LatticeNodeBuilder {
         };
 
         let meta = MetaStore::open(self.data_dir.meta_db())?;
-        let root_store = meta.root_store()?;
-        let stores = meta.list_stores()?;
 
-        let info = NodeInfo {
-            node_id: hex::encode(node.public_key_bytes()),
-            data_path: self.data_dir.base().display().to_string(),
-            is_new,
-            root_store,
-            stores,
-        };
-
-        Ok((LatticeNode {
+        Ok(LatticeNode {
             data_dir: self.data_dir,
             node: Rc::new(node),
             meta,
-        }, info))
+        })
     }
 }
 
@@ -108,8 +95,16 @@ pub struct LatticeNode {
 }
 
 impl LatticeNode {
-    pub fn node_id(&self) -> String {
-        hex::encode(self.node.public_key_bytes())
+    pub fn info(&self) -> NodeInfo {
+        NodeInfo {
+            node_id: hex::encode(self.node.public_key_bytes()),
+            data_path: self.data_dir.base().display().to_string(),
+            stores: self.meta.list_stores().unwrap_or_default(),
+        }
+    }
+
+    pub fn node_id(&self) -> [u8; 32] {
+        self.node.public_key_bytes()
     }
 
     pub fn data_path(&self) -> &Path {
@@ -183,7 +178,7 @@ impl LatticeNode {
         let handle = StoreHandle {
             store_id,
             tx,
-            actor_handle,
+            actor_handle: Some(actor_handle),
         };
         
         Ok((handle, info))
@@ -194,8 +189,7 @@ impl LatticeNode {
 pub struct StoreHandle {
     store_id: Uuid,
     tx: std::sync::mpsc::Sender<crate::store_actor::StoreCmd>,
-    #[allow(dead_code)]
-    actor_handle: std::thread::JoinHandle<()>,
+    actor_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl StoreHandle {
@@ -248,6 +242,16 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
+    pub fn author_state(&self, author: &[u8; 32]) -> Result<Option<lattice_core::proto::AuthorState>, NodeError> {
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+        self.tx.send(StoreCmd::AuthorState { author: *author, resp: resp_tx })
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.recv()
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<u64, NodeError> {
         use crate::store_actor::StoreCmd;
         let (resp_tx, resp_rx) = std::sync::mpsc::channel();
@@ -269,6 +273,16 @@ impl StoreHandle {
     }
 }
 
+impl Drop for StoreHandle {
+    fn drop(&mut self) {
+        // Send shutdown command and wait for actor to finish
+        let _ = self.tx.send(crate::store_actor::StoreCmd::Shutdown);
+        if let Some(handle) = self.actor_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,11 +298,11 @@ mod tests {
     fn test_create_and_open_store() {
         let data_dir = temp_data_dir("meta_store");
         
-        let (node, info) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+        let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
             .build()
             .expect("Failed to create node");
         
-        assert!(info.stores.is_empty());
+        assert!(node.info().stores.is_empty());
         
         let store_id = node.create_store().expect("Failed to create store");
         
@@ -307,7 +321,7 @@ mod tests {
     fn test_store_isolation() {
         let data_dir = temp_data_dir("meta_isolation");
         
-        let (node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+        let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
             .build()
             .expect("Failed to create node");
         
@@ -329,12 +343,12 @@ mod tests {
     fn test_init_creates_root_store() {
         let data_dir = temp_data_dir("init_root");
         
-        let (node, info) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+        let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
             .build()
             .expect("create node");
         
         // Initially no root store
-        assert!(info.root_store.is_none());
+        assert!(node.root_store().unwrap().is_none());
         
         // Init creates root store
         let root_id = node.init().expect("init failed");
@@ -347,7 +361,7 @@ mod tests {
     fn test_duplicate_init_fails() {
         let data_dir = temp_data_dir("init_dup");
         
-        let (node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+        let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
             .build()
             .expect("create node");
         
@@ -368,18 +382,18 @@ mod tests {
         
         // First session: init
         let root_id = {
-            let (node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+            let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
                 .build()
                 .expect("create node");
             node.init().expect("init")
         };
         
-        // Second session: root_store should be in info
-        let (_, info) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+        // Second session: root_store should persist
+        let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
             .build()
             .expect("reload node");
         
-        assert_eq!(info.root_store, Some(root_id));
+        assert_eq!(node.root_store().unwrap(), Some(root_id));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -388,7 +402,7 @@ mod tests {
     fn test_idempotent_put_and_delete() {
         let data_dir = temp_data_dir("idempotent");
         
-        let (node, _) = LatticeNodeBuilder { data_dir: data_dir.clone() }
+        let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
             .build()
             .expect("create node");
         let store_id = node.init().expect("init");

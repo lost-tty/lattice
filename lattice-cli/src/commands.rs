@@ -98,6 +98,14 @@ pub fn commands() -> Vec<Command> {
             handler: cmd_status,
         },
         Command {
+            name: "author-state",
+            args: "[author-hex]",
+            description: "Show author state (default: self)",
+            min_args: 0,
+            max_args: 1,
+            handler: cmd_author_state,
+        },
+        Command {
             name: "help",
             args: "",
             description: "Show this help message",
@@ -215,7 +223,7 @@ fn cmd_help(_node: &LatticeNode, _store: Option<&StoreHandle>, _args: &[String])
 }
 
 fn cmd_status(node: &LatticeNode, store: Option<&StoreHandle>, _args: &[String]) -> CommandResult {
-    println!("Node ID:  {}", node.node_id());
+    println!("Node ID:  {}", hex::encode(node.node_id()));
     println!("Data:     {}", node.data_path().display());
     match node.root_store() {
         Ok(Some(id)) => println!("Root:     {}", id),
@@ -354,4 +362,46 @@ fn cmd_list(_node: &LatticeNode, store: Option<&StoreHandle>, args: &[String]) -
 
 fn format_value(v: &[u8]) -> String {
     std::str::from_utf8(v).map(String::from).unwrap_or_else(|_| format!("0x{}", hex::encode(v)))
+}
+
+fn cmd_author_state(node: &LatticeNode, store: Option<&StoreHandle>, args: &[String]) -> CommandResult {
+    let store = match store {
+        Some(s) => s,
+        None => {
+            eprintln!("Error: no store selected");
+            return CommandResult::Ok;
+        }
+    };
+
+    // Get author: from arg or default to self
+    let author_bytes: [u8; 32] = if args.is_empty() {
+        node.node_id()
+    } else {
+        let hex_str = args[0].trim_start_matches("0x");
+        match hex::decode(hex_str) {
+            Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
+            Ok(bytes) => {
+                eprintln!("Error: author must be 32 bytes, got {}", bytes.len());
+                return CommandResult::Ok;
+            }
+            Err(e) => {
+                eprintln!("Error: invalid hex: {}", e);
+                return CommandResult::Ok;
+            }
+        }
+    };
+
+    match store.author_state(&author_bytes) {
+        Ok(Some(state)) => {
+            println!("Author: {}", hex::encode(&author_bytes));
+            println!("  seq: {}", state.seq);
+            println!("  hash: {}", hex::encode(&state.hash));
+            println!("  log_offset: {}", state.log_offset);
+        }
+        Ok(None) => {
+            println!("No state for author: {}", hex::encode(&author_bytes));
+        }
+        Err(e) => eprintln!("Error: {}", e),
+    }
+    CommandResult::Ok
 }

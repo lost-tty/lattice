@@ -49,7 +49,6 @@ pub enum StoreCmd {
 pub enum StoreActorError {
     Store(StoreError),
     SigChain(SigChainError),
-    ChannelClosed,
 }
 
 impl From<StoreError> for StoreActorError {
@@ -69,7 +68,6 @@ impl std::fmt::Display for StoreActorError {
         match self {
             StoreActorError::Store(e) => write!(f, "Store error: {}", e),
             StoreActorError::SigChain(e) => write!(f, "SigChain error: {}", e),
-            StoreActorError::ChannelClosed => write!(f, "Channel closed"),
         }
     }
 }
