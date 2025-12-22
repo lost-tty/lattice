@@ -1,8 +1,7 @@
 //! Local Lattice node API with multi-store support
 
 use lattice_core::{
-    DataDir, EntryBuilder, MetaStore, Node, SigChain, Store, Uuid,
-    hlc::HLC,
+    DataDir, MetaStore, Node, SigChain, Store, Uuid,
     log::LogError,
     meta_store::MetaStoreError,
     sigchain::SigChainError,
@@ -10,7 +9,6 @@ use lattice_core::{
 };
 use std::path::Path;
 use std::rc::Rc;
-use std::cell::RefCell;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -35,6 +33,12 @@ pub enum NodeError {
     
     #[error("Already initialized")]
     AlreadyInitialized,
+    
+    #[error("Channel closed")]
+    ChannelClosed,
+    
+    #[error("Actor error: {0}")]
+    Actor(String),
 }
 
 pub struct NodeInfo {
@@ -167,85 +171,101 @@ impl LatticeNode {
         };
         
         let info = StoreInfo { store_id, entries_replayed };
+        
+        // Spawn actor thread - actor owns store, sigchain, and node copy
+        let (tx, actor_handle) = crate::store_actor::spawn_store_actor(
+            store_id,
+            store,
+            sigchain,
+            (*self.node).clone(),
+        );
+        
         let handle = StoreHandle {
             store_id,
-            node: Rc::clone(&self.node),
-            sigchain: RefCell::new(sigchain),
-            store,
+            tx,
+            actor_handle,
         };
         
         Ok((handle, info))
     }
 }
 
-/// A handle to a specific store with KV operations
+/// A handle to a specific store - wraps channel to actor thread
 pub struct StoreHandle {
     store_id: Uuid,
-    node: Rc<Node>,
-    sigchain: RefCell<SigChain>,
-    store: Store,
+    tx: std::sync::mpsc::Sender<crate::store_actor::StoreCmd>,
+    #[allow(dead_code)]
+    actor_handle: std::thread::JoinHandle<()>,
 }
 
 impl StoreHandle {
     pub fn id(&self) -> Uuid { self.store_id }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, NodeError> {
-        Ok(self.store.get(key)?)
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+        self.tx.send(StoreCmd::Get { key: key.to_vec(), resp: resp_tx })
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.recv()
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
     }
 
     pub fn get_heads(&self, key: &[u8]) -> Result<Vec<lattice_core::HeadInfo>, NodeError> {
-        Ok(self.store.get_heads(key)?)
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+        self.tx.send(StoreCmd::GetHeads { key: key.to_vec(), resp: resp_tx })
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.recv()
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
     }
 
     pub fn list(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
-        Ok(self.store.list_all()?)
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+        self.tx.send(StoreCmd::List { resp: resp_tx })
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.recv()
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
     }
 
     pub fn log_seq(&self) -> u64 {
-        self.sigchain.borrow().len()
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+        let _ = self.tx.send(StoreCmd::LogSeq { resp: resp_tx });
+        resp_rx.recv().unwrap_or(0)
     }
 
     pub fn applied_seq(&self) -> Result<u64, NodeError> {
-        let author = self.node.public_key_bytes();
-        Ok(self.store.author_state(&author)?
-            .map(|s| s.seq)
-            .unwrap_or(0))
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+        self.tx.send(StoreCmd::AppliedSeq { resp: resp_tx })
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.recv()
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<u64, NodeError> {
-        // Get current heads for this key to cite as parents
-        let heads = self.store.get_heads(key)?;
-        let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
-        
-        self.commit_entry(parent_hashes, |b| b.put(key.to_vec(), value.to_vec()))
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+        self.tx.send(StoreCmd::Put { key: key.to_vec(), value: value.to_vec(), resp: resp_tx })
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.recv()
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(|e| NodeError::Actor(e.to_string()))
     }
 
     pub fn delete(&self, key: &[u8]) -> Result<u64, NodeError> {
-        // Get current heads for this key to cite as parents
-        let heads = self.store.get_heads(key)?;
-        let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
-        
-        self.commit_entry(parent_hashes, |b| b.delete(key.to_vec()))
-    }
-
-    fn commit_entry<F>(&self, parent_hashes: Vec<Vec<u8>>, build: F) -> Result<u64, NodeError>
-    where
-        F: FnOnce(EntryBuilder) -> EntryBuilder,
-    {
-        let mut sigchain = self.sigchain.borrow_mut();
-        let seq = sigchain.len() + 1;
-        let prev_hash = sigchain.last_hash();
-        
-        let builder = EntryBuilder::new(seq, HLC::now())
-            .store_id(self.store_id.as_bytes().to_vec())
-            .prev_hash(prev_hash.to_vec())
-            .parent_hashes(parent_hashes);
-        let entry = build(builder).sign(&self.node);
-        
-        sigchain.append(&entry)?;
-        self.store.apply_entry(&entry)?;
-        
-        Ok(seq)
+        use crate::store_actor::StoreCmd;
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+        self.tx.send(StoreCmd::Delete { key: key.to_vec(), resp: resp_tx })
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.recv()
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(|e| NodeError::Actor(e.to_string()))
     }
 }
 
