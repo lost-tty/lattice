@@ -109,12 +109,12 @@ async fn handle_sync_request(
     
     // Parse store_id from request
     let store_id = Uuid::from_slice(&peer_request.store_id)
-        .map_err(|_| "Invalid store_id in SyncRequest".to_string())?;
+        .map_err(|_| format!("Invalid store_id in SyncRequest: {} bytes, expected 16", peer_request.store_id.len()))?;
     
     println!("[Sync] Received SyncRequest for store {}", store_id);
     
-    // Open the requested store
-    let (store, _info) = node.open_store(store_id)
+    // Open the requested store (uses cache if available)
+    let (store, _info) = node.open_store(store_id).await
         .map_err(|e| format!("Failed to open store {}: {}", store_id, e))?;
     
     println!("[Sync] Received SyncRequest");

@@ -47,7 +47,7 @@ fn cmd_create_store(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option
     match node.create_store() {
         Ok(store_id) => {
             println!("Created store: {}", store_id);
-            match node.open_store(store_id) {
+            match block_async(node.open_store(store_id)) {
                 Ok((handle, _)) => {
                     println!("Switched to new store");
                     CommandResult::SwitchTo(handle)
@@ -75,7 +75,7 @@ fn cmd_use_store(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&L
     };
     
     let start = Instant::now();
-    match node.open_store(store_id) {
+    match block_async(node.open_store(store_id)) {
         Ok((handle, info)) => {
             if info.entries_replayed > 0 {
                 println!("Replayed {} entries ({:.2?})", info.entries_replayed, start.elapsed());

@@ -183,7 +183,7 @@ impl Node {
     pub async fn open_root_store(&self) -> Result<Option<StoreInfo>, NodeError> {
         match self.meta.root_store()? {
             Some(id) => {
-                let (handle, info) = self.open_store(id)?;
+                let (handle, info) = self.open_store(id).await?;
                 *self.root_store.write().await = Some(handle);
                 Ok(Some(info))
             }
@@ -201,7 +201,7 @@ impl Node {
         self.meta.set_root_store(store_id)?;
         
         // Open the store and write our node info as separate keys
-        let (handle, _) = self.open_store(store_id)?;
+        let (handle, _) = self.open_store(store_id).await?;
         let pubkey_hex = hex::encode(self.node.public_key_bytes());
         
         // Store node metadata as separate keys
@@ -235,7 +235,7 @@ impl Node {
         self.meta.set_root_store(store_id)?;
         
         // Open and cache the handle
-        let (handle, _) = self.open_store(store_id)?;
+        let (handle, _) = self.open_store(store_id).await?;
         *self.root_store.write().await = Some(handle.clone());
         
         // Publish our name to the store
@@ -437,7 +437,19 @@ impl Node {
         Ok(store_id)
     }
 
-    pub fn open_store(&self, store_id: Uuid) -> Result<(StoreHandle, StoreInfo), NodeError> {
+    pub async fn open_store(&self, store_id: Uuid) -> Result<(StoreHandle, StoreInfo), NodeError> {
+        // Check if this store is already cached as root_store
+        {
+            let guard = self.root_store.read().await;
+            if let Some(ref handle) = *guard {
+                if handle.id() == store_id {
+                    let info = StoreInfo { store_id, entries_replayed: 0 };
+                    return Ok((handle.clone(), info));
+                }
+            }
+        }
+        
+        // Not cached, open it fresh
         self.data_dir.ensure_store_dirs(store_id)?;
         
         let author_id_hex = hex::encode(self.node.public_key_bytes());
@@ -661,7 +673,7 @@ mod tests {
         let stores = node.list_stores().expect("list failed");
         assert!(stores.contains(&store_id));
         
-        let (handle, _) = node.open_store(store_id).expect("Failed to open store");
+        let (handle, _) = node.open_store(store_id).await.expect("Failed to open store");
         handle.put(b"/key", b"value").await.expect("put failed");
         assert_eq!(handle.get(b"/key").await.unwrap(), Some(b"value".to_vec()));
         
@@ -679,10 +691,10 @@ mod tests {
         let store_a = node.create_store().expect("create A");
         let store_b = node.create_store().expect("create B");
         
-        let (handle_a, _) = node.open_store(store_a).expect("open A");
+        let (handle_a, _) = node.open_store(store_a).await.expect("open A");
         handle_a.put(b"/key", b"from A").await.expect("put A");
         
-        let (handle_b, _) = node.open_store(store_b).expect("open B");
+        let (handle_b, _) = node.open_store(store_b).await.expect("open B");
         assert_eq!(handle_b.get(b"/key").await.unwrap(), None);
         
         assert_eq!(handle_a.get(b"/key").await.unwrap(), Some(b"from A".to_vec()));
