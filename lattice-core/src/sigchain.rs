@@ -4,7 +4,7 @@
 //! before appending (correct seq, prev_hash, valid signature) and persists to disk.
 
 use crate::log::{append_entry, read_entries, LogError};
-use crate::node::Node;
+use crate::node_identity::NodeIdentity;
 use crate::proto::{Entry, SignedEntry};
 use crate::signed_entry::{hash_signed_entry, verify_signed_entry};
 use prost::Message;
@@ -229,7 +229,7 @@ impl SigChain {
     }
     
     /// Create and append a new entry using the node's key
-    pub fn create_entry(&mut self, node: &Node, ops: Vec<crate::proto::Operation>) -> Result<SignedEntry, SigChainError> {
+    pub fn create_entry(&mut self, node: &NodeIdentity, ops: Vec<crate::proto::Operation>) -> Result<SignedEntry, SigChainError> {
         use crate::clock::SystemClock;
         use crate::hlc::HLC;
         use crate::signed_entry::EntryBuilder;
@@ -322,7 +322,7 @@ mod tests {
     use super::*;
     use crate::clock::MockClock;
     use crate::hlc::HLC;
-    use crate::node::Node;
+    use crate::node_identity::NodeIdentity;
     use crate::proto::{operation, Operation, PutOp};
     use crate::signed_entry::EntryBuilder;
     use std::env::temp_dir;
@@ -352,7 +352,7 @@ mod tests {
         let path = temp_log_path("append");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         let mut chain = SigChain::new(&path, TEST_STORE, author);
         
@@ -377,7 +377,7 @@ mod tests {
         let path = temp_log_path("multiple");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         let mut chain = SigChain::new(&path, TEST_STORE, author);
         let clock = MockClock::new(1000);
@@ -402,7 +402,7 @@ mod tests {
         let path = temp_log_path("from_log");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         let clock = MockClock::new(1000);
         
@@ -433,7 +433,7 @@ mod tests {
         let path = temp_log_path("wrong_seq");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         let mut chain = SigChain::new(&path, TEST_STORE, author);
         let clock = MockClock::new(1000);
@@ -457,7 +457,7 @@ mod tests {
         let path = temp_log_path("wrong_prev");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         let mut chain = SigChain::new(&path, TEST_STORE, author);
         let clock = MockClock::new(1000);
@@ -489,7 +489,7 @@ mod tests {
         let path = temp_log_path("wrong_author");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let other_author = [99u8; 32]; // Different author
         let mut chain = SigChain::new(&path, TEST_STORE, other_author);
         let clock = MockClock::new(1000);
@@ -513,7 +513,7 @@ mod tests {
         let path = temp_log_path("create");
         std::fs::remove_file(&path).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         let mut chain = SigChain::new(&path, TEST_STORE, author);
         
@@ -545,7 +545,7 @@ mod tests {
         std::fs::remove_file(&path_a).ok();
         std::fs::remove_file(&path_b).ok();
         
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         let clock = MockClock::new(1000);
         

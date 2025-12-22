@@ -13,6 +13,7 @@ const STORES_TABLE: TableDefinition<&[u8], u64> = TableDefinition::new("stores")
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
 const META_ROOT_STORE: &str = "root_store";
+const META_NAME: &str = "name";
 
 #[derive(Error, Debug)]
 pub enum MetaStoreError {
@@ -102,6 +103,28 @@ impl MetaStore {
         {
             let mut table = write_txn.open_table(META_TABLE)?;
             table.insert(META_ROOT_STORE, store_id.as_bytes().as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+    
+    /// Get the node's display name
+    pub fn name(&self) -> Result<Option<String>, MetaStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(META_TABLE)?;
+        
+        match table.get(META_NAME)? {
+            Some(value) => Ok(Some(String::from_utf8_lossy(value.value()).to_string())),
+            None => Ok(None),
+        }
+    }
+    
+    /// Set the node's display name
+    pub fn set_name(&self, name: &str) -> Result<(), MetaStoreError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(META_TABLE)?;
+            table.insert(META_NAME, name.as_bytes())?;
         }
         write_txn.commit()?;
         Ok(())

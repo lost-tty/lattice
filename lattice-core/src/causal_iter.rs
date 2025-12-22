@@ -102,10 +102,10 @@ mod tests {
     use super::*;
     use crate::hlc::HLC;
     use crate::clock::MockClock;
-    use crate::node::Node;
+    use crate::node_identity::NodeIdentity;
     use crate::signed_entry::EntryBuilder;
     
-    fn make_entry(node: &Node, seq: u64, clock_ms: u64) -> SignedEntry {
+    fn make_entry(node: &NodeIdentity, seq: u64, clock_ms: u64) -> SignedEntry {
         let clock = MockClock::new(clock_ms);
         EntryBuilder::new(seq, HLC::now_with_clock(&clock))
             .store_id(vec![0u8; 16])
@@ -122,7 +122,7 @@ mod tests {
     
     #[test]
     fn test_single_queue() {
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let entries: VecDeque<_> = vec![
             make_entry(&node, 1, 1000),
             make_entry(&node, 2, 2000),
@@ -135,8 +135,8 @@ mod tests {
     
     #[test]
     fn test_merge_multiple_queues() {
-        let node_a = Node::generate();
-        let node_b = Node::generate();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
         
         // Author A: entries at time 1000, 3000
         let queue_a: VecDeque<_> = vec![
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn test_many_authors() {
         // Test with 10 authors to verify heap behavior
-        let nodes: Vec<_> = (0..10).map(|_| Node::generate()).collect();
+        let nodes: Vec<_> = (0..10).map(|_| NodeIdentity::generate()).collect();
         let queues: Vec<VecDeque<_>> = nodes.iter().enumerate().map(|(i, node)| {
             vec![make_entry(node, 1, (i * 100 + 50) as u64)].into()
         }).collect();

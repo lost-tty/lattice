@@ -1,15 +1,10 @@
 //! Lattice Interactive CLI
 
-mod accept_handler;
-mod node;
 mod commands;
-mod store_actor;
-mod sync_protocol;
-mod sync;
 
-use accept_handler::spawn_accept_loop;
+use lattice_net::spawn_accept_loop;
 use commands::CommandResult;
-use node::{LatticeNodeBuilder, StoreHandle};
+use lattice_core::{NodeBuilder, StoreHandle};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::sync::Arc;
@@ -20,7 +15,7 @@ async fn main() {
     println!("Lattice CLI v{}", env!("CARGO_PKG_VERSION"));
     println!("Type 'help' for commands, 'quit' to exit.\n");
 
-    let node = match LatticeNodeBuilder::new().build() {
+    let node = match NodeBuilder::new().build() {
         Ok(n) => n,
         Err(e) => {
             eprintln!("Failed to initialize: {}", e);

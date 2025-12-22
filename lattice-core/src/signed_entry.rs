@@ -7,7 +7,7 @@
 //! - Computing entry hashes for prev_hash linking
 
 use crate::hlc::HLC;
-use crate::node::{Node, NodeError};
+use crate::node_identity::{NodeIdentity, NodeError};
 use crate::proto::{Entry, Hlc, Operation, PutOp, DeleteOp, SignedEntry, operation};
 use ed25519_dalek::{Signature, VerifyingKey};
 use prost::Message;
@@ -116,14 +116,14 @@ impl EntryBuilder {
     }
 
     /// Build and sign the entry, returning a SignedEntry
-    pub fn sign(self, node: &Node) -> SignedEntry {
+    pub fn sign(self, node: &NodeIdentity) -> SignedEntry {
         let entry = self.build();
         sign_entry(&entry, node)
     }
 }
 
 /// Sign an Entry to create a SignedEntry
-pub fn sign_entry(entry: &Entry, node: &Node) -> SignedEntry {
+pub fn sign_entry(entry: &Entry, node: &NodeIdentity) -> SignedEntry {
     let entry_bytes = entry.encode_to_vec();
     let signature = node.sign(&entry_bytes);
     
@@ -152,7 +152,7 @@ pub fn verify_signed_entry(signed: &SignedEntry) -> Result<Entry, EntryError> {
     let signature = Signature::from_bytes(&sig_bytes);
     
     // Verify
-    Node::verify_with_key(&public_key, &signed.entry_bytes, &signature)?;
+    NodeIdentity::verify_with_key(&public_key, &signed.entry_bytes, &signature)?;
     
     // Decode entry
     let entry = Entry::decode(&signed.entry_bytes[..])?;
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_sign_and_verify() {
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         let hlc = HLC::now_with_clock(&clock);
         
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_verify_tampered_fails() {
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         let hlc = HLC::now_with_clock(&clock);
         
@@ -227,8 +227,8 @@ mod tests {
 
     #[test]
     fn test_verify_wrong_key_fails() {
-        let node1 = Node::generate();
-        let node2 = Node::generate();
+        let node1 = NodeIdentity::generate();
+        let node2 = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         let hlc = HLC::now_with_clock(&clock);
         
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_hash_signed_entry() {
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         let hlc = HLC::now_with_clock(&clock);
         
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_prev_hash_chaining() {
-        let node = Node::generate();
+        let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         // First entry

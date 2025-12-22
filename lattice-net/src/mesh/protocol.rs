@@ -1,12 +1,9 @@
-//! Sync Protocol - shared logic for bidirectional sync
-//!
-//! Provides reusable functions for sending and receiving entries during sync.
-//! Used by both accept_handler (incoming sync) and sync (outgoing sync).
+//! Protocol - shared logic for bidirectional sync entry exchange
 
-use crate::node::StoreHandle;
+use crate::{MessageSink, MessageStream};
+use lattice_core::{StoreHandle, CausalEntryIter};
 use lattice_core::proto::{peer_message, PeerMessage, SignedEntry};
 use lattice_core::sync_state::SyncState;
-use lattice_net::{MessageSink, MessageStream};
 use prost::Message;
 use std::collections::VecDeque;
 
@@ -33,7 +30,7 @@ pub async fn send_missing_entries(
     
     // Stream entries in HLC (causal) order
     let mut entries_sent = 0u64;
-    for entry in lattice_core::CausalEntryIter::new(author_entries) {
+    for entry in CausalEntryIter::new(author_entries) {
         let sync_msg = PeerMessage {
             message: Some(peer_message::Message::SyncEntry(lattice_core::proto::SyncEntry {
                 signed_entry: entry.encode_to_vec(),

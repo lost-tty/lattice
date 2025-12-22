@@ -1,7 +1,7 @@
 //! Lattice Core
 //!
 //! Core types for the Lattice distributed mesh:
-//! - **Node**: Identity with Ed25519 keypair
+//! - **NodeIdentity**: Cryptographic identity with Ed25519 keypair
 //! - **SigChain**: Append-only cryptographically signed log
 //! - **Entry**: Atomic operations in the log
 //! - **SyncState**: Per-author sequence tracking for reconciliation
@@ -14,6 +14,7 @@
 //! - **Store**: Persistent KV state from log replay
 //! - **CausalIter**: Merge-sort iterator for HLC-ordered sync
 
+pub mod node_identity;
 pub mod node;
 pub mod sigchain;
 pub mod entry;
@@ -27,12 +28,14 @@ pub mod log;
 pub mod store;
 pub mod meta_store;
 pub mod causal_iter;
+pub mod store_actor;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (16 MB)
 pub const MAX_ENTRY_SIZE: usize = 16 * 1024 * 1024;
 
-pub use node::Node;
+pub use node_identity::{NodeIdentity, PeerStatus};
+pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, StoreHandle, NodeError};
 pub use sigchain::{SigChain, SigChainManager};
 pub use entry::Entry;
 pub use sync_state::{SyncState, AuthorInfo, MissingRange};
@@ -46,4 +49,4 @@ pub use meta_store::MetaStore;
 pub use proto::HeadInfo;
 pub use uuid::Uuid;
 pub use causal_iter::CausalEntryIter;
-
+pub use store_actor::{StoreActor, StoreCmd, StoreActorError, spawn_store_actor};

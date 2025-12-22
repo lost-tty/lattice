@@ -1,11 +1,14 @@
 //! Store Actor - dedicated thread that owns Store and processes commands via channel
 
-use lattice_core::{
-    EntryBuilder, HeadInfo, Node, SigChain, SigChainManager, Store, Uuid,
+use crate::{
+    EntryBuilder, HeadInfo, NodeIdentity, SigChain, SigChainManager, Store, Uuid,
     hlc::HLC,
     proto::AuthorState,
     sigchain::SigChainError,
     store::StoreError,
+    sync_state::SyncState,
+    proto::SignedEntry,
+    log,
 };
 use tokio::sync::{mpsc, oneshot};
 use std::thread::{self, JoinHandle};
@@ -44,15 +47,15 @@ pub enum StoreCmd {
     },
     // Sync-related commands
     SyncState {
-        resp: oneshot::Sender<Result<lattice_core::sync_state::SyncState, StoreError>>,
+        resp: oneshot::Sender<Result<SyncState, StoreError>>,
     },
     ReadEntriesAfter {
         author: [u8; 32],
         from_hash: Option<[u8; 32]>,
-        resp: oneshot::Sender<Result<Vec<lattice_core::proto::SignedEntry>, StoreError>>,
+        resp: oneshot::Sender<Result<Vec<SignedEntry>, StoreError>>,
     },
     ApplyEntry {
-        entry: lattice_core::proto::SignedEntry,
+        entry: SignedEntry,
         resp: oneshot::Sender<Result<(), StoreError>>,
     },
     Shutdown,
@@ -92,7 +95,7 @@ pub struct StoreActor {
     store_id: Uuid,
     store: Store,
     chain_manager: SigChainManager,  // Manages all authors' sigchains
-    node: Node,
+    node: NodeIdentity,
     rx: mpsc::Receiver<StoreCmd>,
 }
 
@@ -102,7 +105,7 @@ impl StoreActor {
         store_id: Uuid,
         store: Store,
         sigchain: SigChain,
-        node: Node,
+        node: NodeIdentity,
         rx: mpsc::Receiver<StoreCmd>,
     ) -> Self {
         // Derive logs_dir from sigchain's log file path
@@ -243,7 +246,7 @@ impl StoreActor {
         &self,
         author: &[u8; 32],
         from_hash: Option<[u8; 32]>,
-    ) -> Result<Vec<lattice_core::proto::SignedEntry>, StoreError> {
+    ) -> Result<Vec<SignedEntry>, StoreError> {
         // Build log path for this author
         let author_hex = hex::encode(author);
         let log_path = self.chain_manager.logs_dir().join(format!("{}.log", author_hex));
@@ -253,7 +256,7 @@ impl StoreActor {
         }
         
         // Use lattice_core's read_entries_after
-        lattice_core::log::read_entries_after(&log_path, from_hash)
+        log::read_entries_after(&log_path, from_hash)
             .map_err(StoreError::from)
     }
 }
@@ -264,7 +267,7 @@ pub fn spawn_store_actor(
     store_id: Uuid,
     store: Store,
     sigchain: SigChain,
-    node: Node,
+    node: NodeIdentity,
 ) -> (mpsc::Sender<StoreCmd>, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(32);
     let actor = StoreActor::new(store_id, store, sigchain, node, rx);
