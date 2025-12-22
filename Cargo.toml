@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "lattice-core",
     "lattice-net",
-    "lattice-store",
     "lattice-cli",
 ]
 
@@ -16,7 +15,6 @@ license = "MIT"
 # Workspace crates
 lattice-core = { path = "lattice-core" }
 lattice-net = { path = "lattice-net" }
-lattice-store = { path = "lattice-store" }
 lattice-cli = { path = "lattice-cli" }
 
 # CLI
