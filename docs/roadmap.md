@@ -33,26 +33,27 @@
 
 ---
 
-## Milestone 1.5: DAG Conflict Resolution ← NEXT
+## Milestone 1.5: DAG Conflict Resolution
 
 **Goal:** Upgrade store from simple LWW to DAG-based conflict resolution per architecture.md.
 
 ### Deliverables
 
-- [ ] Proto: Add `repeated bytes parent_hashes` to Entry (for DAG causality, separate from sigchain `prev_hash`)
-- [ ] Store: keys → `Vec<u8>` (binary, not String)
-- [ ] Store: KV table schema → `Vec<u8> → Vec<HeadInfo>` where `HeadInfo = { value, hlc, author, hash }`
-- [ ] Store: `applied_frontiers` table → `author_id → (seq, hash)` per author
-- [ ] Store: `apply_entry` → track multiple heads, merge parent tips into new tip
-- [ ] Store: `get` → deterministic winner from heads (highest HLC, author_id tiebreaker)
-- [ ] EntryBuilder: `.parent_hashes(...)` method for DAG ancestry
+- [x] Proto: Add `repeated bytes parent_hashes` to Entry (for DAG causality)
+- [x] Proto: Add `HeadInfo` message for multi-head storage
+- [x] Store: KV table schema → `Vec<u8> → Vec<HeadInfo>`
+- [x] Store: `apply_entry` → track multiple heads, merge parent tips
+- [x] Store: `get` → deterministic winner (highest HLC, author tiebreaker)
+- [x] Store: `get_heads` → inspect all heads for a key
+- [x] EntryBuilder: `.parent_hashes(...)` method for DAG ancestry
+- [x] CLI: Show conflict indicator when multiple heads
 
 ### Success Criteria
 
-- Concurrent writes to same key create multiple heads
-- Reads return deterministic winner
-- Next write citing both heads merges fork to single tip
-- All existing tests still pass
+- [x] Concurrent writes to same key create multiple heads
+- [x] Reads return deterministic winner
+- [x] Next write citing both heads merges fork to single tip
+- [x] All existing tests still pass (71 tests)
 
 ---
 

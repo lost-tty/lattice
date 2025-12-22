@@ -189,11 +189,15 @@ pub struct StoreHandle {
 impl StoreHandle {
     pub fn id(&self) -> Uuid { self.store_id }
 
-    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, NodeError> {
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, NodeError> {
         Ok(self.store.get(key)?)
     }
 
-    pub fn list(&self) -> Result<Vec<(String, Vec<u8>)>, NodeError> {
+    pub fn get_heads(&self, key: &[u8]) -> Result<Vec<lattice_core::HeadInfo>, NodeError> {
+        Ok(self.store.get_heads(key)?)
+    }
+
+    pub fn list(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
         Ok(self.store.list_all()?)
     }
 
@@ -202,18 +206,29 @@ impl StoreHandle {
     }
 
     pub fn applied_seq(&self) -> Result<u64, NodeError> {
-        Ok(self.store.last_seq()?)
+        let author = self.node.public_key_bytes();
+        Ok(self.store.author_state(&author)?
+            .map(|s| s.seq)
+            .unwrap_or(0))
     }
 
-    pub fn put(&self, key: &str, value: &[u8]) -> Result<u64, NodeError> {
-        self.commit_entry(|b| b.put(key, value.to_vec()))
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<u64, NodeError> {
+        // Get current heads for this key to cite as parents
+        let heads = self.store.get_heads(key)?;
+        let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
+        
+        self.commit_entry(parent_hashes, |b| b.put(key.to_vec(), value.to_vec()))
     }
 
-    pub fn delete(&self, key: &str) -> Result<u64, NodeError> {
-        self.commit_entry(|b| b.delete(key))
+    pub fn delete(&self, key: &[u8]) -> Result<u64, NodeError> {
+        // Get current heads for this key to cite as parents
+        let heads = self.store.get_heads(key)?;
+        let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
+        
+        self.commit_entry(parent_hashes, |b| b.delete(key.to_vec()))
     }
 
-    fn commit_entry<F>(&self, build: F) -> Result<u64, NodeError>
+    fn commit_entry<F>(&self, parent_hashes: Vec<Vec<u8>>, build: F) -> Result<u64, NodeError>
     where
         F: FnOnce(EntryBuilder) -> EntryBuilder,
     {
@@ -223,7 +238,8 @@ impl StoreHandle {
         
         let builder = EntryBuilder::new(seq, HLC::now())
             .store_id(self.store_id.as_bytes().to_vec())
-            .prev_hash(prev_hash.to_vec());
+            .prev_hash(prev_hash.to_vec())
+            .parent_hashes(parent_hashes);
         let entry = build(builder).sign(&self.node);
         
         sigchain.append(&entry)?;
@@ -261,8 +277,8 @@ mod tests {
         assert!(stores.contains(&store_id));
         
         let (handle, _) = node.open_store(store_id).expect("Failed to open store");
-        handle.put("/key", b"value").expect("put failed");
-        assert_eq!(handle.get("/key").unwrap(), Some(b"value".to_vec()));
+        handle.put(b"/key", b"value").expect("put failed");
+        assert_eq!(handle.get(b"/key").unwrap(), Some(b"value".to_vec()));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -279,12 +295,12 @@ mod tests {
         let store_b = node.create_store().expect("create B");
         
         let (handle_a, _) = node.open_store(store_a).expect("open A");
-        handle_a.put("/key", b"from A").expect("put A");
+        handle_a.put(b"/key", b"from A").expect("put A");
         
         let (handle_b, _) = node.open_store(store_b).expect("open B");
-        assert_eq!(handle_b.get("/key").unwrap(), None);
+        assert_eq!(handle_b.get(b"/key").unwrap(), None);
         
-        assert_eq!(handle_a.get("/key").unwrap(), Some(b"from A".to_vec()));
+        assert_eq!(handle_a.get(b"/key").unwrap(), Some(b"from A".to_vec()));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }

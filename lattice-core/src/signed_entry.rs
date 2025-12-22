@@ -34,6 +34,7 @@ pub struct EntryBuilder {
     version: u32,
     store_id: Vec<u8>,
     prev_hash: Vec<u8>,
+    parent_hashes: Vec<Vec<u8>>,
     seq: u64,
     timestamp: HLC,
     ops: Vec<Operation>,
@@ -44,8 +45,9 @@ impl EntryBuilder {
     pub fn new(seq: u64, timestamp: HLC) -> Self {
         Self {
             version: 1,
-            store_id: Vec::new(), // Empty = legacy single-store
-            prev_hash: vec![0u8; 32], // Genesis or will be set
+            store_id: Vec::new(),
+            prev_hash: vec![0u8; 32],
+            parent_hashes: Vec::new(),
             seq,
             timestamp,
             ops: Vec::new(),
@@ -58,14 +60,20 @@ impl EntryBuilder {
         self
     }
 
-    /// Set the previous entry hash (for chaining)
+    /// Set the previous entry hash (for sigchain linking)
     pub fn prev_hash(mut self, hash: impl Into<Vec<u8>>) -> Self {
         self.prev_hash = hash.into();
         self
     }
 
+    /// Set the parent hashes (for DAG ancestry)
+    pub fn parent_hashes(mut self, hashes: Vec<Vec<u8>>) -> Self {
+        self.parent_hashes = hashes;
+        self
+    }
+
     /// Add a Put operation
-    pub fn put(mut self, key: impl Into<String>, value: impl Into<Vec<u8>>) -> Self {
+    pub fn put(mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
         self.ops.push(Operation {
             op_type: Some(operation::OpType::Put(PutOp {
                 key: key.into(),
@@ -76,7 +84,7 @@ impl EntryBuilder {
     }
 
     /// Add a Delete operation
-    pub fn delete(mut self, key: impl Into<String>) -> Self {
+    pub fn delete(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.ops.push(Operation {
             op_type: Some(operation::OpType::Delete(DeleteOp {
                 key: key.into(),
@@ -97,6 +105,7 @@ impl EntryBuilder {
             version: self.version,
             store_id: self.store_id,
             prev_hash: self.prev_hash,
+            parent_hashes: self.parent_hashes,
             seq: self.seq,
             timestamp: Some(Hlc {
                 wall_time: self.timestamp.wall_time,

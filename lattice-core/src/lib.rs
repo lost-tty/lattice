@@ -41,4 +41,5 @@ pub use signed_entry::{EntryBuilder, sign_entry, verify_signed_entry, hash_signe
 pub use log::{append_entry, read_entries, LogReader};
 pub use store::Store;
 pub use meta_store::MetaStore;
+pub use proto::HeadInfo;
 pub use uuid::Uuid;
