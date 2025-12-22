@@ -60,7 +60,7 @@ pub async fn join_mesh(
             
             // Immediately sync with the peer to get initial data
             println!("[Join] Syncing with peer to get initial data...");
-            match sync_with_peer(node, endpoint, &handle, peer_id).await {
+            match sync_with_peer(endpoint, &handle, peer_id).await {
                 Ok(result) => {
                     println!("[Join] Initial sync complete: applied {} entries", result.entries_applied);
                 }
@@ -87,7 +87,6 @@ pub async fn join_mesh(
 /// Sync with a specific peer (bidirectional).
 /// Both sides exchange states and send missing entries to each other.
 pub async fn sync_with_peer(
-    node: &Node,
     endpoint: &LatticeEndpoint,
     store: &StoreHandle,
     peer_id: iroh::PublicKey,
@@ -192,7 +191,7 @@ pub async fn sync_all(
     // Sync with each peer
     let mut results = Vec::new();
     for peer_id in peer_ids {
-        match sync_with_peer(node, endpoint, store, peer_id).await {
+        match sync_with_peer(endpoint, store, peer_id).await {
             Ok(result) => results.push(result),
             Err(e) => {
                 // Log error but continue with other peers

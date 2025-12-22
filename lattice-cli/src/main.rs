@@ -1,6 +1,8 @@
 //! Lattice Interactive CLI
 
 mod commands;
+mod node_commands;
+mod store_commands;
 
 use lattice_net::spawn_accept_loop;
 use commands::CommandResult;
@@ -52,15 +54,17 @@ async fn main() {
     }
 
     let mut current_store: Option<StoreHandle> = match node.open_root_store() {
-        Ok(Some((h, open_info))) => {
+        Ok(Some(open_info)) => {
             if open_info.entries_replayed > 0 {
                 println!("Root:    {} (replayed {})", open_info.store_id, open_info.entries_replayed);
             } else {
                 println!("Root:    {}", open_info.store_id);
             }
-            // Update shared store for accept loop
-            *shared_store.write().await = Some(h.clone());
-            Some(h)
+            let h = node.root_store().as_ref().cloned();
+            if let Some(ref handle) = h {
+                *shared_store.write().await = Some(handle.clone());
+            }
+            h
         }
         Ok(None) => {
             println!("Status:  Not initialized (use 'init')");
@@ -97,13 +101,8 @@ async fn main() {
                 };
 
                 let cmd_name = args.first().map(|s| s.as_str()).unwrap_or("");
-                
-                if cmd_name == "quit" || cmd_name == "exit" {
-                    println!("Goodbye!");
-                    break;
-                }
 
-                match cmds.iter().find(|c| c.name == cmd_name) {
+                match cmds.iter().find(|c| c.name == cmd_name || (cmd_name == "exit" && c.name == "quit")) {
                     Some(cmd) => {
                         let cmd_args = &args[1..];
                         if cmd_args.len() < cmd.min_args || cmd_args.len() > cmd.max_args {
@@ -116,6 +115,7 @@ async fn main() {
                                     *shared_store.write().await = Some(h.clone());
                                     current_store = Some(h);
                                 }
+                                CommandResult::Quit => break,
                             }
                         }
                     }

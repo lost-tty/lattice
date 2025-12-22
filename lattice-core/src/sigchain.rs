@@ -315,6 +315,26 @@ impl SigChainManager {
     pub fn logs_dir(&self) -> &Path {
         &self.logs_dir
     }
+    
+    /// Get log directory statistics (file count, total bytes)
+    pub fn log_stats(&self) -> (usize, u64) {
+        if !self.logs_dir.exists() {
+            return (0, 0);
+        }
+        let mut total_size = 0u64;
+        let mut file_count = 0;
+        if let Ok(entries) = std::fs::read_dir(&self.logs_dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        total_size += meta.len();
+                        file_count += 1;
+                    }
+                }
+            }
+        }
+        (file_count, total_size)
+    }
 }
 
 #[cfg(test)]
