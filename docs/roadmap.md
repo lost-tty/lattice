@@ -94,6 +94,7 @@
 - [x] Multi-store sync test: compute diff, fetch entries, apply, verify same state
 
 **Phase 2: Iroh Integration**
+- [x] Node info in root store on init: `/nodes/{pubkey}/info` + `/status`
 - [ ] Iroh integration (peer discovery, connection)
 - [ ] Sync protocol (push missing entries over network)
 - [ ] CLI: `peers`, `connect`/`join` commands
