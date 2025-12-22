@@ -58,6 +58,9 @@ pub enum StoreCmd {
         entry: SignedEntry,
         resp: oneshot::Sender<Result<(), StoreError>>,
     },
+    LogStats {
+        resp: oneshot::Sender<(usize, u64)>,
+    },
     Shutdown,
 }
 
@@ -184,6 +187,9 @@ impl StoreActor {
                     // Then apply to store
                     let result = self.store.apply_entry(&entry);
                     let _ = resp.send(result);
+                }
+                StoreCmd::LogStats { resp } => {
+                    let _ = resp.send(self.chain_manager.log_stats());
                 }
                 StoreCmd::Shutdown => {
                     break;

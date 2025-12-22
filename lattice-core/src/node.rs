@@ -54,6 +54,15 @@ pub struct StoreInfo {
     pub entries_replayed: u64,
 }
 
+/// Information about a peer in the mesh
+pub struct PeerInfo {
+    pub pubkey: String,
+    pub name: Option<String>,
+    pub added_at: Option<u64>,
+    pub added_by: Option<String>,
+    pub status: PeerStatus,
+}
+
 pub struct NodeBuilder {
     pub data_dir: DataDir,
 }
@@ -90,6 +99,7 @@ impl NodeBuilder {
             data_dir: self.data_dir,
             node: Rc::new(node),
             meta,
+            root_store: std::cell::RefCell::new(None),
         })
     }
 }
@@ -103,6 +113,7 @@ pub struct Node {
     data_dir: DataDir,
     node: Rc<NodeIdentity>,
     meta: MetaStore,
+    root_store: std::cell::RefCell<Option<StoreHandle>>,
 }
 
 impl Node {
@@ -133,13 +144,13 @@ impl Node {
     }
     
     /// Set the node's display name.
-    /// Updates meta.db and if a store handle is provided, also updates /nodes/{pubkey}/name
-    pub async fn set_name(&self, name: &str, store: Option<&StoreHandle>) -> Result<(), NodeError> {
+    /// Updates meta.db and if root store is open, also updates /nodes/{pubkey}/name
+    pub async fn set_name(&self, name: &str) -> Result<(), NodeError> {
         // Update meta.db
         self.meta.set_name(name)?;
         
-        // If store provided, update there too
-        if let Some(handle) = store {
+        // If root store is open, update there too
+        if let Some(handle) = self.root_store.borrow().as_ref() {
             let pubkey_hex = hex::encode(self.node.public_key_bytes());
             let name_key = format!("/nodes/{}/name", pubkey_hex);
             handle.put(name_key.as_bytes(), name.as_bytes()).await?;
@@ -149,20 +160,31 @@ impl Node {
     }
 
     /// Get the root store ID
-    pub fn root_store(&self) -> Result<Option<Uuid>, NodeError> {
+    pub fn root_store_id(&self) -> Result<Option<Uuid>, NodeError> {
         Ok(self.meta.root_store()?)
     }
-    /// Open the root store if set
-    pub fn open_root_store(&self) -> Result<Option<(StoreHandle, StoreInfo)>, NodeError> {
+    
+    /// Get reference to the cached root store handle (if open)
+    pub fn root_store(&self) -> std::cell::Ref<'_, Option<StoreHandle>> {
+        self.root_store.borrow()
+    }
+    
+    /// Open the root store if set. Node owns the handle internally.
+    /// Returns StoreInfo on success, or None if no root store is set.
+    pub fn open_root_store(&self) -> Result<Option<StoreInfo>, NodeError> {
         match self.meta.root_store()? {
-            Some(id) => Ok(Some(self.open_store(id)?)),
+            Some(id) => {
+                let (handle, info) = self.open_store(id)?;
+                *self.root_store.borrow_mut() = Some(handle);
+                Ok(Some(info))
+            }
             None => Ok(None),
         }
     }
 
     /// Initialize the node with a root store (fails if already initialized).
-    /// Writes the node's pubkey to `/nodes/{pubkey}/info` in the root store.
-    pub async fn init(&self) -> Result<(Uuid, StoreHandle), NodeError> {
+    /// Node owns the store handle internally. Access via root_store().
+    pub async fn init(&self) -> Result<Uuid, NodeError> {
         if self.meta.root_store()?.is_some() {
             return Err(NodeError::AlreadyInitialized);
         }
@@ -190,7 +212,140 @@ impl Node {
         let status_key = format!("/nodes/{}/status", pubkey_hex);
         handle.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await?;
         
-        Ok((store_id, handle))
+        // Store the handle - node owns it
+        *self.root_store.borrow_mut() = Some(handle);
+        
+        Ok(store_id)
+    }
+    
+    // --- Peer Management ---
+    
+    /// Invite a peer to the mesh. Writes their info with status = invited.
+    pub async fn invite_peer(&self, pubkey: &[u8; 32]) -> Result<(), NodeError> {
+        let store = self.root_store.borrow();
+        let store = store.as_ref()
+            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        
+        let pubkey_hex = hex::encode(pubkey);
+        let my_pubkey_hex = hex::encode(self.node.public_key_bytes());
+        
+        let added_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        
+        // Write added_by
+        let added_by_key = format!("/nodes/{}/added_by", pubkey_hex);
+        store.put(added_by_key.as_bytes(), my_pubkey_hex.as_bytes()).await?;
+        
+        // Write added_at
+        let added_at_key = format!("/nodes/{}/added_at", pubkey_hex);
+        store.put(added_at_key.as_bytes(), added_at.to_string().as_bytes()).await?;
+        
+        // Write status = invited
+        let status_key = format!("/nodes/{}/status", pubkey_hex);
+        store.put(status_key.as_bytes(), PeerStatus::Invited.as_str().as_bytes()).await?;
+        
+        Ok(())
+    }
+    
+    /// List all peers in the mesh with their info
+    pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, NodeError> {
+        let store = self.root_store.borrow();
+        let store = store.as_ref()
+            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        
+        let all = store.list().await?;
+        
+        // Collect unique pubkeys with status
+        let mut peers_map: std::collections::HashMap<String, PeerStatus> = std::collections::HashMap::new();
+        for (key, value) in &all {
+            let key_str = String::from_utf8_lossy(key);
+            if key_str.ends_with("/status") {
+                if let Some(pubkey) = key_str.strip_prefix("/nodes/").and_then(|s| s.strip_suffix("/status")) {
+                    let status_str = String::from_utf8_lossy(value);
+                    if let Some(status) = PeerStatus::from_str(&status_str) {
+                        peers_map.insert(pubkey.to_string(), status);
+                    }
+                }
+            }
+        }
+        
+        // Build PeerInfo for each peer
+        let mut peers = Vec::new();
+        for (pubkey, status) in peers_map {
+            let name_key = format!("/nodes/{}/name", pubkey);
+            let added_at_key = format!("/nodes/{}/added_at", pubkey);
+            let added_by_key = format!("/nodes/{}/added_by", pubkey);
+            
+            let name = store.get(name_key.as_bytes()).await?
+                .map(|b| String::from_utf8_lossy(&b).to_string());
+            
+            let added_at = store.get(added_at_key.as_bytes()).await?
+                .and_then(|b| String::from_utf8_lossy(&b).parse().ok());
+            
+            let added_by = store.get(added_by_key.as_bytes()).await?
+                .map(|b| String::from_utf8_lossy(&b).to_string());
+            
+            peers.push(PeerInfo {
+                pubkey,
+                name,
+                added_at,
+                added_by,
+                status,
+            });
+        }
+        
+        Ok(peers)
+    }
+    
+    /// Remove a peer from the mesh (sets status to removed)
+    pub async fn remove_peer(&self, pubkey: &[u8; 32]) -> Result<(), NodeError> {
+        let store = self.root_store.borrow();
+        let store = store.as_ref()
+            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        
+        let pubkey_hex = hex::encode(pubkey);
+        
+        // Prevent self-removal
+        if pubkey == &self.node.public_key_bytes() {
+            return Err(NodeError::Actor("Cannot remove yourself".to_string()));
+        }
+        
+        // Check if peer exists
+        let status_key = format!("/nodes/{}/status", pubkey_hex);
+        match store.get(status_key.as_bytes()).await? {
+            Some(status) if status == PeerStatus::Removed.as_str().as_bytes() => {
+                return Err(NodeError::Actor("Peer already removed".to_string()));
+            }
+            None => {
+                return Err(NodeError::Actor("Peer not found".to_string()));
+            }
+            _ => {}
+        }
+        
+        // Set status to removed
+        store.put(status_key.as_bytes(), PeerStatus::Removed.as_str().as_bytes()).await?;
+        
+        Ok(())
+    }
+    
+    /// Get a peer's status
+    pub async fn get_peer_status(&self, pubkey: &[u8; 32]) -> Result<Option<PeerStatus>, NodeError> {
+        let store = self.root_store.borrow();
+        let store = store.as_ref()
+            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        
+        let pubkey_hex = hex::encode(pubkey);
+        let status_key = format!("/nodes/{}/status", pubkey_hex);
+        
+        match store.get(status_key.as_bytes()).await? {
+            Some(bytes) => {
+                let status_str = String::from_utf8_lossy(&bytes);
+                Ok(PeerStatus::from_str(&status_str))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn list_stores(&self) -> Result<Vec<Uuid>, NodeError> {
@@ -336,6 +491,14 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
+    /// Get log directory statistics (file count, total bytes)
+    pub async fn log_stats(&self) -> (usize, u64) {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(StoreCmd::LogStats { resp: resp_tx }).await;
+        resp_rx.await.unwrap_or((0, 0))
+    }
+
     pub async fn sync_state(&self) -> Result<crate::sync_state::SyncState, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -464,11 +627,11 @@ mod tests {
             .expect("create node");
         
         // Initially no root store
-        assert!(node.root_store().unwrap().is_none());
+        assert!(node.root_store().is_none());
         
         // Init creates root store
-        let (root_id, _handle) = node.init().await.expect("init failed");
-        assert_eq!(node.root_store().unwrap(), Some(root_id));
+        let root_id = node.init().await.expect("init failed");
+        assert_eq!(node.root_store_id().unwrap(), Some(root_id));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -503,7 +666,7 @@ mod tests {
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
             .expect("create node");
-        let (root_id, _) = node.init().await.expect("init");
+        let root_id = node.init().await.expect("init");
         drop(node);  // End first session
         
         // Second session: root_store should persist
@@ -511,7 +674,7 @@ mod tests {
             .build()
             .expect("reload node");
         
-        assert_eq!(node.root_store().unwrap(), Some(root_id));
+        assert_eq!(node.root_store_id().unwrap(), Some(root_id));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -523,7 +686,9 @@ mod tests {
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
             .expect("create node");
-        let (_, store) = node.init().await.expect("init");
+        node.init().await.expect("init");
+        let store = node.root_store();
+        let store = store.as_ref().unwrap();
         
         // Get baseline seq after init
         let baseline = store.log_seq().await;
@@ -562,24 +727,32 @@ mod tests {
         let initial_name = node.name().unwrap();
         
         // Init creates root store
-        let (_, store) = node.init().await.expect("init");
+        node.init().await.expect("init");
         
         // Verify initial name is in store
         let pubkey_hex = hex::encode(node.node_id());
         let name_key = format!("/nodes/{}/name", pubkey_hex);
-        let stored_name = store.get(name_key.as_bytes()).await.unwrap();
-        assert_eq!(stored_name, Some(initial_name.as_bytes().to_vec()));
+        {
+            let store = node.root_store();
+            let store = store.as_ref().unwrap();
+            let stored_name = store.get(name_key.as_bytes()).await.unwrap();
+            assert_eq!(stored_name, Some(initial_name.as_bytes().to_vec()));
+        }
         
         // Change name
         let new_name = "my-custom-name";
-        node.set_name(new_name, Some(&store)).await.expect("set_name");
+        node.set_name(new_name).await.expect("set_name");
         
         // Verify meta.db updated
         assert_eq!(node.name(), Some(new_name.to_string()));
         
         // Verify store updated
-        let stored_name = store.get(name_key.as_bytes()).await.unwrap();
-        assert_eq!(stored_name, Some(new_name.as_bytes().to_vec()));
+        {
+            let store = node.root_store();
+            let store = store.as_ref().unwrap();
+            let stored_name = store.get(name_key.as_bytes()).await.unwrap();
+            assert_eq!(stored_name, Some(new_name.as_bytes().to_vec()));
+        }
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
