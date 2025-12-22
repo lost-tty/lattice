@@ -188,95 +188,97 @@ impl LatticeNode {
 /// A handle to a specific store - wraps channel to actor thread
 pub struct StoreHandle {
     store_id: Uuid,
-    tx: std::sync::mpsc::Sender<crate::store_actor::StoreCmd>,
+    tx: tokio::sync::mpsc::Sender<crate::store_actor::StoreCmd>,
     actor_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl StoreHandle {
     pub fn id(&self) -> Uuid { self.store_id }
 
-    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, NodeError> {
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, NodeError> {
         use crate::store_actor::StoreCmd;
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-        self.tx.send(StoreCmd::Get { key: key.to_vec(), resp: resp_tx })
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::Get { key: key.to_vec(), resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.recv()
+        resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
             .map_err(NodeError::Store)
     }
 
-    pub fn get_heads(&self, key: &[u8]) -> Result<Vec<lattice_core::HeadInfo>, NodeError> {
+    pub async fn get_heads(&self, key: &[u8]) -> Result<Vec<lattice_core::HeadInfo>, NodeError> {
         use crate::store_actor::StoreCmd;
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-        self.tx.send(StoreCmd::GetHeads { key: key.to_vec(), resp: resp_tx })
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::GetHeads { key: key.to_vec(), resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.recv()
+        resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
             .map_err(NodeError::Store)
     }
 
-    pub fn list(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
+    pub async fn list(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
         use crate::store_actor::StoreCmd;
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-        self.tx.send(StoreCmd::List { resp: resp_tx })
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::List { resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.recv()
+        resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
             .map_err(NodeError::Store)
     }
 
-    pub fn log_seq(&self) -> u64 {
+    pub async fn log_seq(&self) -> u64 {
         use crate::store_actor::StoreCmd;
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-        let _ = self.tx.send(StoreCmd::LogSeq { resp: resp_tx });
-        resp_rx.recv().unwrap_or(0)
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(StoreCmd::LogSeq { resp: resp_tx }).await;
+        resp_rx.await.unwrap_or(0)
     }
 
-    pub fn applied_seq(&self) -> Result<u64, NodeError> {
+    pub async fn applied_seq(&self) -> Result<u64, NodeError> {
         use crate::store_actor::StoreCmd;
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-        self.tx.send(StoreCmd::AppliedSeq { resp: resp_tx })
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::AppliedSeq { resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.recv()
+        resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
             .map_err(NodeError::Store)
     }
 
-    pub fn author_state(&self, author: &[u8; 32]) -> Result<Option<lattice_core::proto::AuthorState>, NodeError> {
+    pub async fn author_state(&self, author: &[u8; 32]) -> Result<Option<lattice_core::proto::AuthorState>, NodeError> {
         use crate::store_actor::StoreCmd;
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-        self.tx.send(StoreCmd::AuthorState { author: *author, resp: resp_tx })
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::AuthorState { author: *author, resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.recv()
+        resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
             .map_err(NodeError::Store)
     }
 
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<u64, NodeError> {
+    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<u64, NodeError> {
         use crate::store_actor::StoreCmd;
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-        self.tx.send(StoreCmd::Put { key: key.to_vec(), value: value.to_vec(), resp: resp_tx })
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::Put { key: key.to_vec(), value: value.to_vec(), resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.recv()
+        resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
             .map_err(|e| NodeError::Actor(e.to_string()))
     }
 
-    pub fn delete(&self, key: &[u8]) -> Result<u64, NodeError> {
+    pub async fn delete(&self, key: &[u8]) -> Result<u64, NodeError> {
         use crate::store_actor::StoreCmd;
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-        self.tx.send(StoreCmd::Delete { key: key.to_vec(), resp: resp_tx })
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::Delete { key: key.to_vec(), resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.recv()
+        resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
             .map_err(|e| NodeError::Actor(e.to_string()))
     }
+
 }
 
 impl Drop for StoreHandle {
     fn drop(&mut self) {
-        // Send shutdown command and wait for actor to finish
-        let _ = self.tx.send(crate::store_actor::StoreCmd::Shutdown);
+        // Send shutdown command (non-blocking) and wait for actor to finish
+        // Use try_send to avoid panic in async context
+        let _ = self.tx.try_send(crate::store_actor::StoreCmd::Shutdown);
         if let Some(handle) = self.actor_handle.take() {
             let _ = handle.join();
         }
@@ -294,8 +296,8 @@ mod tests {
         DataDir::new(path)
     }
 
-    #[test]
-    fn test_create_and_open_store() {
+    #[tokio::test]
+    async fn test_create_and_open_store() {
         let data_dir = temp_data_dir("meta_store");
         
         let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
@@ -311,14 +313,14 @@ mod tests {
         assert!(stores.contains(&store_id));
         
         let (handle, _) = node.open_store(store_id).expect("Failed to open store");
-        handle.put(b"/key", b"value").expect("put failed");
-        assert_eq!(handle.get(b"/key").unwrap(), Some(b"value".to_vec()));
+        handle.put(b"/key", b"value").await.expect("put failed");
+        assert_eq!(handle.get(b"/key").await.unwrap(), Some(b"value".to_vec()));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[test]
-    fn test_store_isolation() {
+    #[tokio::test]
+    async fn test_store_isolation() {
         let data_dir = temp_data_dir("meta_isolation");
         
         let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
@@ -329,12 +331,12 @@ mod tests {
         let store_b = node.create_store().expect("create B");
         
         let (handle_a, _) = node.open_store(store_a).expect("open A");
-        handle_a.put(b"/key", b"from A").expect("put A");
+        handle_a.put(b"/key", b"from A").await.expect("put A");
         
         let (handle_b, _) = node.open_store(store_b).expect("open B");
-        assert_eq!(handle_b.get(b"/key").unwrap(), None);
+        assert_eq!(handle_b.get(b"/key").await.unwrap(), None);
         
-        assert_eq!(handle_a.get(b"/key").unwrap(), Some(b"from A".to_vec()));
+        assert_eq!(handle_a.get(b"/key").await.unwrap(), Some(b"from A".to_vec()));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -398,8 +400,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[test]
-    fn test_idempotent_put_and_delete() {
+    #[tokio::test]
+    async fn test_idempotent_put_and_delete() {
         let data_dir = temp_data_dir("idempotent");
         
         let node = LatticeNodeBuilder { data_dir: data_dir.clone() }
@@ -409,22 +411,22 @@ mod tests {
         let (store, _) = node.open_store(store_id).expect("open store");
         
         // Put twice with same value - second should be idempotent
-        let seq1 = store.put(b"/key", b"value").expect("put 1");
+        let seq1 = store.put(b"/key", b"value").await.expect("put 1");
         assert_eq!(seq1, 1);
         
-        let seq2 = store.put(b"/key", b"value").expect("put 2");
+        let seq2 = store.put(b"/key", b"value").await.expect("put 2");
         assert_eq!(seq2, 1, "Second put with same value should be idempotent (no new entry)");
         
-        assert_eq!(store.log_seq(), 1, "Log should have 1 entry, not 2");
+        assert_eq!(store.log_seq().await, 1, "Log should have 1 entry, not 2");
         
         // Delete twice - second should be idempotent
-        let seq3 = store.delete(b"/key").expect("delete 1");
+        let seq3 = store.delete(b"/key").await.expect("delete 1");
         assert_eq!(seq3, 2);
         
-        let seq4 = store.delete(b"/key").expect("delete 2");
+        let seq4 = store.delete(b"/key").await.expect("delete 2");
         assert_eq!(seq4, 2, "Second delete should be idempotent (no new entry)");
         
-        assert_eq!(store.log_seq(), 2, "Log should have 2 entries, not 3");
+        assert_eq!(store.log_seq().await, 2, "Log should have 2 entries, not 3");
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }

@@ -9,7 +9,8 @@ use node::{LatticeNodeBuilder, StoreHandle};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("Lattice CLI v{}", env!("CARGO_PKG_VERSION"));
     println!("Type 'help' for commands, 'quit' to exit.\n");
 
