@@ -247,16 +247,36 @@ impl Store {
     }
     
     /// List all key-value pairs (winner values only)
-    pub fn list_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+    /// If include_deleted is true, includes tombstoned entries
+    pub fn list_all(&self, include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+        self.list_by_prefix(&[], include_deleted)
+    }
+    
+    /// List all key-value pairs matching a prefix (winner values only)
+    /// Uses efficient range query on redb's sorted B-tree
+    /// If include_deleted is true, includes tombstoned entries
+    pub fn list_by_prefix(&self, prefix: &[u8], include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(KV_TABLE)?;
         
         let mut result = Vec::new();
-        for entry in table.iter()? {
+        
+        // Use range query: from prefix to first key that doesn't match
+        for entry in table.range(prefix..)? {
             let (key, value) = entry?;
+            let key_bytes = key.value();
+            
+            // Stop when we've passed the prefix
+            if !key_bytes.starts_with(prefix) {
+                break;
+            }
+            
             let heads = HeadList::decode(value.value())?.heads;
             if let Some(winner) = Self::pick_winner(&heads) {
-                result.push((key.value().to_vec(), winner.value.clone()));
+                // Skip tombstones unless include_deleted is true
+                if include_deleted || !winner.tombstone {
+                    result.push((key_bytes.to_vec(), winner.value.clone()));
+                }
             }
         }
         Ok(result)
@@ -1669,6 +1689,61 @@ mod tests {
         
         assert_eq!(heads.len(), 3, 
             "Wrong order application creates 3 heads (expected - sync handles ordering)");
+        
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_list_by_prefix_filters_tombstones() {
+        let path = temp_db_path("list_tombstones");
+        let _ = std::fs::remove_file(&path);
+        
+        let store = Store::open(&path).unwrap();
+        let node = NodeIdentity::generate();
+        
+        // Create a key under /test/ prefix
+        let clock1 = MockClock::new(1000);
+        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .put("/test/key1", b"value1".to_vec())
+            .sign(&node);
+        store.apply_entry(&entry1).unwrap();
+        
+        // Create another key
+        let clock2 = MockClock::new(2000);
+        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash(hash_signed_entry(&entry1).to_vec())
+            .put("/test/key2", b"value2".to_vec())
+            .sign(&node);
+        store.apply_entry(&entry2).unwrap();
+        
+        // Delete key1
+        let clock3 = MockClock::new(3000);
+        let entry3 = EntryBuilder::new(3, HLC::now_with_clock(&clock3))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash(hash_signed_entry(&entry2).to_vec())
+            .parent_hashes(vec![hash_signed_entry(&entry1).to_vec()])
+            .delete(b"/test/key1")
+            .sign(&node);
+        store.apply_entry(&entry3).unwrap();
+        
+        // list_by_prefix without include_deleted should only show key2
+        let entries = store.list_by_prefix(b"/test/", false).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, b"/test/key2");
+        
+        // list_by_prefix with include_deleted should show both (key1 as tombstone)
+        let entries_all = store.list_by_prefix(b"/test/", true).unwrap();
+        assert_eq!(entries_all.len(), 2);
+        
+        // Verify list_all also respects the flag
+        let all_entries = store.list_all(false).unwrap();
+        assert_eq!(all_entries.len(), 1);
+        
+        let all_entries_incl_deleted = store.list_all(true).unwrap();
+        assert_eq!(all_entries_incl_deleted.len(), 2);
         
         let _ = std::fs::remove_file(&path);
     }

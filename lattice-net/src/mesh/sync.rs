@@ -52,11 +52,8 @@ pub async fn join_mesh(
             let store_uuid = lattice_core::Uuid::from_slice(&resp.store_uuid)
                 .map_err(|_| NodeError::Actor("Invalid UUID from peer".to_string()))?;
             
-            // Create local store with that UUID
-            node.create_store_with_uuid(store_uuid)?;
-            node.set_root_store(store_uuid)?;
-            
-            let (handle, _) = node.open_store(store_uuid)?;
+            // Complete join - creates store, sets as root, caches handle
+            let handle = node.complete_join(store_uuid).await?;
             
             // Immediately sync with the peer to get initial data
             println!("[Join] Syncing with peer to get initial data...");
@@ -66,16 +63,7 @@ pub async fn join_mesh(
                 }
                 Err(e) => {
                     eprintln!("[Join] Warning: Initial sync failed: {}", e);
-                    // Don't fail join, just warn - peer might not have data yet
                 }
-            }
-            
-            // Write our name to the store (separate key, not JSON)
-            // Note: inviter sets our status to 'active' via server.rs
-            let pubkey_hex = hex::encode(node.node_id());
-            if let Some(name) = node.name() {
-                let name_key = format!("/nodes/{}/name", pubkey_hex);
-                let _ = handle.put(name_key.as_bytes(), name.as_bytes()).await;
             }
             
             Ok(handle)
@@ -109,6 +97,7 @@ pub async fn sync_with_peer(
     // 1. Send SyncRequest with our state (don't finish yet - we'll send entries later)
     let req = PeerMessage {
         message: Some(peer_message::Message::SyncRequest(lattice_core::proto::SyncRequest {
+            store_id: store.id().as_bytes().to_vec(),
             state: Some(my_state.to_proto()),
             full_sync: false,
         })),
@@ -163,7 +152,7 @@ pub async fn sync_with_peer(
     })
 }
 
-/// Sync with all active peers from the store.
+/// Sync with all active peers from the node.
 pub async fn sync_all(
     node: &Node,
     endpoint: &LatticeEndpoint,
@@ -171,31 +160,19 @@ pub async fn sync_all(
 ) -> Result<Vec<SyncResult>, NodeError> {
     let my_pubkey = hex::encode(node.node_id());
     
-    // Get all active peers (invited peers haven't joined yet)
-    let all_entries = store.list().await?;
-    let mut peer_ids = Vec::new();
+    // Get all active peers using node.list_peers()
+    let peers = node.list_peers().await?;
+    let mut results = Vec::new();
     
-    for (key, value) in &all_entries {
-        let key_str = String::from_utf8_lossy(key);
-        if key_str.ends_with("/status") && value == PeerStatus::Active.as_str().as_bytes() {
-            if let Some(pubkey) = key_str.strip_prefix("/nodes/").and_then(|s| s.strip_suffix("/status")) {
-                if pubkey != my_pubkey {
-                    if let Ok(id) = parse_node_id(pubkey) {
-                        peer_ids.push(id);
+    for peer in peers {
+        if peer.status == PeerStatus::Active && peer.pubkey != my_pubkey {
+            if let Ok(peer_id) = parse_node_id(&peer.pubkey) {
+                match sync_with_peer(endpoint, store, peer_id).await {
+                    Ok(result) => results.push(result),
+                    Err(e) => {
+                        eprintln!("Sync with {} failed: {}", peer_id.fmt_short(), e);
                     }
                 }
-            }
-        }
-    }
-    
-    // Sync with each peer
-    let mut results = Vec::new();
-    for peer_id in peer_ids {
-        match sync_with_peer(endpoint, store, peer_id).await {
-            Ok(result) => results.push(result),
-            Err(e) => {
-                // Log error but continue with other peers
-                eprintln!("Sync with {} failed: {}", peer_id.fmt_short(), e);
             }
         }
     }

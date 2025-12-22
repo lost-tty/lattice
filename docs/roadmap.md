@@ -127,10 +127,7 @@
 - [x] Entry ordering: Per-author streaming is correct (hash chain per author, HLC for cross-author).
 - [x] Multi-head sync fixed: SyncState now tracks HashSet of head hashes per author.
 - [x] Sync entry ordering: Entries sent in HLC order (merge-sort across authors) to ensure causal order.
-
-*Background Sync:*
-- [ ] Periodic sync with known peers
-- [ ] Track last sync time per peer
+- [x] `join_mesh` doesn't populate `node.root_store`: Fixed with `complete_join` method.
 
 ### Success Criteria
 
@@ -138,26 +135,43 @@
 - Works offline-first (sync when connected)
 
 **Post-M2 Refactoring:**
-- [ ] Unify `node.rs` from `lattice-cli` and `lattice-core`
-- [ ] Use prost for node status in store
+- [x] Unify `node.rs` from `lattice-cli` and `lattice-core`
+- [x] Move network code to `lattice-net`
 
 ---
 
 ## Milestone 3: Multi-Node Mesh
 
-**Goal:** N nodes form a gossip mesh with watermark consensus.
+**Goal:** N nodes form a gossip mesh for real-time sync.
 
 ### Deliverables
 
-- [ ] Gossip protocol
-- [ ] Watermark tracking & log pruning
-- [ ] Node invitation (sigchain membership)
-- [ ] Conflict detection (LWW resolution)
+**Phase 1: LatticeServer Refactor**
+- [ ] `LatticeServer` struct in `lattice-net` wrapping `Arc<Node>` + `Endpoint`
+- [ ] Move `join_mesh`, `sync_with_peer`, `sync_all` to `LatticeServer` methods
+- [ ] Encapsulate `spawn_accept_loop` inside `LatticeServer`
+- [ ] CLI uses `LatticeServer` instead of raw `Node` + `Endpoint`
+- [ ] Route sync command through `LatticeServer` (not raw functions)
+- [ ] Integration test: invite → join → sync end-to-end
+- [ ] Periodic background sync with known peers
+- [ ] Track last sync time per peer
+
+**Phase 2: Gossip Protocol**
+- [ ] Proto: `GossipAnnounce` message with author + latest seq + HLC
+- [ ] `LatticeServer::spawn_gossip_loop` for periodic announcements
+- [ ] On receiving announce: detect missing entries, trigger sync
+- [ ] Track last-seen per peer for staleness detection
 
 ---
 
 ## Future
 
+- remove_peer should be a transactional operation on store
+- Watermark tracking & log pruning
+  - Track minimum confirmed seq per author across all peers
+  - Log pruning: remove entries below watermark
+- Multi-KV-Store sync
+- Optimized sync on join. Only transfer current watermark state, then sync missing entries. This would allow pruning. Might need snapshot support in KV store.
 - Mobile (iOS/Android) clients
 - Key rotation
 - Secure storage (Keychain, TPM)

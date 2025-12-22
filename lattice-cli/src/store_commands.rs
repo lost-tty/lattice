@@ -11,7 +11,7 @@ pub fn store_commands() -> Vec<Command> {
         Command { name: "put", args: "<key> <value>", desc: "Store a key-value pair", group: "store", min_args: 2, max_args: 2, handler: cmd_put as Handler },
         Command { name: "get", args: "<key> [-v]", desc: "Get value for key", group: "store", min_args: 1, max_args: 2, handler: cmd_get as Handler },
         Command { name: "delete", args: "<key>", desc: "Delete a key", group: "store", min_args: 1, max_args: 1, handler: cmd_delete as Handler },
-        Command { name: "list", args: "[-v]", desc: "List all keys", group: "store", min_args: 0, max_args: 1, handler: cmd_list as Handler },
+        Command { name: "list", args: "[prefix] [-v]", desc: "List keys (optionally filtered by prefix)", group: "store", min_args: 0, max_args: 2, handler: cmd_list as Handler },
         Command { name: "author-state", args: "[pubkey]", desc: "Show author sync state", group: "store", min_args: 0, max_args: 1, handler: cmd_author_state as Handler },
     ]
 }
@@ -26,7 +26,7 @@ fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option
     println!("Log Seq:  {}", block_async(h.log_seq()));
     println!("Applied:  {}", block_async(h.applied_seq()).unwrap_or(0));
     
-    let all = block_async(h.list()).unwrap_or_default();
+    let all = block_async(h.list(false)).unwrap_or_default();
     println!("Keys:     {}", all.len());
     
     // Show log directory size
@@ -120,9 +120,19 @@ fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&Lattic
         println!("No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
-    let verbose = args.first().map(|a| a == "-v").unwrap_or(false);
+    
+    // Parse args: [prefix] [-v]
+    let verbose = args.iter().any(|a| a == "-v");
+    let prefix = args.iter().find(|a| *a != "-v").cloned();
+    
     let start = Instant::now();
-    match block_async(h.list()) {
+    let result = if let Some(p) = &prefix {
+        block_async(h.list_by_prefix(p.as_bytes(), verbose))
+    } else {
+        block_async(h.list(verbose))
+    };
+    
+    match result {
         Ok(entries) => {
             if entries.is_empty() {
                 println!("(empty)");
@@ -154,7 +164,8 @@ fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&Lattic
                         }
                     }
                 }
-                println!("({} keys, {:.2?})", entries.len(), start.elapsed());
+                let prefix_str = prefix.as_ref().map(|p| format!(" (prefix: {})", p)).unwrap_or_default();
+                println!("({} keys{}, {:.2?})", entries.len(), prefix_str, start.elapsed());
             }
         }
         Err(e) => eprintln!("Error: {}", e),
