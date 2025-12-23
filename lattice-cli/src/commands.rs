@@ -1,7 +1,7 @@
 //! CLI command handlers
 
 use lattice_core::{Node, StoreHandle};
-use lattice_net::LatticeEndpoint;
+use lattice_net::LatticeServer;
 
 /// Result of a command that may switch stores or exit
 pub enum CommandResult {
@@ -18,7 +18,7 @@ pub fn block_async<F: std::future::Future>(f: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
-pub type Handler = fn(&Node, Option<&StoreHandle>, Option<&LatticeEndpoint>, &[String]) -> CommandResult;
+pub type Handler = fn(&Node, Option<&StoreHandle>, Option<&LatticeServer>, &[String]) -> CommandResult;
 
 pub struct Command {
     pub name: &'static str,
@@ -53,7 +53,7 @@ pub fn commands() -> Vec<Command> {
     cmds
 }
 
-fn cmd_help(_node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, _args: &[String]) -> CommandResult {
+fn cmd_help(_node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String]) -> CommandResult {
     let cmds = commands();
     let mut last_group = "";
     for cmd in &cmds {
@@ -73,7 +73,7 @@ fn cmd_help(_node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&Latti
     CommandResult::Ok
 }
 
-fn cmd_quit(_node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, _args: &[String]) -> CommandResult {
+fn cmd_quit(_node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String]) -> CommandResult {
     println!("Goodbye!");
     CommandResult::Quit
 }

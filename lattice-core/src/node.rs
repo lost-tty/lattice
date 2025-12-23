@@ -840,4 +840,108 @@ mod tests {
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
+
+    #[tokio::test]
+    async fn test_invite_peer() {
+        let data_dir = temp_data_dir("invite_peer");
+        
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        
+        // Init first
+        node.init().await.expect("init");
+        
+        // Invite a peer
+        let peer_pubkey = [0u8; 32]; // Dummy pubkey
+        node.invite_peer(&peer_pubkey).await.expect("invite");
+        
+        // Verify peer is Invited
+        let peers = node.list_peers().await.expect("list_peers");
+        let invited = peers.iter().find(|p| p.pubkey == hex::encode(peer_pubkey));
+        assert!(invited.is_some(), "Should find invited peer");
+        assert_eq!(invited.unwrap().status, PeerStatus::Invited);
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+
+    #[tokio::test]
+    async fn test_accept_join() {
+        let data_dir = temp_data_dir("accept_join");
+        
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        
+        // Init first
+        let store_id = node.init().await.expect("init");
+        
+        // Invite a peer
+        let peer_pubkey = [1u8; 32]; // Dummy pubkey
+        node.invite_peer(&peer_pubkey).await.expect("invite");
+        
+        // Accept the join
+        let acceptance = node.accept_join(&peer_pubkey).await.expect("accept_join");
+        assert_eq!(acceptance.store_id, store_id);
+        
+        // Peer should now be Active
+        let peers = node.list_peers().await.expect("list_peers");
+        let peer = peers.iter().find(|p| p.pubkey == hex::encode(peer_pubkey));
+        assert!(peer.is_some(), "Should find peer");
+        assert_eq!(peer.unwrap().status, PeerStatus::Active);
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+
+    #[tokio::test]
+    async fn test_invite_join_sync_flow() {
+        // Node A: creator, Node B: joiner
+        let data_dir_a = temp_data_dir("flow_a");
+        let data_dir_b = temp_data_dir("flow_b");
+        
+        let node_a = NodeBuilder { data_dir: data_dir_a.clone() }
+            .build()
+            .expect("create node A");
+        let node_b = NodeBuilder { data_dir: data_dir_b.clone() }
+            .build()
+            .expect("create node B");
+        
+        // Step 1: Node A initializes
+        let store_id = node_a.init().await.expect("A init");
+        let store_a = node_a.root_store().await;
+        let store_a = store_a.as_ref().expect("A has root store");
+        
+        // Step 2: A invites B
+        let b_pubkey: [u8; 32] = node_b.node_id().try_into().unwrap();
+        node_a.invite_peer(&b_pubkey).await.expect("invite B");
+        
+        // Verify B is invited
+        let peers = node_a.list_peers().await.expect("list peers");
+        assert!(peers.iter().any(|p| p.status == PeerStatus::Invited));
+        
+        // Step 3: B "joins" (complete_join simulates receiving JoinResponse)
+        let store_b = node_b.complete_join(store_id).await.expect("B join");
+        
+        // Verify B has the same store ID
+        assert_eq!(store_b.id(), store_id);
+        
+        // Step 4: A writes data
+        store_a.put(b"/key", b"from A").await.expect("A put");
+        
+        // Step 5: B writes data independently
+        store_b.put(b"/key", b"from B").await.expect("B put");
+        
+        // Each store has its own local state (not synced yet)
+        let a_val = store_a.get(b"/key").await.expect("A get").unwrap();
+        let b_val = store_b.get(b"/key").await.expect("B get").unwrap();
+        
+        // A sees "from A" (its own write wins locally)
+        assert_eq!(a_val, b"from A".to_vec());
+        // B sees "from B" (its own write wins locally)  
+        assert_eq!(b_val, b"from B".to_vec());
+        
+        // Cleanup
+        let _ = std::fs::remove_dir_all(data_dir_a.base());
+        let _ = std::fs::remove_dir_all(data_dir_b.base());
+    }
 }

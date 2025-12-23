@@ -147,10 +147,10 @@
 ### Deliverables
 
 **Phase 1: LatticeServer Refactor**
-- [ ] `LatticeServer` struct in `lattice-net` wrapping `Arc<Node>` + `Endpoint`
-- [ ] Move `join_mesh`, `sync_with_peer`, `sync_all` to `LatticeServer` methods
-- [ ] Encapsulate `spawn_accept_loop` inside `LatticeServer`
-- [ ] CLI uses `LatticeServer` instead of raw `Node` + `Endpoint`
+- [x] `LatticeServer` struct in `lattice-net` wrapping `Arc<Node>` + `Endpoint`
+- [x] Move `join_mesh`, `sync_with_peer`, `sync_all` to `LatticeServer` methods
+- [x] Encapsulate `spawn_accept_loop` inside `LatticeServer`
+- [x] CLI uses `LatticeServer` instead of raw `Node` + `Endpoint`
 - [ ] Route sync command through `LatticeServer` (not raw functions)
 - [ ] Integration test: invite → join → sync end-to-end
 - [ ] Periodic background sync with known peers
@@ -166,6 +166,11 @@
 
 ## Future
 
+- Gossip:
+  - gossip new entries to peers
+  - backfill missing entries from peers (how do peers notice missing entries?)
+  - snapshots for kv store
+  - prune using consensus watermark
 - remove_peer should be a transactional operation on store
 - Watermark tracking & log pruning
   - Track minimum confirmed seq per author across all peers

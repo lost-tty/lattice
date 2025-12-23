@@ -4,7 +4,7 @@ mod commands;
 mod node_commands;
 mod store_commands;
 
-use lattice_net::spawn_accept_loop;
+use lattice_net::LatticeServer;
 use commands::CommandResult;
 use lattice_core::{NodeBuilder, StoreHandle};
 use rustyline::error::ReadlineError;
@@ -24,22 +24,17 @@ async fn main() {
         }
     };
     
-    // Start Iroh endpoint using same Ed25519 identity
-    let endpoint = match lattice_net::LatticeEndpoint::new(node.secret_key_bytes()).await {
-        Ok(ep) => {
-            println!("Iroh:    {} (listening)", ep.public_key().fmt_short());
-            Some(ep)
+    // Create LatticeServer (creates endpoint and spawns accept loop internally)
+    let server = match LatticeServer::new_from_node(node.clone()).await {
+        Ok(s) => {
+            println!("Iroh:    {} (listening)", s.endpoint().public_key().fmt_short());
+            Some(s)
         }
         Err(e) => {
             eprintln!("Warning: Iroh failed to start: {}", e);
             None
         }
     };
-    
-    // Spawn accept loop for incoming connections
-    if let Some(ref ep) = endpoint {
-        spawn_accept_loop(node.clone(), ep.endpoint().clone());
-    }
     
     let info = node.info();
     println!("Node ID: {}", info.node_id);
@@ -100,7 +95,7 @@ async fn main() {
                         if cmd_args.len() < cmd.min_args || cmd_args.len() > cmd.max_args {
                             println!("Usage: {} {}", cmd.name, cmd.args);
                         } else {
-                            match (cmd.handler)(&node, current_store.as_ref(), endpoint.as_ref(), cmd_args) {
+                            match (cmd.handler)(&node, current_store.as_ref(), server.as_ref(), cmd_args) {
                                 CommandResult::Ok => {}
                                 CommandResult::SwitchTo(h) => {
                                     current_store = Some(h);
