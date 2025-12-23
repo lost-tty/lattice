@@ -191,27 +191,21 @@
 
 ## Future
 
-- offline nodes should not delay sync
-- sync command should transitive sync all peers
-- Gossip:
-  - gossip new entries to peers
-  - backfill missing entries from peers (how do peers notice missing entries?)
-  - snapshots for kv store
-  - prune using consensus watermark
-- remove_peer should be a transactional operation on store
+- Offline nodes should not delay sync
+- Sync command should transitive sync all peers
+- CRDTs: Richer data types (PN-Counters, OR-Sets)
+  - OR-Sets for peer list management
+- Transaction Groups: Atomic batched operations
 - Watermark tracking & log pruning
-  - Track minimum confirmed seq per author across all peers
-  - Log pruning: remove entries below watermark
+  - Track min confirmed seq per author across all peers
+  - Prune entries below watermark
+- Snapshots: Fast bootstrap, optimized join, KV state transfer
 - Multi-KV-Store sync
-- Optimized sync on join. Only transfer current watermark state, then sync missing entries. This would allow pruning. Might need snapshot support in KV store.
 - Mobile (iOS/Android) clients
 - Key rotation
 - Secure storage (Keychain, TPM)
-- Snapshots for fast bootstrap
 - FUSE filesystem mount
-  - Note: FUSE requires u64 inode numbers → maintain `BiMap<u64, Hash>` in redb
+  - Note: requires u64 inodes → BiMap<u64, Hash> in redb
 - Merkle-ized State
   - state.db as Merkle tree with signed root hash
-  - O(1) sync checks (compare root), efficient binary-search diffing
-  - Light clients: fetch value + Merkle proof, verify without full state
-  - Trade-off: write amplification, requires deterministic tree (Patricia Trie / Merkle Search Tree)
+  - O(1) sync checks, efficient diffing, light clients

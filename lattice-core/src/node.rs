@@ -61,6 +61,7 @@ pub struct JoinAcceptance {
 }
 
 /// Information about a peer in the mesh
+#[derive(Clone, Debug)]
 pub struct PeerInfo {
     pub pubkey: String,
     pub name: Option<String>,
