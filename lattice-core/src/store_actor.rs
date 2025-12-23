@@ -10,7 +10,7 @@ use crate::{
     proto::SignedEntry,
     log,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, broadcast};
 use std::thread::{self, JoinHandle};
 
 /// Commands sent to the store actor
@@ -103,9 +103,11 @@ impl std::error::Error for StoreActorError {}
 pub struct StoreActor {
     store_id: Uuid,
     store: Store,
-    chain_manager: SigChainManager,  // Manages all authors' sigchains
+    chain_manager: SigChainManager,
     node: NodeIdentity,
     rx: mpsc::Receiver<StoreCmd>,
+    /// Broadcast sender for emitting entries after they're committed locally
+    entry_tx: broadcast::Sender<SignedEntry>,
 }
 
 impl StoreActor {
@@ -116,6 +118,7 @@ impl StoreActor {
         sigchain: SigChain,
         node: NodeIdentity,
         rx: mpsc::Receiver<StoreCmd>,
+        entry_tx: broadcast::Sender<SignedEntry>,
     ) -> Self {
         // Derive logs_dir from sigchain's log file path
         let logs_dir = sigchain.log_path()
@@ -134,6 +137,7 @@ impl StoreActor {
             chain_manager,
             node,
             rx,
+            entry_tx,
         }
     }
 
@@ -253,6 +257,9 @@ impl StoreActor {
         let sigchain = self.chain_manager.get_or_create(local_author);
         sigchain.append(&entry)?;
         self.store.apply_entry(&entry)?;
+        
+        // Broadcast the entry to listeners (for gossip)
+        let _ = self.entry_tx.send(entry.clone());
 
         Ok(seq)
     }
@@ -276,16 +283,17 @@ impl StoreActor {
     }
 }
 
-/// Spawn a store actor in a new thread, returns (sender, join_handle)
+/// Spawn a store actor in a new thread, returns (cmd_tx, entry_tx, join_handle)
 /// Uses std::thread since redb is blocking
 pub fn spawn_store_actor(
     store_id: Uuid,
     store: Store,
     sigchain: SigChain,
     node: NodeIdentity,
-) -> (mpsc::Sender<StoreCmd>, JoinHandle<()>) {
+) -> (mpsc::Sender<StoreCmd>, broadcast::Sender<SignedEntry>, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(32);
-    let actor = StoreActor::new(store_id, store, sigchain, node, rx);
+    let (entry_tx, _entry_rx) = broadcast::channel(64);
+    let actor = StoreActor::new(store_id, store, sigchain, node, rx, entry_tx.clone());
     let handle = thread::spawn(move || actor.run());
-    (tx, handle)
+    (tx, entry_tx, handle)
 }

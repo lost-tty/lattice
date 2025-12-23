@@ -12,7 +12,7 @@ pub mod gossip;
 pub mod framing;
 pub mod mesh;
 
-pub use endpoint::{LatticeEndpoint, PublicKey};
+pub use endpoint::{LatticeEndpoint, PublicKey, LATTICE_ALPN};
 pub use framing::{MessageSink, MessageStream};
 pub use lattice_core::proto::{SyncRequest, SyncResponse, SyncEntry, SyncDone, SyncState, Frontier};
 pub use mesh::{LatticeServer, SyncResult};

@@ -28,7 +28,10 @@ impl LatticeEndpoint {
         
         let endpoint = Endpoint::builder()
             .secret_key(secret_key)
-            .alpns(vec![LATTICE_ALPN.to_vec()])
+            .alpns(vec![
+                LATTICE_ALPN.to_vec(),
+                iroh_gossip::ALPN.to_vec(),  // Also accept gossip protocol
+            ])
             .discovery(mdns)  // Add mDNS on top of default DNS
             .bind()
             .await?;

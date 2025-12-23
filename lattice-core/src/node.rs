@@ -8,9 +8,11 @@ use crate::{
     store::StoreError,
     spawn_store_actor, StoreCmd,
     node_identity::NodeError as IdentityError,
+    proto::SignedEntry,
 };
 use std::path::Path;
 use thiserror::Error;
+use tokio::sync::broadcast;
 
 #[derive(Error, Debug)]
 pub enum NodeError {
@@ -67,6 +69,13 @@ pub struct PeerInfo {
     pub status: PeerStatus,
 }
 
+/// Events emitted by Node for interested listeners (e.g., LatticeServer)
+#[derive(Clone, Debug)]
+pub enum NodeEvent {
+    /// Root store was activated (opened or set)
+    RootStoreActivated(StoreHandle),
+}
+
 pub struct NodeBuilder {
     pub data_dir: DataDir,
 }
@@ -90,7 +99,6 @@ impl NodeBuilder {
         };
 
         let meta = MetaStore::open(self.data_dir.meta_db())?;
-        
         // Set hostname on first creation
         if is_new {
             let hostname = hostname::get()
@@ -98,12 +106,16 @@ impl NodeBuilder {
                 .unwrap_or_else(|_| "unknown".to_string());
             let _ = meta.set_name(&hostname);
         }
+        
+        // Create event channel
+        let (event_tx, _) = broadcast::channel(16);
 
         Ok(Node {
             data_dir: self.data_dir,
             node: std::sync::Arc::new(node),
             meta,
             root_store: tokio::sync::RwLock::new(None),
+            event_tx,
         })
     }
 }
@@ -118,6 +130,7 @@ pub struct Node {
     node: std::sync::Arc<NodeIdentity>,
     meta: MetaStore,
     root_store: tokio::sync::RwLock<Option<StoreHandle>>,
+    event_tx: broadcast::Sender<NodeEvent>,
 }
 
 impl Node {
@@ -131,6 +144,11 @@ impl Node {
 
     pub fn node_id(&self) -> [u8; 32] {
         self.node.public_key_bytes()
+    }
+    
+    /// Subscribe to node events (e.g., root store activation)
+    pub fn subscribe_events(&self) -> broadcast::Receiver<NodeEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Get the secret key bytes for Iroh integration (same Ed25519 key)
@@ -184,7 +202,13 @@ impl Node {
         match self.meta.root_store()? {
             Some(id) => {
                 let (handle, info) = self.open_store(id).await?;
+                
+                // Emit event for listeners (send clone, keep original)
+                let _ = self.event_tx.send(NodeEvent::RootStoreActivated(handle.clone()));
+                
+                // Store original handle (owns actor thread)
                 *self.root_store.write().await = Some(handle);
+                
                 Ok(Some(info))
             }
             None => Ok(None),
@@ -234,14 +258,18 @@ impl Node {
         self.create_store_with_uuid(store_id)?;
         self.meta.set_root_store(store_id)?;
         
-        // Open and cache the handle
+        // Open and cache the handle (original stays in cache)
         let (handle, _) = self.open_store(store_id).await?;
-        *self.root_store.write().await = Some(handle.clone());
+        let handle_clone = handle.clone();
+        *self.root_store.write().await = Some(handle);
+        
+        // Emit event for listeners
+        let _ = self.event_tx.send(NodeEvent::RootStoreActivated(handle_clone.clone()));
         
         // Publish our name to the store
         let _ = self.publish_name().await;
         
-        Ok(handle)
+        Ok(handle_clone)
     }
     
     // --- Peer Management ---
@@ -471,17 +499,19 @@ impl Node {
         let info = StoreInfo { store_id, entries_replayed };
         
         // Spawn actor thread - actor owns store, sigchain, and node copy
-        let (tx, actor_handle) = spawn_store_actor(
+        let (tx, entry_tx, actor_handle) = spawn_store_actor(
             store_id,
             store,
             sigchain,
             (*self.node).clone(),
         );
         
+        // Store the entry sender for gossip
         let handle = StoreHandle {
             store_id,
             tx,
             actor_handle: Some(actor_handle),
+            entry_tx,
         };
         
         Ok((handle, info))
@@ -489,10 +519,12 @@ impl Node {
 }
 
 /// A handle to a specific store - wraps channel to actor thread
+#[derive(Debug)]
 pub struct StoreHandle {
     store_id: Uuid,
     tx: tokio::sync::mpsc::Sender<StoreCmd>,
     actor_handle: Option<std::thread::JoinHandle<()>>,
+    entry_tx: broadcast::Sender<SignedEntry>,
 }
 
 impl Clone for StoreHandle {
@@ -501,12 +533,18 @@ impl Clone for StoreHandle {
             store_id: self.store_id,
             tx: self.tx.clone(),
             actor_handle: None, // Clones don't own the actor thread
+            entry_tx: self.entry_tx.clone(),
         }
     }
 }
 
 impl StoreHandle {
     pub fn id(&self) -> Uuid { self.store_id }
+    
+    /// Subscribe to receive entries as they're committed locally
+    pub fn subscribe_entries(&self) -> broadcast::Receiver<SignedEntry> {
+        self.entry_tx.subscribe()
+    }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, NodeError> {
         use StoreCmd;
