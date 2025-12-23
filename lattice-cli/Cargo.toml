@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 lattice-core = { workspace = true }
 lattice-net = { workspace = true }
-rustyline = { workspace = true }
+rustyline-async = "0.4"
 hex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -25,3 +25,6 @@ chrono = { workspace = true }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
 tempfile = "3"
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+

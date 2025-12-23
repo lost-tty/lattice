@@ -3,13 +3,22 @@
 use lattice_core::{Node, StoreHandle};
 use lattice_net::LatticeServer;
 use clap::{Parser, Subcommand, CommandFactory};
-use rustyline::completion::{Completer, Pair};
-use rustyline::Context;
-use rustyline::Helper;
-use rustyline::hint::Hinter;
-use rustyline::highlight::Highlighter;
-use rustyline::validate::Validator;
-use std::sync::{Arc, RwLock};
+use rustyline_async::SharedWriter;
+use std::sync::Arc;
+use std::io::Write;
+
+/// Macro for writing to SharedWriter with less boilerplate
+#[macro_export]
+macro_rules! wout {
+    ($writer:expr, $($arg:tt)*) => {{
+        use std::io::Write;
+        let mut w = $writer.clone();
+        let _ = writeln!(w, $($arg)*);
+    }}
+}
+
+/// Shared writer type for async output - SharedWriter is already Clone and internally synchronized
+pub type Writer = SharedWriter;
 
 /// Result of a command that may switch stores or exit
 pub enum CommandResult {
@@ -19,11 +28,6 @@ pub enum CommandResult {
     SwitchTo(StoreHandle),
     /// Exit the CLI
     Quit,
-}
-
-/// Helper to call async code from sync command handlers
-pub fn block_async<F: std::future::Future>(f: F) -> F::Output {
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
 #[derive(Parser)]
@@ -91,8 +95,9 @@ pub enum LatticeCommand {
     Quit,
 }
 
-fn print_recursive_help(cmd: &clap::Command, prefix: &str) {
+fn format_recursive_help(cmd: &clap::Command, prefix: &str, output: &mut String) {
     use std::collections::BTreeMap;
+    use std::fmt::Write;
     let mut groups: BTreeMap<Option<String>, Vec<(&clap::Command, String)>> = BTreeMap::new();
 
     for sub in cmd.get_subcommands() {
@@ -121,256 +126,18 @@ fn print_recursive_help(cmd: &clap::Command, prefix: &str) {
     let mut first_group = true;
     for (heading, subs) in groups {
         if !first_group {
-            println!();
+            let _ = writeln!(output);
         }
         if let Some(h) = heading {
-            println!("{}:", h);
+            let _ = writeln!(output, "{}:", h);
         }
         first_group = false;
 
         for (sub, full_name) in subs {
             let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
-            println!("  {:24} {}", full_name, about);
-            print_recursive_help(sub, &full_name);
+            let _ = writeln!(output, "  {:24} {}", full_name, about);
+            format_recursive_help(sub, &full_name, output);
         }
-    }
-}
-
-// --- Tab Completion ---
-
-pub struct CliHelper {
-    node: Arc<Node>,
-    current_store: Arc<RwLock<Option<StoreHandle>>>,
-}
-
-impl CliHelper {
-    pub fn new(node: Arc<Node>, current_store: Arc<RwLock<Option<StoreHandle>>>) -> Self {
-        Self { node, current_store }
-    }
-
-
-    fn suggest_peers(&self, partial: &str) -> Vec<Pair> {
-        let handle = tokio::runtime::Handle::current();
-        let peers = handle.block_on(self.node.list_peers()).unwrap_or_default();
-        
-        let mut candidates = Vec::new();
-        for peer in &peers {
-            if peer.pubkey.starts_with(partial) {
-                candidates.push(Pair {
-                    display: format!("{} ({})", peer.pubkey, peer.name.as_ref().map(|s| s.as_str()).unwrap_or("unknown")),
-                    replacement: peer.pubkey.clone(),
-                });
-            }
-        }
-        candidates
-    }
-    
-    fn suggest_stores(&self, partial: &str) -> Vec<Pair> {
-        let stores = self.node.list_stores().unwrap_or_default();
-        let mut candidates = Vec::new();
-        for store_id in stores {
-            let id_str = store_id.to_string();
-            if id_str.starts_with(partial) {
-                candidates.push(Pair {
-                    display: id_str.clone(),
-                    replacement: id_str,
-                });
-            }
-        }
-        candidates
-    }
-
-    fn suggest_keys(&self, partial: &str) -> Vec<Pair> {
-        let store_guard = self.current_store.read().unwrap();
-        if let Some(store) = store_guard.as_ref() {
-            let handle = tokio::runtime::Handle::current();
-            let keys = handle.block_on(store.list_by_prefix(partial.as_bytes(), false)).unwrap_or_default();
-            
-            let mut candidates = Vec::new();
-            for (key_bytes, _) in keys {
-                let key_str = String::from_utf8_lossy(&key_bytes).to_string();
-                if key_str.starts_with(partial) {
-                    candidates.push(Pair {
-                        display: key_str.clone(),
-                        replacement: key_str,
-                    });
-                }
-            }
-            return candidates;
-        }
-        Vec::new()
-    }
-
-    fn suggest_arguments(&self, cmd: &clap::Command, partial: &str) -> Vec<Pair> {
-        let mut candidates = Vec::new();
-
-        // Iterate over positional arguments to imply context
-        for arg in cmd.get_arguments() {
-             if arg.is_positional() {
-                 match arg.get_id().as_str() {
-                     "pubkey" | "node_id" => {
-                         candidates.extend(self.suggest_peers(partial));
-                     },
-                     "uuid" | "store_id" => {
-                         candidates.extend(self.suggest_stores(partial));
-                     },
-                     "key" | "prefix" => {
-                         candidates.extend(self.suggest_keys(partial));
-                     },
-                     _ => {}
-                 }
-            }
-        }
-        
-        candidates
-    }
-}
-
-fn longest_common_prefix(strings: &[String]) -> String {
-    if strings.is_empty() { return String::new(); }
-    let mut prefix = strings[0].clone();
-    for s in &strings[1..] {
-        while !s.starts_with(&prefix) {
-            prefix.pop();
-        }
-    }
-    prefix
-}
-
-impl Helper for CliHelper {}
-impl Hinter for CliHelper {
-    type Hint = String;
-}
-impl Highlighter for CliHelper {}
-impl Validator for CliHelper {}
-
-impl Completer for CliHelper {
-    type Candidate = Pair;
-
-    fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let (before, _after) = line.split_at(pos);
-        
-        let tokens: Vec<&str> = before.split_ascii_whitespace().collect();
-        let looking_for_new_token = before.ends_with(' ');
-        
-        let mut cmd = LatticeCli::command();
-
-        let walk_count = if looking_for_new_token {
-            tokens.len()
-        } else {
-            tokens.len().saturating_sub(1)
-        };
-
-        for i in 0..walk_count {
-            let token = tokens[i];
-            let found_sub = cmd.get_subcommands().find(|s| s.get_name() == token || s.get_all_aliases().any(|a| a == token)).cloned();
-            if let Some(sub) = found_sub {
-                cmd = sub;
-            } else {
-                return Ok((pos, Vec::new()));
-            }
-        }
-        
-        let partial = if looking_for_new_token {
-            ""
-        } else {
-            tokens.last().copied().unwrap_or("")
-        };
-
-        // Collect all matching names (not Pairs yet)
-        let mut all_matches: Vec<String> = Vec::new();
-        
-        // Add subcommand names
-        for sub in cmd.get_subcommands() {
-            let name = sub.get_name();
-            if name.starts_with(partial) {
-                all_matches.push(name.to_string());
-            }
-        }
-        
-        // Add argument suggestions (peers, keys, stores) - these are already Vec<Pair>
-        // but we need just the replacement strings for LCP calculation
-        let arg_candidates = self.suggest_arguments(&cmd, partial);
-        for pair in &arg_candidates {
-            // Only add the base name (strip trailing space if present)
-            let name = pair.replacement.trim_end();
-            if !all_matches.contains(&name.to_string()) {
-                all_matches.push(name.to_string());
-            }
-        }
-
-        // Start position
-        let start = if looking_for_new_token {
-            pos
-        } else {
-            before.rfind(' ').map(|p| p + 1).unwrap_or(0)
-        };
-
-        if all_matches.is_empty() {
-            return Ok((start, Vec::new()));
-        }
-
-        if all_matches.len() == 1 {
-            return Ok((start, vec![Pair {
-                display: all_matches[0].clone(),
-                replacement: format!("{} ", all_matches[0]),
-            }]));
-        }
-
-        let lcp = longest_common_prefix(&all_matches);
-        if lcp.len() > partial.len() {
-            return Ok((start, vec![Pair {
-                display: lcp.clone(),
-                replacement: lcp,
-            }]));
-        }
-
-        // Find shortest prefix length where we have fewer unique prefixes than matches
-        // But ensure at least 8 chars beyond input for readability
-        let lcp_len = lcp.len();
-        let max_len = all_matches.iter().map(|m| m.len()).max().unwrap_or(0);
-        let min_display_len = lcp_len + 8;
-        
-        let mut group_prefixes: Vec<String> = all_matches.clone();
-        let mut found_grouping = false;
-        
-        for prefix_len in (lcp_len + 1)..=max_len {
-            let prefixes: Vec<String> = all_matches.iter()
-                .map(|m| m.chars().take(prefix_len).collect::<String>())
-                .collect();
-            let mut unique: Vec<String> = prefixes.clone();
-            unique.sort();
-            unique.dedup();
-            
-            if unique.len() < all_matches.len() {
-                // Found a grouping point
-                if prefix_len >= min_display_len || !found_grouping {
-                    group_prefixes = unique;
-                    found_grouping = true;
-                }
-                if prefix_len >= min_display_len {
-                    break;
-                }
-            }
-        }
-        
-        let mut candidates = Vec::new();
-        for prefix in group_prefixes {
-            let is_complete = all_matches.iter().any(|m| m == &prefix);
-            let is_truncated = all_matches.iter().any(|m| m.starts_with(&prefix) && m != &prefix);
-            // Strip the already-typed prefix from display
-            let suffix = &prefix[lcp_len..];
-            let display = if is_truncated && !is_complete {
-                format!("{}…", suffix)
-            } else {
-                suffix.to_string()
-            };
-            candidates.push(Pair {
-                display,
-                replacement: if is_complete { format!("{} ", prefix) } else { prefix },
-            });
-        }
-        Ok((start, candidates))
     }
 }
 
@@ -419,49 +186,52 @@ pub enum PeerSubcommand {
     },
 }
 
-pub fn handle_command(
+pub async fn handle_command(
     node: &Node,
     store: Option<&StoreHandle>,
-    server: Option<&LatticeServer>,
+    server: Option<Arc<LatticeServer>>,
     cli: LatticeCli,
+    writer: Writer,
 ) -> CommandResult {
     match cli.command {
         LatticeCommand::Help => {
-            println!("Available commands:");
+            let mut output = String::from("Available commands:\n");
             let cmd = LatticeCli::command();
-            print_recursive_help(&cmd, "");
-            println!();
+            format_recursive_help(&cmd, "", &mut output);
+            output.push('\n');
+            let mut w = writer.clone();
+            let _ = write!(w, "{}", output);
             CommandResult::Ok
         }
         LatticeCommand::Node { subcommand } => match subcommand {
-            NodeSubcommand::Init => crate::node_commands::cmd_init(node, store, server, &[]),
-            NodeSubcommand::Status => crate::node_commands::cmd_node_status(node, store, server, &[]),
-            NodeSubcommand::Join { node_id } => crate::node_commands::cmd_join(node, store, server, &[node_id]),
+            NodeSubcommand::Init => crate::node_commands::cmd_init(node, store, server.as_deref(), &[], writer).await,
+            NodeSubcommand::Status => crate::node_commands::cmd_node_status(node, store, server.as_deref(), &[], writer).await,
+            NodeSubcommand::Join { node_id } => crate::node_commands::cmd_join(node, store, server.as_deref(), &[node_id], writer).await,
         },
         LatticeCommand::Store { subcommand } => match subcommand {
-            StoreSubcommand::Create => crate::node_commands::cmd_create_store(node, store, server, &[]),
-            StoreSubcommand::Use { uuid } => crate::node_commands::cmd_use_store(node, store, server, &[uuid]),
-            StoreSubcommand::List => crate::node_commands::cmd_list_stores(node, store, server, &[]),
-            StoreSubcommand::Status => crate::store_commands::cmd_store_status(node, store, server, &[]),
+            StoreSubcommand::Create => crate::node_commands::cmd_create_store(node, store, server.as_deref(), &[], writer).await,
+            StoreSubcommand::Use { uuid } => crate::node_commands::cmd_use_store(node, store, server.as_deref(), &[uuid], writer).await,
+            StoreSubcommand::List => crate::node_commands::cmd_list_stores(node, store, server.as_deref(), &[], writer).await,
+            StoreSubcommand::Status => crate::store_commands::cmd_store_status(node, store, server.as_deref(), &[], writer).await,
         },
         LatticeCommand::Peer { subcommand } => match subcommand {
-            PeerSubcommand::List => crate::node_commands::cmd_peers(node, store, server, &[]),
-            PeerSubcommand::Invite { pubkey } => crate::node_commands::cmd_invite(node, store, server, &[pubkey]),
-            PeerSubcommand::Remove { pubkey } => crate::node_commands::cmd_remove(node, store, server, &[pubkey]),
+            PeerSubcommand::List => crate::node_commands::cmd_peers(node, store, server.as_deref(), &[], writer).await,
+            PeerSubcommand::Invite { pubkey } => crate::node_commands::cmd_invite(node, store, server.as_deref(), &[pubkey], writer).await,
+            PeerSubcommand::Remove { pubkey } => crate::node_commands::cmd_remove(node, store, server.as_deref(), &[pubkey], writer).await,
             PeerSubcommand::Sync { node_id } => {
                 let args = node_id.map(|id| vec![id]).unwrap_or_default();
-                crate::node_commands::cmd_sync(node, store, server, &args)
+                crate::node_commands::cmd_sync(node, store, server.clone(), &args, writer).await
             }
         },
-        LatticeCommand::Put { key, value } => crate::store_commands::cmd_put(node, store, server, &[key, value]),
+        LatticeCommand::Put { key, value } => crate::store_commands::cmd_put(node, store, server.as_deref(), &[key, value], writer).await,
         LatticeCommand::Get { key, verbose } => {
             let mut args = vec![key];
             if verbose {
                 args.push("-v".to_string());
             }
-            crate::store_commands::cmd_get(node, store, server, &args)
+            crate::store_commands::cmd_get(node, store, server.as_deref(), &args, writer).await
         },
-        LatticeCommand::Delete { key } => crate::store_commands::cmd_delete(node, store, server, &[key]),
+        LatticeCommand::Delete { key } => crate::store_commands::cmd_delete(node, store, server.as_deref(), &[key], writer).await,
         LatticeCommand::List { prefix, verbose } => {
             let mut args = Vec::new();
             if let Some(p) = prefix {
@@ -470,108 +240,16 @@ pub fn handle_command(
             if verbose {
                 args.push("-v".to_string());
             }
-            crate::store_commands::cmd_list(node, store, server, &args)
+            crate::store_commands::cmd_list(node, store, server.as_deref(), &args, writer).await
         },
         LatticeCommand::AuthorState { pubkey } => {
             let args = pubkey.map(|p| vec![p]).unwrap_or_default();
-            crate::store_commands::cmd_author_state(node, store, server, &args)
+            crate::store_commands::cmd_author_state(node, store, server.as_deref(), &args, writer).await
         },
         LatticeCommand::Quit => {
-            println!("Goodbye!");
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Goodbye!");
             CommandResult::Quit
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rustyline::Context;
-    use rustyline::history::DefaultHistory;
-    use lattice_core::NodeBuilder;
-    use std::sync::{Arc, RwLock};
-
-    async fn setup_test_helper() -> CliHelper {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let mut builder = NodeBuilder::new();
-        builder.data_dir = lattice_core::DataDir::new(temp_dir.path().to_path_buf());
-        let node = builder.build().unwrap();
-        let node = Arc::new(node);
-        let store = Arc::new(RwLock::new(None));
-        CliHelper::new(node, store)
-    }
-
-    #[tokio::test]
-    async fn test_completion_top_level() {
-        let helper = setup_test_helper().await;
-        let history = DefaultHistory::new();
-        let ctx = Context::new(&history);
-        
-        // Complete "no" -> "node"
-        let (pos, candidates) = helper.complete("no", 2, &ctx).unwrap();
-        assert_eq!(pos, 0);
-        assert!(candidates.iter().any(|c| c.display == "node"));
-        
-        // Complete "p" -> "peer", "put"
-        let (pos, candidates) = helper.complete("p", 1, &ctx).unwrap();
-        assert_eq!(pos, 0);
-        assert!(candidates.iter().any(|c| c.display == "peer"));
-        assert!(candidates.iter().any(|c| c.display == "put"));
-    }
-
-    #[tokio::test]
-    async fn test_completion_nested() {
-        let helper = setup_test_helper().await;
-        let history = DefaultHistory::new();
-        let ctx = Context::new(&history);
-        
-        // Complete "node i" -> "node init"
-        let (pos, candidates) = helper.complete("node i", 6, &ctx).unwrap();
-        assert_eq!(pos, 5);
-        assert!(candidates.iter().any(|c| c.display == "init"));
-        
-        // Complete "node " -> all node subcommands
-        let (pos, candidates) = helper.complete("node ", 5, &ctx).unwrap();
-        assert_eq!(pos, 5);
-        assert!(candidates.iter().any(|c| c.display == "init"));
-        assert!(candidates.iter().any(|c| c.display == "status"));
-    }
-
-    #[tokio::test]
-    async fn test_completion_invalid_walk() {
-        let helper = setup_test_helper().await;
-        let history = DefaultHistory::new();
-        let ctx = Context::new(&history);
-        
-        // Complete "invalid command " -> nothing
-        let (_pos, candidates) = helper.complete("invalid ", 8, &ctx).unwrap();
-        assert_eq!(candidates.len(), 0);
-    }
-
-    #[test]
-    fn test_longest_common_prefix() {
-        // Test basic LCP
-        let strings = vec!["key_abc1".to_string(), "key_abc2".to_string(), "key_xyz".to_string()];
-        assert_eq!(longest_common_prefix(&strings), "key_");
-        
-        // Test LCP with more specific prefix
-        let strings = vec!["key_abc1".to_string(), "key_abc2".to_string()];
-        assert_eq!(longest_common_prefix(&strings), "key_abc");
-        
-        // Test single element (LCP is the element itself)
-        let strings = vec!["key_abc1".to_string()];
-        assert_eq!(longest_common_prefix(&strings), "key_abc1");
-        
-        // Test empty
-        let strings: Vec<String> = vec![];
-        assert_eq!(longest_common_prefix(&strings), "");
-        
-        // Test no common prefix
-        let strings = vec!["apple".to_string(), "banana".to_string()];
-        assert_eq!(longest_common_prefix(&strings), "");
-        
-        // Test full match
-        let strings = vec!["same".to_string(), "same".to_string()];
-        assert_eq!(longest_common_prefix(&strings), "same");
     }
 }

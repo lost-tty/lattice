@@ -1,112 +1,132 @@
 //! Store commands - direct KV operations
 
-use crate::commands::{block_async, CommandResult};
+use crate::commands::{CommandResult, Writer};
 use lattice_core::{Node, StoreHandle};
 use lattice_net::LatticeServer;
 use std::time::Instant;
+use std::io::Write;
 
-pub fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String]) -> CommandResult {
+pub async fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
-        println!("No store selected. Use 'init' or 'use <uuid>'");
+        let mut w = writer.clone();
+        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     
-    println!("Store ID: {}", h.id());
-    println!("Log Seq:  {}", block_async(h.log_seq()));
-    println!("Applied:  {}", block_async(h.applied_seq()).unwrap_or(0));
+    let mut w = writer.clone();
+    let _ = writeln!(w, "Store ID: {}", h.id());
+    let _ = writeln!(w, "Log Seq:  {}", h.log_seq().await);
+    let _ = writeln!(w, "Applied:  {}", h.applied_seq().await.unwrap_or(0));
     
-    let all = block_async(h.list(false)).unwrap_or_default();
-    println!("Keys:     {}", all.len());
+    let all = h.list(false).await.unwrap_or_default();
+    let _ = writeln!(w, "Keys:     {}", all.len());
     
     // Show log directory size
-    let (file_count, total_size) = block_async(h.log_stats());
+    let (file_count, total_size) = h.log_stats().await;
     if file_count > 0 {
-        println!("Logs:     {} files, {} bytes", file_count, total_size);
+        let _ = writeln!(w, "Logs:     {} files, {} bytes", file_count, total_size);
     }
     
     CommandResult::Ok
 }
 
-pub fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
+pub async fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
-        println!("No store selected. Use 'init' or 'use <uuid>'");
+        let mut w = writer.clone();
+        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     let start = Instant::now();
-    match block_async(h.put(args[0].as_bytes(), args[1].as_bytes())) {
-        Ok(seq) => println!("OK (seq: {}, {:.2?})", seq, start.elapsed()),
-        Err(e) => eprintln!("Error: {}", e),
+    match h.put(args[0].as_bytes(), args[1].as_bytes()).await {
+        Ok(seq) => {
+            let mut w = writer.clone();
+            let _ = writeln!(w, "OK (seq: {}, {:.2?})", seq, start.elapsed());
+        }
+        Err(e) => {
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Error: {}", e);
+        }
     }
     CommandResult::Ok
 }
 
-pub fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
+pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
-        println!("No store selected. Use 'init' or 'use <uuid>'");
+        let mut w = writer.clone();
+        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     let verbose = args.get(1).map(|a| a == "-v").unwrap_or(false);
     let start = Instant::now();
     let key = args[0].as_bytes();
     
+    let mut w = writer.clone();
     if verbose {
         // Show all heads
-        match block_async(h.get_heads(key)) {
-            Ok(heads) if heads.is_empty() => println!("(nil)"),
+        match h.get_heads(key).await {
+            Ok(heads) if heads.is_empty() => { let _ = writeln!(w, "(nil)"); }
             Ok(heads) => {
                 for (i, head) in heads.iter().enumerate() {
                     let winner = if i == 0 { "→" } else { " " };
                     let tombstone = if head.tombstone { "⊗" } else { "" };
                     let author_short = hex::encode(&head.author).chars().take(8).collect::<String>();
                     if head.tombstone {
-                        println!("{} {} (deleted) (hlc:{}, author:{})", 
+                        let _ = writeln!(w, "{} {} (deleted) (hlc:{}, author:{})", 
                             winner, tombstone, head.hlc, author_short);
                     } else {
-                        println!("{} {} (hlc:{}, author:{})", 
+                        let _ = writeln!(w, "{} {} (hlc:{}, author:{})", 
                             winner, format_value(&head.value), head.hlc, author_short);
                     }
                 }
                 if heads.len() > 1 {
-                    println!("⚠ {} heads (conflict)", heads.len());
+                    let _ = writeln!(w, "⚠ {} heads (conflict)", heads.len());
                 }
-                println!("({:.2?})", start.elapsed());
+                let _ = writeln!(w, "({:.2?})", start.elapsed());
             }
-            Err(e) => eprintln!("Error: {}", e),
+            Err(e) => { let _ = writeln!(w, "Error: {}", e); }
         }
     } else {
-        match block_async(h.get(key)) {
+        match h.get(key).await {
             Ok(Some(v)) => {
-                let heads = block_async(h.get_heads(key)).unwrap_or_default();
+                let heads = h.get_heads(key).await.unwrap_or_default();
                 if heads.len() > 1 {
-                    println!("{} (⚠ {} heads)", format_value(&v), heads.len());
+                    let _ = writeln!(w, "{} (⚠ {} heads)", format_value(&v), heads.len());
                 } else {
-                    println!("{}", format_value(&v));
+                    let _ = writeln!(w, "{}", format_value(&v));
                 }
-                println!("({:.2?})", start.elapsed());
+                let _ = writeln!(w, "({:.2?})", start.elapsed());
             }
-            Ok(None) => println!("(nil)"),
-            Err(e) => eprintln!("Error: {}", e),
+            Ok(None) => { let _ = writeln!(w, "(nil)"); }
+            Err(e) => { let _ = writeln!(w, "Error: {}", e); }
         }
     }
     CommandResult::Ok
 }
 
-pub fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
+pub async fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
-        println!("No store selected. Use 'init' or 'use <uuid>'");
+        let mut w = writer.clone();
+        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     let start = Instant::now();
-    match block_async(h.delete(args[0].as_bytes())) {
-        Ok(seq) => println!("OK (seq: {}, {:.2?})", seq, start.elapsed()),
-        Err(e) => eprintln!("Error: {}", e),
+    match h.delete(args[0].as_bytes()).await {
+        Ok(seq) => {
+            let mut w = writer.clone();
+            let _ = writeln!(w, "OK (seq: {}, {:.2?})", seq, start.elapsed());
+        }
+        Err(e) => {
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Error: {}", e);
+        }
     }
     CommandResult::Ok
 }
 
-pub fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
+pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
-        println!("No store selected. Use 'init' or 'use <uuid>'");
+        let mut w = writer.clone();
+        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     
@@ -116,57 +136,59 @@ pub fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _server: Option<&Latt
     
     let start = Instant::now();
     let result = if let Some(p) = &prefix {
-        block_async(h.list_by_prefix(p.as_bytes(), verbose))
+        h.list_by_prefix(p.as_bytes(), verbose).await
     } else {
-        block_async(h.list(verbose))
+        h.list(verbose).await
     };
     
+    let mut w = writer.clone();
     match result {
         Ok(entries) => {
             if entries.is_empty() {
-                println!("(empty)");
+                let _ = writeln!(w, "(empty)");
             } else {
                 for (k, v) in &entries {
                     let key_str = format_value(k);
                     if verbose {
                         // Show all heads for this key
-                        let heads = block_async(h.get_heads(k)).unwrap_or_default();
-                        println!("{}:", key_str);
+                        let heads = h.get_heads(k).await.unwrap_or_default();
+                        let _ = writeln!(w, "{}:", key_str);
                         for (i, head) in heads.iter().enumerate() {
                             let winner = if i == 0 { "→" } else { " " };
                             let author_short = hex::encode(&head.author).chars().take(8).collect::<String>();
                             if head.tombstone {
-                                println!("  {} ⊗ (deleted) (hlc:{}, author:{})", 
+                                let _ = writeln!(w, "  {} ⊗ (deleted) (hlc:{}, author:{})", 
                                     winner, head.hlc, author_short);
                             } else {
-                                println!("  {} {} (hlc:{}, author:{})", 
+                                let _ = writeln!(w, "  {} {} (hlc:{}, author:{})", 
                                     winner, format_value(&head.value), head.hlc, author_short);
                             }
                         }
                     } else {
                         // Check for multiple heads
-                        let heads = block_async(h.get_heads(k)).unwrap_or_default();
+                        let heads = h.get_heads(k).await.unwrap_or_default();
                         if heads.len() > 1 {
-                            println!("{} = {} (⚠ {} heads)", key_str, format_value(v), heads.len());
+                            let _ = writeln!(w, "{} = {} (⚠ {} heads)", key_str, format_value(v), heads.len());
                         } else {
-                            println!("{} = {}", key_str, format_value(v));
+                            let _ = writeln!(w, "{} = {}", key_str, format_value(v));
                         }
                     }
                 }
                 let prefix_str = prefix.as_ref().map(|p| format!(" (prefix: {})", p)).unwrap_or_default();
-                println!("({} keys{}, {:.2?})", entries.len(), prefix_str, start.elapsed());
+                let _ = writeln!(w, "({} keys{}, {:.2?})", entries.len(), prefix_str, start.elapsed());
             }
         }
-        Err(e) => eprintln!("Error: {}", e),
+        Err(e) => { let _ = writeln!(w, "Error: {}", e); }
     }
     CommandResult::Ok
 }
 
-pub fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
+pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
     let store = match store {
         Some(s) => s,
         None => {
-            eprintln!("Error: no store selected");
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Error: no store selected");
             return CommandResult::Ok;
         }
     };
@@ -179,27 +201,30 @@ pub fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _server: Optio
         match hex::decode(hex_str) {
             Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
             Ok(bytes) => {
-                eprintln!("Error: author must be 32 bytes, got {}", bytes.len());
+                let mut w = writer.clone();
+                let _ = writeln!(w, "Error: author must be 32 bytes, got {}", bytes.len());
                 return CommandResult::Ok;
             }
             Err(e) => {
-                eprintln!("Error: invalid hex: {}", e);
+                let mut w = writer.clone();
+                let _ = writeln!(w, "Error: invalid hex: {}", e);
                 return CommandResult::Ok;
             }
         }
     };
 
-    match block_async(store.author_state(&author_bytes)) {
+    let mut w = writer.clone();
+    match store.author_state(&author_bytes).await {
         Ok(Some(state)) => {
-            println!("Author: {}", hex::encode(&author_bytes));
-            println!("  seq: {}", state.seq);
-            println!("  hash: {}", hex::encode(&state.hash));
-            println!("  log_offset: {}", state.log_offset);
+            let _ = writeln!(w, "Author: {}", hex::encode(&author_bytes));
+            let _ = writeln!(w, "  seq: {}", state.seq);
+            let _ = writeln!(w, "  hash: {}", hex::encode(&state.hash));
+            let _ = writeln!(w, "  log_offset: {}", state.log_offset);
         }
         Ok(None) => {
-            println!("No state for author: {}", hex::encode(&author_bytes));
+            let _ = writeln!(w, "No state for author: {}", hex::encode(&author_bytes));
         }
-        Err(e) => eprintln!("Error: {}", e),
+        Err(e) => { let _ = writeln!(w, "Error: {}", e); }
     }
     CommandResult::Ok
 }
