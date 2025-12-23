@@ -35,7 +35,7 @@ pub mod store_actor;
 pub const MAX_ENTRY_SIZE: usize = 16 * 1024 * 1024;
 
 pub use node_identity::{NodeIdentity, PeerStatus};
-pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, StoreHandle, NodeError, PeerInfo, JoinAcceptance};
+pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, StoreHandle, NodeError, NodeEvent, PeerInfo, JoinAcceptance};
 pub use sigchain::{SigChain, SigChainManager};
 pub use entry::Entry;
 pub use sync_state::{SyncState, AuthorInfo, MissingRange};

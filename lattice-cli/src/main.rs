@@ -51,6 +51,7 @@ async fn main() {
             } else {
                 println!("Root:    {}", open_info.store_id);
             }
+
             node.root_store().await.as_ref().cloned()
         }
         Ok(None) => {

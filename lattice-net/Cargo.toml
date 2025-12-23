@@ -17,6 +17,9 @@ bytes = { workspace = true }
 tokio-util = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
+blake3.workspace = true
+anyhow = "1.0.100"
+futures-lite = "2.6.1"
 
 [dev-dependencies]
 tokio-test = { workspace = true }

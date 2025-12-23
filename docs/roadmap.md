@@ -146,26 +146,53 @@
 
 ### Deliverables
 
-**Phase 1: LatticeServer Refactor**
+**Phase 1: LatticeServer Refactor** ✓
 - [x] `LatticeServer` struct in `lattice-net` wrapping `Arc<Node>` + `Endpoint`
 - [x] Move `join_mesh`, `sync_with_peer`, `sync_all` to `LatticeServer` methods
-- [x] Encapsulate `spawn_accept_loop` inside `LatticeServer`
+- [x] Encapsulate accept loop inside `LatticeServer` (via Router + ProtocolHandler)
 - [x] CLI uses `LatticeServer` instead of raw `Node` + `Endpoint`
-- [ ] Route sync command through `LatticeServer` (not raw functions)
 - [ ] Integration test: invite → join → sync end-to-end
 - [ ] Periodic background sync with known peers
 - [ ] Track last sync time per peer
 
-**Phase 2: Gossip Protocol**
-- [ ] Proto: `GossipAnnounce` message with author + latest seq + HLC
-- [ ] `LatticeServer::spawn_gossip_loop` for periodic announcements
-- [ ] On receiving announce: detect missing entries, trigger sync
-- [ ] Track last-seen per peer for staleness detection
+**Phase 2: Gossip Protocol** ✓ (iroh-gossip)
+- [x] Router handles both `lattice-sync/1` and `/iroh-gossip/1` ALPNs
+- [x] `NodeEvent::RootStoreActivated` emitted when root store opens
+- [x] Auto-join gossip topic on root store activation
+- [x] Broadcast local entries to gossip topic on commit
+- [x] Receive gossip entries and apply to store
+- [x] Topic ID via `blake3::hash("lattice/{store_id}")`
+- [ ] Gossip bootstrap peers from `/peers/` (needs Prefix Watch)
+
+**Next: Prefix Watch (reactive store updates)**
+- [ ] `store.watch_prefix(prefix) -> Receiver<WatchEvent>`
+- [ ] `WatchEvent::Put { key, value }` / `WatchEvent::Delete { key }`
+- [ ] StoreActor tracks watchers per prefix, emits on matching put/delete
+- [ ] LatticeServer uses `/peers/` watch to update gossip bootstrap peers dynamically
+- [ ] Enables reactive patterns: config changes, presence, app-level subscriptions
+
+---
+
+## Technical Debt
+
+**Logging**
+- [ ] Replace `println!`/`eprintln!` with `tracing` crate (`tracing::info!`, `tracing::error!`)
+- Standard in Rust async ecosystem, used by Iroh internally
+
+**Lifecycle Management (Zombie Tasks)**
+- [ ] Spawned infinite loops (`spawn_node_event_listener`, `spawn_entry_forward_loop`, gossip receive loop) keep running if `LatticeServer` is dropped
+- [ ] Use `tokio_util::sync::CancellationToken` or keep `JoinHandle`s for graceful shutdown
+
+**Error Handling**
+- [ ] Replace `Result<..., String>` with `anyhow::Result` or define `LatticeNetError` enum
+- String errors make it hard to handle specific failure cases
 
 ---
 
 ## Future
 
+- offline nodes should not delay sync
+- sync command should transitive sync all peers
 - Gossip:
   - gossip new entries to peers
   - backfill missing entries from peers (how do peers notice missing entries?)
