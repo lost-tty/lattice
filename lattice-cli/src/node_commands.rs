@@ -2,7 +2,7 @@
 
 use crate::commands::{block_async, Command, CommandResult, Handler};
 use lattice_core::{Node, StoreHandle, PeerStatus, Uuid};
-use lattice_net::LatticeEndpoint;
+use lattice_net::LatticeServer;
 use chrono::DateTime;
 use std::time::Instant;
 
@@ -26,7 +26,7 @@ pub fn node_commands() -> Vec<Command> {
 
 // --- Store management ---
 
-fn cmd_init(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, _args: &[String]) -> CommandResult {
+fn cmd_init(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String]) -> CommandResult {
     match block_async(node.init()) {
         Ok(store_id) => {
             println!("Initialized with root store: {}", store_id);
@@ -43,7 +43,7 @@ fn cmd_init(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&Lattic
     }
 }
 
-fn cmd_create_store(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, _args: &[String]) -> CommandResult {
+fn cmd_create_store(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String]) -> CommandResult {
     match node.create_store() {
         Ok(store_id) => {
             println!("Created store: {}", store_id);
@@ -65,7 +65,7 @@ fn cmd_create_store(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option
     }
 }
 
-fn cmd_use_store(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, args: &[String]) -> CommandResult {
+fn cmd_use_store(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
     let store_id = match Uuid::parse_str(&args[0]) {
         Ok(id) => id,
         Err(_) => {
@@ -91,7 +91,7 @@ fn cmd_use_store(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&L
     }
 }
 
-fn cmd_list_stores(node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, _args: &[String]) -> CommandResult {
+fn cmd_list_stores(node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String]) -> CommandResult {
     let stores = match node.list_stores() {
         Ok(s) => s,
         Err(e) => {
@@ -114,7 +114,7 @@ fn cmd_list_stores(node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&
 
 // --- Info ---
 
-fn cmd_node_status(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, _args: &[String]) -> CommandResult {
+fn cmd_node_status(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String]) -> CommandResult {
     println!("Node ID:  {}", hex::encode(node.node_id()));
     if let Some(name) = node.name() {
         println!("Name:     {}", name);
@@ -138,7 +138,7 @@ fn cmd_node_status(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<
 
 // --- Peer management ---
 
-fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, args: &[String]) -> CommandResult {
+fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
     let pubkey_hex = &args[0];
     let pubkey: [u8; 32] = match hex::decode(pubkey_hex) {
         Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
@@ -158,7 +158,7 @@ fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&Latt
     CommandResult::Ok
 }
 
-fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, _args: &[String]) -> CommandResult {
+fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String]) -> CommandResult {
     let peers = match block_async(node.list_peers()) {
         Ok(p) => p,
         Err(e) => {
@@ -204,7 +204,7 @@ fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&Latti
     CommandResult::Ok
 }
 
-fn cmd_remove(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, args: &[String]) -> CommandResult {
+fn cmd_remove(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
     let pubkey_hex = &args[0];
     let pubkey: [u8; 32] = match hex::decode(pubkey_hex) {
         Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
@@ -223,9 +223,9 @@ fn cmd_remove(node: &Node, _store: Option<&StoreHandle>, _endpoint: Option<&Latt
 
 // --- Networking ---
 
-fn cmd_join(node: &Node, store: Option<&StoreHandle>, endpoint: Option<&LatticeEndpoint>, args: &[String]) -> CommandResult {
-    let endpoint = match endpoint {
-        Some(ep) => ep,
+fn cmd_join(_node: &Node, store: Option<&StoreHandle>, server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
+    let server = match server {
+        Some(s) => s,
         None => {
             eprintln!("Iroh endpoint not started.");
             return CommandResult::Ok;
@@ -247,7 +247,7 @@ fn cmd_join(node: &Node, store: Option<&StoreHandle>, endpoint: Option<&LatticeE
     
     println!("Joining mesh via {}...", peer_id.fmt_short());
     
-    match block_async(lattice_net::join_mesh(node, endpoint, peer_id)) {
+    match block_async(server.join_mesh(peer_id)) {
         Ok(handle) => {
             println!("Joined mesh! Use 'sync' command to sync entries.");
             CommandResult::SwitchTo(handle)
@@ -259,9 +259,9 @@ fn cmd_join(node: &Node, store: Option<&StoreHandle>, endpoint: Option<&LatticeE
     }
 }
 
-fn cmd_sync(node: &Node, store: Option<&StoreHandle>, endpoint: Option<&LatticeEndpoint>, args: &[String]) -> CommandResult {
-    let endpoint = match endpoint {
-        Some(ep) => ep,
+fn cmd_sync(_node: &Node, store: Option<&StoreHandle>, server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
+    let server = match server {
+        Some(s) => s,
         None => {
             eprintln!("Iroh endpoint not started.");
             return CommandResult::Ok;
@@ -278,7 +278,7 @@ fn cmd_sync(node: &Node, store: Option<&StoreHandle>, endpoint: Option<&LatticeE
     
     if args.is_empty() {
         // Sync with all active peers
-        match block_async(lattice_net::sync_all(node, endpoint, store)) {
+        match block_async(server.sync_all(store)) {
             Ok(results) => {
                 if results.is_empty() {
                     println!("No peers to sync with.");
@@ -300,7 +300,7 @@ fn cmd_sync(node: &Node, store: Option<&StoreHandle>, endpoint: Option<&LatticeE
         };
         
         println!("Syncing with {}...", peer_id.fmt_short());
-        match block_async(lattice_net::sync_with_peer(endpoint, store, peer_id)) {
+        match block_async(server.sync_with_peer(store, peer_id)) {
             Ok(result) => {
                 println!("Sync complete! Applied {} entries (peer sent {})", 
                     result.entries_applied, result.entries_sent_by_peer);

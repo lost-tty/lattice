@@ -2,7 +2,7 @@
 
 use crate::commands::{block_async, Command, CommandResult, Handler};
 use lattice_core::{Node, StoreHandle};
-use lattice_net::LatticeEndpoint;
+use lattice_net::LatticeServer;
 use std::time::Instant;
 
 pub fn store_commands() -> Vec<Command> {
@@ -16,7 +16,7 @@ pub fn store_commands() -> Vec<Command> {
     ]
 }
 
-fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, _args: &[String]) -> CommandResult {
+fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String]) -> CommandResult {
     let Some(h) = store else {
         println!("No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
@@ -38,7 +38,7 @@ fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option
     CommandResult::Ok
 }
 
-fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, args: &[String]) -> CommandResult {
+fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
     let Some(h) = store else {
         println!("No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
@@ -51,7 +51,7 @@ fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&Lattice
     CommandResult::Ok
 }
 
-fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, args: &[String]) -> CommandResult {
+fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
     let Some(h) = store else {
         println!("No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
@@ -102,7 +102,7 @@ fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&Lattice
     CommandResult::Ok
 }
 
-fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, args: &[String]) -> CommandResult {
+fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
     let Some(h) = store else {
         println!("No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
@@ -115,7 +115,7 @@ fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&Latt
     CommandResult::Ok
 }
 
-fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, args: &[String]) -> CommandResult {
+fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
     let Some(h) = store else {
         println!("No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
@@ -173,7 +173,7 @@ fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&Lattic
     CommandResult::Ok
 }
 
-fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _endpoint: Option<&LatticeEndpoint>, args: &[String]) -> CommandResult {
+fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String]) -> CommandResult {
     let store = match store {
         Some(s) => s,
         None => {
