@@ -326,10 +326,13 @@ impl Completer for CliHelper {
         }
 
         // Find shortest prefix length where we have fewer unique prefixes than matches
+        // But ensure at least 8 chars beyond input for readability
         let lcp_len = lcp.len();
         let max_len = all_matches.iter().map(|m| m.len()).max().unwrap_or(0);
+        let min_display_len = lcp_len + 8;
         
         let mut group_prefixes: Vec<String> = all_matches.clone();
+        let mut found_grouping = false;
         
         for prefix_len in (lcp_len + 1)..=max_len {
             let prefixes: Vec<String> = all_matches.iter()
@@ -340,16 +343,30 @@ impl Completer for CliHelper {
             unique.dedup();
             
             if unique.len() < all_matches.len() {
-                group_prefixes = unique;
-                break;
+                // Found a grouping point
+                if prefix_len >= min_display_len || !found_grouping {
+                    group_prefixes = unique;
+                    found_grouping = true;
+                }
+                if prefix_len >= min_display_len {
+                    break;
+                }
             }
         }
         
         let mut candidates = Vec::new();
         for prefix in group_prefixes {
             let is_complete = all_matches.iter().any(|m| m == &prefix);
+            let is_truncated = all_matches.iter().any(|m| m.starts_with(&prefix) && m != &prefix);
+            // Strip the already-typed prefix from display
+            let suffix = &prefix[lcp_len..];
+            let display = if is_truncated && !is_complete {
+                format!("{}…", suffix)
+            } else {
+                suffix.to_string()
+            };
             candidates.push(Pair {
-                display: prefix.clone(),
+                display,
                 replacement: if is_complete { format!("{} ", prefix) } else { prefix },
             });
         }
