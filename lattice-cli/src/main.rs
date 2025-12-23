@@ -24,10 +24,10 @@ async fn main() {
     };
     
     // Create LatticeServer (creates endpoint and spawns accept loop internally)
-    let _server = match LatticeServer::new_from_node(node.clone()).await {
+    let server: Option<Arc<LatticeServer>> = match LatticeServer::new_from_node(node.clone()).await {
         Ok(s) => {
             println!("Iroh:    {} (listening)", s.endpoint().public_key().fmt_short());
-            Some(s)
+            Some(Arc::new(s))
         }
         Err(e) => {
             eprintln!("Warning: Iroh failed to start: {}", e);
@@ -66,6 +66,7 @@ async fn main() {
 
     let node_clone = node.clone();
     let store_clone = current_store.clone();
+    let server_clone = server.clone();
     
     // Run REPL in a blocking task to allow blocking calls (used in completion)
     // and to avoid blocking the async runtime
@@ -111,8 +112,9 @@ async fn main() {
                             // Execute the command, blocking until it completes
                             // Since we are in spawn_blocking, this is safe and won't panic the runtime
                             let store_guard = store_clone.read().unwrap();
+                            let server_ref = server_clone.as_ref().map(|s| s.as_ref());
                             let result = match rt.block_on(async {
-                                handle_command(&node_clone, store_guard.as_ref(), None, cli) 
+                                handle_command(&node_clone, store_guard.as_ref(), server_ref, cli) 
                             }) {
                                 res => res
                             };

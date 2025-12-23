@@ -415,41 +415,63 @@ impl LatticeServer {
         Ok(SyncResult { entries_applied, entries_sent_by_peer })
     }
     
-    /// Sync with all active peers.
+    /// Sync with all active peers in parallel.
+    /// 
+    /// Results include both successes and failures for visibility.
     pub async fn sync_all(&self, store: &StoreHandle) -> Result<Vec<SyncResult>, NodeError> {
+        use futures_util::future::join_all;
+        use std::time::Duration;
+        
+        const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+        
         let peers = self.node.list_peers().await?;
-        let mut results = Vec::new();
         let my_pubkey = self.endpoint.public_key();
         
-        for peer in peers {
-            if peer.status != PeerStatus::Active {
-                continue;
-            }
-            
-            let peer_id = match parse_node_id(&peer.pubkey) {
-                Ok(id) => id,
-                Err(e) => {
-                    eprintln!("[Sync] Failed to parse peer {}: {}", peer.pubkey, e);
-                    continue;
-                }
-            };
-            
-            // Skip self
-            if peer_id == my_pubkey {
-                continue;
-            }
-            
-            println!("[Sync] Syncing with {}...", peer_id.fmt_short());
-            match self.sync_with_peer(store, peer_id).await {
-                Ok(result) => {
-                    println!("[Sync] Applied {} entries", result.entries_applied);
-                    results.push(result);
-                }
-                Err(e) => eprintln!("[Sync] Failed: {}", e),
-            }
+        // Collect peers to sync with
+        let peer_ids: Vec<_> = peers
+            .into_iter()
+            .filter(|p| p.status == PeerStatus::Active)
+            .filter_map(|p| parse_node_id(&p.pubkey).ok())
+            .filter(|id| *id != my_pubkey)
+            .collect();
+        
+        if peer_ids.is_empty() {
+            println!("[Sync] No active peers to sync with");
+            return Ok(Vec::new());
         }
         
-        Ok(results)
+        println!("[Sync] Syncing with {} peers in parallel...", peer_ids.len());
+        
+        // Spawn all syncs in parallel with timeout
+        let futures = peer_ids.iter().map(|&peer_id| {
+            let store = store.clone();
+            async move {
+                let peer_short = peer_id.fmt_short();
+                println!("[Sync] Starting sync with {}...", peer_short);
+                
+                match tokio::time::timeout(SYNC_TIMEOUT, self.sync_with_peer(&store, peer_id)).await {
+                    Ok(Ok(result)) => {
+                        println!("[Sync] {} complete: {} entries applied", peer_short, result.entries_applied);
+                        Some(result)
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("[Sync] {} failed: {}", peer_short, e);
+                        None
+                    }
+                    Err(_) => {
+                        eprintln!("[Sync] {} timed out after {:?}", peer_short, SYNC_TIMEOUT);
+                        None
+                    }
+                }
+            }
+        });
+        
+        let results: Vec<Option<SyncResult>> = join_all(futures).await;
+        let successful: Vec<SyncResult> = results.into_iter().flatten().collect();
+        
+        println!("[Sync] Parallel sync complete: {}/{} peers succeeded", successful.len(), peer_ids.len());
+        
+        Ok(successful)
     }
 }
 
