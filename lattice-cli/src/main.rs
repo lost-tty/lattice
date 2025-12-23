@@ -6,10 +6,9 @@ mod store_commands;
 
 use lattice_net::LatticeServer;
 use commands::CommandResult;
-use lattice_core::{NodeBuilder, StoreHandle};
+use lattice_core::NodeBuilder;
 use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 #[tokio::main]
 async fn main() {
@@ -25,7 +24,7 @@ async fn main() {
     };
     
     // Create LatticeServer (creates endpoint and spawns accept loop internally)
-    let server = match LatticeServer::new_from_node(node.clone()).await {
+    let _server = match LatticeServer::new_from_node(node.clone()).await {
         Ok(s) => {
             println!("Iroh:    {} (listening)", s.endpoint().public_key().fmt_short());
             Some(s)
@@ -44,7 +43,7 @@ async fn main() {
         println!("Stores:  {}", info.stores.len());
     }
 
-    let mut current_store: Option<StoreHandle> = match node.open_root_store().await {
+    let current_store = Arc::new(RwLock::new(match node.open_root_store().await {
         Ok(Some(open_info)) => {
             if open_info.entries_replayed > 0 {
                 println!("Root:    {} (replayed {})", open_info.store_id, open_info.entries_replayed);
@@ -62,60 +61,85 @@ async fn main() {
             eprintln!("Warning: {}", e);
             None
         }
-    };
+    }));
     println!();
 
-    let mut rl = DefaultEditor::new().expect("Failed to create editor");
-    let cmds = commands::commands();
+    let node_clone = node.clone();
+    let store_clone = current_store.clone();
+    
+    // Run REPL in a blocking task to allow blocking calls (used in completion)
+    // and to avoid blocking the async runtime
+    tokio::task::spawn_blocking(move || {
+        let helper = crate::commands::CliHelper::new(node_clone.clone(), store_clone.clone());
+        let config = rustyline::Config::builder()
+            .completion_type(rustyline::config::CompletionType::List)
+            .build();
+        let mut rl = rustyline::Editor::<crate::commands::CliHelper, rustyline::history::DefaultHistory>::with_config(config).expect("Failed to create editor");
+        rl.set_helper(Some(helper));
 
-    loop {
-        let prompt = match &current_store {
-            Some(h) => format!("lattice:{}> ", &h.id().to_string()[..8]),
-            None => "lattice:no-store> ".to_string(),
-        };
+        loop {
+            let prompt = {
+                let store_guard = store_clone.read().unwrap();
+                match &*store_guard {
+                    Some(h) => format!("lattice:{}> ", &h.id().to_string()[..8]),
+                    None => "lattice:no-store> ".to_string(),
+                }
+            };
 
-        match rl.readline(&prompt) {
-            Ok(line) => {
-                let line = line.trim();
-                if line.is_empty() { continue; }
-                let _ = rl.add_history_entry(line);
+            match rl.readline(&prompt) {
+                Ok(line) => {
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    let _ = rl.add_history_entry(line);
 
-                let args = match shlex::split(line) {
-                    Some(a) => a,
-                    None => {
-                        println!("Error: mismatched quotes");
-                        continue;
-                    }
-                };
+                    let args = match shlex::split(line) {
+                        Some(a) => a,
+                        None => {
+                            println!("Error: mismatched quotes");
+                            continue;
+                        }
+                    };
 
-                let cmd_name = args.first().map(|s| s.as_str()).unwrap_or("");
+                    use clap::Parser;
+                    use commands::{LatticeCli, handle_command};
 
-                match cmds.iter().find(|c| c.name == cmd_name || (cmd_name == "exit" && c.name == "quit")) {
-                    Some(cmd) => {
-                        let cmd_args = &args[1..];
-                        if cmd_args.len() < cmd.min_args || cmd_args.len() > cmd.max_args {
-                            println!("Usage: {} {}", cmd.name, cmd.args);
-                        } else {
-                            match (cmd.handler)(&node, current_store.as_ref(), server.as_ref(), cmd_args) {
+                    // We need a runtime handle to execute async commands from the synchronous REPL
+                    let rt = tokio::runtime::Handle::current();
+
+                    match LatticeCli::try_parse_from(args) {
+                        Ok(cli) => {
+                            // Execute the command, blocking until it completes
+                            // Since we are in spawn_blocking, this is safe and won't panic the runtime
+                            let store_guard = store_clone.read().unwrap();
+                            let result = match rt.block_on(async {
+                                handle_command(&node_clone, store_guard.as_ref(), None, cli) 
+                            }) {
+                                res => res
+                            };
+                            
+                            match result {
                                 CommandResult::Ok => {}
                                 CommandResult::SwitchTo(h) => {
-                                    current_store = Some(h);
+                                    drop(store_guard);
+                                    *store_clone.write().unwrap() = Some(h);
                                 }
                                 CommandResult::Quit => break,
                             }
                         }
+                        Err(e) => {
+                            println!("{}", e);
+                        }
                     }
-                    None => println!("Unknown: '{}'. Type 'help'.", cmd_name),
+                }
+                Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
+                    println!("Goodbye!");
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("Error: {:?}", e);
+                    break;
                 }
             }
-            Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
-                println!("Goodbye!");
-                break;
-            }
-            Err(e) => {
-                eprintln!("Error: {:?}", e);
-                break;
-            }
         }
-    }
+    }).await.expect("REPL task panicked");
 }
