@@ -85,8 +85,10 @@ pub struct PeerInfo {
 /// Events emitted by Node for interested listeners (e.g., LatticeServer)
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
-    /// Root store was activated (opened or set)
-    RootStoreActivated(StoreHandle),
+    /// Store is ready (opened and available)
+    StoreReady(StoreHandle),
+    /// Sync requested (catch up with peers)
+    SyncRequested(StoreHandle),
 }
 
 /// Event for peer status changes (from watch_peers)
@@ -227,23 +229,19 @@ impl Node {
         self.root_store.read().await
     }
     
-    /// Open the root store if set. Node owns the handle internally.
-    /// Returns StoreInfo on success, or None if no root store is set.
-    pub async fn open_root_store(&self) -> Result<Option<StoreInfo>, NodeError> {
-        match self.meta.root_store()? {
-            Some(id) => {
-                let (handle, info) = self.open_store(id).await?;
-                
-                // Emit event for listeners (send clone, keep original)
-                let _ = self.event_tx.send(NodeEvent::RootStoreActivated(handle.clone()));
-                
-                // Store original handle (owns actor thread)
-                *self.root_store.write().await = Some(handle);
-                
-                Ok(Some(info))
-            }
-            None => Ok(None),
+    /// Start the node - opens root store if set and emits StoreReady event.
+    pub async fn start(&self) -> Result<(), NodeError> {
+        if let Some(id) = self.meta.root_store()? {
+            let (handle, _info) = self.open_store(id).await?;
+            
+            // Emit events for listeners
+            let _ = self.event_tx.send(NodeEvent::StoreReady(handle.clone()));
+            let _ = self.event_tx.send(NodeEvent::SyncRequested(handle.clone()));
+            
+            // Store original handle (owns actor thread)
+            *self.root_store.write().await = Some(handle);
         }
+        Ok(())
     }
 
     /// Initialize the node with a root store (fails if already initialized).
@@ -295,7 +293,7 @@ impl Node {
         *self.root_store.write().await = Some(handle);
         
         // Emit event for listeners
-        let _ = self.event_tx.send(NodeEvent::RootStoreActivated(handle_clone.clone()));
+        let _ = self.event_tx.send(NodeEvent::StoreReady(handle_clone.clone()));
         
         // Publish our name to the store
         let _ = self.publish_name().await;

@@ -8,7 +8,6 @@
 //! - **Mesh**: Peer-to-peer join and sync operations
 
 pub mod endpoint;
-pub mod gossip;
 pub mod framing;
 pub mod mesh;
 

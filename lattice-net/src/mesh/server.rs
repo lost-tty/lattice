@@ -49,7 +49,7 @@ impl ProtocolHandler for SyncProtocol {
 impl LatticeServer {
     /// Create a new LatticeServer from just a Node (creates endpoint internally).
     #[tracing::instrument(skip(node))]
-    pub async fn new_from_node(node: Arc<Node>) -> Result<Self, super::error::ServerError> {
+    pub async fn new_from_node(node: Arc<Node>) -> Result<Arc<Self>, super::error::ServerError> {
         let endpoint = LatticeEndpoint::new(node.secret_key_bytes()).await
             .map_err(|e| super::error::ServerError::Endpoint(e.to_string()))?;
         Self::new(node, endpoint).await
@@ -57,7 +57,7 @@ impl LatticeServer {
     
     /// Create a new LatticeServer with existing endpoint.
     #[tracing::instrument(skip(node, endpoint))]
-    pub async fn new(node: Arc<Node>, endpoint: LatticeEndpoint) -> Result<Self, super::error::ServerError> {
+    pub async fn new(node: Arc<Node>, endpoint: LatticeEndpoint) -> Result<Arc<Self>, super::error::ServerError> {
         let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint));
         let sync_protocol = SyncProtocol { node: node.clone() };
         let router = Router::builder(endpoint.endpoint().clone())
@@ -65,41 +65,45 @@ impl LatticeServer {
             .accept(iroh_gossip::ALPN, gossip_manager.gossip().clone())
             .spawn();
         
-        let server = Self { 
+        let server = Arc::new(Self { 
             node: node.clone(), 
             endpoint,
             gossip_manager: gossip_manager.clone(),
             router,
-        };
+        });
         
-        // Spawn background task to manage gossip on store activation
-        let gm = gossip_manager.clone();
-        let node_clone = node.clone();
+        // Spawn background task to handle store events
+        let server_clone = server.clone();
         tokio::spawn(async move {
-            Self::run_gossip_listener(node_clone, gm).await;
+            Self::run_node_ready_handler(server_clone).await;
         });
         
         Ok(server)
     }
     
-    async fn run_gossip_listener(node: Arc<Node>, gossip_manager: Arc<super::gossip_manager::GossipManager>) {
-        let mut event_rx = node.subscribe_events();
+    async fn run_node_ready_handler(server: Arc<Self>) {
+        let mut event_rx = server.node.subscribe_events();
         
-        // Check if root store already open at startup  
-        if let Some(store) = (*node.root_store().await).clone() {
-            tracing::info!(store_id = %store.id(), "Root store already open");
-            if let Err(e) = gossip_manager.setup_for_store(&*node, &store).await {
-                tracing::error!(error = %e, "Gossip setup failed");
-            }
-        }
-        
-        // Listen for future activations
+        // Listen for node events
         while let Ok(event) = event_rx.recv().await {
             match event {
-                NodeEvent::RootStoreActivated(store) => {
-                    tracing::info!(store_id = %store.id(), "Root store activated");
-                    if let Err(e) = gossip_manager.setup_for_store(&*node, &store).await {
+                NodeEvent::StoreReady(store) => {
+                    tracing::info!(store_id = %store.id(), "Node ready");
+                    
+                    // Setup gossip
+                    if let Err(e) = server.gossip_manager.setup_for_store(&*server.node, &store).await {
                         tracing::error!(error = %e, "Gossip setup failed");
+                    }
+                }
+                NodeEvent::SyncRequested(store) => {
+                    // Sync with active peers to catch up
+                    match server.sync_all(&store).await {
+                        Ok(results) if !results.is_empty() => {
+                            let total: u64 = results.iter().map(|r| r.entries_applied).sum();
+                            tracing::info!(entries = total, peers = results.len(), "Sync complete");
+                        }
+                        Ok(_) => tracing::debug!("No peers to sync with"),
+                        Err(e) => tracing::warn!(error = %e, "Sync failed"),
                     }
                 }
             }
