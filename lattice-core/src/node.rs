@@ -672,6 +672,34 @@ impl StoreHandle {
             .map_err(|e| NodeError::Actor(e.to_string()))
     }
 
+    /// Watch for key changes matching a regex pattern.
+    /// Returns initial snapshot of matching entries plus a receiver for future changes.
+    /// 
+    /// Example patterns:
+    /// - `^/nodes/.*` - matches all node keys
+    /// - `^/nodes/[a-f0-9]+/status$` - matches peer status keys
+    /// 
+    /// The initial snapshot is atomic with the watch subscription - no events will be missed.
+    pub async fn watch(&self, pattern: &str) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<crate::store_actor::WatchEvent>), NodeError> {
+        self.watch_with_opts(pattern, false).await
+    }
+    
+    /// Watch with option to include deleted entries in initial snapshot.
+    pub async fn watch_with_opts(&self, pattern: &str, include_deleted: bool) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<crate::store_actor::WatchEvent>), NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::Watch { 
+            pattern: pattern.to_string(), 
+            include_deleted,
+            resp: resp_tx 
+        }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(|e| NodeError::Actor(e.to_string()))
+    }
+
+
 }
 
 impl Drop for StoreHandle {
@@ -982,5 +1010,172 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_dir_all(data_dir_a.base());
         let _ = std::fs::remove_dir_all(data_dir_b.base());
+    }
+
+    // === Watcher Tests ===
+
+    #[tokio::test]
+    async fn test_watch_receives_put_event() {
+        let data_dir = temp_data_dir("watch_put");
+        
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        node.init().await.expect("init");
+        
+        let store = node.root_store().await;
+        let store = store.as_ref().unwrap();
+        
+        // Watch for keys starting with /test/
+        let (_initial, mut rx) = store.watch("^/test/").await.expect("watch");
+        
+        // Write a matching key
+        store.put(b"/test/key1", b"value1").await.expect("put");
+        
+        // Should receive the event
+        let event = rx.recv().await.expect("recv");
+        assert_eq!(event.key, b"/test/key1");
+        match event.kind {
+            crate::store_actor::WatchEventKind::Put { value } => {
+                assert_eq!(value, b"value1");
+            }
+            _ => panic!("Expected Put event"),
+        }
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+
+    #[tokio::test]
+    async fn test_watch_receives_delete_event() {
+        let data_dir = temp_data_dir("watch_delete");
+        
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        node.init().await.expect("init");
+        
+        let store = node.root_store().await;
+        let store = store.as_ref().unwrap();
+        
+        // First put, then watch, then delete
+        store.put(b"/test/key", b"value").await.expect("put");
+        
+        let (_initial, mut rx) = store.watch("^/test/").await.expect("watch");
+        store.delete(b"/test/key").await.expect("delete");
+        
+        // Should receive delete event
+        let event = rx.recv().await.expect("recv");
+        assert_eq!(event.key, b"/test/key");
+        assert!(matches!(event.kind, crate::store_actor::WatchEventKind::Delete));
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+
+    #[tokio::test]
+    async fn test_watch_only_matching_keys() {
+        let data_dir = temp_data_dir("watch_filter");
+        
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        node.init().await.expect("init");
+        
+        let store = node.root_store().await;
+        let store = store.as_ref().unwrap();
+        
+        // Watch only /nodes/
+        let (_initial, mut rx) = store.watch("^/nodes/").await.expect("watch");
+        
+        // Write a non-matching key (should NOT trigger)
+        store.put(b"/config/setting", b"value").await.expect("put config");
+        
+        // Write a matching key (should trigger)
+        store.put(b"/nodes/abc/status", b"active").await.expect("put nodes");
+        
+        // Should only receive the nodes key
+        let event = rx.recv().await.expect("recv");
+        assert_eq!(event.key, b"/nodes/abc/status");
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+
+    #[tokio::test]
+    async fn test_watch_complex_regex() {
+        let data_dir = temp_data_dir("watch_complex");
+        
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        node.init().await.expect("init");
+        
+        let store = node.root_store().await;
+        let store = store.as_ref().unwrap();
+        
+        // Watch for peer status keys specifically
+        let (_initial, mut rx) = store.watch("^/nodes/[a-f0-9]+/status$").await.expect("watch");
+        
+        // This should NOT match (name, not status)
+        store.put(b"/nodes/abc123/name", b"Alice").await.expect("put name");
+        
+        // This SHOULD match (status)
+        store.put(b"/nodes/abc123/status", b"active").await.expect("put status");
+        
+        // Should only receive the status key
+        let event = rx.recv().await.expect("recv");
+        assert!(event.key.ends_with(b"/status"));
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+
+    #[tokio::test]
+    async fn test_watch_invalid_regex_fails() {
+        let data_dir = temp_data_dir("watch_invalid");
+        
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        node.init().await.expect("init");
+        
+        let store = node.root_store().await;
+        let store = store.as_ref().unwrap();
+        
+        // Invalid regex should return error
+        let result = store.watch("[invalid(regex").await;
+        assert!(result.is_err());
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
+    }
+
+    #[tokio::test]
+    async fn test_watch_multiple_watchers() {
+        let data_dir = temp_data_dir("watch_multi");
+        
+        let node = NodeBuilder { data_dir: data_dir.clone() }
+            .build()
+            .expect("create node");
+        node.init().await.expect("init");
+        
+        let store = node.root_store().await;
+        let store = store.as_ref().unwrap();
+        
+        // Two watchers with different patterns
+        let (_initial1, mut rx1) = store.watch("^/nodes/").await.expect("watch 1");
+        let (_initial2, mut rx2) = store.watch("^/config/").await.expect("watch 2");
+        
+        // Write to nodes (should trigger rx1 only)
+        store.put(b"/nodes/test", b"value").await.expect("put nodes");
+        
+        // Write to config (should trigger rx2 only)
+        store.put(b"/config/test", b"value").await.expect("put config");
+        
+        // rx1 should receive nodes event
+        let event1 = rx1.recv().await.expect("recv1");
+        assert!(event1.key.starts_with(b"/nodes/"));
+        
+        // rx2 should receive config event
+        let event2 = rx2.recv().await.expect("recv2");
+        assert!(event2.key.starts_with(b"/config/"));
+        
+        let _ = std::fs::remove_dir_all(data_dir.base());
     }
 }

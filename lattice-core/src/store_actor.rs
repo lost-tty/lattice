@@ -10,8 +10,47 @@ use crate::{
     proto::SignedEntry,
     log,
 };
+use prost::Message;
 use tokio::sync::{mpsc, oneshot, broadcast};
 use std::thread::{self, JoinHandle};
+use std::collections::HashMap;
+use regex::Regex;
+
+/// Event emitted when a watched key changes
+#[derive(Clone, Debug)]
+pub struct WatchEvent {
+    pub key: Vec<u8>,
+    pub kind: WatchEventKind,
+}
+
+/// Kind of watch event
+#[derive(Clone, Debug)]
+pub enum WatchEventKind {
+    Put { value: Vec<u8> },
+    Delete,
+}
+
+/// A registered watcher with compiled regex
+struct Watcher {
+    pattern: Regex,
+    tx: broadcast::Sender<WatchEvent>,
+}
+
+/// Error when creating a watcher
+#[derive(Debug)]
+pub enum WatchError {
+    InvalidRegex(String),
+}
+
+impl std::fmt::Display for WatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WatchError::InvalidRegex(e) => write!(f, "Invalid regex: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for WatchError {}
 
 /// Commands sent to the store actor
 pub enum StoreCmd {
@@ -67,6 +106,12 @@ pub enum StoreCmd {
     LogStats {
         resp: oneshot::Sender<(usize, u64)>,
     },
+    /// Watch keys matching a regex pattern, returns initial snapshot + receiver for changes
+    Watch {
+        pattern: String,
+        include_deleted: bool,
+        resp: oneshot::Sender<Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<WatchEvent>), WatchError>>,
+    },
     Shutdown,
 }
 
@@ -108,6 +153,10 @@ pub struct StoreActor {
     rx: mpsc::Receiver<StoreCmd>,
     /// Broadcast sender for emitting entries after they're committed locally
     entry_tx: broadcast::Sender<SignedEntry>,
+    /// Active key watchers (id -> watcher)
+    watchers: HashMap<u64, Watcher>,
+    /// Counter for watcher IDs
+    next_watcher_id: u64,
 }
 
 impl StoreActor {
@@ -138,6 +187,8 @@ impl StoreActor {
             node,
             rx,
             entry_tx,
+            watchers: HashMap::new(),
+            next_watcher_id: 0,
         }
     }
 
@@ -199,10 +250,65 @@ impl StoreActor {
                     
                     // Then apply to store
                     let result = self.store.apply_entry(&entry);
+                    
+                    // Emit watch events for the operations in this entry
+                    if result.is_ok() {
+                        if let Ok(inner) = crate::proto::Entry::decode(&entry.entry_bytes[..]) {
+                            for op in &inner.ops {
+                                use crate::proto::operation::OpType;
+                                match &op.op_type {
+                                    Some(OpType::Put(put_op)) => {
+                                        self.emit_watch_event(&put_op.key, WatchEventKind::Put { 
+                                            value: put_op.value.clone() 
+                                        });
+                                    }
+                                    Some(OpType::Delete(delete_op)) => {
+                                        self.emit_watch_event(&delete_op.key, WatchEventKind::Delete);
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
+                    
                     let _ = resp.send(result);
                 }
                 StoreCmd::LogStats { resp } => {
                     let _ = resp.send(self.chain_manager.log_stats());
+                }
+                StoreCmd::Watch { pattern, include_deleted, resp } => {
+                    match Regex::new(&pattern) {
+                        Ok(regex) => {
+                            // Get initial snapshot of matching entries
+                            let all_entries = match self.store.list_all(include_deleted) {
+                                Ok(entries) => entries,
+                                Err(e) => {
+                                    let _ = resp.send(Err(WatchError::InvalidRegex(format!("Store error: {}", e))));
+                                    continue;
+                                }
+                            };
+                            
+                            // Filter by regex
+                            let initial: Vec<(Vec<u8>, Vec<u8>)> = all_entries
+                                .into_iter()
+                                .filter(|(key, _)| {
+                                    let key_str = String::from_utf8_lossy(key);
+                                    regex.is_match(&key_str)
+                                })
+                                .collect();
+                            
+                            // Set up watcher
+                            let (tx, rx) = broadcast::channel(64);
+                            let id = self.next_watcher_id;
+                            self.next_watcher_id += 1;
+                            self.watchers.insert(id, Watcher { pattern: regex, tx });
+                            
+                            let _ = resp.send(Ok((initial, rx)));
+                        }
+                        Err(e) => {
+                            let _ = resp.send(Err(WatchError::InvalidRegex(e.to_string())));
+                        }
+                    }
                 }
                 StoreCmd::Shutdown => {
                     break;
@@ -221,7 +327,12 @@ impl StoreActor {
         }
         
         let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
-        self.commit_entry(parent_hashes, |b| b.put(key.to_vec(), value.to_vec()))
+        let result = self.commit_entry(parent_hashes, |b| b.put(key.to_vec(), value.to_vec()))?;
+        
+        // Emit watch event
+        self.emit_watch_event(key, WatchEventKind::Put { value: value.to_vec() });
+        
+        Ok(result)
     }
 
     fn do_delete(&mut self, key: &[u8]) -> Result<u64, StoreActorError> {
@@ -234,7 +345,41 @@ impl StoreActor {
         }
         
         let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
-        self.commit_entry(parent_hashes, |b| b.delete(key.to_vec()))
+        let result = self.commit_entry(parent_hashes, |b| b.delete(key.to_vec()))?;
+        
+        // Emit watch event
+        self.emit_watch_event(key, WatchEventKind::Delete);
+        
+        Ok(result)
+    }
+    
+    /// Emit watch events to all watchers whose pattern matches the key.
+    /// Lazily prunes dead watchers (where all receivers have been dropped).
+    fn emit_watch_event(&mut self, key: &[u8], kind: WatchEventKind) {
+        let key_str = String::from_utf8_lossy(key);
+        
+        // Collect IDs of dead watchers to remove
+        let mut dead_ids = Vec::new();
+        
+        for (&id, watcher) in &self.watchers {
+            // Check if any receivers are still alive
+            if watcher.tx.receiver_count() == 0 {
+                dead_ids.push(id);
+                continue;
+            }
+            
+            if watcher.pattern.is_match(&key_str) {
+                let _ = watcher.tx.send(WatchEvent {
+                    key: key.to_vec(),
+                    kind: kind.clone(),
+                });
+            }
+        }
+        
+        // Remove dead watchers
+        for id in dead_ids {
+            self.watchers.remove(&id);
+        }
     }
 
     fn commit_entry<F>(&mut self, parent_hashes: Vec<Vec<u8>>, build: F) -> Result<u64, StoreActorError>

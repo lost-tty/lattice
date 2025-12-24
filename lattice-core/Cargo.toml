@@ -19,6 +19,7 @@ uuid = { workspace = true }
 tokio = { workspace = true }
 hostname = "0.4"
 serde_json = "1"
+regex = "1"
 
 [build-dependencies]
 prost-build = { workspace = true }

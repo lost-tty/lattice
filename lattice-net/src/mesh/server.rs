@@ -4,13 +4,9 @@ use crate::{MessageSink, MessageStream, LatticeEndpoint, parse_node_id, LATTICE_
 use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle};
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
-use iroh_gossip::Gossip;
 use std::sync::Arc;
-use std::collections::HashMap;
-use tokio::sync::RwLock;
 use futures_util::StreamExt;
-use lattice_core::proto::{PeerMessage, peer_message, JoinRequest, JoinResponse, SignedEntry};
-use prost::Message;
+use lattice_core::proto::{PeerMessage, peer_message, JoinRequest, JoinResponse};
 use super::protocol;
 
 /// Result of a sync operation with a peer
@@ -20,15 +16,12 @@ pub struct SyncResult {
 }
 
 /// LatticeServer wraps Node + Endpoint + Gossip and provides mesh networking methods.
-/// Uses Router to handle incoming connections for both sync and gossip protocols.
 pub struct LatticeServer {
     node: Arc<Node>,
     endpoint: LatticeEndpoint,
-    gossip: Gossip,
+    gossip_manager: Arc<super::gossip_manager::GossipManager>,
     #[allow(dead_code)]
     router: Router,
-    /// Gossip senders per store topic
-    gossip_senders: Arc<RwLock<HashMap<Uuid, iroh_gossip::api::GossipSender>>>,
 }
 
 /// Protocol handler for lattice sync connections
@@ -42,14 +35,12 @@ impl std::fmt::Debug for SyncProtocol {
     }
 }
 
-
 impl ProtocolHandler for SyncProtocol {
     fn accept(&self, conn: Connection) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
         let node = self.node.clone();
         Box::pin(async move {
             if let Err(e) = handle_connection(node, conn).await {
-                tracing::error!("[Accept] Error: {}", e);
-                // Log error but return Ok - protocol handled the connection
+                tracing::error!(error = %e, "Connection handler error");
             }
             Ok(())
         })
@@ -58,182 +49,66 @@ impl ProtocolHandler for SyncProtocol {
 
 impl LatticeServer {
     /// Create a new LatticeServer from just a Node (creates endpoint internally).
-    pub async fn new_from_node(node: Arc<Node>) -> Result<Self, String> {
+    #[tracing::instrument(skip(node))]
+    pub async fn new_from_node(node: Arc<Node>) -> Result<Self, super::error::ServerError> {
         let endpoint = LatticeEndpoint::new(node.secret_key_bytes()).await
-            .map_err(|e| format!("Failed to create endpoint: {}", e))?;
+            .map_err(|e| super::error::ServerError::Endpoint(e.to_string()))?;
         Self::new(node, endpoint).await
     }
     
     /// Create a new LatticeServer with existing endpoint.
-    pub async fn new(node: Arc<Node>, endpoint: LatticeEndpoint) -> Result<Self, String> {
-        // Create gossip instance
-        let gossip = Gossip::builder().spawn(endpoint.endpoint().clone());
-        
-        // Create sync protocol handler
+    #[tracing::instrument(skip(node, endpoint))]
+    pub async fn new(node: Arc<Node>, endpoint: LatticeEndpoint) -> Result<Self, super::error::ServerError> {
+        let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint));
         let sync_protocol = SyncProtocol { node: node.clone() };
-        
-        // Create router to handle both protocols
         let router = Router::builder(endpoint.endpoint().clone())
             .accept(LATTICE_ALPN, sync_protocol)
-            .accept(iroh_gossip::ALPN, gossip.clone())
+            .accept(iroh_gossip::ALPN, gossip_manager.gossip().clone())
             .spawn();
         
         let server = Self { 
-            node, 
+            node: node.clone(), 
             endpoint,
-            gossip,
+            gossip_manager: gossip_manager.clone(),
             router,
-            gossip_senders: Arc::new(RwLock::new(HashMap::new())),
         };
-        server.spawn_node_event_listener();
         
-        // If root store is already open, start gossip for it  
-        if let Some(store) = (*server.node.root_store().await).clone() {
-            tracing::info!("[Gossip] Root store already open, starting gossip...");
-            server.join_gossip_topic(store.id()).await?;
-            server.spawn_entry_forward_loop(store);
-        }
+        // Spawn background task to manage gossip on store activation
+        let gm = gossip_manager.clone();
+        let node_clone = node.clone();
+        tokio::spawn(async move {
+            Self::run_gossip_listener(node_clone, gm).await;
+        });
         
         Ok(server)
     }
     
-    /// Spawn a listener for Node events (auto-starts gossip when root store is activated)
-    fn spawn_node_event_listener(&self) {
-        let mut event_rx = self.node.subscribe_events();
-        let gossip_senders = self.gossip_senders.clone();
-        let gossip = self.gossip.clone();
-        let node = self.node.clone();
-        let my_pubkey = self.endpoint.public_key();
+    async fn run_gossip_listener(node: Arc<Node>, gossip_manager: Arc<super::gossip_manager::GossipManager>) {
+        let mut event_rx = node.subscribe_events();
         
-        tokio::spawn(async move {
-            while let Ok(event) = event_rx.recv().await {
-                match event {
-                    NodeEvent::RootStoreActivated(store) => {
-                        tracing::info!("[Gossip] Root store activated: {}, starting gossip...", store.id());
-                        
-                        let store_id = store.id();
-                        
-                        // Get bootstrap peers from node's peer list
-                        let bootstrap_peers: Vec<iroh::PublicKey> = match node.list_peers().await {
-                            Ok(peers) => {
-                                peers.iter()
-                                    .filter(|p| p.status == PeerStatus::Active)
-                                    .filter_map(|p| parse_node_id(&p.pubkey).ok())
-                                    .filter(|id| *id != my_pubkey)  // Don't connect to ourselves
-                                    .collect()
-                            }
-                            Err(e) => {
-                                tracing::error!("[Gossip] Failed to list peers: {}, using empty list", e);
-                                Vec::new()
-                            }
-                        };
-                        tracing::info!("[Gossip] Bootstrap peers: {}", bootstrap_peers.len());
-                        
-                        // Topic ID from hash of "lattice/{store_id}" for namespacing
-                        let topic_bytes = blake3::hash(format!("lattice/{}", store_id).as_bytes());
-                        let topic_id = iroh_gossip::TopicId::from_bytes(*topic_bytes.as_bytes());
-                        
-                        // Use subscribe (non-blocking) - peers will connect when they sync
-                        // subscribe_and_join would block waiting for peers we can't reach yet
-                        match gossip.subscribe(topic_id, bootstrap_peers).await {
-                            Ok(sub) => {
-                                let (sender, receiver) = sub.split();
-                                
-                                // Store sender
-                                gossip_senders.write().await.insert(store_id, sender);
-                                
-                                // Spawn receive loop
-                                let store_recv = store.clone();
-                                tokio::spawn(async move {
-                                    let mut receiver = receiver;
-                                    tracing::info!("[Gossip] Receive loop started for topic {:?}", topic_id);
-                                    
-                                    while let Some(event) = futures_util::StreamExt::next(&mut receiver).await {
-                                        match event {
-                                            Ok(iroh_gossip::api::Event::Received(msg)) => {
-                                                tracing::info!("[Gossip] Received {} bytes", msg.content.len());
-                                                if let Ok(entry) = SignedEntry::decode(&msg.content[..]) {
-                                                    if let Err(e) = store_recv.apply_entry(entry).await {
-                                                        tracing::error!("[Gossip] Failed to apply entry: {}", e);
-                                                    } else {
-                                                        tracing::info!("[Gossip] Applied entry successfully");
-                                                    }
-                                                }
-                                            }
-                                            Ok(other) => {
-                                                tracing::info!("[Gossip] Event: {:?}", other);
-                                            }
-                                            Err(e) => {
-                                                tracing::error!("[Gossip] Error: {}", e);
-                                            }
-                                        }
-                                    }
-                                });
-                                
-                                // Spawn entry forward loop
-                                let gossip_senders = gossip_senders.clone();
-                                let mut entry_rx = store.subscribe_entries();
-                                tokio::spawn(async move {
-                                    tracing::info!("[Gossip] Entry forward loop started for store {}", store_id);
-                                    while let Ok(entry) = entry_rx.recv().await {
-                                        let senders = gossip_senders.read().await;
-                                        if let Some(sender) = senders.get(&store_id) {
-                                            let bytes = entry.encode_to_vec();
-                                            tracing::info!("[Gossip] Broadcasting {} bytes", bytes.len());
-                                            let _ = sender.broadcast(bytes.into()).await;
-                                        }
-                                    }
-                                });
-                                
-                                tracing::info!("[Gossip] Gossip started for store {}", store_id);
-                            }
-                            Err(e) => {
-                                tracing::error!("[Gossip] Failed to subscribe to topic: {}", e);
-                            }
-                        }
+        // Check if root store already open at startup  
+        if let Some(store) = (*node.root_store().await).clone() {
+            tracing::info!(store_id = %store.id(), "Root store already open");
+            if let Err(e) = gossip_manager.setup_for_store(&store).await {
+                tracing::error!(error = %e, "Gossip setup failed");
+            }
+        }
+        
+        // Listen for future activations
+        while let Ok(event) = event_rx.recv().await {
+            match event {
+                NodeEvent::RootStoreActivated(store) => {
+                    tracing::info!(store_id = %store.id(), "Root store activated");
+                    if let Err(e) = gossip_manager.setup_for_store(&store).await {
+                        tracing::error!(error = %e, "Gossip setup failed");
                     }
                 }
             }
-        });
+        }
     }
-    
-    /// Start gossip for a store (call after store is opened)
-    pub async fn start_gossip_for_store(&self, store: StoreHandle) -> Result<(), String> {
-        tracing::info!("[Gossip] Starting gossip for store {}", store.id());
-        self.join_gossip_topic(store.id()).await?;
-        self.spawn_entry_forward_loop(store);
-        Ok(())
-    }
-    
-    /// Spawn a loop that forwards local store entry broadcasts to gossip
-    fn spawn_entry_forward_loop(&self, store: StoreHandle) {
-        let store_id = store.id();
-        let gossip_senders = self.gossip_senders.clone();
-        let mut entry_rx = store.subscribe_entries();
-        
-        tracing::info!("[Gossip] Starting entry forward loop for store {}", store_id);
-        
-        tokio::spawn(async move {
-            while let Ok(entry) = entry_rx.recv().await {
-                tracing::info!("[Gossip] Received local entry, forwarding to gossip...");
-                // Forward to gossip sender
-                let senders = gossip_senders.read().await;
-                if let Some(sender) = senders.get(&store_id) {
-                    let bytes = entry.encode_to_vec();
-                    tracing::info!("[Gossip] Broadcasting {} bytes to topic {}", bytes.len(), store_id);
-                    if let Err(e) = sender.broadcast(bytes.into()).await {
-                        tracing::error!("[Gossip] Failed to broadcast entry: {}", e);
-                    } else {
-                        tracing::info!("[Gossip] Broadcast successful");
-                    }
-                } else {
-                    tracing::error!("[Gossip] No gossip sender for store {}", store_id);
-                }
-            }
-            tracing::info!("[Gossip] Entry forward loop ended for store {}", store_id);
-        });
-    }
-    
+}
+
+impl LatticeServer {
     /// Access the underlying node
     pub fn node(&self) -> &Node {
         &self.node
@@ -243,89 +118,10 @@ impl LatticeServer {
     pub fn endpoint(&self) -> &LatticeEndpoint {
         &self.endpoint
     }
-
     
-    /// Join gossip topic for a store (subscribes and spawns receive loop)
-    pub async fn join_gossip_topic(&self, store_id: Uuid) -> Result<(), String> {
-        // Get active peers to bootstrap gossip
-        let peers = self.node.list_peers().await
-            .map_err(|e| format!("Failed to list peers: {}", e))?;
-        
-        let my_pubkey = self.endpoint.public_key();
-        let bootstrap_peers: Vec<iroh::PublicKey> = peers.iter()
-            .filter(|p| p.status == PeerStatus::Active)
-            .filter_map(|p| parse_node_id(&p.pubkey).ok())
-            .filter(|id| *id != my_pubkey)  // Don't connect to ourselves
-            .collect();
-        
-        tracing::info!("[Gossip] Joining topic {} with {} bootstrap peers", store_id, bootstrap_peers.len());
-        
-        // Topic ID from store UUID bytes (padded to 32 bytes)
-        // Topic ID from hash of "lattice/{store_id}" for namespacing
-        let topic_bytes = blake3::hash(format!("lattice/{}", store_id).as_bytes());
-        let topic_id = iroh_gossip::TopicId::from_bytes(*topic_bytes.as_bytes());
-        
-        // Subscribe to topic
-        let (sender, mut receiver) = self.gossip.subscribe(topic_id, bootstrap_peers).await
-            .map_err(|e| format!("Failed to subscribe to gossip topic: {}", e))?
-            .split();
-        
-        // Store sender for broadcasting
-        {
-            let mut senders = self.gossip_senders.write().await;
-            senders.insert(store_id, sender);
-        }
-        
-        // Spawn receive loop
-        let node = self.node.clone();
-        let topic = topic_id;
-        tokio::spawn(async move {
-            // StreamExt imported at module level
-            tracing::info!("[Gossip] Receive loop started for topic {:?}", topic);
-            
-            while let Some(event) = receiver.next().await {
-                match event {
-                    Ok(iroh_gossip::api::Event::Received(message)) => {
-                        tracing::info!("[Gossip] Received gossip message: {} bytes", message.content.len());
-                        // Decode SignedEntry and apply
-                        match SignedEntry::decode(&message.content[..]) {
-                            Ok(entry) => {
-                                tracing::info!("[Gossip] Decoded entry, applying...");
-                                // Find store and apply entry
-                                if let Some(store) = (*node.root_store().await).clone() {
-                                    if let Err(e) = store.apply_entry(entry.into()).await {
-                                        tracing::error!("[Gossip] Failed to apply entry: {}", e);
-                                    } else {
-                                        tracing::info!("[Gossip] Entry applied successfully");
-                                    }
-                                } else {
-                                    tracing::error!("[Gossip] No root store to apply entry to");
-                                }
-                            }
-                            Err(e) => tracing::error!("[Gossip] Failed to decode entry: {}", e),
-                        }
-                    }
-                    Ok(other) => {
-                        tracing::info!("[Gossip] Other event: {:?}", other);
-                    }
-                    Err(e) => tracing::error!("[Gossip] Receive error: {}", e),
-                }
-            }
-            tracing::info!("[Gossip] Receive loop ended for topic");
-        });
-        
-        Ok(())
-    }
-    
-    /// Broadcast an entry to all gossip subscribers for a store
-    pub async fn broadcast_entry(&self, store_id: Uuid, entry: &SignedEntry) -> Result<(), String> {
-        let senders = self.gossip_senders.read().await;
-        if let Some(sender) = senders.get(&store_id) {
-            let bytes = entry.encode_to_vec();
-            sender.broadcast(bytes.into()).await
-                .map_err(|e| format!("Gossip broadcast failed: {}", e))?;
-        }
-        Ok(())
+    /// Access the gossip manager
+    pub fn gossip_manager(&self) -> &super::gossip_manager::GossipManager {
+        &self.gossip_manager
     }
     
     /// Join an existing mesh by connecting to a peer.
@@ -361,9 +157,9 @@ impl LatticeServer {
                 let handle = self.node.complete_join(store_uuid).await?;
                 
                 // Sync with peer to get initial data
-                tracing::info!("[Join] Syncing with peer to get initial data...");
+                tracing::debug!("[Join] Syncing with peer to get initial data...");
                 if let Ok(result) = self.sync_with_peer(&handle, peer_id).await {
-                    tracing::info!("[Join] Initial sync complete: {} entries", result.entries_applied);
+                    tracing::debug!("[Join] Initial sync complete: {} entries", result.entries_applied);
                 }
                 
                 Ok(handle)
@@ -440,22 +236,22 @@ impl LatticeServer {
             .collect();
         
         if peer_ids.is_empty() {
-            tracing::info!("[Sync] No active peers to sync with");
+            tracing::debug!("[Sync] No active peers to sync with");
             return Ok(Vec::new());
         }
         
-        tracing::info!("[Sync] Syncing with {} peers in parallel...", peer_ids.len());
+        tracing::debug!("[Sync] Syncing with {} peers in parallel...", peer_ids.len());
         
         // Spawn all syncs in parallel with timeout
         let futures = peer_ids.iter().map(|&peer_id| {
             let store = store.clone();
             async move {
                 let peer_short = peer_id.fmt_short();
-                tracing::info!("[Sync] Starting sync with {}...", peer_short);
+                tracing::debug!("[Sync] Starting sync with {}...", peer_short);
                 
                 match tokio::time::timeout(SYNC_TIMEOUT, self.sync_with_peer(&store, peer_id)).await {
                     Ok(Ok(result)) => {
-                        tracing::info!("[Sync] {} complete: {} entries applied", peer_short, result.entries_applied);
+                        tracing::debug!("[Sync] {} complete: {} entries applied", peer_short, result.entries_applied);
                         Some(result)
                     }
                     Ok(Err(e)) => {
@@ -479,9 +275,6 @@ impl LatticeServer {
     }
 }
 
-// --- Connection handling ---
-// --- Connection handling ---
-
 /// Handle a single incoming connection
 async fn handle_connection(
     node: Arc<Node>,
@@ -489,7 +282,7 @@ async fn handle_connection(
 ) -> Result<(), String> {
     let remote_id = conn.remote_id();
     let remote_hex = hex::encode(remote_id.as_bytes());
-    tracing::info!("\n[Incoming] {} (ALPN: {})", remote_id.fmt_short(), String::from_utf8_lossy(conn.alpn()));
+    tracing::debug!("[Incoming] {} (ALPN: {})", remote_id.fmt_short(), String::from_utf8_lossy(conn.alpn()));
     
     // Parse remote pubkey
     let remote_pubkey: [u8; 32] = hex::decode(&remote_hex)
@@ -525,7 +318,7 @@ async fn handle_join_request(
     req: lattice_core::proto::JoinRequest,
     mut sink: MessageSink,
 ) -> Result<(), String> {
-    tracing::info!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
+    tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
     
     // Accept the join - verifies invited, sets active, returns store ID
     let acceptance = node.accept_join(remote_pubkey).await
@@ -540,7 +333,7 @@ async fn handle_join_request(
     sink.send(&resp).await?;
     sink.finish().await?;
     
-    tracing::info!("[Join] Sent JoinResponse, peer now active");
+    tracing::debug!("[Join] Sent JoinResponse, peer now active");
     Ok(())
 }
 
@@ -555,19 +348,19 @@ async fn handle_sync_request(
     // Verify peer is active (allowed to sync)
     node.verify_peer_status(remote_pubkey, &[PeerStatus::Active]).await
         .map_err(|e| e.to_string())?;
-    tracing::info!("[Sync] Verified peer as active");
+    tracing::debug!("[Sync] Verified peer as active");
     
     // Parse store_id from request
     let store_id = Uuid::from_slice(&peer_request.store_id)
         .map_err(|_| format!("Invalid store_id in SyncRequest: {} bytes, expected 16", peer_request.store_id.len()))?;
     
-    tracing::info!("[Sync] Received SyncRequest for store {}", store_id);
+    tracing::debug!("[Sync] Received SyncRequest for store {}", store_id);
     
     // Open the requested store (uses cache if available)
     let (store, _info) = node.open_store(store_id).await
         .map_err(|e| format!("Failed to open store {}: {}", store_id, e))?;
     
-    tracing::info!("[Sync] Received SyncRequest");
+    tracing::debug!("[Sync] Received SyncRequest");
     
     // Get our sync state
     let my_state = store.sync_state().await
@@ -588,14 +381,13 @@ async fn handle_sync_request(
         .unwrap_or_default();
     
     let entries_sent = protocol::send_missing_entries(&mut sink, &store, &my_state, &peer_state).await?;
-    tracing::info!("[Sync] Sent {} entries, now receiving from peer...", entries_sent);
+    tracing::debug!("[Sync] Sent {} entries, now receiving from peer...", entries_sent);
     
     // 3. Receive entries from requester (bidirectional)
     let (entries_applied, _) = protocol::receive_entries(&mut stream, &store).await?;
     
     sink.finish().await?;
     
-    tracing::info!("[Sync] Applied {} entries from peer", entries_applied);
+    tracing::debug!("[Sync] Applied {} entries from peer", entries_applied);
     Ok(())
 }
-
