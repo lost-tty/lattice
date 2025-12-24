@@ -29,13 +29,15 @@ pub mod store;
 pub mod meta_store;
 pub mod causal_iter;
 pub mod store_actor;
+pub mod store_handle;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (16 MB)
 pub const MAX_ENTRY_SIZE: usize = 16 * 1024 * 1024;
 
 pub use node_identity::{NodeIdentity, PeerStatus};
-pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, StoreHandle, NodeError, NodeEvent, PeerInfo, JoinAcceptance};
+pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, PeerWatchEvent, PeerWatchEventKind, parse_peer_status_key, PEER_STATUS_PATTERN};
+pub use store_handle::StoreHandle;
 pub use sigchain::{SigChain, SigChainManager};
 pub use entry::Entry;
 pub use sync_state::{SyncState, AuthorInfo, MissingRange};
