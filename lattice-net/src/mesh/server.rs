@@ -5,7 +5,6 @@ use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle};
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
-use futures_util::StreamExt;
 use lattice_core::proto::{PeerMessage, peer_message, JoinRequest, JoinResponse};
 use super::protocol;
 
@@ -89,7 +88,7 @@ impl LatticeServer {
         // Check if root store already open at startup  
         if let Some(store) = (*node.root_store().await).clone() {
             tracing::info!(store_id = %store.id(), "Root store already open");
-            if let Err(e) = gossip_manager.setup_for_store(&store).await {
+            if let Err(e) = gossip_manager.setup_for_store(&*node, &store).await {
                 tracing::error!(error = %e, "Gossip setup failed");
             }
         }
@@ -99,7 +98,7 @@ impl LatticeServer {
             match event {
                 NodeEvent::RootStoreActivated(store) => {
                     tracing::info!(store_id = %store.id(), "Root store activated");
-                    if let Err(e) = gossip_manager.setup_for_store(&store).await {
+                    if let Err(e) = gossip_manager.setup_for_store(&*node, &store).await {
                         tracing::error!(error = %e, "Gossip setup failed");
                     }
                 }

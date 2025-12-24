@@ -6,13 +6,25 @@ use crate::{
     meta_store::MetaStoreError,
     sigchain::SigChainError,
     store::StoreError,
-    spawn_store_actor, StoreCmd,
+    spawn_store_actor,
     node_identity::NodeError as IdentityError,
-    proto::SignedEntry,
+    store_handle::StoreHandle,
 };
 use std::path::Path;
 use thiserror::Error;
 use tokio::sync::broadcast;
+
+/// Regex pattern for peer status keys
+pub const PEER_STATUS_PATTERN: &str = r"^/nodes/([a-f0-9]+)/status$";
+
+/// Parse a peer status key like `/nodes/{pubkey}/status` and extract the pubkey hex.
+/// Returns None if the key doesn't match the expected format.
+pub fn parse_peer_status_key(key: &[u8]) -> Option<String> {
+    let key_str = String::from_utf8_lossy(key);
+    let regex = regex::Regex::new(PEER_STATUS_PATTERN).expect("valid regex");
+    regex.captures(&key_str)
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+}
 
 #[derive(Error, Debug)]
 pub enum NodeError {
@@ -75,6 +87,24 @@ pub struct PeerInfo {
 pub enum NodeEvent {
     /// Root store was activated (opened or set)
     RootStoreActivated(StoreHandle),
+}
+
+/// Event for peer status changes (from watch_peers)
+#[derive(Clone, Debug)]
+pub struct PeerWatchEvent {
+    /// Peer's public key (hex encoded)
+    pub pubkey: String,
+    /// The status change
+    pub kind: PeerWatchEventKind,
+}
+
+/// Kind of peer status change
+#[derive(Clone, Debug)]
+pub enum PeerWatchEventKind {
+    /// Peer status was set
+    StatusChanged(PeerStatus),
+    /// Peer was removed (deleted)
+    Removed,
 }
 
 pub struct NodeBuilder {
@@ -310,11 +340,12 @@ impl Node {
         let store = guard.as_ref()
             .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
         
-        let all = store.list(false).await?;
+        // Only list keys under /nodes/ prefix
+        let nodes = store.list_by_prefix(b"/nodes/", false).await?;
         
         // Collect unique pubkeys with status
         let mut peers_map: std::collections::HashMap<String, PeerStatus> = std::collections::HashMap::new();
-        for (key, value) in &all {
+        for (key, value) in &nodes {
             let key_str = String::from_utf8_lossy(key);
             if key_str.ends_with("/status") {
                 if let Some(pubkey) = key_str.strip_prefix("/nodes/").and_then(|s| s.strip_suffix("/status")) {
@@ -508,208 +539,54 @@ impl Node {
         );
         
         // Store the entry sender for gossip
-        let handle = StoreHandle {
-            store_id,
-            tx,
-            actor_handle: Some(actor_handle),
-            entry_tx,
-        };
+        let handle = StoreHandle::new(store_id, tx, actor_handle, entry_tx);
         
         Ok((handle, info))
     }
-}
-
-/// A handle to a specific store - wraps channel to actor thread
-#[derive(Debug)]
-pub struct StoreHandle {
-    store_id: Uuid,
-    tx: tokio::sync::mpsc::Sender<StoreCmd>,
-    actor_handle: Option<std::thread::JoinHandle<()>>,
-    entry_tx: broadcast::Sender<SignedEntry>,
-}
-
-impl Clone for StoreHandle {
-    fn clone(&self) -> Self {
-        Self {
-            store_id: self.store_id,
-            tx: self.tx.clone(),
-            actor_handle: None, // Clones don't own the actor thread
-            entry_tx: self.entry_tx.clone(),
-        }
-    }
-}
-
-impl StoreHandle {
-    pub fn id(&self) -> Uuid { self.store_id }
     
-    /// Subscribe to receive entries as they're committed locally
-    pub fn subscribe_entries(&self) -> broadcast::Receiver<SignedEntry> {
-        self.entry_tx.subscribe()
-    }
-
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::Get { key: key.to_vec(), resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    pub async fn get_heads(&self, key: &[u8]) -> Result<Vec<crate::HeadInfo>, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::GetHeads { key: key.to_vec(), resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    pub async fn list(&self, include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::List { include_deleted, resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    pub async fn list_by_prefix(&self, prefix: &[u8], include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::ListByPrefix { prefix: prefix.to_vec(), include_deleted, resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    pub async fn log_seq(&self) -> u64 {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let _ = self.tx.send(StoreCmd::LogSeq { resp: resp_tx }).await;
-        resp_rx.await.unwrap_or(0)
-    }
-
-    pub async fn applied_seq(&self) -> Result<u64, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::AppliedSeq { resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    pub async fn author_state(&self, author: &[u8; 32]) -> Result<Option<crate::proto::AuthorState>, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::AuthorState { author: *author, resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    /// Get log directory statistics (file count, total bytes)
-    pub async fn log_stats(&self) -> (usize, u64) {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let _ = self.tx.send(StoreCmd::LogStats { resp: resp_tx }).await;
-        resp_rx.await.unwrap_or((0, 0))
-    }
-
-    pub async fn sync_state(&self) -> Result<crate::sync_state::SyncState, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::SyncState { resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    pub async fn read_entries_after(&self, author: &[u8; 32], from_hash: Option<[u8; 32]>) -> Result<Vec<crate::proto::SignedEntry>, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::ReadEntriesAfter { author: *author, from_hash, resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    pub async fn apply_entry(&self, entry: crate::proto::SignedEntry) -> Result<(), NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::ApplyEntry { entry, resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<u64, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::Put { key: key.to_vec(), value: value.to_vec(), resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(|e| NodeError::Actor(e.to_string()))
-    }
-
-    pub async fn delete(&self, key: &[u8]) -> Result<u64, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::Delete { key: key.to_vec(), resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(|e| NodeError::Actor(e.to_string()))
-    }
-
-    /// Watch for key changes matching a regex pattern.
-    /// Returns initial snapshot of matching entries plus a receiver for future changes.
+    /// Watch for peer status changes on the root store.
+    /// Returns initial snapshot of peers with their status and a receiver for status changes.
     /// 
-    /// Example patterns:
-    /// - `^/nodes/.*` - matches all node keys
-    /// - `^/nodes/[a-f0-9]+/status$` - matches peer status keys
-    /// 
-    /// The initial snapshot is atomic with the watch subscription - no events will be missed.
-    pub async fn watch(&self, pattern: &str) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<crate::store_actor::WatchEvent>), NodeError> {
-        self.watch_with_opts(pattern, false).await
-    }
-    
-    /// Watch with option to include deleted entries in initial snapshot.
-    pub async fn watch_with_opts(&self, pattern: &str, include_deleted: bool) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<crate::store_actor::WatchEvent>), NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::Watch { 
-            pattern: pattern.to_string(), 
-            include_deleted,
-            resp: resp_tx 
-        }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(|e| NodeError::Actor(e.to_string()))
-    }
-
-
-}
-
-impl Drop for StoreHandle {
-    fn drop(&mut self) {
-        // Only send shutdown if we own the actor (non-cloned handle)
-        if let Some(handle) = self.actor_handle.take() {
-            let _ = self.tx.try_send(StoreCmd::Shutdown);
-            let _ = handle.join();
-        }
-        // Clones (actor_handle = None) don't send shutdown - actor keeps running
+    /// Both the initial snapshot and receiver provide typed `(pubkey, PeerStatus)` data.
+    pub async fn watch_peers(&self) -> Result<(Vec<(String, PeerStatus)>, broadcast::Receiver<PeerWatchEvent>), NodeError> {
+        let guard = self.root_store.read().await;
+        let store = guard.as_ref()
+            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        
+        let pattern = r"^/nodes/([a-f0-9]+)/status$";
+        let (initial, mut raw_rx) = store.watch(pattern).await?;
+        
+        // Parse initial snapshot into (pubkey, status) pairs
+        let peers: Vec<(String, PeerStatus)> = initial.iter()
+            .filter_map(|(k, v)| {
+                let pubkey = parse_peer_status_key(k)?;
+                let status = PeerStatus::from_str(&String::from_utf8_lossy(v))?;
+                Some((pubkey, status))
+            })
+            .collect();
+        
+        // Create transformed channel for PeerWatchEvent
+        let (tx, rx) = broadcast::channel(64);
+        tokio::spawn(async move {
+            use crate::store_actor::WatchEventKind;
+            while let Ok(event) = raw_rx.recv().await {
+                if let Some(pubkey) = parse_peer_status_key(&event.key) {
+                    let kind = match event.kind {
+                        WatchEventKind::Put { value } => {
+                            if let Some(status) = PeerStatus::from_str(&String::from_utf8_lossy(&value)) {
+                                PeerWatchEventKind::StatusChanged(status)
+                            } else {
+                                continue;
+                            }
+                        }
+                        WatchEventKind::Delete => PeerWatchEventKind::Removed,
+                    };
+                    let _ = tx.send(PeerWatchEvent { pubkey, kind });
+                }
+            }
+        });
+        
+        Ok((peers, rx))
     }
 }
 
