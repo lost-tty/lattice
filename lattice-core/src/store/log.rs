@@ -208,7 +208,8 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::signed_entry::EntryBuilder;
+    use crate::store::signed_entry::EntryBuilder;
+    use crate::proto::Operation;
     use std::env::temp_dir;
 
     fn temp_log_path(name: &str) -> std::path::PathBuf {
@@ -231,7 +232,7 @@ mod tests {
         let hlc = HLC::now_with_clock(&clock);
         
         let entry = EntryBuilder::new(1, hlc)
-            .put("/test/key", b"value".to_vec())
+            .operation(Operation::put("/test/key", b"value".to_vec()))
             .sign(&node);
         
         append_entry(&path, &entry).unwrap();
@@ -253,7 +254,7 @@ mod tests {
         
         for i in 1..=5 {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
-                .put(format!("/key/{}", i), format!("value{}", i).into_bytes())
+                .operation(Operation::put(format!("/key/{}", i), format!("value{}", i).into_bytes()))
                 .sign(&node);
             append_entry(&path, &entry).unwrap();
         }
@@ -277,7 +278,7 @@ mod tests {
         
         for i in 1..=5 {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
-                .put(format!("/key/{}", i), format!("value{}", i).into_bytes())
+                .operation(Operation::put(format!("/key/{}", i), format!("value{}", i).into_bytes()))
                 .sign(&node);
             hashes.push(compute_entry_hash(&entry));
             append_entry(&path, &entry).unwrap();
@@ -305,7 +306,7 @@ mod tests {
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .put("/key", b"value".to_vec())
+            .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         append_entry(&path, &entry).unwrap();
         
@@ -325,7 +326,7 @@ mod tests {
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .put("/key", b"value".to_vec())
+            .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         let expected_hash = compute_entry_hash(&entry);
         append_entry(&path, &entry).unwrap();
@@ -372,7 +373,7 @@ mod tests {
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .put("/key", b"original".to_vec())
+            .operation(Operation::put("/key", b"original".to_vec()))
             .sign(&node);
         append_entry(&path, &entry).unwrap();
         
@@ -403,7 +404,7 @@ mod tests {
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .put("/key", b"data".to_vec())
+            .operation(Operation::put("/key", b"data".to_vec()))
             .sign(&node);
         append_entry(&path, &entry).unwrap();
         
@@ -437,7 +438,7 @@ mod tests {
         let huge_payload = vec![0u8; crate::MAX_ENTRY_SIZE + 100];
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .put("/huge", huge_payload)
+            .operation(Operation::put("/huge", huge_payload))
             .sign(&node);
         
         let result = append_entry(&path, &entry);
@@ -459,7 +460,7 @@ mod tests {
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .put("/key", b"val".to_vec())
+            .operation(Operation::put("/key", b"val".to_vec()))
             .sign(&node);
         append_entry(&path, &entry).unwrap();
         
@@ -512,7 +513,7 @@ mod tests {
         // Write 3 entries
         for i in 0..3 {
             let entry = EntryBuilder::new(i + 1, HLC::now_with_clock(&clock))
-                .put(format!("/key/{}", i), b"val".to_vec())
+                .operation(Operation::put(format!("/key/{}", i), b"val"))
                 .sign(&node);
             append_entry(&path, &entry).unwrap();
         }

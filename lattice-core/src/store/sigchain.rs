@@ -3,10 +3,9 @@
 //! A SigChain manages a single author's append-only log. It validates entries
 //! before appending (correct seq, prev_hash, valid signature) and persists to disk.
 
-use crate::log::{append_entry, read_entries, LogError};
-use crate::node_identity::NodeIdentity;
+use crate::store::log::{append_entry, read_entries, LogError};
 use crate::proto::{Entry, SignedEntry};
-use crate::signed_entry::{hash_signed_entry, verify_signed_entry};
+use crate::store::signed_entry::{hash_signed_entry, verify_signed_entry};
 use prost::Message;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -132,6 +131,7 @@ impl SigChain {
     }
     
     /// Get the author's public key
+    #[cfg(test)]
     pub fn author_id(&self) -> &[u8; 32] {
         &self.author_id
     }
@@ -157,6 +157,7 @@ impl SigChain {
     }
     
     /// Check if the chain is empty
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.next_seq == 1
     }
@@ -229,18 +230,20 @@ impl SigChain {
     }
     
     /// Create and append a new entry using the node's key
-    pub fn create_entry(&mut self, node: &NodeIdentity, ops: Vec<crate::proto::Operation>) -> Result<SignedEntry, SigChainError> {
-        use crate::clock::SystemClock;
+    pub fn create_entry(
+        &mut self,
+        node: &crate::node_identity::NodeIdentity,
+        parent_hashes: Vec<Vec<u8>>,
+        ops: Vec<crate::proto::Operation>,
+    ) -> Result<SignedEntry, SigChainError> {
         use crate::hlc::HLC;
-        use crate::signed_entry::EntryBuilder;
+        use crate::store::signed_entry::EntryBuilder;
         
-        let hlc = HLC::now_with_clock(&SystemClock);
-        
-        let mut builder = EntryBuilder::new(self.next_seq, hlc)
+        let mut builder = EntryBuilder::new(self.next_seq(), HLC::now())
             .store_id(self.store_id.to_vec())
-            .prev_hash(self.last_hash.to_vec());
+            .prev_hash(self.last_hash().to_vec())
+            .parent_hashes(parent_hashes);
         
-        // Add operations
         for op in ops {
             builder = builder.operation(op);
         }
@@ -343,8 +346,8 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::proto::{operation, Operation, PutOp};
-    use crate::signed_entry::EntryBuilder;
+    use crate::proto::Operation;
+    use crate::store::signed_entry::EntryBuilder;
     use std::env::temp_dir;
 
     fn temp_log_path(name: &str) -> PathBuf {
@@ -380,7 +383,7 @@ mod tests {
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key", b"value".to_vec())
+            .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         
         chain.append(&entry).unwrap();
@@ -406,7 +409,7 @@ mod tests {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
                 .prev_hash(chain.last_hash.to_vec())
-                .put(format!("/key/{}", i), format!("value{}", i).into_bytes())
+                .operation(Operation::put(format!("/key/{}", i), format!("value{}", i).into_bytes()))
                 .sign(&node);
             chain.append(&entry).unwrap();
         }
@@ -433,7 +436,7 @@ mod tests {
                 let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                     .store_id(TEST_STORE.to_vec())
                     .prev_hash(chain.last_hash.to_vec())
-                    .put("/key", b"val".to_vec())
+                    .operation(Operation::put("/key", b"val".to_vec()))
                     .sign(&node);
                 chain.append(&entry).unwrap();
             }
@@ -462,7 +465,7 @@ mod tests {
         let entry = EntryBuilder::new(2, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key", b"val".to_vec())
+            .operation(Operation::put("/key", b"val".to_vec()))
             .sign(&node);
         
         let result = chain.append(&entry);
@@ -486,7 +489,7 @@ mod tests {
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key", b"v1".to_vec())
+            .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         chain.append(&entry1).unwrap();
         
@@ -494,7 +497,7 @@ mod tests {
         let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([99u8; 32].to_vec()) // Wrong!
-            .put("/key", b"v2".to_vec())
+            .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
         
         let result = chain.append(&entry2);
@@ -518,7 +521,7 @@ mod tests {
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key", b"val".to_vec())
+            .operation(Operation::put("/key", b"val".to_vec()))
             .sign(&node);
         
         let result = chain.append(&entry);
@@ -537,16 +540,9 @@ mod tests {
         let author = node.public_key_bytes();
         let mut chain = SigChain::new(&path, TEST_STORE, author);
         
-        let ops = vec![
-            Operation {
-                op_type: Some(operation::OpType::Put(PutOp {
-                    key: b"/test".to_vec(),
-                    value: b"hello".to_vec(),
-                })),
-            },
-        ];
+        let ops = vec![Operation::put(b"/test", b"hello")];
         
-        let signed = chain.create_entry(&node, ops).unwrap();
+        let signed = chain.create_entry(&node, vec![], ops).unwrap();
         
         assert_eq!(chain.len(), 1);
         
@@ -577,7 +573,7 @@ mod tests {
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(store_a.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key", b"val".to_vec())
+            .operation(Operation::put("/key", b"val".to_vec()))
             .sign(&node);
         chain_a.append(&entry).unwrap();
         

@@ -1,11 +1,10 @@
 //! Protocol - shared logic for bidirectional sync entry exchange
 
 use crate::{MessageSink, MessageStream};
-use lattice_core::{StoreHandle, CausalEntryIter};
+use lattice_core::StoreHandle;
 use lattice_core::proto::{peer_message, PeerMessage, SignedEntry};
-use lattice_core::sync_state::SyncState;
+use lattice_core::SyncState;
 use prost::Message;
-use std::collections::VecDeque;
 
 /// Send entries that peer is missing based on state diff.
 /// Returns (entries_sent, optional_error).
@@ -17,20 +16,13 @@ pub async fn send_missing_entries(
 ) -> Result<u64, String> {
     let missing = peer_state.diff(my_state);
     
-    // Build queues for each author's entries
-    let mut author_entries: Vec<VecDeque<SignedEntry>> = Vec::new();
-    for range in missing {
-        let from_hash = if range.from_hash == [0u8; 32] { None } else { Some(range.from_hash) };
-        let entries = store.read_entries_after(&range.author, from_hash).await
-            .map_err(|e| format!("Failed to read entries: {}", e))?;
-        if !entries.is_empty() {
-            author_entries.push(entries.into());
-        }
-    }
+    // Get entries in causal order (merged across all authors)
+    let entries = store.read_missing_entries(missing).await
+        .map_err(|e| format!("Failed to read entries: {}", e))?;
     
-    // Stream entries in HLC (causal) order
+    // Stream entries
     let mut entries_sent = 0u64;
-    for entry in CausalEntryIter::new(author_entries) {
+    for entry in entries {
         let sync_msg = PeerMessage {
             message: Some(peer_message::Message::SyncEntry(lattice_core::proto::SyncEntry {
                 signed_entry: entry.encode_to_vec(),

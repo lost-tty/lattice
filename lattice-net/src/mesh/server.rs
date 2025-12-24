@@ -200,7 +200,7 @@ impl LatticeServer {
         
         let peer_state = match resp_msg.message {
             Some(peer_message::Message::SyncResponse(resp)) => {
-                resp.state.map(|s| lattice_core::sync_state::SyncState::from_proto(&s))
+                resp.state.map(|s| lattice_core::SyncState::from_proto(&s))
                     .unwrap_or_default()
             }
             _ => return Err(NodeError::Actor("Expected SyncResponse".to_string())),
@@ -380,7 +380,7 @@ async fn handle_sync_request(
     
     // 2. Send entries peer is missing
     let peer_state = peer_request.state
-        .map(|s| lattice_core::sync_state::SyncState::from_proto(&s))
+        .map(|s| lattice_core::SyncState::from_proto(&s))
         .unwrap_or_default();
     
     let entries_sent = protocol::send_missing_entries(&mut sink, &store, &my_state, &peer_state).await?;

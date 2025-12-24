@@ -168,13 +168,46 @@
 - [x] LatticeServer uses `/nodes/([a-f0-9]+)/status` watch to monitor peers
 - [x] Enables reactive patterns: config changes, presence, app-level subscriptions
 
+**Pre-M3: Orphan Entry Handling**
+
+Entries can arrive out-of-order via gossip when:
+- Node wakes from offline, receives gossip before sync completes
+- Gossip messages lost, creating gaps in chain
+- DAG parent hashes reference entries not yet received
+
+*Current behavior:* SigChain rejects entries with unknown prev_hash → orphans dropped
+
+*Proposed fix:*
+- [ ] Orphan buffer: hold entries with unknown parents, TTL 30-60 seconds
+- [ ] On sync complete or parent arrival: re-process buffered entries in order
+- [ ] If orphan is "far ahead" (seq > local + threshold), trigger sync immediately
+- [ ] Metrics: track orphan rate to detect gossip reliability issues
+
 **Phase 3: Multi-Store & Reliability** (Next)
 
-*Multi-Store Sync*
+**Goal:** True multi-store sync with per-store peer sets and decoupled network/store layers.
+
+*Phase 3A: Multi-Store Sync (operational)*
 - [ ] `SyncRequested` for non-root stores (currently only root store)
 - [ ] `setup_for_store` called for each store, not just root
 - [ ] Track which stores are synced/gossiping
 - [ ] Verify gossip entries have correct store-id before applying
+
+*Phase 3B: Architecture refactor*
+- [ ] Sync Coordinator in Node: routes sync requests by store_id
+- [ ] LatticeServer becomes pure transport (accept, frame, route)
+- [ ] Node owns gossip topic management per store
+- [ ] Event-based: Network emits `EntryReceived(store_id, bytes)`, Node routes
+
+*Phase 3C: Per-store peer sets*
+- [ ] Each store defines membership via `/nodes/` prefix
+- [ ] Sync/gossip only with peers authorized for that store
+- [ ] Store-scoped discovery: watch `/nodes/` per store for peer changes
+
+*Phase 3D: Trait boundaries (optional)*
+- [ ] `trait SyncParticipant`: opaque sync interface
+- [ ] Network depends on trait, not concrete `StoreHandle`
+- [ ] Enables mock stores for protocol testing
 
 *Gossip Reliability*
 - [ ] Handle gossip gaps (missed updates while offline)
@@ -188,16 +221,39 @@
 - [ ] Track sync failures per peer
 - [ ] Offline nodes should not block sync (timeout + skip)
 
+*Failure & Partition Scenarios (testing)*
+- [ ] Node A writes while B offline → B rejoins → verify sync
+- [ ] A-B-C chain: A↔B synced, B↔C synced, A↔C never direct → verify eventual consistency
+- [ ] Network partition: A-B | C-D → partition heals → verify merge
+- [ ] Node crashes mid-sync → restarts → verify no data corruption
+- [ ] Gossip message loss → verify anti-entropy sync recovers
+- [ ] Split-brain: A writes x=1, C writes x=2 concurrently → verify LWW resolution
+- [ ] Simultaneous writes to same key across N nodes → verify convergence
+- [ ] Node rejoins after long offline period → verify catch-up
+- [ ] Delete during partition → verify tombstone propagates correctly
+- [ ] Clock skew between nodes → verify HLC handles it
+
 ---
 
 ## Technical Debt
 
+**Crate Refactoring: lattice-store**
+- [x] Consolidate store logic into `src/store/` module with private submodules
+- [x] Make store API opaque: hide internal `Entry`/`SignedEntry` from consumers
+- [x] Store should not know about network; network should not know about entry internals
+- [x] Added `Operation::put()`/`delete()` constructors for clean operation creation
+- [ ] Extract `Store`, `SigChain`, `StoreActor` into separate `lattice-store` crate
+- [ ] Define trait boundary between store and network layers
+- [ ] Consider: `trait SyncableStore` for sync protocol to consume without proto details
+- [ ] Consider: Entry validation/signing as pluggable strategy
+- [ ] Goal: `lattice-core` becomes thin orchestration layer
+
 **Logging**
-- [ ] Replace `println!`/`eprintln!` with `tracing` crate (`tracing::info!`, `tracing::error!`)
-- Standard in Rust async ecosystem, used by Iroh internally
+- [x] Replace `println!`/`eprintln!` with `tracing` crate (`tracing::info!`, `tracing::error!`)
+- Standard in Rust async ecosystem, used by Iroh internally. CLI uses `RUST_LOG` env var.
 
 **Lifecycle Management (Zombie Tasks)**
-- [ ] Spawned infinite loops (`spawn_node_event_listener`, `spawn_entry_forward_loop`, gossip receive loop) keep running if `LatticeServer` is dropped
+- [ ] Spawned infinite loops keep running if `LatticeServer` is dropped
 - [ ] Use `tokio_util::sync::CancellationToken` or keep `JoinHandle`s for graceful shutdown
 
 **Error Handling**
@@ -213,6 +269,10 @@
 - CRDTs: Richer data types (PN-Counters, OR-Sets)
   - OR-Sets for peer list management
 - Transaction Groups: Atomic batched operations
+  - `EntryBuilder.operation()` already supports chaining multiple ops per entry
+  - Expose via `StoreHandle::transact()` or similar API
+  - Requires validating all operations succeed or rejecting entire entry atomically
+  - Consider renaming `Entry` → `Transaction` to reflect semantics
 - Watermark tracking & log pruning
   - Track min confirmed seq per author across all peers
   - Prune entries below watermark

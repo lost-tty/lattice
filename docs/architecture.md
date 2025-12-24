@@ -48,9 +48,33 @@
 - Missing entries are fetched via unicast.
 - MAX_DRIFT should be generous (e.g., hours) to accommodate sleeping devices.
 
+
 Networking modes:
 - Active (servers/laptops on power): Frequent gossip broadcasts, proactive sync.
 - Low-power (mobile/battery): Pull-based sync on wake. Query peers instead of relying on push gossip.
+
+### Store/Network Boundary
+
+The store module exposes only `StoreHandle` to the network layer. Internal types (`Store`, `SigChain`, `StoreActor`, `Entry`) are hidden.
+
+```
+lattice-net                           lattice-core
+┌─────────────────┐                  ┌───────────────────┐
+│  LatticeServer  │───────────────── │      Node         │
+│  (owns Endpoint)│                  │  (owns stores)    │
+└────────┬────────┘                  └─────────┬─────────┘
+         │                                     │
+         │ uses StoreHandle API                │ spawns
+         ▼                                     ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │                    StoreHandle                          │
+  │  • put(key, value), get(key), delete(key)               │
+  │  • subscribe_entries() → for gossip broadcast           │
+  │  • apply_entry(SignedEntry) → for receiving gossip/sync │
+  │  • read_missing_entries(missing_ranges) → for sync send │
+  │  • sync_state() → for sync negotiation                  │
+  └─────────────────────────────────────────────────────────┘
+```
 
 ## Parts
 
@@ -210,11 +234,12 @@ meta               "root_store"            [u8; 16] (UUID)            Root store
 ### Operation Flow (put/delete)
 
 ```
-1. User calls put("/key", value)
+1. User calls StoreHandle::put(key, value)
          │
          ▼
-2. SigChain.create_entry()
+2. StoreActor (internal) → SigChain.create_entry()
    - Build Entry with parent_hashes (current tips for key)
+   - Use Operation::put(key, value) to add ops
    - Sign it → SignedEntry
          │
          ▼
