@@ -49,4 +49,4 @@ pub use meta_store::MetaStore;
 pub use proto::HeadInfo;
 pub use uuid::Uuid;
 pub use causal_iter::CausalEntryIter;
-pub use store_actor::{StoreActor, StoreCmd, StoreActorError, spawn_store_actor};
+pub use store_actor::{StoreActor, StoreCmd, StoreActorError, spawn_store_actor, WatchEvent, WatchEventKind, WatchError};
