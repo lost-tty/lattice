@@ -120,7 +120,7 @@ impl GossipManager {
     ) {
         let senders = self.senders.clone();
         tokio::spawn(async move {
-            tracing::debug!("Entry forwarder started");
+            tracing::debug!(store_id = %store_id, "Entry forwarder started");
             while let Ok(entry) = entry_rx.recv().await {
                 tracing::debug!(store_id = %store_id, "Broadcasting entry via gossip");
                 if let Some(sender) = senders.read().await.get(&store_id) {
@@ -131,7 +131,7 @@ impl GossipManager {
                     tracing::warn!(store_id = %store_id, "No gossip sender for store");
                 }
             }
-            tracing::warn!("Entry forwarder ended");
+            tracing::warn!(store_id = %store_id, "Entry forwarder ended");
         });
     }
     

@@ -40,27 +40,7 @@ async fn main() {
         println!("Stores:  {}", info.stores.len());
     }
 
-    // Open root store BEFORE creating readline so we know the correct prompt
-    let initial_store = match node.open_root_store().await {
-        Ok(Some(open_info)) => {
-            if open_info.entries_replayed > 0 {
-                println!("Root:    {} (replayed {})", open_info.store_id, open_info.entries_replayed);
-            } else {
-                println!("Root:    {}", open_info.store_id);
-            }
-            node.root_store().await.as_ref().cloned()
-        }
-        Ok(None) => {
-            println!("Status:  Not initialized (use 'init')");
-            None
-        }
-        Err(e) => {
-            eprintln!("Warning: {}", e);
-            None
-        }
-    };
-    
-    let current_store = Arc::new(RwLock::new(initial_store));
+    let current_store = Arc::new(RwLock::new(None));
     let initial_prompt = make_prompt(current_store.read().unwrap().as_ref());
     
     let (mut rl, writer) = match Readline::new(initial_prompt) {
@@ -86,17 +66,28 @@ async fn main() {
         .with_ansi(true)
         .init();
     
-    // NOW create LatticeServer - gossip logs will go through tracing
     let server: Option<Arc<LatticeServer>> = match LatticeServer::new_from_node(node.clone()).await {
         Ok(s) => {
             tracing::info!("Iroh: {} (listening)", s.endpoint().public_key().fmt_short());
-            Some(Arc::new(s))
+            Some(s)
         }
         Err(e) => {
             tracing::error!("Iroh failed to start: {}", e);
             None
         }
     };
+    
+    if let Err(e) = node.start().await {
+        eprintln!("Warning: {}", e);
+    }
+    
+    // Update prompt based on root store status
+    if let Some(store) = node.root_store().await.as_ref() {
+        println!("Root:    {}", store.id());
+        *current_store.write().unwrap() = Some(store.clone());
+    } else {
+        println!("Status:  Not initialized (use 'init')");
+    }
 
     loop {
         let prompt = make_prompt(current_store.read().unwrap().as_ref());
