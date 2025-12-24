@@ -151,25 +151,42 @@
 - [x] Move `join_mesh`, `sync_with_peer`, `sync_all` to `LatticeServer` methods
 - [x] Encapsulate accept loop inside `LatticeServer` (via Router + ProtocolHandler)
 - [x] CLI uses `LatticeServer` instead of raw `Node` + `Endpoint`
-- [ ] Integration test: invite → join → sync end-to-end
-- [ ] Periodic background sync with known peers
-- [ ] Track last sync time per peer
 
 **Phase 2: Gossip Protocol** ✓ (iroh-gossip)
 - [x] Router handles both `lattice-sync/1` and `/iroh-gossip/1` ALPNs
-- [x] `NodeEvent::RootStoreActivated` emitted when root store opens
+- [x] `NodeEvent::StoreReady` emitted when root store opens
 - [x] Auto-join gossip topic on root store activation
 - [x] Broadcast local entries to gossip topic on commit
 - [x] Receive gossip entries and apply to store
 - [x] Topic ID via `blake3::hash("lattice/{store_id}")`
-- [ ] Gossip bootstrap peers from `/peers/` (needs Prefix Watch)
+- [x] Gossip bootstrap peers from `/nodes/` via Key Watcher
 
-**Next: Prefix Watch (reactive store updates)**
-- [ ] `store.watch_prefix(prefix) -> Receiver<WatchEvent>`
-- [ ] `WatchEvent::Put { key, value }` / `WatchEvent::Delete { key }`
-- [ ] StoreActor tracks watchers per prefix, emits on matching put/delete
-- [ ] LatticeServer uses `/peers/` watch to update gossip bootstrap peers dynamically
-- [ ] Enables reactive patterns: config changes, presence, app-level subscriptions
+**Key Watcher (reactive store updates)** ✓
+- [x] `store.watch(regex) -> (initial, Receiver<WatchEvent>)` with regex pattern matching
+- [x] `WatchEvent::Put { key, value }` / `WatchEvent::Delete { key }` types
+- [x] StoreActor tracks watchers, emits on matching put/delete
+- [x] LatticeServer uses `/nodes/([a-f0-9]+)/status` watch to monitor peers
+- [x] Enables reactive patterns: config changes, presence, app-level subscriptions
+
+**Phase 3: Multi-Store & Reliability** (Next)
+
+*Multi-Store Sync*
+- [ ] `SyncRequested` for non-root stores (currently only root store)
+- [ ] `setup_for_store` called for each store, not just root
+- [ ] Track which stores are synced/gossiping
+- [ ] Verify gossip entries have correct store-id before applying
+
+*Gossip Reliability*
+- [ ] Handle gossip gaps (missed updates while offline)
+- [ ] Periodic anti-entropy sync to catch missed entries
+- [ ] Detect stale gossip (peer hasn't sent in N seconds → trigger sync)
+- [ ] Gossip ack/nack for delivery confirmation?
+
+*Sync Resilience*
+- [ ] Retry failed syncs with backoff
+- [ ] Handle partial sync (peer disconnects mid-sync)
+- [ ] Track sync failures per peer
+- [ ] Offline nodes should not block sync (timeout + skip)
 
 ---
 
