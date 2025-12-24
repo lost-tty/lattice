@@ -6,10 +6,10 @@
 //! - meta: String → Vec<u8> (system metadata: last_seq, last_hash, etc.)
 //! - author: [u8; 32] → AuthorState (per-author replay tracking)
 
-use crate::log::{read_entries, LogError};
+use crate::store::log::{read_entries, LogError};
+use crate::store::sigchain::SigChainError;
+use crate::store::signed_entry::hash_signed_entry;
 use crate::proto::{operation, AuthorState, Entry, HeadInfo, HeadList, SignedEntry};
-use crate::sigchain::SigChainError;
-use crate::signed_entry::hash_signed_entry;
 use prost::Message;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::path::Path;
@@ -313,8 +313,8 @@ impl Store {
     /// Get sync state for all authors (for reconciliation).
     ///
     /// Returns a SyncState with each author's highest seen sequence number and hash.
-    pub fn sync_state(&self) -> Result<crate::sync_state::SyncState, StoreError> {
-        use crate::sync_state::SyncState;
+    pub fn sync_state(&self) -> Result<super::sync_state::SyncState, StoreError> {
+        use super::sync_state::SyncState;
         
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(AUTHOR_TABLE)?;
@@ -345,7 +345,8 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::signed_entry::EntryBuilder;
+    use crate::store::signed_entry::EntryBuilder;
+    use crate::proto::Operation;
     use std::env::temp_dir;
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
@@ -367,7 +368,7 @@ mod tests {
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key", b"value".to_vec())
+            .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         
         store.apply_entry(&entry).unwrap();
@@ -419,7 +420,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
             .parent_hashes(vec![]) // No parent
-            .put("/key", b"v1".to_vec())
+            .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
         
@@ -429,7 +430,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(hash_signed_entry(&entry1).to_vec())
             .parent_hashes(vec![]) // Also no parent (doesn't know about entry1)
-            .put("/key", b"v2".to_vec())
+            .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
         store.apply_entry(&entry2).unwrap();
         
@@ -453,7 +454,7 @@ mod tests {
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key", b"v1".to_vec())
+            .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
         
@@ -461,7 +462,7 @@ mod tests {
         let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
             .prev_hash(hash_signed_entry(&entry1).to_vec())
-            .put("/key", b"v2".to_vec())
+            .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
         store.apply_entry(&entry2).unwrap();
         
@@ -475,7 +476,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(hash2.to_vec())
             .parent_hashes(vec![hash1.to_vec(), hash2.to_vec()])
-            .put("/key", b"merged".to_vec())
+            .operation(Operation::put("/key", b"merged".to_vec()))
             .sign(&node);
         store.apply_entry(&entry3).unwrap();
         
@@ -500,7 +501,7 @@ mod tests {
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key", b"v1".to_vec())
+            .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
         
@@ -509,7 +510,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(hash_signed_entry(&entry1).to_vec())
             // No parent_hashes = concurrent write
-            .put("/key", b"v2".to_vec())
+            .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
         store.apply_entry(&entry2).unwrap();
         
@@ -522,7 +523,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(hash1.to_vec())
             .parent_hashes(vec![hash1.to_vec()]) // Only cites entry1
-            .delete("/key")
+            .operation(Operation::delete("/key"))
             .sign(&node);
         store.apply_entry(&entry3).unwrap();
         
@@ -552,7 +553,7 @@ mod tests {
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key", b"value".to_vec())
+            .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
         
@@ -565,7 +566,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(hash1.to_vec())
             .parent_hashes(vec![hash1.to_vec()])
-            .delete("/key")
+            .operation(Operation::delete("/key"))
             .sign(&node);
         store.apply_entry(&entry2).unwrap();
         
@@ -601,7 +602,7 @@ mod tests {
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put(b"/key", b"v1".to_vec())
+            .operation(Operation::put(b"/key", b"v1".to_vec()))
             .sign(&alice);
         store.apply_entry(&entry1).unwrap();
         let h1 = hash_signed_entry(&entry1);
@@ -612,7 +613,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(h1.to_vec())
             .parent_hashes(vec![h1.to_vec()])
-            .delete(b"/key")
+            .operation(Operation::delete(b"/key"))
             .sign(&alice);
         store.apply_entry(&entry2).unwrap();
         
@@ -622,7 +623,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())  // Bob's own chain
             .parent_hashes(vec![h1.to_vec()])  // Cites H1 as parent
-            .put(b"/key", b"v2".to_vec())
+            .operation(Operation::put(b"/key", b"v2".to_vec()))
             .sign(&bob);
         store.apply_entry(&entry3).unwrap();
         
@@ -661,7 +662,7 @@ mod tests {
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put(b"/key", b"alice_v1".to_vec())
+            .operation(Operation::put(b"/key", b"alice_v1".to_vec()))
             .sign(&alice);
         store.apply_entry(&entry1).unwrap();
         let h1 = hash_signed_entry(&entry1);
@@ -672,7 +673,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
             // No parent_hashes = concurrent/diverged
-            .put(b"/key", b"bob_v2".to_vec())
+            .operation(Operation::put(b"/key", b"bob_v2".to_vec()))
             .sign(&bob);
         store.apply_entry(&entry2).unwrap();
         let h2 = hash_signed_entry(&entry2);
@@ -691,7 +692,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
             .parent_hashes(vec![h1.to_vec(), h2.to_vec()])
-            .put(b"/key", b"charlie_merged".to_vec())
+            .operation(Operation::put(b"/key", b"charlie_merged".to_vec()))
             .sign(&charlie);
         store.apply_entry(&entry3).unwrap();
         
@@ -718,7 +719,7 @@ mod tests {
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put(b"/key", b"value".to_vec())
+            .operation(Operation::put(b"/key", b"value".to_vec()))
             .sign(&node);
         
         // Apply once
@@ -753,7 +754,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
             .parent_hashes(vec![])  // No parents for first write
-            .put(b"/key", b"1".to_vec())
+            .operation(Operation::put(b"/key", b"1".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
         let h1 = hash_signed_entry(&entry1);
@@ -766,7 +767,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(h1.to_vec())
             .parent_hashes(vec![h1.to_vec()])  // Cites h1
-            .put(b"/key", b"2".to_vec())
+            .operation(Operation::put(b"/key", b"2".to_vec()))
             .sign(&node);
         store.apply_entry(&entry2).unwrap();
         
@@ -797,7 +798,7 @@ mod tests {
 
     #[test]
     fn test_replay_to_existing_state_no_duplicates() {
-        use crate::sigchain::SigChain;
+        use crate::store::sigchain::SigChain;
         
         // This simulates: put a=1, put a=2, then restart and replay from log
         // The replay should skip already-applied entries
@@ -817,7 +818,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
             .parent_hashes(vec![])
-            .put(b"/key", b"1".to_vec())
+            .operation(Operation::put(b"/key", b"1".to_vec()))
             .sign(&node);
         sigchain.append(&entry1).unwrap();
         store.apply_entry(&entry1).unwrap();
@@ -829,7 +830,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(h1.to_vec())
             .parent_hashes(vec![h1.to_vec()])
-            .put(b"/key", b"2".to_vec())
+            .operation(Operation::put(b"/key", b"2".to_vec()))
             .sign(&node);
         sigchain.append(&entry2).unwrap();
         store.apply_entry(&entry2).unwrap();
@@ -861,7 +862,7 @@ mod tests {
 
     #[test]
     fn test_fast_resume_on_restart() {
-        use crate::sigchain::SigChain;
+        use crate::store::sigchain::SigChain;
         
         // Fast resume: entries already applied are skipped based on per-author seq
         let state_path = temp_db_path("fast_resume_state");
@@ -881,7 +882,7 @@ mod tests {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
                 .prev_hash(prev)
-                .put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes())
+                .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             store.apply_entry(&entry).unwrap();
@@ -908,7 +909,7 @@ mod tests {
 
     #[test]
     fn test_partial_replay_after_crash() {
-        use crate::sigchain::SigChain;
+        use crate::store::sigchain::SigChain;
         
         // Simulates: log has 5 entries, state.db only has first 3 applied (crash)
         // Replay should apply entries 4 and 5
@@ -929,7 +930,7 @@ mod tests {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
                 .prev_hash(prev)
-                .put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes())
+                .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             
@@ -960,7 +961,7 @@ mod tests {
 
     #[test]
     fn test_state_db_rollback_and_replay() {
-        use crate::sigchain::SigChain;
+        use crate::store::sigchain::SigChain;
         
         // Simulates: 
         // 1. Apply entries 1-3
@@ -988,7 +989,7 @@ mod tests {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
                 .prev_hash(prev)
-                .put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes())
+                .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             store.apply_entry(&entry).unwrap();
@@ -1008,7 +1009,7 @@ mod tests {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
                 .prev_hash(prev)
-                .put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes())
+                .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             store.apply_entry(&entry).unwrap();
@@ -1153,10 +1154,10 @@ mod tests {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
                 .prev_hash([0u8; 32].to_vec())
-                .put(format!("/key{}", i), format!("value{}", i).into_bytes())
+                .operation(Operation::put(format!("/key{}", i), format!("value{}", i).into_bytes()))
                 .sign(&node_a);
             store_a.apply_entry(&entry).unwrap();
-            crate::log::append_entry(&log_path_a, &entry).unwrap();
+            crate::store::log::append_entry(&log_path_a, &entry).unwrap();
         }
         
         // Node B is empty
@@ -1176,7 +1177,7 @@ mod tests {
         assert_eq!(missing[0].to_seq, 3);    // A has 3 entries
         
         // Fetch entries from A's log (using from_hash = 0 means read all)
-        let entries = crate::log::read_entries_after(
+        let entries = crate::store::log::read_entries_after(
             &log_path_a,
             if missing[0].from_hash == [0u8; 32] { None } else { Some(missing[0].from_hash) }
         ).unwrap();
@@ -1225,10 +1226,10 @@ mod tests {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
                 .prev_hash([0u8; 32].to_vec())
-                .put(format!("/a{}", i), format!("from_a{}", i).into_bytes())
+                .operation(Operation::put(format!("/a{}", i), format!("from_a{}", i).into_bytes()))
                 .sign(&node_a);
             store_a.apply_entry(&entry).unwrap();
-            crate::log::append_entry(&log_path_a, &entry).unwrap();
+            crate::store::log::append_entry(&log_path_a, &entry).unwrap();
         }
         
         // Node B writes different entries
@@ -1237,10 +1238,10 @@ mod tests {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
                 .prev_hash([0u8; 32].to_vec())
-                .put(format!("/b{}", i), format!("from_b{}", i).into_bytes())
+                .operation(Operation::put(format!("/b{}", i), format!("from_b{}", i).into_bytes()))
                 .sign(&node_b);
             store_b.apply_entry(&entry).unwrap();
-            crate::log::append_entry(&log_path_b, &entry).unwrap();
+            crate::store::log::append_entry(&log_path_b, &entry).unwrap();
         }
         
         // Get sync states
@@ -1258,13 +1259,13 @@ mod tests {
         assert_eq!(b_needs[0].author, node_a.public_key_bytes());
         
         // Sync A → B
-        let entries_a = crate::log::read_entries(&log_path_a).unwrap();
+        let entries_a = crate::store::log::read_entries(&log_path_a).unwrap();
         for entry in &entries_a {
             store_b.apply_entry(entry).unwrap();
         }
         
         // Sync B → A
-        let entries_b = crate::log::read_entries(&log_path_b).unwrap();
+        let entries_b = crate::store::log::read_entries(&log_path_b).unwrap();
         for entry in &entries_b {
             store_a.apply_entry(entry).unwrap();
         }
@@ -1311,48 +1312,48 @@ mod tests {
         let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key_a", b"from_a".to_vec())
+            .operation(Operation::put("/key_a", b"from_a".to_vec()))
             .sign(&node_a);
         store_a.apply_entry(&entry_a).unwrap();
-        crate::log::append_entry(&log_path_a, &entry_a).unwrap();
+        crate::store::log::append_entry(&log_path_a, &entry_a).unwrap();
         
         let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(2000)))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key_b", b"from_b".to_vec())
+            .operation(Operation::put("/key_b", b"from_b".to_vec()))
             .sign(&node_b);
         store_b.apply_entry(&entry_b).unwrap();
-        crate::log::append_entry(&log_path_b, &entry_b).unwrap();
+        crate::store::log::append_entry(&log_path_b, &entry_b).unwrap();
         
         let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(3000)))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/key_c", b"from_c".to_vec())
+            .operation(Operation::put("/key_c", b"from_c".to_vec()))
             .sign(&node_c);
         store_c.apply_entry(&entry_c).unwrap();
-        crate::log::append_entry(&log_path_c, &entry_c).unwrap();
+        crate::store::log::append_entry(&log_path_c, &entry_c).unwrap();
         
         // Sync A ↔ B
-        for entry in crate::log::read_entries(&log_path_a).unwrap() {
+        for entry in crate::store::log::read_entries(&log_path_a).unwrap() {
             store_b.apply_entry(&entry).unwrap();
         }
-        for entry in crate::log::read_entries(&log_path_b).unwrap() {
+        for entry in crate::store::log::read_entries(&log_path_b).unwrap() {
             store_a.apply_entry(&entry).unwrap();
         }
         
         // Sync B ↔ C
-        for entry in crate::log::read_entries(&log_path_b).unwrap() {
+        for entry in crate::store::log::read_entries(&log_path_b).unwrap() {
             store_c.apply_entry(&entry).unwrap();
         }
-        for entry in crate::log::read_entries(&log_path_c).unwrap() {
+        for entry in crate::store::log::read_entries(&log_path_c).unwrap() {
             store_b.apply_entry(&entry).unwrap();
         }
         
         // Sync A ↔ C (A should get C's entry, C should get A's entry)
-        for entry in crate::log::read_entries(&log_path_a).unwrap() {
+        for entry in crate::store::log::read_entries(&log_path_a).unwrap() {
             store_c.apply_entry(&entry).unwrap();
         }
-        for entry in crate::log::read_entries(&log_path_c).unwrap() {
+        for entry in crate::store::log::read_entries(&log_path_c).unwrap() {
             store_a.apply_entry(&entry).unwrap();
         }
         
@@ -1397,28 +1398,28 @@ mod tests {
         let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/shared_key", b"value_from_a".to_vec())
+            .operation(Operation::put("/shared_key", b"value_from_a".to_vec()))
             .sign(&node_a);
         store_a.apply_entry(&entry_a).unwrap();
-        crate::log::append_entry(&log_path_a, &entry_a).unwrap();
+        crate::store::log::append_entry(&log_path_a, &entry_a).unwrap();
         
         let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))  // Same HLC!
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/shared_key", b"value_from_b".to_vec())
+            .operation(Operation::put("/shared_key", b"value_from_b".to_vec()))
             .sign(&node_b);
         store_b.apply_entry(&entry_b).unwrap();
-        crate::log::append_entry(&log_path_b, &entry_b).unwrap();
+        crate::store::log::append_entry(&log_path_b, &entry_b).unwrap();
         
         // Before sync: A has A's value, B has B's value
         assert_eq!(store_a.get(b"/shared_key").unwrap(), Some(b"value_from_a".to_vec()));
         assert_eq!(store_b.get(b"/shared_key").unwrap(), Some(b"value_from_b".to_vec()));
         
         // Sync A → B and B → A
-        for entry in crate::log::read_entries(&log_path_a).unwrap() {
+        for entry in crate::store::log::read_entries(&log_path_a).unwrap() {
             store_b.apply_entry(&entry).unwrap();
         }
-        for entry in crate::log::read_entries(&log_path_b).unwrap() {
+        for entry in crate::store::log::read_entries(&log_path_b).unwrap() {
             store_a.apply_entry(&entry).unwrap();
         }
         
@@ -1471,14 +1472,14 @@ mod tests {
         let entry_low = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/tiebreak_key", b"from_low".to_vec())
+            .operation(Operation::put("/tiebreak_key", b"from_low".to_vec()))
             .sign(low_node);
         store.apply_entry(&entry_low).unwrap();
         
         let entry_high = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/tiebreak_key", b"from_high".to_vec())
+            .operation(Operation::put("/tiebreak_key", b"from_high".to_vec()))
             .sign(high_node);
         store.apply_entry(&entry_high).unwrap();
         
@@ -1525,7 +1526,7 @@ mod tests {
         let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/a", b"from_a".to_vec())
+            .operation(Operation::put("/a", b"from_a".to_vec()))
             .sign(&node_a);
         store_a.apply_entry(&entry_a).unwrap();
         
@@ -1533,7 +1534,7 @@ mod tests {
         let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/a", b"from_b".to_vec())
+            .operation(Operation::put("/a", b"from_b".to_vec()))
             .sign(&node_b);
         store_a.apply_entry(&entry_b).unwrap();
         
@@ -1541,7 +1542,7 @@ mod tests {
         let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/a", b"from_c".to_vec())
+            .operation(Operation::put("/a", b"from_c".to_vec()))
             .sign(&node_c);
         store_a.apply_entry(&entry_c).unwrap();
         
@@ -1559,7 +1560,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(hash_signed_entry(&entry_a).to_vec())  // Continues A's chain
             .parent_hashes(parent_hashes)  // References all heads
-            .put("/a", b"merged".to_vec())
+            .operation(Operation::put("/a", b"merged".to_vec()))
             .sign(&node_a);
         store_a.apply_entry(&merge_entry).unwrap();
         
@@ -1639,19 +1640,19 @@ mod tests {
         let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/a", b"from_a".to_vec())
+            .operation(Operation::put("/a", b"from_a".to_vec()))
             .sign(&node_a);
         
         let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/a", b"from_b".to_vec())
+            .operation(Operation::put("/a", b"from_b".to_vec()))
             .sign(&node_b);
         
         let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/a", b"from_c".to_vec())
+            .operation(Operation::put("/a", b"from_c".to_vec()))
             .sign(&node_c);
         
         // We need the hashes for parent_hashes - compute them
@@ -1663,7 +1664,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(hash_a.to_vec())
             .parent_hashes(vec![hash_a.to_vec(), hash_b.to_vec(), hash_c.to_vec()])
-            .put("/a", b"merged".to_vec())
+            .operation(Operation::put("/a", b"merged".to_vec()))
             .sign(&node_a);
         
         // Apply in WRONG order: A's chain first (entry_a + merge), then B, then C
@@ -1706,7 +1707,7 @@ mod tests {
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
             .prev_hash([0u8; 32].to_vec())
-            .put("/test/key1", b"value1".to_vec())
+            .operation(Operation::put("/test/key1", b"value1".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
         
@@ -1715,7 +1716,7 @@ mod tests {
         let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
             .prev_hash(hash_signed_entry(&entry1).to_vec())
-            .put("/test/key2", b"value2".to_vec())
+            .operation(Operation::put("/test/key2", b"value2".to_vec()))
             .sign(&node);
         store.apply_entry(&entry2).unwrap();
         
@@ -1725,7 +1726,7 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .prev_hash(hash_signed_entry(&entry2).to_vec())
             .parent_hashes(vec![hash_signed_entry(&entry1).to_vec()])
-            .delete(b"/test/key1")
+            .operation(Operation::delete(b"/test/key1"))
             .sign(&node);
         store.apply_entry(&entry3).unwrap();
         

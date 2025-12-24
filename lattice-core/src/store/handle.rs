@@ -2,17 +2,21 @@
 
 use crate::{
     Uuid,
-    store_actor::StoreCmd,
     node::NodeError,
+    node_identity::NodeIdentity,
     proto::SignedEntry,
 };
-use tokio::sync::broadcast;
+use super::actor::{StoreCmd, StoreActor};
+use super::core::Store;
+use tokio::sync::{broadcast, mpsc};
+use std::path::PathBuf;
+use std::thread;
 
 /// A handle to a specific store - wraps channel to actor thread
 #[derive(Debug)]
 pub struct StoreHandle {
     store_id: Uuid,
-    tx: tokio::sync::mpsc::Sender<StoreCmd>,
+    tx: mpsc::Sender<StoreCmd>,
     actor_handle: Option<std::thread::JoinHandle<()>>,
     entry_tx: broadcast::Sender<SignedEntry>,
 }
@@ -29,14 +33,19 @@ impl Clone for StoreHandle {
 }
 
 impl StoreHandle {
-    /// Create a new StoreHandle (crate-internal)
-    pub(crate) fn new(
+    /// Spawn a store actor in a new thread, returning a handle to it.
+    /// Uses std::thread since redb is blocking.
+    pub fn spawn(
         store_id: Uuid,
-        tx: tokio::sync::mpsc::Sender<StoreCmd>,
-        actor_handle: std::thread::JoinHandle<()>,
-        entry_tx: broadcast::Sender<SignedEntry>,
+        store: Store,
+        logs_dir: PathBuf,
+        node: NodeIdentity,
     ) -> Self {
-        Self { store_id, tx, actor_handle: Some(actor_handle), entry_tx }
+        let (tx, rx) = mpsc::channel(32);
+        let (entry_tx, _entry_rx) = broadcast::channel(64);
+        let actor = StoreActor::new(store_id, store, logs_dir, node, rx, entry_tx.clone());
+        let handle = thread::spawn(move || actor.run());
+        Self { store_id, tx, actor_handle: Some(handle), entry_tx }
     }
     
     pub fn id(&self) -> Uuid { self.store_id }
@@ -56,7 +65,7 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    pub async fn get_heads(&self, key: &[u8]) -> Result<Vec<crate::HeadInfo>, NodeError> {
+    pub async fn get_heads(&self, key: &[u8]) -> Result<Vec<crate::proto::HeadInfo>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::GetHeads { key: key.to_vec(), resp: resp_tx }).await
@@ -121,7 +130,7 @@ impl StoreHandle {
         resp_rx.await.unwrap_or((0, 0))
     }
 
-    pub async fn sync_state(&self) -> Result<crate::sync_state::SyncState, NodeError> {
+    pub async fn sync_state(&self) -> Result<super::sync_state::SyncState, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::SyncState { resp: resp_tx }).await
@@ -141,6 +150,27 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
+    /// Read entries that peer is missing, returned in causal (HLC) order.
+    /// Takes a list of MissingRange from SyncState::diff() and merges entries
+    /// from all authors into proper causal order for sync.
+    pub async fn read_missing_entries(&self, missing: Vec<super::sync_state::MissingRange>) -> Result<Vec<crate::proto::SignedEntry>, NodeError> {
+        use std::collections::VecDeque;
+        use super::causal_iter::CausalEntryIter;
+        
+        // Fetch entries for each author
+        let mut author_entries: Vec<VecDeque<crate::proto::SignedEntry>> = Vec::new();
+        for range in missing {
+            let from_hash = if range.from_hash == [0u8; 32] { None } else { Some(range.from_hash) };
+            let entries = self.read_entries_after(&range.author, from_hash).await?;
+            if !entries.is_empty() {
+                author_entries.push(entries.into());
+            }
+        }
+        
+        // Merge in causal (HLC) order
+        Ok(CausalEntryIter::new(author_entries).collect())
+    }
+
     pub async fn apply_entry(&self, entry: crate::proto::SignedEntry) -> Result<(), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -151,7 +181,7 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<u64, NodeError> {
+    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::Put { key: key.to_vec(), value: value.to_vec(), resp: resp_tx }).await
@@ -161,7 +191,7 @@ impl StoreHandle {
             .map_err(|e| NodeError::Actor(e.to_string()))
     }
 
-    pub async fn delete(&self, key: &[u8]) -> Result<u64, NodeError> {
+    pub async fn delete(&self, key: &[u8]) -> Result<(), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::Delete { key: key.to_vec(), resp: resp_tx }).await
@@ -179,12 +209,12 @@ impl StoreHandle {
     /// - `^/nodes/[a-f0-9]+/status$` - matches peer status keys
     /// 
     /// The initial snapshot is atomic with the watch subscription - no events will be missed.
-    pub async fn watch(&self, pattern: &str) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<crate::store_actor::WatchEvent>), NodeError> {
+    pub async fn watch(&self, pattern: &str) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<super::actor::WatchEvent>), NodeError> {
         self.watch_with_opts(pattern, false).await
     }
     
     /// Watch with option to include deleted entries in initial snapshot.
-    pub async fn watch_with_opts(&self, pattern: &str, include_deleted: bool) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<crate::store_actor::WatchEvent>), NodeError> {
+    pub async fn watch_with_opts(&self, pattern: &str, include_deleted: bool) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<super::actor::WatchEvent>), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::Watch { 

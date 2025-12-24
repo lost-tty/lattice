@@ -1,14 +1,10 @@
 //! Local Lattice node API with multi-store support
 
 use crate::{
-    DataDir, MetaStore, NodeIdentity, PeerStatus, SigChain, Store, Uuid,
-    log::LogError,
+    DataDir, MetaStore, NodeIdentity, PeerStatus, Uuid,
     meta_store::MetaStoreError,
-    sigchain::SigChainError,
-    store::StoreError,
-    spawn_store_actor,
     node_identity::NodeError as IdentityError,
-    store_handle::StoreHandle,
+    store::{Store, StoreError, StoreHandle, LogError},
 };
 use std::path::Path;
 use thiserror::Error;
@@ -36,9 +32,6 @@ pub enum NodeError {
     
     #[error("MetaStore error: {0}")]
     MetaStore(#[from] MetaStoreError),
-    
-    #[error("SigChain error: {0}")]
-    SigChain(#[from] SigChainError),
     
     #[error("Log error: {0}")]
     Log(#[from] LogError),
@@ -512,12 +505,7 @@ impl Node {
         
         let author_id_hex = hex::encode(self.node.public_key_bytes());
         let log_path = self.data_dir.store_log_file(store_id, &author_id_hex);
-        
-        let sigchain = if log_path.exists() {
-            SigChain::from_log(&log_path, *store_id.as_bytes(), self.node.public_key_bytes())?
-        } else {
-            SigChain::new(&log_path, *store_id.as_bytes(), self.node.public_key_bytes())
-        };
+        let logs_dir = log_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         
         let store = Store::open(self.data_dir.store_state_db(store_id))?;
         let entries_replayed = if log_path.exists() {
@@ -528,16 +516,13 @@ impl Node {
         
         let info = StoreInfo { store_id, entries_replayed };
         
-        // Spawn actor thread - actor owns store, sigchain, and node copy
-        let (tx, entry_tx, actor_handle) = spawn_store_actor(
+        // Spawn actor thread - actor owns store, sigchain manager, and node copy
+        let handle = StoreHandle::spawn(
             store_id,
             store,
-            sigchain,
+            logs_dir,
             (*self.node).clone(),
         );
-        
-        // Store the entry sender for gossip
-        let handle = StoreHandle::new(store_id, tx, actor_handle, entry_tx);
         
         Ok((handle, info))
     }
@@ -566,7 +551,7 @@ impl Node {
         // Create transformed channel for PeerWatchEvent
         let (tx, rx) = broadcast::channel(64);
         tokio::spawn(async move {
-            use crate::store_actor::WatchEventKind;
+            use crate::WatchEventKind;
             while let Ok(event) = raw_rx.recv().await {
                 if let Some(pubkey) = parse_peer_status_key(&event.key) {
                     let kind = match event.kind {
@@ -720,22 +705,18 @@ mod tests {
         let baseline = store.log_seq().await;
         
         // Put twice with same value - second should be idempotent
-        let seq1 = store.put(b"/key", b"value").await.expect("put 1");
-        assert_eq!(seq1, baseline + 1);
-        
-        let seq2 = store.put(b"/key", b"value").await.expect("put 2");
-        assert_eq!(seq2, baseline + 1, "Second put should be idempotent (no new entry)");
-        
+        store.put(b"/key", b"value").await.expect("put 1");
         assert_eq!(store.log_seq().await, baseline + 1);
         
-        // Delete twice - second should be idempotent
-        let seq3 = store.delete(b"/key").await.expect("delete 1");
-        assert_eq!(seq3, baseline + 2);
+        store.put(b"/key", b"value").await.expect("put 2");
+        assert_eq!(store.log_seq().await, baseline + 1, "Second put should be idempotent (no new entry)");
         
-        let seq4 = store.delete(b"/key").await.expect("delete 2");
-        assert_eq!(seq4, baseline + 2, "Second delete should be idempotent (no new entry)");
-        
+        // Delete twice - second should be idempotent  
+        store.delete(b"/key").await.expect("delete 1");
         assert_eq!(store.log_seq().await, baseline + 2);
+        
+        store.delete(b"/key").await.expect("delete 2");
+        assert_eq!(store.log_seq().await, baseline + 2, "Second delete should be idempotent (no new entry)");
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -911,7 +892,7 @@ mod tests {
         let event = rx.recv().await.expect("recv");
         assert_eq!(event.key, b"/test/key1");
         match event.kind {
-            crate::store_actor::WatchEventKind::Put { value } => {
+            crate::WatchEventKind::Put { value } => {
                 assert_eq!(value, b"value1");
             }
             _ => panic!("Expected Put event"),
@@ -941,7 +922,7 @@ mod tests {
         // Should receive delete event
         let event = rx.recv().await.expect("recv");
         assert_eq!(event.key, b"/test/key");
-        assert!(matches!(event.kind, crate::store_actor::WatchEventKind::Delete));
+        assert!(matches!(event.kind, crate::WatchEventKind::Delete));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }

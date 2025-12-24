@@ -5,6 +5,18 @@
 // Include the generated code from prost-build
 include!(concat!(env!("OUT_DIR"), "/lattice.rs"));
 
+impl Operation {
+    /// Create a Put operation
+    pub fn put(key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
+        Self { op_type: Some(operation::OpType::Put(PutOp { key: key.into(), value: value.into() })) }
+    }
+    
+    /// Create a Delete operation
+    pub fn delete(key: impl Into<Vec<u8>>) -> Self {
+        Self { op_type: Some(operation::OpType::Delete(DeleteOp { key: key.into() })) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

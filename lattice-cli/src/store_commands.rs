@@ -38,9 +38,9 @@ pub async fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _server: Option<
     };
     let start = Instant::now();
     match h.put(args[0].as_bytes(), args[1].as_bytes()).await {
-        Ok(seq) => {
+        Ok(()) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "OK (seq: {}, {:.2?})", seq, start.elapsed());
+            let _ = writeln!(w, "OK ({:.2?})", start.elapsed());
         }
         Err(e) => {
             let mut w = writer.clone();
@@ -111,9 +111,9 @@ pub async fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _server: Opti
     };
     let start = Instant::now();
     match h.delete(args[0].as_bytes()).await {
-        Ok(seq) => {
+        Ok(()) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "OK (seq: {}, {:.2?})", seq, start.elapsed());
+            let _ = writeln!(w, "OK ({:.2?})", start.elapsed());
         }
         Err(e) => {
             let mut w = writer.clone();

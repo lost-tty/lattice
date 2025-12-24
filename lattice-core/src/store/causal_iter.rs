@@ -103,14 +103,15 @@ mod tests {
     use crate::hlc::HLC;
     use crate::clock::MockClock;
     use crate::node_identity::NodeIdentity;
-    use crate::signed_entry::EntryBuilder;
+    use crate::store::signed_entry::EntryBuilder;
     
     fn make_entry(node: &NodeIdentity, seq: u64, clock_ms: u64) -> SignedEntry {
+        use crate::proto::Operation;
         let clock = MockClock::new(clock_ms);
         EntryBuilder::new(seq, HLC::now_with_clock(&clock))
             .store_id(vec![0u8; 16])
             .prev_hash(vec![0u8; 32])
-            .put(b"/test".to_vec(), format!("seq{}", seq).into_bytes())
+            .operation(Operation::put(b"/test", format!("seq{}", seq)))
             .sign(node)
     }
     

@@ -8,7 +8,7 @@
 
 use crate::hlc::HLC;
 use crate::node_identity::{NodeIdentity, NodeError};
-use crate::proto::{Entry, Hlc, Operation, PutOp, DeleteOp, SignedEntry, operation};
+use crate::proto::{Entry, Hlc, Operation, SignedEntry};
 use ed25519_dalek::{Signature, VerifyingKey};
 use prost::Message;
 use thiserror::Error;
@@ -69,27 +69,6 @@ impl EntryBuilder {
     /// Set the parent hashes (for DAG ancestry)
     pub fn parent_hashes(mut self, hashes: Vec<Vec<u8>>) -> Self {
         self.parent_hashes = hashes;
-        self
-    }
-
-    /// Add a Put operation
-    pub fn put(mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
-        self.ops.push(Operation {
-            op_type: Some(operation::OpType::Put(PutOp {
-                key: key.into(),
-                value: value.into(),
-            })),
-        });
-        self
-    }
-
-    /// Add a Delete operation
-    pub fn delete(mut self, key: impl Into<Vec<u8>>) -> Self {
-        self.ops.push(Operation {
-            op_type: Some(operation::OpType::Delete(DeleteOp {
-                key: key.into(),
-            })),
-        });
         self
     }
     
@@ -165,11 +144,6 @@ pub fn hash_signed_entry(signed: &SignedEntry) -> [u8; 32] {
     blake3::hash(&bytes).into()
 }
 
-/// Compute the BLAKE3 hash of entry_bytes (alternative for lighter hashing)
-pub fn hash_entry_bytes(entry_bytes: &[u8]) -> [u8; 32] {
-    blake3::hash(entry_bytes).into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,8 +155,8 @@ mod tests {
         let hlc = HLC::now_with_clock(&clock);
         
         let entry = EntryBuilder::new(1, hlc)
-            .put("/test/key", b"value".to_vec())
-            .delete("/test/old")
+            .operation(Operation::put("/test/key", b"value".to_vec()))
+            .operation(Operation::delete("/test/old"))
             .build();
         
         assert_eq!(entry.version, 1);
@@ -197,7 +171,7 @@ mod tests {
         let hlc = HLC::now_with_clock(&clock);
         
         let signed = EntryBuilder::new(1, hlc)
-            .put("/nodes/abc", b"test".to_vec())
+            .operation(Operation::put("/nodes/abc", b"test".to_vec()))
             .sign(&node);
         
         assert_eq!(signed.author_id.len(), 32);
@@ -216,7 +190,7 @@ mod tests {
         let hlc = HLC::now_with_clock(&clock);
         
         let mut signed = EntryBuilder::new(1, hlc)
-            .put("/key", b"value".to_vec())
+            .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         
         // Tamper with entry bytes
@@ -233,7 +207,7 @@ mod tests {
         let hlc = HLC::now_with_clock(&clock);
         
         let mut signed = EntryBuilder::new(1, hlc)
-            .put("/key", b"value".to_vec())
+            .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node1);
         
         // Replace author with different key
@@ -249,7 +223,7 @@ mod tests {
         let hlc = HLC::now_with_clock(&clock);
         
         let signed = EntryBuilder::new(1, hlc)
-            .put("/key", b"value".to_vec())
+            .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         
         let hash = hash_signed_entry(&signed);
@@ -267,7 +241,7 @@ mod tests {
         
         // First entry
         let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .put("/key", b"v1".to_vec())
+            .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         
         let hash1 = hash_signed_entry(&entry1);
@@ -275,7 +249,7 @@ mod tests {
         // Second entry links to first
         let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock))
             .prev_hash(hash1)
-            .put("/key", b"v2".to_vec())
+            .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
         
         let decoded = verify_signed_entry(&entry2).unwrap();

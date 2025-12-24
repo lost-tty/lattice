@@ -1,18 +1,17 @@
 //! Store Actor - dedicated thread that owns Store and processes commands via channel
 
 use crate::{
-    EntryBuilder, HeadInfo, NodeIdentity, SigChain, SigChainManager, Store, Uuid,
-    hlc::HLC,
-    proto::AuthorState,
-    sigchain::SigChainError,
-    store::StoreError,
+    NodeIdentity, Uuid,
+    proto::{AuthorState, SignedEntry, HeadInfo},
+};
+use super::{
+    core::{Store, StoreError},
+    sigchain::{SigChainError, SigChainManager},
     sync_state::SyncState,
-    proto::SignedEntry,
     log,
 };
 use prost::Message;
 use tokio::sync::{mpsc, oneshot, broadcast};
-use std::thread::{self, JoinHandle};
 use std::collections::HashMap;
 use regex::Regex;
 
@@ -74,11 +73,11 @@ pub enum StoreCmd {
     Put {
         key: Vec<u8>,
         value: Vec<u8>,
-        resp: oneshot::Sender<Result<u64, StoreActorError>>,
+        resp: oneshot::Sender<Result<(), StoreActorError>>,
     },
     Delete {
         key: Vec<u8>,
-        resp: oneshot::Sender<Result<u64, StoreActorError>>,
+        resp: oneshot::Sender<Result<(), StoreActorError>>,
     },
     LogSeq {
         resp: oneshot::Sender<u64>,
@@ -146,7 +145,6 @@ impl std::error::Error for StoreActorError {}
 
 /// The store actor - runs in its own thread, owns Store and SigChainManager
 pub struct StoreActor {
-    store_id: Uuid,
     store: Store,
     chain_manager: SigChainManager,
     node: NodeIdentity,
@@ -164,24 +162,17 @@ impl StoreActor {
     pub fn new(
         store_id: Uuid,
         store: Store,
-        sigchain: SigChain,
+        logs_dir: std::path::PathBuf,
         node: NodeIdentity,
         rx: mpsc::Receiver<StoreCmd>,
         entry_tx: broadcast::Sender<SignedEntry>,
     ) -> Self {
-        // Derive logs_dir from sigchain's log file path
-        let logs_dir = sigchain.log_path()
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        
-        // Create chain manager and register the local node's sigchain
+        // Create chain manager - it will create/load sigchains as needed
         let mut chain_manager = SigChainManager::new(&logs_dir, *store_id.as_bytes());
         let local_author = node.public_key_bytes();
         chain_manager.get_or_create(local_author);  // Pre-initialize local chain
         
         Self {
-            store_id,
             store,
             chain_manager,
             node,
@@ -317,40 +308,42 @@ impl StoreActor {
         }
     }
 
-    fn do_put(&mut self, key: &[u8], value: &[u8]) -> Result<u64, StoreActorError> {
+    fn do_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), StoreActorError> {
+        use crate::proto::Operation;
+        
         let heads = self.store.get_heads(key)?;
         
         // Idempotency check (pure function)
         if !Store::needs_put(&heads, value) {
-            let local_author = self.node.public_key_bytes();
-            return Ok(self.chain_manager.get(&local_author).map(|c| c.len()).unwrap_or(0));
+            return Ok(());
         }
         
         let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
-        let result = self.commit_entry(parent_hashes, |b| b.put(key.to_vec(), value.to_vec()))?;
+        self.commit_entry(parent_hashes, vec![Operation::put(key, value)])?;
         
         // Emit watch event
         self.emit_watch_event(key, WatchEventKind::Put { value: value.to_vec() });
         
-        Ok(result)
+        Ok(())
     }
 
-    fn do_delete(&mut self, key: &[u8]) -> Result<u64, StoreActorError> {
+    fn do_delete(&mut self, key: &[u8]) -> Result<(), StoreActorError> {
+        use crate::proto::Operation;
+        
         let heads = self.store.get_heads(key)?;
         
         // Idempotency check (pure function)
         if !Store::needs_delete(&heads) {
-            let local_author = self.node.public_key_bytes();
-            return Ok(self.chain_manager.get(&local_author).map(|c| c.len()).unwrap_or(0));
+            return Ok(());
         }
         
         let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
-        let result = self.commit_entry(parent_hashes, |b| b.delete(key.to_vec()))?;
+        self.commit_entry(parent_hashes, vec![Operation::delete(key)])?;
         
         // Emit watch event
         self.emit_watch_event(key, WatchEventKind::Delete);
         
-        Ok(result)
+        Ok(())
     }
     
     /// Emit watch events to all watchers whose pattern matches the key.
@@ -382,31 +375,17 @@ impl StoreActor {
         }
     }
 
-    fn commit_entry<F>(&mut self, parent_hashes: Vec<Vec<u8>>, build: F) -> Result<u64, StoreActorError>
-    where
-        F: FnOnce(EntryBuilder) -> EntryBuilder,
-    {
+    fn commit_entry(&mut self, parent_hashes: Vec<Vec<u8>>, ops: Vec<crate::proto::Operation>) -> Result<(), StoreActorError> {
         let local_author = self.node.public_key_bytes();
         let sigchain = self.chain_manager.get_or_create(local_author);
-        
-        let seq = sigchain.len() + 1;
-        let prev_hash = *sigchain.last_hash();
+        let entry = sigchain.create_entry(&self.node, parent_hashes, ops)?;
 
-        let builder = EntryBuilder::new(seq, HLC::now())
-            .store_id(self.store_id.as_bytes().to_vec())
-            .prev_hash(prev_hash.to_vec())
-            .parent_hashes(parent_hashes);
-        let entry = build(builder).sign(&self.node);
-
-        // Append to local sigchain
-        let sigchain = self.chain_manager.get_or_create(local_author);
-        sigchain.append(&entry)?;
         self.store.apply_entry(&entry)?;
         
         // Broadcast the entry to listeners (for gossip)
         let _ = self.entry_tx.send(entry.clone());
 
-        Ok(seq)
+        Ok(())
     }
 
     fn do_read_entries_after(
@@ -426,19 +405,4 @@ impl StoreActor {
         log::read_entries_after(&log_path, from_hash)
             .map_err(StoreError::from)
     }
-}
-
-/// Spawn a store actor in a new thread, returns (cmd_tx, entry_tx, join_handle)
-/// Uses std::thread since redb is blocking
-pub fn spawn_store_actor(
-    store_id: Uuid,
-    store: Store,
-    sigchain: SigChain,
-    node: NodeIdentity,
-) -> (mpsc::Sender<StoreCmd>, broadcast::Sender<SignedEntry>, JoinHandle<()>) {
-    let (tx, rx) = mpsc::channel(32);
-    let (entry_tx, _entry_rx) = broadcast::channel(64);
-    let actor = StoreActor::new(store_id, store, sigchain, node, rx, entry_tx.clone());
-    let handle = thread::spawn(move || actor.run());
-    (tx, entry_tx, handle)
 }

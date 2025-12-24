@@ -9,41 +9,25 @@ use lattice_net::LatticeServer;
 use commands::CommandResult;
 use lattice_core::NodeBuilder;
 use rustyline_async::{Readline, ReadlineEvent};
+use std::io::Write;
 use std::sync::{Arc, RwLock};
 use tracing_subscriber::EnvFilter;
 
 fn make_prompt(store: Option<&lattice_core::StoreHandle>) -> String {
+    use owo_colors::OwoColorize;
+    
     match store {
-        Some(h) => format!("lattice:{}> ", &h.id().to_string()[..8]),
-        None => "lattice:no-store> ".to_string(),
+        Some(h) => format!("{}:{}> ", "lattice".cyan(), h.id().to_string()[..8].to_string().green()),
+        None => format!("{}:{}> ", "lattice".cyan(), "no-store".yellow()),
     }
 }
 
 #[tokio::main]
 async fn main() {
-    println!("Lattice CLI v{}", env!("CARGO_PKG_VERSION"));
-    println!("Type 'help' for commands, 'quit' to exit.\n");
-
-    let node = match NodeBuilder::new().build() {
-        Ok(n) => Arc::new(n),
-        Err(e) => {
-            eprintln!("Failed to initialize: {}", e);
-            return;
-        }
-    };
+    // Create readline first so we can use the async writer for all output
+    let initial_prompt = "lattice:no-store> ".to_string();
     
-    let info = node.info();
-    println!("Node ID: {}", info.node_id);
-    println!("Data:    {}", info.data_path);
-
-    if !info.stores.is_empty() {
-        println!("Stores:  {}", info.stores.len());
-    }
-
-    let current_store = Arc::new(RwLock::new(None));
-    let initial_prompt = make_prompt(current_store.read().unwrap().as_ref());
-    
-    let (mut rl, writer) = match Readline::new(initial_prompt) {
+    let (mut rl, mut writer) = match Readline::new(initial_prompt) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to create readline: {}", e);
@@ -51,12 +35,14 @@ async fn main() {
         }
     };
     
-    // Initialize tracing with SharedWriter
+    // Initialize tracing with SharedWriter (as early as possible)
+    // Uses RUST_LOG env var, defaults to info for lattice crates
     let make_writer = tracing_writer::SharedWriterMakeWriter::new(writer.clone());
-    
-    let filter = EnvFilter::try_from_env("LATTICE_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("warn,lattice_net=info,lattice_core=info"));
-    
+    let filter = EnvFilter::from_default_env()
+        .add_directive("warn".parse().unwrap())
+        .add_directive("lattice_net=info".parse().unwrap())
+        .add_directive("lattice_core=info".parse().unwrap());
+
     tracing_subscriber::fmt()
         .with_writer(make_writer)
         .with_env_filter(filter)
@@ -66,6 +52,20 @@ async fn main() {
         .with_ansi(true)
         .init();
     
+    let _ = writeln!(writer, "Lattice CLI v{}", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(writer, "Type 'help' for commands, 'quit' to exit.\n");
+    
+    let node = match NodeBuilder::new().build() {
+        Ok(n) => Arc::new(n),
+        Err(e) => {
+            let _ = writeln!(writer, "Failed to initialize: {}", e);
+            return;
+        }
+    };
+
+    let current_store = Arc::new(RwLock::new(None));
+    
+    // Create server FIRST so it can receive StoreReady event from node.start()
     let server: Option<Arc<LatticeServer>> = match LatticeServer::new_from_node(node.clone()).await {
         Ok(s) => {
             tracing::info!("Iroh: {} (listening)", s.endpoint().public_key().fmt_short());
@@ -77,16 +77,17 @@ async fn main() {
         }
     };
     
+    // Now start node - this emits StoreReady which server will receive
     if let Err(e) = node.start().await {
-        eprintln!("Warning: {}", e);
+        tracing::warn!("Node start: {}", e);
     }
     
-    // Update prompt based on root store status
+    // Show node status (after server so gossip is set up)
+    let _ = node_commands::cmd_node_status(&node, None, server.as_deref(), &[], writer.clone()).await;
+    
+    // Update current store based on root store status
     if let Some(store) = node.root_store().await.as_ref() {
-        println!("Root:    {}", store.id());
         *current_store.write().unwrap() = Some(store.clone());
-    } else {
-        println!("Status:  Not initialized (use 'init')");
     }
 
     loop {
