@@ -73,36 +73,68 @@ pub fn append_entry(path: impl AsRef<Path>, entry: &SignedEntry) -> Result<u64, 
     Ok(metadata.len())
 }
 
-/// Read all SignedEntry messages from a log file (with hash verification)
-pub fn read_entries(path: impl AsRef<Path>) -> Result<Vec<SignedEntry>, LogError> {
-    read_entries_after(path, None)
-}
-
-/// Read all entries that come AFTER the given hash.
-/// If `last_hash` is None, reads all entries.
-pub fn read_entries_after(path: impl AsRef<Path>, last_hash: Option<[u8; 32]>) -> Result<Vec<SignedEntry>, LogError> {
+/// Return an iterator over entries that come AFTER the given hash.
+/// If `last_hash` is None, iterates all entries.
+/// This is the streaming version - use this for large logs to avoid OOM.
+pub fn iter_entries_after(path: impl AsRef<Path>, last_hash: Option<[u8; 32]>) -> Result<impl Iterator<Item = Result<SignedEntry, LogError>>, LogError> {
     let reader = match LogReader::open(&path) {
         Ok(r) => r,
-        Err(LogError::Io(e)) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(LogError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(EntryIterAfter::empty());
+        }
         Err(e) => return Err(e),
     };
     
-    let mut entries = Vec::new();
-    let mut found_start = last_hash.is_none();
-    
-    for result in reader {
-        let (hash, entry) = result?;
-        
-        if found_start {
-            entries.push(entry);
-        } else if let Some(target) = last_hash {
-            if hash == target {
-                found_start = true;
-            }
+    Ok(EntryIterAfter::new(reader, last_hash))
+}
+
+/// Iterator that skips entries until a target hash is found, then yields the rest.
+pub struct EntryIterAfter {
+    reader: Option<LogReader>,
+    target_hash: Option<[u8; 32]>,
+    found_start: bool,
+}
+
+impl EntryIterAfter {
+    fn new(reader: LogReader, target_hash: Option<[u8; 32]>) -> Self {
+        Self {
+            reader: Some(reader),
+            target_hash,
+            found_start: target_hash.is_none(),
         }
     }
     
-    Ok(entries)
+    fn empty() -> Self {
+        Self {
+            reader: None,
+            target_hash: None,
+            found_start: true,
+        }
+    }
+}
+
+impl Iterator for EntryIterAfter {
+    type Item = Result<SignedEntry, LogError>;
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        let reader = self.reader.as_mut()?;
+        
+        loop {
+            match reader.next()? {
+                Ok((hash, entry)) => {
+                    if self.found_start {
+                        return Some(Ok(entry));
+                    } else if let Some(target) = self.target_hash {
+                        if hash == target {
+                            self.found_start = true;
+                            // Continue to next entry (don't return the target itself)
+                        }
+                    }
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
 }
 
 /// Iterator over entries in a log file
@@ -220,6 +252,16 @@ mod tests {
     fn compute_entry_hash(entry: &SignedEntry) -> [u8; 32] {
         let entry_bytes = entry.encode_to_vec();
         blake3::hash(&entry_bytes).into()
+    }
+    
+    /// Test helper - read all entries from log
+    fn read_entries(path: impl AsRef<std::path::Path>) -> Result<Vec<SignedEntry>, LogError> {
+        read_entries_after(path, None)
+    }
+    
+    /// Test helper - read entries after a hash
+    fn read_entries_after(path: impl AsRef<std::path::Path>, last_hash: Option<[u8; 32]>) -> Result<Vec<SignedEntry>, LogError> {
+        iter_entries_after(path, last_hash)?.collect()
     }
 
     #[test]

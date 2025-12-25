@@ -9,6 +9,8 @@ use prost::Message;
 /// Send entries that peer is missing based on state diff.
 /// If author_filter is non-empty, only send entries for those authors.
 /// Returns (entries_sent, optional_error).
+/// 
+/// Uses streaming channels to send entries without loading all into memory.
 pub async fn send_missing_entries(
     sink: &mut MessageSink,
     store: &StoreHandle,
@@ -23,21 +25,28 @@ pub async fn send_missing_entries(
         missing.retain(|r| author_filter.contains(&r.author));
     }
     
-    // Get entries in causal order (merged across all authors)
-    let entries = store.read_missing_entries(missing).await
-        .map_err(|e| format!("Failed to read entries: {}", e))?;
-    
-    // Stream entries
     let mut entries_sent = 0u64;
-    for entry in entries {
-        let sync_msg = PeerMessage {
-            message: Some(peer_message::Message::SyncEntry(lattice_core::proto::SyncEntry {
-                signed_entry: entry.encode_to_vec(),
-                hash: vec![],
-            })),
-        };
-        sink.send(&sync_msg).await?;
-        entries_sent += 1;
+    
+    // Stream entries per-author
+    for range in missing {
+        let author = range.author;
+        let from_hash = if range.from_hash == [0u8; 32] { None } else { Some(range.from_hash) };
+        
+        // Get streaming receiver for this author's entries
+        let mut rx = store.stream_entries_after(&author, from_hash).await
+            .map_err(|e| format!("Failed to start entry stream: {}", e))?;
+        
+        // Stream entries as they arrive from background thread
+        while let Some(entry) = rx.recv().await {
+            let sync_msg = PeerMessage {
+                message: Some(peer_message::Message::SyncEntry(lattice_core::proto::SyncEntry {
+                    signed_entry: entry.encode_to_vec(),
+                    hash: vec![],
+                })),
+            };
+            sink.send(&sync_msg).await?;
+            entries_sent += 1;
+        }
     }
     
     // Send SyncDone

@@ -94,10 +94,11 @@ pub enum StoreCmd {
     SyncState {
         resp: oneshot::Sender<Result<SyncState, StoreError>>,
     },
-    ReadEntriesAfter {
+    /// Streaming version - returns a channel receiver for entries
+    ReadEntriesAfterStream {
         author: [u8; 32],
         from_hash: Option<[u8; 32]>,
-        resp: oneshot::Sender<Result<Vec<SignedEntry>, StoreError>>,
+        resp: oneshot::Sender<Result<mpsc::Receiver<SignedEntry>, StoreError>>,
     },
     IngestEntry {
         entry: SignedEntry,
@@ -238,9 +239,8 @@ impl StoreActor {
                 StoreCmd::SyncState { resp } => {
                     let _ = resp.send(self.store.sync_state());
                 }
-                StoreCmd::ReadEntriesAfter { author, from_hash, resp } => {
-                    // Read entries from the log file for this author
-                    let result = self.do_read_entries_after(&author, from_hash);
+                StoreCmd::ReadEntriesAfterStream { author, from_hash, resp } => {
+                    let result = self.do_stream_entries_after(&author, from_hash);
                     let _ = resp.send(result);
                 }
                 StoreCmd::IngestEntry { entry, resp } => {
@@ -420,21 +420,39 @@ impl StoreActor {
         Ok(())
     }
 
-    fn do_read_entries_after(
+    /// Spawn a thread to stream entries via channel. Thread terminates when receiver is dropped.
+    fn do_stream_entries_after(
         &self,
         author: &[u8; 32],
         from_hash: Option<[u8; 32]>,
-    ) -> Result<Vec<SignedEntry>, StoreError> {
-        // Build log path for this author
+    ) -> Result<mpsc::Receiver<SignedEntry>, StoreError> {
         let author_hex = hex::encode(author);
         let log_path = self.chain_manager.logs_dir().join(format!("{}.log", author_hex));
         
-        if !log_path.exists() {
-            return Ok(Vec::new());  // No log file for this author
-        }
+        // Channel with backpressure - thread waits if consumer is slow
+        let (tx, rx) = mpsc::channel(256);
         
-        // Use lattice_core's read_entries_after
-        log::read_entries_after(&log_path, from_hash)
-            .map_err(StoreError::from)
+        // Spawn thread to stream entries
+        std::thread::spawn(move || {
+            let iter = match log::iter_entries_after(&log_path, from_hash) {
+                Ok(iter) => iter,
+                Err(_) => return,  // No file or error - just close channel
+            };
+            
+            for result in iter {
+                match result {
+                    Ok(entry) => {
+                        // blocking_send returns Err when receiver is dropped
+                        if tx.blocking_send(entry).is_err() {
+                            return;  // Consumer dropped, exit cleanly
+                        }
+                    }
+                    Err(_) => return,  // Read error, stop streaming
+                }
+            }
+            // Iterator exhausted, thread exits, channel closes
+        });
+        
+        Ok(rx)
     }
 }

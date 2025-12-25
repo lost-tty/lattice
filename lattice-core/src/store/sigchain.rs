@@ -3,7 +3,7 @@
 //! A SigChain manages a single author's append-only log. It validates entries
 //! before appending (correct seq, prev_hash, valid signature) and persists to disk.
 
-use crate::store::log::{append_entry, read_entries, LogError};
+use crate::store::log::{append_entry, iter_entries_after, LogError};
 use crate::proto::{Entry, SignedEntry};
 use crate::store::signed_entry::{hash_signed_entry, verify_signed_entry};
 use crate::store::orphan_store::GapInfo;
@@ -71,11 +71,12 @@ impl SigChain {
     /// Load a sigchain from an existing log file
     pub fn from_log(log_path: impl AsRef<Path>, store_id: [u8; 16], author_id: [u8; 32]) -> Result<Self, SigChainError> {
         let log_path = log_path.as_ref().to_path_buf();
-        let entries = read_entries(&log_path)?;
+        let entries_iter = iter_entries_after(&log_path, None)?;
         
         let mut chain = Self::new(&log_path, store_id, author_id);
         
-        for signed_entry in entries {
+        for result in entries_iter {
+            let signed_entry = result?;
             // Verify signature
             verify_signed_entry(&signed_entry)
                 .map_err(|_| SigChainError::InvalidSignature)?;
@@ -634,7 +635,10 @@ mod tests {
         assert_eq!(chain.len(), 1);
         
         // Verify it was written
-        let entries = read_entries(&path).unwrap();
+        let entries: Vec<_> = crate::store::log::iter_entries_after(&path, None)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_bytes, signed.entry_bytes);
         
