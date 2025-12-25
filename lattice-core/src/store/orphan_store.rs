@@ -4,16 +4,60 @@
 //! They're buffered here until the parent arrives and makes them valid.
 //!
 //! Table: orphans
-//! Key:   (author[32], prev_hash[32], entry_hash[32]) = 96 bytes
-//! Value: (seq: u64 LE) + SignedEntry bytes
+//! Key:   OrphanKey (author[32] + prev_hash[32] + entry_hash[32] = 96 bytes)
+//! Value: OrphanedEntry protobuf
 
 use crate::proto::{OrphanedEntry, SignedEntry};
 use prost::Message;
-use redb::{Database, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
 use thiserror::Error;
 
 const ORPHANS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("orphans");
+
+/// Composite key for orphan entries: author + prev_hash + entry_hash
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct OrphanKey {
+    pub author: [u8; 32],
+    pub prev_hash: [u8; 32],
+    pub entry_hash: [u8; 32],
+}
+
+impl OrphanKey {
+    /// Create a new orphan key
+    pub fn new(author: [u8; 32], prev_hash: [u8; 32], entry_hash: [u8; 32]) -> Self {
+        Self { author, prev_hash, entry_hash }
+    }
+
+    /// View the key as a byte slice for database operations
+    pub fn as_bytes(&self) -> &[u8; 96] {
+        // SAFETY: #[repr(C)] guarantees no padding for contiguous [u8; 32] arrays
+        unsafe { &*(self as *const Self as *const [u8; 96]) }
+    }
+
+    /// Parse a key from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 96 {
+            return None;
+        }
+        Some(Self {
+            author: bytes[0..32].try_into().ok()?,
+            prev_hash: bytes[32..64].try_into().ok()?,
+            entry_hash: bytes[64..96].try_into().ok()?,
+        })
+    }
+
+    /// Create a range start key for prefix queries (author + prev_hash)
+    pub fn range_start(author: [u8; 32], prev_hash: [u8; 32]) -> Self {
+        Self { author, prev_hash, entry_hash: [0u8; 32] }
+    }
+
+    /// Create a range end key for prefix queries (author + prev_hash)
+    pub fn range_end(author: [u8; 32], prev_hash: [u8; 32]) -> Self {
+        Self { author, prev_hash, entry_hash: [0xFFu8; 32] }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum OrphanStoreError {
@@ -68,16 +112,7 @@ impl OrphanStore {
         Ok(Self { db })
     }
     
-    /// Build key: author(32) + prev_hash(32) + entry_hash(32) = 96 bytes
-    fn make_key(author: &[u8; 32], prev_hash: &[u8; 32], entry_hash: &[u8; 32]) -> [u8; 96] {
-        let mut key = [0u8; 96];
-        key[0..32].copy_from_slice(author);
-        key[32..64].copy_from_slice(prev_hash);
-        key[64..96].copy_from_slice(entry_hash);
-        key
-    }
-    
-    /// Insert an orphan entry
+    /// Insert an orphan entry. Returns true if new, false if already existed.
     pub fn insert(
         &self,
         author: &[u8; 32],
@@ -85,17 +120,23 @@ impl OrphanStore {
         entry_hash: &[u8; 32],
         seq: u64,
         entry: &SignedEntry,
-    ) -> Result<(), OrphanStoreError> {
-        let key = Self::make_key(author, prev_hash, entry_hash);
-        let value = OrphanedEntry { seq, entry: Some(entry.clone()) }.encode_to_vec();
+    ) -> Result<bool, OrphanStoreError> {
+        let key = OrphanKey::new(*author, *prev_hash, *entry_hash);
         
         let write_txn = self.db.begin_write()?;
-        {
+        let is_new = {
             let mut table = write_txn.open_table(ORPHANS_TABLE)?;
-            table.insert(key.as_slice(), value.as_slice())?;
-        }
+            // Check if already exists
+            if table.get(key.as_bytes().as_slice())?.is_some() {
+                false
+            } else {
+                let value = OrphanedEntry { seq, entry: Some(entry.clone()) }.encode_to_vec();
+                table.insert(key.as_bytes().as_slice(), value.as_slice())?;
+                true
+            }
+        };
         write_txn.commit()?;
-        Ok(())
+        Ok(is_new)
     }
     
     /// Find all orphans waiting for a specific parent hash (for a specific author)
@@ -104,30 +145,24 @@ impl OrphanStore {
         author: &[u8; 32],
         prev_hash: &[u8; 32],
     ) -> Result<Vec<(u64, SignedEntry, [u8; 32])>, OrphanStoreError> {
-        let mut start_key = [0u8; 96];
-        start_key[0..32].copy_from_slice(author);
-        start_key[32..64].copy_from_slice(prev_hash);
-        
-        let mut end_key = [0u8; 96];
-        end_key[0..32].copy_from_slice(author);
-        end_key[32..64].copy_from_slice(prev_hash);
-        end_key[64..96].fill(0xFF);
+        let start_key = OrphanKey::range_start(*author, *prev_hash);
+        let end_key = OrphanKey::range_end(*author, *prev_hash);
         
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(ORPHANS_TABLE)?;
         
         let mut results = Vec::new();
-        for row in table.range(start_key.as_slice()..=end_key.as_slice())? {
-            let (key, value) = row?;
+        for row in table.range(start_key.as_bytes().as_slice()..=end_key.as_bytes().as_slice())? {
+            let (key_bytes, value) = row?;
             let orphaned = OrphanedEntry::decode(value.value())?;
             let signed = orphaned.entry.ok_or_else(|| {
                 OrphanStoreError::Decode(prost::DecodeError::new("Missing entry"))
             })?;
             
-            let mut entry_hash = [0u8; 32];
-            entry_hash.copy_from_slice(&key.value()[64..96]);
+            let key = OrphanKey::from_bytes(key_bytes.value())
+                .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
             
-            results.push((orphaned.seq, signed, entry_hash));
+            results.push((orphaned.seq, signed, key.entry_hash));
         }
         
         Ok(results)
@@ -140,12 +175,12 @@ impl OrphanStore {
         prev_hash: &[u8; 32],
         entry_hash: &[u8; 32],
     ) -> Result<(), OrphanStoreError> {
-        let key = Self::make_key(author, prev_hash, entry_hash);
+        let key = OrphanKey::new(*author, *prev_hash, *entry_hash);
         
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(ORPHANS_TABLE)?;
-            table.remove(key.as_slice())?;
+            table.remove(key.as_bytes().as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
@@ -156,6 +191,26 @@ impl OrphanStore {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(ORPHANS_TABLE)?;
         Ok(table.len()? as usize)
+    }
+    
+    /// List all orphans as (author, seq, prev_hash)
+    pub fn list_all(&self) -> Result<Vec<([u8; 32], u64, [u8; 32])>, OrphanStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(ORPHANS_TABLE)?;
+        
+        let mut orphans = Vec::new();
+        for row in table.iter()? {
+            let (key_bytes, value) = row?;
+            let key = OrphanKey::from_bytes(key_bytes.value())
+                .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
+            
+            let orphaned = crate::proto::OrphanedEntry::decode(value.value())?;
+            orphans.push((key.author, orphaned.seq, key.prev_hash));
+        }
+        
+        // Sort by author then seq
+        orphans.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        Ok(orphans)
     }
 }
 

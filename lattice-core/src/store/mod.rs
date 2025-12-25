@@ -23,3 +23,4 @@ pub use handle::StoreHandle;
 pub use actor::{WatchEvent, WatchEventKind, WatchError};
 pub use sync_state::{SyncState, MissingRange};
 pub use log::LogError;
+pub use signed_entry::hash_signed_entry;

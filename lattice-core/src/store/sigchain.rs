@@ -357,20 +357,22 @@ impl SigChainManager {
                         .unwrap_or([0u8; 32]);
                     let seq = decoded.as_ref().map(|e| e.seq).unwrap_or(0);
                     
-                    self.orphan_store.insert(&author, &prev_hash, &entry_hash, seq, &current)
+                    let is_new = self.orphan_store.insert(&author, &prev_hash, &entry_hash, seq, &current)
                         .map_err(|e| SigChainError::WrongAuthor { 
                             expected: "orphan store insert".to_string(), 
                             got: e.to_string() 
                         })?;
                     
-                    // Emit gap event via broadcast channel
-                    let gap = GapInfo {
-                        author,
-                        from_seq: chain_next_seq,
-                        to_seq: seq,
-                        last_known_hash: Some(chain_last_hash),
-                    };
-                    let _ = self.gap_tx.send(gap); // Ignore if no subscribers
+                    // Only emit gap event for NEW orphans, not duplicates
+                    if is_new {
+                        let gap = GapInfo {
+                            author,
+                            from_seq: chain_next_seq,
+                            to_seq: seq,
+                            last_known_hash: Some(chain_last_hash),
+                        };
+                        let _ = self.gap_tx.send(gap);
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -387,23 +389,37 @@ impl SigChainManager {
     /// Get log directory statistics (file count, total bytes, orphan count)
     pub fn log_stats(&self) -> (usize, u64, usize) {
         let orphan_count = self.orphan_store.count().unwrap_or(0);
-        
+        let files = self.log_files();
+        let total_size: u64 = files.iter().map(|(_, size, _)| size).sum();
+        (files.len(), total_size, orphan_count)
+    }
+    
+    /// Get log file paths for detailed stats (hashing done by caller to avoid blocking actor)
+    pub fn log_paths(&self) -> Vec<(String, u64, std::path::PathBuf)> {
+        let mut files = self.log_files();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files
+    }
+    
+    /// List all .log files in logs_dir as (name, size, path)
+    fn log_files(&self) -> Vec<(String, u64, std::path::PathBuf)> {
         if !self.logs_dir.exists() {
-            return (0, 0, orphan_count);
+            return vec![];
         }
-        let mut total_size = 0u64;
-        let mut file_count = 0;
-        if let Ok(entries) = std::fs::read_dir(&self.logs_dir) {
-            for entry in entries.flatten() {
-                if let Ok(meta) = entry.metadata() {
-                    if meta.is_file() {
-                        total_size += meta.len();
-                        file_count += 1;
-                    }
-                }
-            }
-        }
-        (file_count, total_size, orphan_count)
+        let Ok(entries) = std::fs::read_dir(&self.logs_dir) else { return vec![] };
+        
+        entries.flatten().filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            if !meta.is_file() { return None }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".log") { return None }
+            Some((name, meta.len(), entry.path()))
+        }).collect()
+    }
+    
+    /// List all orphans as (author, seq, prev_hash)
+    pub fn orphan_list(&self) -> Vec<([u8; 32], u64, [u8; 32])> {
+        self.orphan_store.list_all().unwrap_or_default()
     }
 }
 

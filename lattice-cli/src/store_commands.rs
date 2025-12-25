@@ -6,12 +6,14 @@ use lattice_net::LatticeServer;
 use std::time::Instant;
 use std::io::Write;
 
-pub async fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
+    
+    let verbose = args.iter().any(|a| a == "-v");
     
     let mut w = writer.clone();
     let _ = writeln!(w, "Store ID: {}", h.id());
@@ -28,6 +30,159 @@ pub async fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _server
     }
     if orphan_count > 0 {
         let _ = writeln!(w, "Orphans:  {} (pending parent entries)", orphan_count);
+    }
+    
+    // Show detailed file info with -v
+    if verbose && file_count > 0 {
+        let _ = writeln!(w);
+        let _ = writeln!(w, "Log Files:");
+        let files = h.log_stats_detailed().await;
+        for (name, size, checksum) in files {
+            let _ = writeln!(w, "  {} {:>10} bytes  {}", checksum, size, name);
+        }
+    }
+    
+    // Show orphan details with -v
+    if verbose && orphan_count > 0 {
+        let _ = writeln!(w);
+        let _ = writeln!(w, "Orphaned Entries:");
+        let orphans = h.orphan_list().await;
+        for (author, seq, prev_hash) in orphans {
+            let _ = writeln!(w, "  author:{}  seq:{}  awaiting:{}", 
+                hex::encode(&author[..8]), seq, hex::encode(&prev_hash[..8]));
+        }
+    }
+    
+    CommandResult::Ok
+}
+
+pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+    let Some(h) = store else {
+        let mut w = writer.clone();
+        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
+        return CommandResult::Ok;
+    };
+    
+    let mut w = writer.clone();
+    
+    // Get sync state to find all authors
+    let sync_state = match h.sync_state().await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(w, "Error getting sync state: {}", e);
+            return CommandResult::Ok;
+        }
+    };
+    
+    let authors = sync_state.authors();
+    let _ = writeln!(w, "Store {} - {} authors\n", h.id(), authors.len());
+    
+    // Sort authors by their hex-encoded key for consistent output
+    let mut sorted_authors: Vec<_> = authors.into_iter().collect();
+    sorted_authors.sort_by(|a, b| a.0.cmp(&b.0));
+    
+    for (author, info) in sorted_authors {
+        let author_short = hex::encode(&author[..8]);
+        let _ = writeln!(w, "Author {} (seq: {}, heads: {})", author_short, info.seq, info.heads.len());
+        
+        // Get all entries for this author
+        let entries = match h.read_entries_after(&author, None).await {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = writeln!(w, "  Error reading entries: {}", e);
+                continue;
+            }
+        };
+        
+        for entry in entries {
+            // Decode entry to show details
+            let hash = lattice_core::store::hash_signed_entry(&entry);
+            let hash_short = hex::encode(&hash[..8]);
+            
+            match prost::Message::decode(&entry.entry_bytes[..]) {
+                Ok(decoded) => {
+                    let e: lattice_core::proto::Entry = decoded;
+                    let prev_hash_short = if e.prev_hash.len() >= 8 {
+                        hex::encode(&e.prev_hash[..8])
+                    } else {
+                        "00000000".to_string()
+                    };
+                    let hlc = e.timestamp.as_ref()
+                        .map(|t| format_hlc_proto(t))
+                        .unwrap_or_else(|| "0.0".to_string());
+                    
+                    // Format ops as PUT:key=value or DEL:key
+                    let ops_str: Vec<String> = e.ops.iter().filter_map(|op| {
+                        use lattice_core::proto::operation::OpType;
+                        match &op.op_type {
+                            Some(OpType::Put(p)) => {
+                                let key = String::from_utf8_lossy(&p.key);
+                                let val = String::from_utf8_lossy(&p.value);
+                                let val_short = if val.len() > 20 { format!("{}...", &val[..20]) } else { val.to_string() };
+                                Some(format!("PUT:{}={}", key, val_short))
+                            }
+                            Some(OpType::Delete(d)) => {
+                                let key = String::from_utf8_lossy(&d.key);
+                                Some(format!("DEL:{}", key))
+                            }
+                            None => None,
+                        }
+                    }).collect();
+                    
+                    // Format parent_hashes
+                    let parents_str = if e.parent_hashes.is_empty() {
+                        String::new()
+                    } else {
+                        let ps: Vec<String> = e.parent_hashes.iter()
+                            .map(|h| if h.len() >= 8 { hex::encode(&h[..8]) } else { "????????".to_string() })
+                            .collect();
+                        format!(" parents:[{}]", ps.join(","))
+                    };
+                    
+                    let _ = writeln!(w, "  seq:{:<4} prev:{}  hash:{}  hlc:{}  {}{}", e.seq, prev_hash_short, hash_short, hlc, ops_str.join(" "), parents_str);
+                }
+                Err(e) => {
+                    let _ = writeln!(w, "  [CORRUPT ENTRY] hash:{}  error: {}", hash_short, e);
+                }
+            }
+        }
+        let _ = writeln!(w);
+    }
+    
+    CommandResult::Ok
+}
+
+pub async fn cmd_store_watermark(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+    let Some(h) = store else {
+        let mut w = writer.clone();
+        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
+        return CommandResult::Ok;
+    };
+    
+    let mut w = writer.clone();
+    
+    // Get sync state
+    let sync_state = match h.sync_state().await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(w, "Error getting sync state: {}", e);
+            return CommandResult::Ok;
+        }
+    };
+    
+    let authors = sync_state.authors();
+    let _ = writeln!(w, "Sync Watermark - {} authors\n", authors.len());
+    
+    // Sort authors
+    let mut sorted: Vec<_> = authors.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    
+    for (author, info) in sorted {
+        let author_hex = hex::encode(&author[..8]);
+        let heads_str: Vec<String> = info.heads.iter()
+            .map(|h| hex::encode(&h[..8]))
+            .collect();
+        let _ = writeln!(w, "{}: seq:{} heads:[{}]", author_hex, info.seq, heads_str.join(", "));
     }
     
     CommandResult::Ok
@@ -73,12 +228,13 @@ pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _server: Option<
                     let winner = if i == 0 { "→" } else { " " };
                     let tombstone = if head.tombstone { "⊗" } else { "" };
                     let author_short = hex::encode(&head.author).chars().take(8).collect::<String>();
+                    let hash_short = if head.hash.len() >= 8 { hex::encode(&head.hash[..8]) } else { "????????".to_string() };
                     if head.tombstone {
-                        let _ = writeln!(w, "{} {} (deleted) (hlc:{}, author:{})", 
-                            winner, tombstone, head.hlc, author_short);
+                        let _ = writeln!(w, "{} {} (deleted) (hlc:{}, author:{}, hash:{})", 
+                            winner, tombstone, format_hlc(head.hlc), author_short, hash_short);
                     } else {
-                        let _ = writeln!(w, "{} {} (hlc:{}, author:{})", 
-                            winner, format_value(&head.value), head.hlc, author_short);
+                        let _ = writeln!(w, "{} {} (hlc:{}, author:{}, hash:{})", 
+                            winner, format_value(&head.value), format_hlc(head.hlc), author_short, hash_short);
                     }
                 }
                 if heads.len() > 1 {
@@ -159,12 +315,13 @@ pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _server: Option
                         for (i, head) in heads.iter().enumerate() {
                             let winner = if i == 0 { "→" } else { " " };
                             let author_short = hex::encode(&head.author).chars().take(8).collect::<String>();
+                            let hash_short = if head.hash.len() >= 8 { hex::encode(&head.hash[..8]) } else { "????????".to_string() };
                             if head.tombstone {
-                                let _ = writeln!(w, "  {} ⊗ (deleted) (hlc:{}, author:{})", 
-                                    winner, head.hlc, author_short);
+                                let _ = writeln!(w, "  {} ⊗ (deleted) (hlc:{}, author:{}, hash:{})", 
+                                    winner, format_hlc(head.hlc), author_short, hash_short);
                             } else {
-                                let _ = writeln!(w, "  {} {} (hlc:{}, author:{})", 
-                                    winner, format_value(&head.value), head.hlc, author_short);
+                                let _ = writeln!(w, "  {} {} (hlc:{}, author:{}, hash:{})", 
+                                    winner, format_value(&head.value), format_hlc(head.hlc), author_short, hash_short);
                             }
                         }
                     } else {
@@ -234,4 +391,19 @@ pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _server:
 
 fn format_value(v: &[u8]) -> String {
     std::str::from_utf8(v).map(String::from).unwrap_or_else(|_| format!("0x{}", hex::encode(v)))
+}
+
+/// Format HLC components as "walltime.counter"
+fn format_hlc_parts(wall_time: u64, counter: u32) -> String {
+    format!("{}.{}", wall_time, counter)
+}
+
+/// Format combined HLC value (wall_time << 16 | counter) as "walltime.counter"
+fn format_hlc(hlc: u64) -> String {
+    format_hlc_parts(hlc >> 16, (hlc & 0xFFFF) as u32)
+}
+
+/// Format HLC proto message as "walltime.counter"
+fn format_hlc_proto(hlc: &lattice_core::proto::Hlc) -> String {
+    format_hlc_parts(hlc.wall_time, hlc.counter)
 }

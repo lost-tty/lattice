@@ -129,6 +129,34 @@ impl StoreHandle {
         let _ = self.tx.send(StoreCmd::LogStats { resp: resp_tx }).await;
         resp_rx.await.unwrap_or((0, 0, 0))
     }
+    
+    /// Get detailed log file info (filename, size, checksum)
+    /// Heavy I/O and hashing is done via spawn_blocking to avoid blocking the actor.
+    pub async fn log_stats_detailed(&self) -> Vec<(String, u64, String)> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(StoreCmd::LogPaths { resp: resp_tx }).await;
+        let paths = resp_rx.await.unwrap_or_default();
+        
+        // Do heavy I/O + hashing off the actor thread
+        tokio::task::spawn_blocking(move || {
+            paths.into_iter().map(|(name, size, path)| {
+                let checksum = match std::fs::read(&path) {
+                    Ok(data) => hex::encode(&blake3::hash(&data).as_bytes()[..8]),
+                    Err(_) => "????????".to_string(),
+                };
+                (name, size, checksum)
+            }).collect()
+        }).await.unwrap_or_default()
+    }
+    
+    /// Get list of orphaned entries (author, seq, prev_hash)
+    pub async fn orphan_list(&self) -> Vec<([u8; 32], u64, [u8; 32])> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(StoreCmd::OrphanList { resp: resp_tx }).await;
+        resp_rx.await.unwrap_or_default()
+    }
 
     pub async fn sync_state(&self) -> Result<super::sync_state::SyncState, NodeError> {
         use StoreCmd;
