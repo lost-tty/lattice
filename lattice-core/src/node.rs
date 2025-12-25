@@ -68,7 +68,7 @@ pub struct JoinAcceptance {
 /// Information about a peer in the mesh
 #[derive(Clone, Debug)]
 pub struct PeerInfo {
-    pub pubkey: String,
+    pub pubkey: [u8; 32],
     pub name: Option<String>,
     pub added_at: Option<u64>,
     pub added_by: Option<String>,
@@ -350,10 +350,16 @@ impl Node {
         
         // Build PeerInfo for each peer
         let mut peers = Vec::new();
-        for (pubkey, status) in peers_map {
-            let name_key = format!("/nodes/{}/name", pubkey);
-            let added_at_key = format!("/nodes/{}/added_at", pubkey);
-            let added_by_key = format!("/nodes/{}/added_by", pubkey);
+        for (pubkey_hex, status) in peers_map {
+            // Parse pubkey hex to bytes
+            let pubkey: [u8; 32] = match hex::decode(&pubkey_hex) {
+                Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
+                _ => continue, // Skip invalid pubkeys
+            };
+            
+            let name_key = format!("/nodes/{}/name", pubkey_hex);
+            let added_at_key = format!("/nodes/{}/added_at", pubkey_hex);
+            let added_by_key = format!("/nodes/{}/added_by", pubkey_hex);
             
             let name = store.get(name_key.as_bytes()).await?
                 .map(|b| String::from_utf8_lossy(&b).to_string());
@@ -781,7 +787,7 @@ mod tests {
         
         // Verify peer is Invited
         let peers = node.list_peers().await.expect("list_peers");
-        let invited = peers.iter().find(|p| p.pubkey == hex::encode(peer_pubkey));
+        let invited = peers.iter().find(|p| p.pubkey == peer_pubkey);
         assert!(invited.is_some(), "Should find invited peer");
         assert_eq!(invited.unwrap().status, PeerStatus::Invited);
         
@@ -809,7 +815,7 @@ mod tests {
         
         // Peer should now be Active
         let peers = node.list_peers().await.expect("list_peers");
-        let peer = peers.iter().find(|p| p.pubkey == hex::encode(peer_pubkey));
+        let peer = peers.iter().find(|p| p.pubkey == peer_pubkey);
         assert!(peer.is_some(), "Should find peer");
         assert_eq!(peer.unwrap().status, PeerStatus::Active);
         

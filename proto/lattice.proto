@@ -111,9 +111,10 @@ message JoinResponse {
 
 // 7. Sync Protocol Messages (bidirectional sync after join)
 message SyncRequest {
-  bytes store_id = 1;     // Store UUID to sync (16 bytes)
-  SyncState state = 2;    // Sender's sync state (for incremental sync)
-  bool full_sync = 3;     // If true, request all entries (for join)
+  bytes store_id = 1;            // Store UUID to sync (16 bytes)
+  SyncState state = 2;           // Sender's sync state (for incremental sync)
+  bool full_sync = 3;            // If true, request all entries (for join)
+  repeated bytes author_ids = 4; // Optional: filter to these authors (empty = all)
 }
 
 message SyncResponse {
@@ -140,4 +141,10 @@ message PeerMessage {
     SyncEntry sync_entry = 5;
     SyncDone sync_done = 6;
   }
+}
+
+// 9. Orphan Entry (for orphan buffer storage)
+message OrphanedEntry {
+  uint64 seq = 1;            // Sequence number of the orphaned entry
+  SignedEntry entry = 2;     // The orphaned entry itself
 }

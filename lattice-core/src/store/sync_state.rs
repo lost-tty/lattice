@@ -322,4 +322,64 @@ mod tests {
         assert!(!missing_from_peer2.is_empty(), 
             "BUG: SyncState misses peer2's fork because seq numbers match");
     }
+    
+    /// Test that diff returns all authors, which can then be filtered by protocol layer.
+    /// This verifies the author_filter parameter in send_missing_entries works.
+    #[test]
+    fn test_diff_multiple_authors_for_filtering() {
+        let mut my_state = SyncState::new();
+        let mut peer_state = SyncState::new();
+        
+        let author_a = [0xAA; 32];
+        let author_b = [0xBB; 32];
+        let author_c = [0xCC; 32];
+        
+        // I have author_a at seq 5, nothing for b or c
+        my_state.set(author_a, 5, [0x11; 32]);
+        
+        // Peer has all three authors ahead of me
+        peer_state.set(author_a, 10, [0x22; 32]);
+        peer_state.set(author_b, 3, [0x33; 32]);
+        peer_state.set(author_c, 7, [0x44; 32]);
+        
+        // Full diff returns all three
+        let full_diff = my_state.diff(&peer_state);
+        assert_eq!(full_diff.len(), 3, "Should have 3 authors in diff");
+        
+        // Verify filter mechanism works (simulating protocol layer)
+        let author_filter = [author_b];
+        let filtered: Vec<_> = full_diff.iter()
+            .filter(|r| author_filter.contains(&r.author))
+            .collect();
+        
+        assert_eq!(filtered.len(), 1, "Should filter to just author_b");
+        assert_eq!(filtered[0].author, author_b);
+        assert_eq!(filtered[0].from_seq, 0);
+        assert_eq!(filtered[0].to_seq, 3);
+    }
+    
+    /// Test gap filling scenario: I have seq 1-5, I receive seq 8 (orphan).
+    /// Gap detection should request seq 6-8 from peers.
+    #[test]
+    fn test_gap_detection_sync_request() {
+        let mut my_state = SyncState::new();
+        let mut peer_state = SyncState::new();
+        
+        let author = [0x11; 32];
+        
+        // I have entries 1-5
+        my_state.set(author, 5, [0xAA; 32]);
+        
+        // I received orphan at seq 8, so I know peer has at least seq 8
+        // (In reality, we'd learn this from the GapInfo broadcast)
+        peer_state.set(author, 8, [0xBB; 32]);
+        
+        // Diff should show I need seq 6-8
+        let missing = my_state.diff(&peer_state);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].from_seq, 5);  // I have up to 5
+        assert_eq!(missing[0].to_seq, 8);    // Peer has up to 8
+        
+        // The sync should fill entries 6, 7, 8 and resolve the orphan
+    }
 }

@@ -122,12 +122,12 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    /// Get log directory statistics (file count, total bytes)
-    pub async fn log_stats(&self) -> (usize, u64) {
+    /// Get log directory statistics (file count, total bytes, orphan count)
+    pub async fn log_stats(&self) -> (usize, u64, usize) {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self.tx.send(StoreCmd::LogStats { resp: resp_tx }).await;
-        resp_rx.await.unwrap_or((0, 0))
+        resp_rx.await.unwrap_or((0, 0, 0))
     }
 
     pub async fn sync_state(&self) -> Result<super::sync_state::SyncState, NodeError> {
@@ -171,14 +171,24 @@ impl StoreHandle {
         Ok(CausalEntryIter::new(author_entries).collect())
     }
 
-    pub async fn apply_entry(&self, entry: crate::proto::SignedEntry) -> Result<(), NodeError> {
+    pub async fn ingest_entry(&self, entry: crate::proto::SignedEntry) -> Result<(), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::ApplyEntry { entry, resp: resp_tx }).await
+        self.tx.send(StoreCmd::IngestEntry { entry, resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
         resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
             .map_err(NodeError::Store)
+    }
+
+    /// Subscribe to gap detection events (emitted when orphan entries are buffered)
+    pub async fn subscribe_gaps(&self) -> Result<broadcast::Receiver<super::orphan_store::GapInfo>, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::SubscribeGaps { resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)
     }
 
     pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), NodeError> {
