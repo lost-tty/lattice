@@ -18,7 +18,7 @@ mod sync_state;
 mod orphan_store;
 
 // Public API - types needed by Node and LatticeServer
-pub use core::{Store, StoreError};
+pub use core::{Store, StoreError, ParentValidationError};
 pub use handle::StoreHandle;
 pub use actor::{WatchEvent, WatchEventKind, WatchError};
 pub use sync_state::{SyncState, MissingRange};

@@ -5,10 +5,11 @@ use crate::{
     proto::{AuthorState, SignedEntry, HeadInfo},
 };
 use super::{
-    core::{Store, StoreError},
-    sigchain::{SigChainError, SigChainManager},
+    core::{Store, StoreError, ParentValidationError},
+    sigchain::{SigChainError, SigChainManager, SigchainValidation},
     sync_state::SyncState,
     orphan_store::GapInfo,
+    signed_entry::hash_signed_entry,
     log,
 };
 use prost::Message;
@@ -386,38 +387,131 @@ impl StoreActor {
 
         Ok(())
     }
-    
-    /// Ingest entry through chain manager and apply to store + emit watch events.
+    /// Ingest entry through unified validation: sigchain + state.
     /// Common path for both local and remote entries.
-    /// Gaps are emitted via broadcast channel from SigChainManager.
+    /// Entry is only committed when both validations pass.
+    /// 
+    /// Note: This implements strict consistency where sigchain entries are blocked
+    /// until their DAG dependencies are resolved (head-of-line blocking by design).
     fn apply_ingested_entry(&mut self, entry: &SignedEntry) -> Result<(), StoreActorError> {
-        // Ingest - validates and appends to chain, returns ready entries
-        let ready_entries = self.chain_manager.ingest(entry)?;
+        // Work queue contains:
+        // - entry
+        // - DAG orphan metadata (key, parent_hash, entry_hash) for deletion after processing
+        // - Sigchain orphan metadata (author, prev_hash, entry_hash) for deletion after processing
+        // Orphans are deleted AFTER successful processing to prevent data loss on crash.
+        type OrphanMeta = (
+            Option<(Vec<u8>, [u8; 32], [u8; 32])>,   // DAG orphan: (key, parent_hash, entry_hash)
+            Option<([u8; 32], [u8; 32], [u8; 32])>,  // Sigchain orphan: (author, prev_hash, entry_hash)
+        );
+        let mut work_queue: Vec<(SignedEntry, OrphanMeta)> = 
+            vec![(entry.clone(), (None, None))];
+        let mut is_primary_entry = true;
         
-        // Apply ready entries to store and emit watch events
-        for ready_entry in &ready_entries {
-            self.store.apply_entry(ready_entry)?;
-            
-            // Emit watch events from entry ops
-            if let Ok(inner) = crate::proto::Entry::decode(&ready_entry.entry_bytes[..]) {
-                for op in &inner.ops {
-                    use crate::proto::operation::OpType;
-                    match &op.op_type {
-                        Some(OpType::Put(put_op)) => {
-                            self.emit_watch_event(&put_op.key, WatchEventKind::Put { 
-                                value: put_op.value.clone() 
-                            });
+        while let Some((current, (dag_orphan_meta, sigchain_orphan_meta))) = work_queue.pop() {
+            // Step 1: Validate sigchain
+            match self.chain_manager.validate_entry(&current) {
+                SigchainValidation::Valid => {
+                    // Step 2: Validate state (parent_hashes)
+                    match self.store.validate_parent_hashes(&current) {
+                        Ok(()) => {
+                            // Both valid - commit to sigchain and apply to state
+                            let ready_orphans = self.chain_manager.commit_entry(&current)?;
+                            self.store.apply_entry(&current)?;
+                            
+                            // Now safe to delete the DAG orphan entry (if this was one)
+                            if let Some((key, parent_hash, entry_hash)) = dag_orphan_meta {
+                                self.chain_manager.delete_dag_orphan(&key, &parent_hash, &entry_hash);
+                            }
+                            
+                            // Now safe to delete the sigchain orphan entry (if this was one)
+                            if let Some((author, prev_hash, entry_hash)) = sigchain_orphan_meta {
+                                self.chain_manager.delete_sigchain_orphan(&author, &prev_hash, &entry_hash);
+                            }
+                            
+                            // Emit watch events
+                            self.emit_watch_events_for_entry(&current);
+                            
+                            // Add any sigchain orphans that became ready (with metadata for deferred deletion)
+                            for (orphan, author, prev_hash, orphan_hash) in ready_orphans {
+                                work_queue.push((orphan, (None, Some((author, prev_hash, orphan_hash)))));
+                            }
+                            
+                            // Find DAG orphans waiting for this entry's hash
+                            // Store metadata but DON'T delete yet - delete after successful processing
+                            let entry_hash = hash_signed_entry(&current);
+                            let dag_orphans = self.chain_manager.find_dag_orphans(&entry_hash);
+                            for (key, orphan_entry, orphan_hash) in dag_orphans {
+                                // Store metadata for deletion after processing
+                                work_queue.push((orphan_entry, (Some((key, entry_hash, orphan_hash)), None)));
+                            }
                         }
-                        Some(OpType::Delete(delete_op)) => {
-                            self.emit_watch_event(&delete_op.key, WatchEventKind::Delete);
+                        Err(ParentValidationError::MissingParent { key, awaited_hash }) => {
+                            // Transitioning dependencies: Remove the old orphan record (for the satisfied parent)
+                            // before re-buffering this entry under the *next* missing parent hash.
+                            if let Some((old_key, old_parent_hash, old_entry_hash)) = dag_orphan_meta {
+                                self.chain_manager.delete_dag_orphan(&old_key, &old_parent_hash, &old_entry_hash);
+                            }
+                            
+                            match awaited_hash.clone().try_into() {
+                                Ok(awaited) => {
+                                    self.chain_manager.buffer_dag_orphan(&current, &key, &awaited)?;
+                                }
+                                Err(_) => {
+                                    // Invalid hash length - drop entry to prevent memory leak
+                                    eprintln!(
+                                        "[error] Invalid parent hash length ({}), dropping entry",
+                                        awaited_hash.len()
+                                    );
+                                }
+                            }
                         }
-                        None => {}
+                        Err(e) => {
+                            // Unexpected state error - log and drop entry
+                            eprintln!("[error] State validation failed with unexpected error: {:?}", e);
+                        }
+                    }
+                }
+                SigchainValidation::Orphan { gap, prev_hash } => {
+                    // Sigchain validation failed (out of order) - buffer as orphan
+                    self.chain_manager.buffer_sigchain_orphan(
+                        &current, gap.author, prev_hash, gap.to_seq, gap.from_seq, 
+                        gap.last_known_hash.unwrap_or([0u8; 32])
+                    )?;
+                }
+                SigchainValidation::Error(e) => {
+                    // Primary entry error - return error to caller
+                    // Cascaded orphan errors are logged but don't propagate
+                    if is_primary_entry {
+                        return Err(StoreActorError::SigChain(e));
+                    } else {
+                        eprintln!("[warn] Cascaded orphan failed sigchain validation: {:?}", e);
                     }
                 }
             }
+            is_primary_entry = false;
         }
         
         Ok(())
+    }
+    
+    /// Emit watch events for all operations in an entry
+    fn emit_watch_events_for_entry(&mut self, entry: &SignedEntry) {
+        if let Ok(inner) = crate::proto::Entry::decode(&entry.entry_bytes[..]) {
+            for op in &inner.ops {
+                use crate::proto::operation::OpType;
+                match &op.op_type {
+                    Some(OpType::Put(put_op)) => {
+                        self.emit_watch_event(&put_op.key, WatchEventKind::Put { 
+                            value: put_op.value.clone() 
+                        });
+                    }
+                    Some(OpType::Delete(delete_op)) => {
+                        self.emit_watch_event(&delete_op.key, WatchEventKind::Delete);
+                    }
+                    None => {}
+                }
+            }
+        }
     }
 
     /// Spawn a thread to stream entries via channel. Thread terminates when receiver is dropped.
@@ -456,3 +550,610 @@ impl StoreActor {
         Ok(rx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock::MockClock;
+    use crate::hlc::HLC;
+    use crate::node_identity::NodeIdentity;
+    use crate::proto::Operation;
+    use crate::store::signed_entry::{EntryBuilder, hash_signed_entry};
+    use std::env::temp_dir;
+    
+    const TEST_STORE: [u8; 16] = [1u8; 16];
+    
+    fn temp_test_dir(name: &str) -> std::path::PathBuf {
+        let tid = std::thread::current().id();
+        temp_dir().join(format!("lattice_actor_test_{}_{:?}", name, tid))
+    }
+
+    /// Test that entries with invalid parent_hashes are buffered as DAG orphans
+    /// and applied when the parent entry arrives.
+    #[test]
+    fn test_dag_orphan_buffering_and_retry() {
+        let dir = temp_test_dir("dag_orphan");
+        let _ = std::fs::remove_dir_all(&dir);
+        let state_path = dir.join("state.db");
+        let logs_dir = dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        
+        let store = Store::open(&state_path).unwrap();
+        let node = NodeIdentity::generate();
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let (entry_tx, _entry_rx) = broadcast::channel(32);
+        
+        let actor = StoreActor::new(
+            Uuid::from_bytes(TEST_STORE),
+            store,
+            logs_dir,
+            node.clone(),
+            cmd_rx,
+            entry_tx,
+        );
+        
+        // Run actor in background thread
+        let actor_handle = std::thread::spawn(move || actor.run());
+        
+        // Create entry1: first write to /key with no parent_hashes
+        let clock1 = MockClock::new(1000);
+        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])  // No parents - this is fine for new key
+            .operation(Operation::put(b"/key", b"value1".to_vec()))
+            .sign(&node);
+        let hash1 = hash_signed_entry(&entry1);
+        
+        // Create entry2: second write citing entry1 as parent
+        let clock2 = MockClock::new(2000);
+        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash(hash1.to_vec())
+            .parent_hashes(vec![hash1.to_vec()])  // Cites entry1
+            .operation(Operation::put(b"/key", b"value2".to_vec()))
+            .sign(&node);
+        let hash2 = hash_signed_entry(&entry2);
+        
+        // Step 1: Ingest entry2 FIRST - should fail parent validation and be buffered
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
+            entry: entry2.clone(), 
+            resp: resp_tx 
+        }).unwrap();
+        let result = resp_rx.blocking_recv().unwrap();
+        // Entry2 should be accepted (buffered as DAG orphan, not rejected)
+        assert!(result.is_ok(), "entry2 should be accepted (buffered)");
+        
+        // Verify /key has no heads yet (entry2 is buffered, not applied)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::GetHeads { 
+            key: b"/key".to_vec(), 
+            resp: resp_tx 
+        }).unwrap();
+        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads.len(), 0, "/key should have no heads while entry2 is buffered");
+        
+        // Step 2: Ingest entry1 - should apply AND trigger entry2 to apply
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
+            entry: entry1.clone(), 
+            resp: resp_tx 
+        }).unwrap();
+        let result = resp_rx.blocking_recv().unwrap();
+        assert!(result.is_ok(), "entry1 should apply successfully");
+        
+        // Step 3: Verify /key now has a single head with hash2 (entry2 was applied)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::GetHeads { 
+            key: b"/key".to_vec(), 
+            resp: resp_tx 
+        }).unwrap();
+        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads.len(), 1, "/key should have exactly 1 head");
+        assert_eq!(&heads[0].hash, &hash2.to_vec(), "head should be entry2's hash");
+        
+        // Verify the value is from entry2
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::Get { 
+            key: b"/key".to_vec(), 
+            resp: resp_tx 
+        }).unwrap();
+        let value = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(value, Some(b"value2".to_vec()), "value should be from entry2");
+        
+        // Shutdown
+        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
+        actor_handle.join().unwrap();
+    }
+    
+    /// Test merge conflict resolution: entry with two parent hashes (DAG merge).
+    /// A and B write to same key /merged (creating two heads).
+    /// C merges both heads into one by citing both as parents.
+    /// C arrives first (sigchain valid, but DAG parents A,B missing).
+    /// A arrives -> C wakes up, B still missing, C goes back to buffer.
+    /// B arrives -> C becomes ready and is applied.
+    #[test]
+    fn test_merge_conflict_partial_parent_satisfaction() {
+        let dir = temp_test_dir("merge_conflict");
+        let _ = std::fs::remove_dir_all(&dir);
+        let state_path = dir.join("state.db");
+        let logs_dir = dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        
+        let store = Store::open(&state_path).unwrap();
+        let node1 = NodeIdentity::generate(); // Author 1: creates A
+        let node2 = NodeIdentity::generate(); // Author 2: creates B
+        let node3 = NodeIdentity::generate(); // Author 3: creates C (merge)
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let (entry_tx, _entry_rx) = broadcast::channel(32);
+        
+        let actor = StoreActor::new(
+            Uuid::from_bytes(TEST_STORE),
+            store,
+            logs_dir,
+            node1.clone(),
+            cmd_rx,
+            entry_tx,
+        );
+        
+        let actor_handle = std::thread::spawn(move || actor.run());
+        
+        // Author1: Create entry_a - writes to /merged (genesis for this key from author1)
+        let clock_a = MockClock::new(1000);
+        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock_a))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])  // No parent - creates first head
+            .operation(Operation::put(b"/merged", b"value_a".to_vec()))
+            .sign(&node1);
+        let hash_a = hash_signed_entry(&entry_a);
+        
+        // Author2: Create entry_b - also writes to /merged (creates second head, concurrent write)
+        let clock_b = MockClock::new(2000);
+        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&clock_b))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())  // Author2's genesis
+            .parent_hashes(vec![])  // No parent - creates second head concurrently
+            .operation(Operation::put(b"/merged", b"value_b".to_vec()))
+            .sign(&node2);
+        let hash_b = hash_signed_entry(&entry_b);
+        
+        // Author3: Create entry_c - merges both heads by citing both as parents
+        let clock_c = MockClock::new(3000);
+        let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&clock_c))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())  // Author3's genesis
+            .parent_hashes(vec![hash_a.to_vec(), hash_b.to_vec()])  // Merge!
+            .operation(Operation::put(b"/merged", b"merged_value".to_vec()))
+            .sign(&node3);
+        let hash_c = hash_signed_entry(&entry_c);
+        
+        // Step 1: Ingest entry_c FIRST
+        // Sigchain valid (seq 1 for author3), but DAG parents [A,B] missing -> buffered
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
+            entry: entry_c.clone(), 
+            resp: resp_tx 
+        }).unwrap();
+        let result = resp_rx.blocking_recv().unwrap();
+        assert!(result.is_ok(), "entry_c should be accepted (buffered as DAG orphan)");
+        
+        // Verify /merged has no heads yet
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::GetHeads { 
+            key: b"/merged".to_vec(), 
+            resp: resp_tx 
+        }).unwrap();
+        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads.len(), 0, "/merged should have no heads");
+        
+        // Step 2: Ingest entry_b SECOND (harder case: B arrives before A)
+        // B applies, creating a head. But C is buffered waiting for A (first in parent list).
+        // C does NOT wake up because it's keyed by hash_a, not hash_b.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
+            entry: entry_b.clone(), 
+            resp: resp_tx 
+        }).unwrap();
+        let result = resp_rx.blocking_recv().unwrap();
+        assert!(result.is_ok(), "entry_b should apply successfully");
+        
+        // Verify /merged has 1 head (from B) - C is still buffered waiting for A
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::GetHeads { 
+            key: b"/merged".to_vec(), 
+            resp: resp_tx 
+        }).unwrap();
+        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads.len(), 1, "/merged should have 1 head from B (C still waiting for A)");
+        assert_eq!(&heads[0].hash, &hash_b.to_vec());
+        
+        // Step 3: Ingest entry_a LAST
+        // A applies, creating second head. C wakes up (was waiting for A).
+        // Now both parents present -> C applies and merges heads.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
+            entry: entry_a.clone(), 
+            resp: resp_tx 
+        }).unwrap();
+        let result = resp_rx.blocking_recv().unwrap();
+        assert!(result.is_ok(), "entry_a should apply successfully");
+        
+        // Verify /merged now has 1 head (C merged A and B)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::GetHeads { 
+            key: b"/merged".to_vec(), 
+            resp: resp_tx 
+        }).unwrap();
+        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads.len(), 1, "/merged should have 1 head (merged by C)");
+        assert_eq!(&heads[0].hash, &hash_c.to_vec(), "head should be entry_c's hash");
+        
+        // Verify merged value
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::Get { 
+            key: b"/merged".to_vec(), 
+            resp: resp_tx 
+        }).unwrap();
+        let value = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(value, Some(b"merged_value".to_vec()), "value should be merged");
+        
+        // Shutdown
+        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
+        actor_handle.join().unwrap();
+    }
+    
+    /// Test merge conflict with C -> A -> B order.
+    /// C arrives first (buffered waiting for A).
+    /// A arrives -> C wakes up, but B is still missing -> C re-buffered waiting for B.
+    /// B arrives -> C wakes up, both parents present -> C applies.
+    #[test]
+    fn test_merge_conflict_rebuffer_on_partial_satisfaction() {
+        let dir = temp_test_dir("merge_rebuffer");
+        let _ = std::fs::remove_dir_all(&dir);
+        let state_path = dir.join("state.db");
+        let logs_dir = dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        
+        let store = Store::open(&state_path).unwrap();
+        let node1 = NodeIdentity::generate();
+        let node2 = NodeIdentity::generate();
+        let node3 = NodeIdentity::generate();
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let (entry_tx, _entry_rx) = broadcast::channel(32);
+        
+        let actor = StoreActor::new(
+            Uuid::from_bytes(TEST_STORE),
+            store,
+            logs_dir,
+            node1.clone(),
+            cmd_rx,
+            entry_tx,
+        );
+        
+        let actor_handle = std::thread::spawn(move || actor.run());
+        
+        // Author1: entry_a writes to /merged
+        let clock_a = MockClock::new(1000);
+        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock_a))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put(b"/merged", b"value_a".to_vec()))
+            .sign(&node1);
+        let hash_a = hash_signed_entry(&entry_a);
+        
+        // Author2: entry_b writes to /merged (concurrent)
+        let clock_b = MockClock::new(2000);
+        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&clock_b))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put(b"/merged", b"value_b".to_vec()))
+            .sign(&node2);
+        let hash_b = hash_signed_entry(&entry_b);
+        
+        // Author3: entry_c merges both
+        let clock_c = MockClock::new(3000);
+        let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&clock_c))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![hash_a.to_vec(), hash_b.to_vec()])
+            .operation(Operation::put(b"/merged", b"merged_value".to_vec()))
+            .sign(&node3);
+        let hash_c = hash_signed_entry(&entry_c);
+        
+        // Step 1: C arrives first -> buffered waiting for A (first in parent list)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
+            entry: entry_c.clone(), 
+            resp: resp_tx 
+        }).unwrap();
+        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        
+        // Verify no heads
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
+        assert_eq!(resp_rx.blocking_recv().unwrap().unwrap().len(), 0);
+        
+        // Step 2: A arrives -> C wakes, B still missing -> C re-buffered for B
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
+            entry: entry_a.clone(), 
+            resp: resp_tx 
+        }).unwrap();
+        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        
+        // Verify 1 head from A (C is re-buffered, not applied)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
+        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads.len(), 1, "/merged should have 1 head from A (C re-buffered for B)");
+        assert_eq!(&heads[0].hash, &hash_a.to_vec());
+        
+        // Step 3: B arrives -> C wakes, both present -> C applies
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
+            entry: entry_b.clone(), 
+            resp: resp_tx 
+        }).unwrap();
+        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        
+        // Verify 1 head from C (merged A and B)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
+        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads.len(), 1, "/merged should have 1 head (merged by C)");
+        assert_eq!(&heads[0].hash, &hash_c.to_vec());
+        
+        // Verify value
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::Get { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
+        assert_eq!(resp_rx.blocking_recv().unwrap().unwrap(), Some(b"merged_value".to_vec()));
+        
+        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
+        actor_handle.join().unwrap();
+    }
+    
+    /// Test that orphan store is cleaned up after multi-parent merge completes.
+    /// This catches the leak bug where stale orphan records remain after re-buffering.
+    /// Scenario: C depends on [A, B], neither present. C buffered for A.
+    /// A arrives -> C wakes, fails on B, re-buffered for B. 
+    /// B arrives -> C applies.
+    /// Bug: old "C waiting for A" record was never deleted.
+    #[test]
+    fn test_orphan_store_cleanup_on_rebuffer() {
+        let dir = temp_test_dir("orphan_cleanup");
+        let _ = std::fs::remove_dir_all(&dir);
+        let state_path = dir.join("state.db");
+        let logs_dir = dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        
+        let store = Store::open(&state_path).unwrap();
+        let node1 = NodeIdentity::generate();
+        let node2 = NodeIdentity::generate();
+        let node3 = NodeIdentity::generate();
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let (entry_tx, _entry_rx) = broadcast::channel(32);
+        
+        let actor = StoreActor::new(
+            Uuid::from_bytes(TEST_STORE),
+            store,
+            logs_dir.clone(),
+            node1.clone(),
+            cmd_rx,
+            entry_tx,
+        );
+        
+        let actor_handle = std::thread::spawn(move || actor.run());
+        
+        // Author1: entry_a writes to /merged
+        let clock_a = MockClock::new(1000);
+        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock_a))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put(b"/merged", b"value_a".to_vec()))
+            .sign(&node1);
+        let hash_a = hash_signed_entry(&entry_a);
+        
+        // Author2: entry_b writes to /merged (concurrent)
+        let clock_b = MockClock::new(2000);
+        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&clock_b))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put(b"/merged", b"value_b".to_vec()))
+            .sign(&node2);
+        let hash_b = hash_signed_entry(&entry_b);
+        
+        // Author3: entry_c merges both
+        let clock_c = MockClock::new(3000);
+        let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&clock_c))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![hash_a.to_vec(), hash_b.to_vec()])
+            .operation(Operation::put(b"/merged", b"merged_value".to_vec()))
+            .sign(&node3);
+        let hash_c = hash_signed_entry(&entry_c);
+        
+        // Step 1: C arrives -> buffered for A
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_c.clone(), resp: resp_tx }).unwrap();
+        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        
+        // Step 2: A arrives -> C wakes, B missing, C re-buffered for B
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
+        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        
+        // Step 3: B arrives -> C wakes, applies
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
+        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        
+        // Verify C merged successfully
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
+        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(&heads[0].hash, &hash_c.to_vec());
+        
+        // Shutdown actor so we can check orphan store directly
+        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
+        actor_handle.join().unwrap();
+        
+        // CRITICAL: Check DAG orphan store is empty - no stale records
+        // This is the bug we're testing for: old "C waiting for A" record leaked
+        let orphan_db_path = logs_dir.join("orphans.db");
+        let orphan_store = crate::store::orphan_store::OrphanStore::open(&orphan_db_path).unwrap();
+        let dag_orphan_count = crate::store::orphan_store::tests::count_dag_orphans(&orphan_store);
+        assert_eq!(dag_orphan_count, 0, "DAG orphan store should be empty after all entries applied (found {} stale records)", dag_orphan_count);
+    }
+    
+    /// Test crash recovery: sigchain committed but state not applied.
+    /// Simulates crash between commit_entry and apply_entry.
+    /// On restart, actor should replay log and recover missing state.
+    #[test]
+    fn test_crash_recovery_on_actor_spawn() {
+        use crate::store::sigchain::SigChain;
+        
+        let dir = temp_test_dir("crash_recovery");
+        let _ = std::fs::remove_dir_all(&dir);
+        let state_path = dir.join("state.db");
+        let logs_dir = dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        
+        let store = Store::open(&state_path).unwrap();
+        let node = NodeIdentity::generate();
+        let author = node.public_key_bytes();
+        
+        // Write 3 entries to sigchain log directly (simulating commits)
+        let log_path = logs_dir.join(format!("{}.log", hex::encode(author)));
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, author);
+        
+        let mut entries = Vec::new();
+        for i in 1u64..=3 {
+            let clock = MockClock::new(i * 1000);
+            let prev = sigchain.last_hash().to_vec();
+            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+                .store_id(TEST_STORE.to_vec())
+                .prev_hash(prev)
+                .parent_hashes(vec![])
+                .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("value{}", i).into_bytes()))
+                .sign(&node);
+            sigchain.append_unchecked(&entry).unwrap();
+            entries.push(entry);
+        }
+        
+        // Only apply first entry to state (simulating crash after entry 1)
+        store.apply_entry(&entries[0]).unwrap();
+        
+        // Verify state only has entry 1
+        assert!(store.get(b"/key1").unwrap().is_some(), "key1 should exist");
+        assert!(store.get(b"/key2").unwrap().is_none(), "key2 should NOT exist (crash before apply)");
+        assert!(store.get(b"/key3").unwrap().is_none(), "key3 should NOT exist (crash before apply)");
+        
+        // Drop everything to simulate crash
+        drop(store);
+        drop(sigchain);
+        
+        // === RESTART ===
+        // Reopen store and spawn actor with StoreHandle
+        // The actor should replay log and recover entries 2 and 3
+        let store = Store::open(&state_path).unwrap();
+        let handle = crate::store::handle::StoreHandle::spawn(
+            Uuid::from_bytes(TEST_STORE),
+            store,
+            logs_dir.clone(),
+            node.clone(),
+        );
+        
+        // Give actor time to initialize
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        
+        // Check if entries 2 and 3 were recovered
+        // Using blocking runtime since we're in a sync test
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let key2_value = rt.block_on(handle.get(b"/key2")).unwrap();
+        let key3_value = rt.block_on(handle.get(b"/key3")).unwrap();
+        
+        assert_eq!(key2_value, Some(b"value2".to_vec()), "key2 should be recovered from log replay");
+        assert_eq!(key3_value, Some(b"value3".to_vec()), "key3 should be recovered from log replay");
+        
+        // Shutdown (handle Drop will send shutdown)
+        drop(handle);
+    }
+    
+    /// Test sigchain orphan data loss prevention.
+    /// Scenario: Entry B is orphaned waiting for A. A arrives and commits.
+    /// B is returned as ready orphan, but then we simulate a "crash" before B is processed.
+    /// On restart, B should still be recoverable (not lost).
+    /// 
+    /// This test exposes the bug: commit_entry deletes orphans before they're fully processed.
+    #[test]
+    fn test_sigchain_orphan_not_lost_on_crash() {
+        use crate::store::sigchain::SigChainManager;
+        
+        let dir = temp_test_dir("sigchain_orphan_loss");
+        let _ = std::fs::remove_dir_all(&dir);
+        let logs_dir = dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        
+        let node = NodeIdentity::generate();
+        
+        // Create manager
+        let mut manager = SigChainManager::new(&logs_dir, TEST_STORE);
+        
+        // Create entry A (seq 1) and entry B (seq 2)
+        let clock_a = MockClock::new(1000);
+        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock_a))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put(b"/key_a", b"value_a".to_vec()))
+            .sign(&node);
+        let hash_a = hash_signed_entry(&entry_a);
+        
+        let clock_b = MockClock::new(2000);
+        let entry_b = EntryBuilder::new(2, HLC::now_with_clock(&clock_b))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash(hash_a.to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put(b"/key_b", b"value_b".to_vec()))
+            .sign(&node);
+        
+        // Ingest B first -> becomes orphan waiting for A
+        let result_b = manager.validate_entry(&entry_b);
+        match result_b {
+            crate::store::sigchain::SigchainValidation::Orphan { gap, prev_hash } => {
+                manager.buffer_sigchain_orphan(&entry_b, gap.author, prev_hash, gap.to_seq, gap.from_seq, gap.last_known_hash.unwrap_or([0u8; 32])).unwrap();
+            }
+            _ => panic!("Expected B to be orphaned"),
+        }
+        
+        // Verify B is in orphan store
+        let orphan_count = manager.sigchain_orphan_count();
+        assert_eq!(orphan_count, 1, "B should be buffered as sigchain orphan");
+        
+        // Ingest A -> A commits, B should become ready
+        let result_a = manager.validate_entry(&entry_a);
+        assert!(matches!(result_a, crate::store::sigchain::SigchainValidation::Valid));
+        let ready_orphans = manager.commit_entry(&entry_a).unwrap();
+        
+        // B should be returned as ready
+        assert_eq!(ready_orphans.len(), 1, "B should be returned as ready orphan");
+        
+        // CRITICAL: Check if B is still in orphan store after commit_entry
+        // BUG: B was deleted eagerly, so if we crash here, B is lost!
+        let orphan_count_after = manager.sigchain_orphan_count();
+        
+        // This assertion will FAIL with the current code (bug exists)
+        // After fix, B should still be in orphan store until explicitly deleted
+        assert_eq!(orphan_count_after, 1, 
+            "BUG: Sigchain orphan B should NOT be deleted until fully processed! \
+             If this fails, orphans can be lost on crash.");
+    }
+}
+

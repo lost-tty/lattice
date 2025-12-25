@@ -12,6 +12,7 @@ use crate::store::signed_entry::hash_signed_entry;
 use crate::proto::{operation, AuthorState, Entry, HeadInfo, HeadList, SignedEntry};
 use prost::Message;
 use redb::{Database, ReadableTable, TableDefinition};
+use std::collections::HashSet;
 use std::path::Path;
 use thiserror::Error;
 
@@ -45,6 +46,22 @@ pub enum StoreError {
     
     #[error("Sigchain error: {0}")]
     SigChain(#[from] SigChainError),
+}
+
+/// Errors that occur when validating parent_hashes against current state
+#[derive(Error, Debug, Clone)]
+pub enum ParentValidationError {
+    #[error("Missing parent hash for key")]
+    MissingParent {
+        key: Vec<u8>,
+        awaited_hash: Vec<u8>,
+    },
+    
+    #[error("Decode error: {0}")]
+    Decode(String),
+    
+    #[error("Store error: {0}")]
+    Store(String),
 }
 
 /// Persistent store for KV state with DAG conflict resolution
@@ -104,6 +121,50 @@ impl Store {
             Self::apply_ops_to_tables(signed_entry, &mut kv_table, &mut author_table)?;
         }
         write_txn.commit()?;
+        Ok(())
+    }
+    
+    /// Validate that parent_hashes in entry match current heads for affected keys.
+    /// Returns Ok(()) if valid (entry can be applied), Err with missing parent info if not.
+    /// Empty parent_hashes is always valid (creates new head).
+    pub fn validate_parent_hashes(&self, signed_entry: &SignedEntry) -> Result<(), ParentValidationError> {
+        let entry = Entry::decode(&signed_entry.entry_bytes[..])
+            .map_err(|e| ParentValidationError::Decode(e.to_string()))?;
+        
+        // If no parent_hashes, this is a "new head" operation - always valid
+        if entry.parent_hashes.is_empty() {
+            return Ok(());
+        }
+        
+        // Convert parent_hashes to HashSet for O(1) lookup
+        let parent_set: HashSet<Vec<u8>> = entry.parent_hashes.iter().cloned().collect();
+        
+        // For each operation, check that ALL parent_hashes are in current heads for that key
+        for op in &entry.ops {
+            let key = match &op.op_type {
+                Some(operation::OpType::Put(p)) => &p.key,
+                Some(operation::OpType::Delete(d)) => &d.key,
+                None => continue,
+            };
+            
+            let current_heads = self.get_heads(key)
+                .map_err(|e| ParentValidationError::Store(e.to_string()))?;
+            
+            let current_hashes: HashSet<Vec<u8>> = current_heads.iter()
+                .map(|h| h.hash.clone())
+                .collect();
+            
+            // All parent_hashes must exist in current_heads for this key
+            for parent in &parent_set {
+                if !current_hashes.contains(parent) {
+                    return Err(ParentValidationError::MissingParent {
+                        key: key.clone(),
+                        awaited_hash: parent.clone(),
+                    });
+                }
+            }
+        }
+        
         Ok(())
     }
     

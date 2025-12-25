@@ -1,11 +1,16 @@
 //! OrphanStore - persistent storage for orphan entries awaiting their parent
 //!
-//! Orphan entries arrive out-of-order (via gossip) before their parent entry.
-//! They're buffered here until the parent arrives and makes them valid.
+//! Two types of orphans:
+//! 1. Sigchain orphans: entries out of order in author's chain (awaiting prev_hash)
+//! 2. DAG orphans: entries with parent_hashes not yet in heads (awaiting DAG parent)
 //!
-//! Table: orphans
+//! Table: orphans (sigchain)
 //! Key:   OrphanKey (author[32] + prev_hash[32] + entry_hash[32] = 96 bytes)
 //! Value: OrphanedEntry protobuf
+//!
+//! Table: dag_orphans
+//! Key:   DagOrphanKey (key_hash[32] + parent_hash[32] + entry_hash[32] = 96 bytes)
+//! Value: DagOrphanedEntry protobuf
 
 use crate::proto::{OrphanedEntry, SignedEntry};
 use prost::Message;
@@ -14,6 +19,7 @@ use std::path::Path;
 use thiserror::Error;
 
 const ORPHANS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("orphans");
+const DAG_ORPHANS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dag_orphans");
 
 /// Composite key for orphan entries: author + prev_hash + entry_hash
 #[repr(C)]
@@ -56,6 +62,47 @@ impl OrphanKey {
     /// Create a range end key for prefix queries (author + prev_hash)
     pub fn range_end(author: [u8; 32], prev_hash: [u8; 32]) -> Self {
         Self { author, prev_hash, entry_hash: [0xFFu8; 32] }
+    }
+}
+
+/// Composite key for DAG orphan entries: parent_hash + key_hash + entry_hash
+/// parent_hash is FIRST to enable efficient prefix scans when querying by parent
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct DagOrphanKey {
+    pub parent_hash: [u8; 32],   // awaited parent hash (FIRST for efficient range queries)
+    pub key_hash: [u8; 32],      // blake3 hash of the key
+    pub entry_hash: [u8; 32],    // hash of the orphaned entry
+}
+
+impl DagOrphanKey {
+    pub fn new(key_hash: [u8; 32], parent_hash: [u8; 32], entry_hash: [u8; 32]) -> Self {
+        Self { parent_hash, key_hash, entry_hash }
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 96] {
+        unsafe { &*(self as *const Self as *const [u8; 96]) }
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 96 {
+            return None;
+        }
+        Some(Self {
+            parent_hash: bytes[0..32].try_into().ok()?,
+            key_hash: bytes[32..64].try_into().ok()?,
+            entry_hash: bytes[64..96].try_into().ok()?,
+        })
+    }
+    
+    /// Create a range start key for prefix queries by parent_hash
+    pub fn range_start_by_parent(parent_hash: [u8; 32]) -> Self {
+        Self { parent_hash, key_hash: [0u8; 32], entry_hash: [0u8; 32] }
+    }
+
+    /// Create a range end key for prefix queries by parent_hash
+    pub fn range_end_by_parent(parent_hash: [u8; 32]) -> Self {
+        Self { parent_hash, key_hash: [0xFFu8; 32], entry_hash: [0xFFu8; 32] }
     }
 }
 
@@ -106,6 +153,7 @@ impl OrphanStore {
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(ORPHANS_TABLE)?;
+            let _ = write_txn.open_table(DAG_ORPHANS_TABLE)?;
         }
         write_txn.commit()?;
         
@@ -212,12 +260,110 @@ impl OrphanStore {
         orphans.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         Ok(orphans)
     }
+    
+    // ==================== DAG Orphan Methods ====================
+    
+    /// Insert a DAG orphan entry (awaiting parent_hash to become a head).
+    /// Returns true if new, false if already existed.
+    pub fn insert_dag_orphan(
+        &self,
+        key: &[u8],
+        parent_hash: &[u8; 32],
+        entry_hash: &[u8; 32],
+        entry: &SignedEntry,
+    ) -> Result<bool, OrphanStoreError> {
+        let key_hash: [u8; 32] = blake3::hash(key).into();
+        let dag_key = DagOrphanKey::new(key_hash, *parent_hash, *entry_hash);
+        
+        let write_txn = self.db.begin_write()?;
+        let is_new = {
+            let mut table = write_txn.open_table(DAG_ORPHANS_TABLE)?;
+            if table.get(dag_key.as_bytes().as_slice())?.is_some() {
+                false
+            } else {
+                // Store: key bytes + entry (we need the original key for retry)
+                let value = DagOrphanedEntry { 
+                    key: key.to_vec(), 
+                    entry: Some(entry.clone()),
+                }.encode_to_vec();
+                table.insert(dag_key.as_bytes().as_slice(), value.as_slice())?;
+                true
+            }
+        };
+        write_txn.commit()?;
+        Ok(is_new)
+    }
+    
+    /// Find all DAG orphans waiting for a specific parent hash to become a head.
+    /// Uses efficient range query since parent_hash is the key prefix.
+    pub fn find_dag_orphans_by_parent(
+        &self,
+        parent_hash: &[u8; 32],
+    ) -> Result<Vec<(Vec<u8>, SignedEntry, [u8; 32])>, OrphanStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(DAG_ORPHANS_TABLE)?;
+        
+        // Efficient range query using parent_hash prefix
+        let start = DagOrphanKey::range_start_by_parent(*parent_hash);
+        let end = DagOrphanKey::range_end_by_parent(*parent_hash);
+        
+        let mut results = Vec::new();
+        for row in table.range(start.as_bytes().as_slice()..=end.as_bytes().as_slice())? {
+            let (key_bytes, value) = row?;
+            let dag_key = DagOrphanKey::from_bytes(key_bytes.value())
+                .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
+            
+            let orphaned = DagOrphanedEntry::decode(value.value())?;
+            let signed = orphaned.entry.ok_or_else(|| {
+                OrphanStoreError::Decode(prost::DecodeError::new("Missing entry"))
+            })?;
+            results.push((orphaned.key, signed, dag_key.entry_hash));
+        }
+        Ok(results)
+    }
+    
+    /// Delete a specific DAG orphan entry
+    pub fn delete_dag_orphan(
+        &self,
+        key: &[u8],
+        parent_hash: &[u8; 32],
+        entry_hash: &[u8; 32],
+    ) -> Result<(), OrphanStoreError> {
+        let key_hash: [u8; 32] = blake3::hash(key).into();
+        let dag_key = DagOrphanKey::new(key_hash, *parent_hash, *entry_hash);
+        
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(DAG_ORPHANS_TABLE)?;
+            table.remove(dag_key.as_bytes().as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+}
+
+/// Stored value for DAG orphan entries
+#[derive(Clone, prost::Message)]
+pub struct DagOrphanedEntry {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: Vec<u8>,
+    
+    #[prost(message, optional, tag = "2")]
+    pub entry: Option<SignedEntry>,
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::env::temp_dir;
+    use redb::ReadableTableMetadata;
+    
+    /// Count total DAG orphan entries in the store (test helper)
+    pub fn count_dag_orphans(store: &OrphanStore) -> usize {
+        let read_txn = store.db.begin_read().unwrap();
+        let table = read_txn.open_table(DAG_ORPHANS_TABLE).unwrap();
+        table.len().unwrap() as usize
+    }
     
     #[test]
     fn test_orphan_store_basic() {
