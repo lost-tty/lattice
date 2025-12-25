@@ -15,6 +15,7 @@ mod log;
 mod signed_entry;
 mod causal_iter;
 mod sync_state;
+mod orphan_store;
 
 // Public API - types needed by Node and LatticeServer
 pub use core::{Store, StoreError};

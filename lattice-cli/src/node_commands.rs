@@ -205,7 +205,7 @@ pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, _server: Optio
                     (None, false) => format!(" ({})", added_str),
                     (None, true) => String::new(),
                 };
-                let _ = writeln!(w, "  {}{}", peer.pubkey, info_str);
+                let _ = writeln!(w, "  {}{}", hex::encode(peer.pubkey), info_str);
             }
         }
     }
@@ -346,7 +346,7 @@ pub async fn cmd_sync(_node: &Node, store: Option<&StoreHandle>, server: Option<
         
         let peer_short = peer_id.fmt_short();
         tokio::spawn(async move {
-            match server.sync_with_peer(&store, peer_id).await {
+            match server.sync_with_peer(&store, peer_id, &[]).await {
                 Ok(result) => {
                     let mut w = writer.clone();
                     let _ = writeln!(w, "[Sync] {} complete: {} entries (peer sent {})", 

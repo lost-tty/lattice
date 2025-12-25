@@ -22,9 +22,12 @@ pub async fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _server
     let _ = writeln!(w, "Keys:     {}", all.len());
     
     // Show log directory size
-    let (file_count, total_size) = h.log_stats().await;
+    let (file_count, total_size, orphan_count) = h.log_stats().await;
     if file_count > 0 {
         let _ = writeln!(w, "Logs:     {} files, {} bytes", file_count, total_size);
+    }
+    if orphan_count > 0 {
+        let _ = writeln!(w, "Orphans:  {} (pending parent entries)", orphan_count);
     }
     
     CommandResult::Ok

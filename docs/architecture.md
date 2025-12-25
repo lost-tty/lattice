@@ -231,6 +231,75 @@ meta               "root_store"            [u8; 16] (UUID)            Root store
 
 - log_frontiers: `HashMap<AuthorId, (seq, hash)>` — rebuilt from log files on startup
 
+### Multi-Store Architecture
+
+The root store acts as the **control plane** for all stores in the mesh. Additional stores are declared in root store and automatically created/removed on all nodes.
+
+**Store Lifecycle:**
+
+1. **Declaration**: Any node writes `/stores/{uuid}/...` entries to root store
+2. **Propagation**: Changes sync to all peers via normal gossip/sync
+3. **Materialization**: Each node watches `/stores/` prefix, creates/deletes local stores
+4. **Sync**: Each store syncs independently using its own gossip topic
+
+**Root Store Keys for Stores:**
+
+```
+/stores/{uuid}/name      = "My App Data"           # Optional display name
+/stores/{uuid}/created_at = 1703548800000          # HLC timestamp
+/stores/{uuid}/created_by = {author_pubkey}        # Creator's key
+/stores/{uuid}/deleted_at = ...                    # Soft-delete (tombstone)
+```
+
+**Shared Peer Model:**
+
+All stores inherit the peer list from root store (`/nodes/` prefix). This simplifies:
+- No duplicate peer management per store
+- Single trust domain per mesh
+- Peer authorization checked against root store on entry ingest
+
+```
+Root Store                     Side Stores
+┌─────────────────┐           ┌─────────────────┐
+│ /nodes/abc/...  │           │ app data        │
+│ /nodes/def/...  │──────────▶│ (any keys)      │
+│ /stores/xxx/... │  peers    │                 │
+└─────────────────┘           └─────────────────┘
+                              ┌─────────────────┐
+                              │ another store   │
+                              │                 │
+                              └─────────────────┘
+```
+
+**HTTP API Access Tokens:**
+
+Stores can be exposed over HTTP API using token-based authentication. Tokens are declared in root store with a secret hash (clients provide secret, server verifies).
+
+```
+/tokens/{token_id}/store_id   = {store_uuid}       # Which store this token accesses
+/tokens/{token_id}/secret_hash = {sha256(secret)}  # Hashed secret for verification
+/tokens/{token_id}/name        = "Mobile Client"   # Optional description
+/tokens/{token_id}/created_at  = ...
+/tokens/{token_id}/expires_at  = ...               # Optional expiry (0 = no expiry)
+/tokens/{token_id}/permissions = "rw"              # r=read, w=write, rw=both
+```
+
+**Token Flow:**
+
+1. Admin generates secret locally: `secret = random_bytes(32)`
+2. Admin writes token to root store: `secret_hash = sha256(secret)`
+3. Admin shares secret out-of-band (QR code, secure channel)
+4. Client calls HTTP API with `Authorization: Bearer {token_id}:{secret}`
+5. Server verifies `sha256(secret) == stored_hash`, checks permissions
+6. To revoke: delete `/tokens/{token_id}/*` or set `expires_at` in past
+
+**Security Notes:**
+
+- Secrets never stored in replicated state (only hashes)
+- Token revocation propagates via normal sync
+- Compromised token can be revoked from any node
+- Consider: rate limiting per token, audit logging
+
 ### Operation Flow (put/delete)
 
 ```
@@ -339,3 +408,32 @@ Practical model:
 
 Future:
 - Capability-based permissions: Explore finer-grained write access (e.g., per-key or per-prefix permissions) via capabilities. Exact mechanism TBD.
+
+### Peer Authorization During Replay
+
+*Key distinction:*
+- Signature verification: Is Ed25519 signature valid? (always verifiable)
+- Peer authorization: Was this public key allowed to write at this time?
+
+*During replay, need to answer:* "Was author X authorized when they wrote entry Y?"
+
+*Options for cross-store authorization (side-store using root store peer list):*
+
+1. **Self-contained stores** - Each store copies peer list at creation, manages its own
+   - Clean separation, but duplicates peer management
+
+2. **HLC-based verification** - Use HLC timestamps:
+   - Root store peer changes have HLC, side-store entries have HLC
+   - Check: was author in root store peer list at entry's HLC?
+   - Requires root store to keep full history
+
+3. **Trust-on-first-sync** - Accept entries from trusted peer during sync
+   - "If Alice (trusted) gave me this entry, entry is valid"
+   - Pragmatic but less rigorous
+
+4. **Root store audit log** - Never purge peer history:
+   - `/peers/{pubkey}/added_at = HLC`, `/peers/{pubkey}/removed_at = HLC`
+   - Can reconstruct historical peer state at any point
+   - Recommended for rigorous verification
+
+*Current behavior:* Signature verified during ingest, peer status checked on network receive.

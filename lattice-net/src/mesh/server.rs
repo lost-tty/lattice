@@ -1,6 +1,6 @@
 //! Server - LatticeServer for mesh networking
 
-use crate::{MessageSink, MessageStream, LatticeEndpoint, parse_node_id, LATTICE_ALPN};
+use crate::{MessageSink, MessageStream, LatticeEndpoint, LATTICE_ALPN};
 use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle};
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
@@ -84,30 +84,68 @@ impl LatticeServer {
     async fn run_node_ready_handler(server: Arc<Self>) {
         let mut event_rx = server.node.subscribe_events();
         
-        // Listen for node events
         while let Ok(event) = event_rx.recv().await {
             match event {
                 NodeEvent::StoreReady(store) => {
                     tracing::info!(store_id = %store.id(), "Node ready");
                     
-                    // Setup gossip
-                    if let Err(e) = server.gossip_manager.setup_for_store(&*server.node, &store).await {
+                    if let Err(e) = server.gossip_manager.setup_for_store(server.node.clone(), &store).await {
                         tracing::error!(error = %e, "Gossip setup failed");
                     }
+                    
+                    Self::spawn_gap_watcher(server.clone(), store);
                 }
                 NodeEvent::SyncRequested(store) => {
-                    // Sync with active peers to catch up
-                    match server.sync_all(&store).await {
-                        Ok(results) if !results.is_empty() => {
+                    if let Ok(results) = server.sync_all(&store).await {
+                        if !results.is_empty() {
                             let total: u64 = results.iter().map(|r| r.entries_applied).sum();
                             tracing::info!(entries = total, peers = results.len(), "Sync complete");
                         }
-                        Ok(_) => tracing::debug!("No peers to sync with"),
-                        Err(e) => tracing::warn!(error = %e, "Sync failed"),
                     }
                 }
             }
         }
+    }
+    
+    /// Spawn gap watcher that triggers sync when orphans are detected.
+    /// Uses deduplication to avoid event storms.
+    fn spawn_gap_watcher(server: Arc<Self>, store: StoreHandle) {
+        tokio::spawn(async move {
+            let Ok(mut gap_rx) = store.subscribe_gaps().await else { return };
+            
+            use std::collections::HashSet;
+            use tokio::sync::broadcast::error::RecvError;
+            let syncing = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::<[u8; 32]>::new()));
+            
+            loop {
+                match gap_rx.recv().await {
+                    Ok(gap) => {
+                        let author = gap.author;
+                        
+                        // Skip if sync already in progress for this author
+                        {
+                            let mut guard = syncing.lock().await;
+                            if guard.contains(&author) { continue; }
+                            guard.insert(author);
+                        }
+                        
+                        tracing::debug!(
+                            author = %hex::encode(&author[..8]),
+                            from_seq = gap.from_seq, to_seq = gap.to_seq,
+                            "Gap detected, syncing"
+                        );
+                        
+                        let _ = server.sync_author_all(&store, author).await;
+                        syncing.lock().await.remove(&author);
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Gap watcher lagged");
+                        continue;
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
     }
 }
 
@@ -161,7 +199,7 @@ impl LatticeServer {
                 
                 // Sync with peer to get initial data
                 tracing::debug!("[Join] Syncing with peer to get initial data...");
-                if let Ok(result) = self.sync_with_peer(&handle, peer_id).await {
+                if let Ok(result) = self.sync_with_peer(&handle, peer_id, &[]).await {
                     tracing::debug!("[Join] Initial sync complete: {} entries", result.entries_applied);
                 }
                 
@@ -171,8 +209,9 @@ impl LatticeServer {
         }
     }
     
-    /// Sync with a specific peer.
-    pub async fn sync_with_peer(&self, store: &StoreHandle, peer_id: iroh::PublicKey) -> Result<SyncResult, NodeError> {
+    /// Sync with a peer, optionally filtering to specific authors.
+    /// Pass empty slice for all authors.
+    pub async fn sync_with_peer(&self, store: &StoreHandle, peer_id: iroh::PublicKey, authors: &[[u8; 32]]) -> Result<SyncResult, NodeError> {
         let conn = self.endpoint.connect(peer_id).await
             .map_err(|e| NodeError::Actor(format!("Connection failed: {}", e)))?;
         
@@ -190,6 +229,7 @@ impl LatticeServer {
                 store_id: store.id().as_bytes().to_vec(),
                 state: Some(my_state.to_proto()),
                 full_sync: false,
+                author_ids: authors.iter().map(|a| a.to_vec()).collect(),
             })),
         };
         sink.send(&req).await.map_err(|e| NodeError::Actor(e))?;
@@ -207,7 +247,7 @@ impl LatticeServer {
         };
         
         // Exchange entries
-        let _entries_sent = protocol::send_missing_entries(&mut sink, store, &my_state, &peer_state).await
+        let _entries_sent = protocol::send_missing_entries(&mut sink, store, &my_state, &peer_state, authors).await
             .map_err(|e| NodeError::Actor(e))?;
         
         let (entries_applied, entries_sent_by_peer) = protocol::receive_entries(&mut stream, store).await
@@ -218,63 +258,70 @@ impl LatticeServer {
         Ok(SyncResult { entries_applied, entries_sent_by_peer })
     }
     
-    /// Sync with all active peers in parallel.
-    /// 
-    /// Results include both successes and failures for visibility.
-    pub async fn sync_all(&self, store: &StoreHandle) -> Result<Vec<SyncResult>, NodeError> {
+    /// Get active peer IDs (excluding self)
+    async fn active_peer_ids(&self) -> Result<Vec<iroh::PublicKey>, NodeError> {
+        let peers = self.node.list_peers().await?;
+        let my_pubkey = self.endpoint.public_key();
+        
+        Ok(peers.into_iter()
+            .filter(|p| p.status == PeerStatus::Active)
+            .filter_map(|p| iroh::PublicKey::from_bytes(&p.pubkey).ok())
+            .filter(|id| *id != my_pubkey)
+            .collect())
+    }
+    
+    /// Sync with specific peers in parallel, optionally filtering authors
+    async fn sync_peers(&self, store: &StoreHandle, peer_ids: &[iroh::PublicKey], authors: &[[u8; 32]]) -> Vec<SyncResult> {
         use futures_util::future::join_all;
         use std::time::Duration;
         
         const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
         
-        let peers = self.node.list_peers().await?;
-        let my_pubkey = self.endpoint.public_key();
-        
-        // Collect peers to sync with
-        let peer_ids: Vec<_> = peers
-            .into_iter()
-            .filter(|p| p.status == PeerStatus::Active)
-            .filter_map(|p| parse_node_id(&p.pubkey).ok())
-            .filter(|id| *id != my_pubkey)
-            .collect();
-        
-        if peer_ids.is_empty() {
-            tracing::debug!("[Sync] No active peers to sync with");
-            return Ok(Vec::new());
-        }
-        
-        tracing::debug!("[Sync] Syncing with {} peers in parallel...", peer_ids.len());
-        
-        // Spawn all syncs in parallel with timeout
         let futures = peer_ids.iter().map(|&peer_id| {
             let store = store.clone();
+            let authors = authors.to_vec();
             async move {
-                let peer_short = peer_id.fmt_short();
-                tracing::debug!("[Sync] Starting sync with {}...", peer_short);
-                
-                match tokio::time::timeout(SYNC_TIMEOUT, self.sync_with_peer(&store, peer_id)).await {
-                    Ok(Ok(result)) => {
-                        tracing::debug!("[Sync] {} complete: {} entries applied", peer_short, result.entries_applied);
-                        Some(result)
-                    }
+                match tokio::time::timeout(SYNC_TIMEOUT, self.sync_with_peer(&store, peer_id, &authors)).await {
+                    Ok(Ok(result)) => Some(result),
                     Ok(Err(e)) => {
-                        tracing::error!("[Sync] {} failed: {}", peer_short, e);
+                        tracing::debug!(peer = %peer_id.fmt_short(), error = %e, "Sync failed");
                         None
                     }
                     Err(_) => {
-                        tracing::error!("[Sync] {} timed out after {:?}", peer_short, SYNC_TIMEOUT);
+                        tracing::debug!(peer = %peer_id.fmt_short(), "Sync timed out");
                         None
                     }
                 }
             }
         });
         
-        let results: Vec<Option<SyncResult>> = join_all(futures).await;
-        let successful: Vec<SyncResult> = results.into_iter().flatten().collect();
+        join_all(futures).await.into_iter().flatten().collect()
+    }
+    
+    /// Sync a specific author with all active peers in parallel (for gap filling)
+    pub async fn sync_author_all(&self, store: &StoreHandle, author: [u8; 32]) -> Result<u64, NodeError> {
+        let peer_ids = self.active_peer_ids().await?;
+        if peer_ids.is_empty() {
+            return Ok(0);
+        }
         
-        tracing::info!("[Sync] Parallel sync complete: {}/{} peers succeeded", successful.len(), peer_ids.len());
+        let results = self.sync_peers(store, &peer_ids, &[author]).await;
+        Ok(results.iter().map(|r| r.entries_applied).sum())
+    }
+    
+    /// Sync with all active peers in parallel.
+    pub async fn sync_all(&self, store: &StoreHandle) -> Result<Vec<SyncResult>, NodeError> {
+        let peer_ids = self.active_peer_ids().await?;
+        if peer_ids.is_empty() {
+            tracing::debug!("[Sync] No active peers");
+            return Ok(Vec::new());
+        }
         
-        Ok(successful)
+        tracing::debug!("[Sync] Syncing with {} peers...", peer_ids.len());
+        let results = self.sync_peers(store, &peer_ids, &[]).await;
+        tracing::info!("[Sync] Complete: {}/{} peers", results.len(), peer_ids.len());
+        
+        Ok(results)
     }
 }
 
@@ -383,7 +430,12 @@ async fn handle_sync_request(
         .map(|s| lattice_core::SyncState::from_proto(&s))
         .unwrap_or_default();
     
-    let entries_sent = protocol::send_missing_entries(&mut sink, &store, &my_state, &peer_state).await?;
+    // Parse author filter from request
+    let author_filter: Vec<[u8; 32]> = peer_request.author_ids.iter()
+        .filter_map(|a| a.as_slice().try_into().ok())
+        .collect();
+    
+    let entries_sent = protocol::send_missing_entries(&mut sink, &store, &my_state, &peer_state, &author_filter).await?;
     tracing::debug!("[Sync] Sent {} entries, now receiving from peer...", entries_sent);
     
     // 3. Receive entries from requester (bidirectional)

@@ -8,6 +8,7 @@ use super::{
     core::{Store, StoreError},
     sigchain::{SigChainError, SigChainManager},
     sync_state::SyncState,
+    orphan_store::GapInfo,
     log,
 };
 use prost::Message;
@@ -98,18 +99,22 @@ pub enum StoreCmd {
         from_hash: Option<[u8; 32]>,
         resp: oneshot::Sender<Result<Vec<SignedEntry>, StoreError>>,
     },
-    ApplyEntry {
+    IngestEntry {
         entry: SignedEntry,
         resp: oneshot::Sender<Result<(), StoreError>>,
     },
     LogStats {
-        resp: oneshot::Sender<(usize, u64)>,
+        resp: oneshot::Sender<(usize, u64, usize)>,
     },
     /// Watch keys matching a regex pattern, returns initial snapshot + receiver for changes
     Watch {
         pattern: String,
         include_deleted: bool,
         resp: oneshot::Sender<Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<WatchEvent>), WatchError>>,
+    },
+    /// Subscribe to gap detection events
+    SubscribeGaps {
+        resp: oneshot::Sender<broadcast::Receiver<GapInfo>>,
     },
     Shutdown,
 }
@@ -232,36 +237,12 @@ impl StoreActor {
                     let result = self.do_read_entries_after(&author, from_hash);
                     let _ = resp.send(result);
                 }
-                StoreCmd::ApplyEntry { entry, resp } => {
-                    // Use SigChainManager to append to the correct author's log
-                    if let Err(e) = self.chain_manager.append_entry(&entry) {
-                        let _ = resp.send(Err(StoreError::from(e)));
-                        continue;
-                    }
-                    
-                    // Then apply to store
-                    let result = self.store.apply_entry(&entry);
-                    
-                    // Emit watch events for the operations in this entry
-                    if result.is_ok() {
-                        if let Ok(inner) = crate::proto::Entry::decode(&entry.entry_bytes[..]) {
-                            for op in &inner.ops {
-                                use crate::proto::operation::OpType;
-                                match &op.op_type {
-                                    Some(OpType::Put(put_op)) => {
-                                        self.emit_watch_event(&put_op.key, WatchEventKind::Put { 
-                                            value: put_op.value.clone() 
-                                        });
-                                    }
-                                    Some(OpType::Delete(delete_op)) => {
-                                        self.emit_watch_event(&delete_op.key, WatchEventKind::Delete);
-                                    }
-                                    None => {}
-                                }
-                            }
-                        }
-                    }
-                    
+                StoreCmd::IngestEntry { entry, resp } => {
+                    let result = self.apply_ingested_entry(&entry)
+                        .map_err(|e| match e {
+                            StoreActorError::SigChain(e) => StoreError::from(e),
+                            StoreActorError::Store(e) => e,
+                        });
                     let _ = resp.send(result);
                 }
                 StoreCmd::LogStats { resp } => {
@@ -301,6 +282,9 @@ impl StoreActor {
                         }
                     }
                 }
+                StoreCmd::SubscribeGaps { resp } => {
+                    let _ = resp.send(self.chain_manager.subscribe_gaps());
+                }
                 StoreCmd::Shutdown => {
                     break;
                 }
@@ -319,7 +303,7 @@ impl StoreActor {
         }
         
         let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
-        self.commit_entry(parent_hashes, vec![Operation::put(key, value)])?;
+        self.create_local_entry(parent_hashes, vec![Operation::put(key, value)])?;
         
         // Emit watch event
         self.emit_watch_event(key, WatchEventKind::Put { value: value.to_vec() });
@@ -338,7 +322,7 @@ impl StoreActor {
         }
         
         let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
-        self.commit_entry(parent_hashes, vec![Operation::delete(key)])?;
+        self.create_local_entry(parent_hashes, vec![Operation::delete(key)])?;
         
         // Emit watch event
         self.emit_watch_event(key, WatchEventKind::Delete);
@@ -375,16 +359,52 @@ impl StoreActor {
         }
     }
 
-    fn commit_entry(&mut self, parent_hashes: Vec<Vec<u8>>, ops: Vec<crate::proto::Operation>) -> Result<(), StoreActorError> {
+    /// Create a local entry (for put/delete) and ingest it through unified path
+    fn create_local_entry(&mut self, parent_hashes: Vec<Vec<u8>>, ops: Vec<crate::proto::Operation>) -> Result<(), StoreActorError> {
+        // Build the entry (without appending)
         let local_author = self.node.public_key_bytes();
         let sigchain = self.chain_manager.get_or_create(local_author);
-        let entry = sigchain.create_entry(&self.node, parent_hashes, ops)?;
-
-        self.store.apply_entry(&entry)?;
+        let entry = sigchain.build_entry(&self.node, parent_hashes, ops);
+        
+        // Use unified apply path
+        self.apply_ingested_entry(&entry)?;
         
         // Broadcast the entry to listeners (for gossip)
         let _ = self.entry_tx.send(entry.clone());
 
+        Ok(())
+    }
+    
+    /// Ingest entry through chain manager and apply to store + emit watch events.
+    /// Common path for both local and remote entries.
+    /// Gaps are emitted via broadcast channel from SigChainManager.
+    fn apply_ingested_entry(&mut self, entry: &SignedEntry) -> Result<(), StoreActorError> {
+        // Ingest - validates and appends to chain, returns ready entries
+        let ready_entries = self.chain_manager.ingest(entry)?;
+        
+        // Apply ready entries to store and emit watch events
+        for ready_entry in &ready_entries {
+            self.store.apply_entry(ready_entry)?;
+            
+            // Emit watch events from entry ops
+            if let Ok(inner) = crate::proto::Entry::decode(&ready_entry.entry_bytes[..]) {
+                for op in &inner.ops {
+                    use crate::proto::operation::OpType;
+                    match &op.op_type {
+                        Some(OpType::Put(put_op)) => {
+                            self.emit_watch_event(&put_op.key, WatchEventKind::Put { 
+                                value: put_op.value.clone() 
+                            });
+                        }
+                        Some(OpType::Delete(delete_op)) => {
+                            self.emit_watch_event(&delete_op.key, WatchEventKind::Delete);
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+        
         Ok(())
     }
 

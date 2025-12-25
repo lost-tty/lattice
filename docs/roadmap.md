@@ -168,52 +168,81 @@
 - [x] LatticeServer uses `/nodes/([a-f0-9]+)/status` watch to monitor peers
 - [x] Enables reactive patterns: config changes, presence, app-level subscriptions
 
-**Pre-M3: Orphan Entry Handling**
+**Pre-M3: Orphan Entry Handling & Entry Ingestion**
 
 Entries can arrive out-of-order via gossip when:
 - Node wakes from offline, receives gossip before sync completes
 - Gossip messages lost, creating gaps in chain
 - DAG parent hashes reference entries not yet received
 
-*Current behavior:* SigChain rejects entries with unknown prev_hash → orphans dropped
 
-*Proposed fix:*
-- [ ] Orphan buffer: hold entries with unknown parents, TTL 30-60 seconds
-- [ ] On sync complete or parent arrival: re-process buffered entries in order
-- [ ] If orphan is "far ahead" (seq > local + threshold), trigger sync immediately
-- [ ] Metrics: track orphan rate to detect gossip reliability issues
+*Tasks:*
+- [x] Fix in-memory state bug: ingest() uses SigChain.append() which updates state
+- [x] Add ingest() method (validates via SigChain, returns ready entries)
+- [x] StoreActor uses ingest() return value to apply entries
+- [x] Add orphan buffer (orphans.db with redb)
+- [x] On parent arrival: check buffer, apply any now-valid orphans
+- [x] Metrics: track orphan count in store status CLI
+- [ ] TTL expiry for orphans
 
 **Phase 3: Multi-Store & Reliability** (Next)
 
-**Goal:** True multi-store sync with per-store peer sets and decoupled network/store layers.
+**Goal:** Root store as control plane for declaring/managing additional stores. All stores sync independently using shared peer list.
 
-*Phase 3A: Multi-Store Sync (operational)*
-- [ ] `SyncRequested` for non-root stores (currently only root store)
-- [ ] `setup_for_store` called for each store, not just root
-- [ ] Track which stores are synced/gossiping
+*Phase 3A: Store Declarations in Root Store*
+- [ ] Root store keys: `/stores/{uuid}/name`, `/stores/{uuid}/created_at`, `/stores/{uuid}/created_by`
+- [ ] CLI: `create-store [name]` writes to root store (not local meta.db)
+- [ ] CLI: `delete-store <uuid>` writes tombstone (`/stores/{uuid}/deleted_at`)
+- [ ] CLI: `list-stores` reads from root store prefix scan
+
+*Phase 3B: Store Watcher (automatic materialization)*
+- [ ] Node watches `/stores/` prefix on root store
+- [ ] On new store detected: create local `stores/{uuid}/` directory + state.db
+- [ ] On store deleted: mark local store as archived (don't delete data)
+- [ ] Startup: reconcile local stores with root store declarations
+
+*Phase 3C: Multi-Store Gossip*
+- [ ] `setup_for_store` called for each active store (not just root)
+- [ ] Per-store gossip topics: `blake3("lattice/{store_id}")`
+- [ ] Track which stores are actively gossiping
 - [ ] Verify gossip entries have correct store-id before applying
 
-*Phase 3B: Architecture refactor*
-- [ ] Sync Coordinator in Node: routes sync requests by store_id
-- [ ] LatticeServer becomes pure transport (accept, frame, route)
-- [ ] Node owns gossip topic management per store
-- [ ] Event-based: Network emits `EntryReceived(store_id, bytes)`, Node routes
+*Phase 3D: Shared Peer List*
+- [ ] All stores use root store peer list (`/nodes/` prefix)
+- [ ] Peer authorization checked against root store on ingest
+- [ ] Remove Phase 3C "per-store peer sets" — single trust domain
 
-*Phase 3C: Per-store peer sets*
-- [ ] Each store defines membership via `/nodes/` prefix
-- [ ] Sync/gossip only with peers authorized for that store
-- [ ] Store-scoped discovery: watch `/nodes/` per store for peer changes
+*Phase 3E: HTTP API Access Tokens*
+- [ ] Root store keys: `/tokens/{id}/store_id`, `/tokens/{id}/secret_hash`, `/tokens/{id}/permissions`
+- [ ] Token verification: `sha256(client_secret) == stored_hash`
+- [ ] Permissions: `r` (read), `w` (write), `rw` (both)
+- [ ] CLI: `create-token <store> [--name] [--expires]` → generates secret, writes hash
+- [ ] CLI: `list-tokens`, `revoke-token <id>`
 
-*Phase 3D: Trait boundaries (optional)*
-- [ ] `trait SyncParticipant`: opaque sync interface
-- [ ] Network depends on trait, not concrete `StoreHandle`
-- [ ] Enables mock stores for protocol testing
+*Phase 3F: HTTP API Server (lattice-http crate)*
+- [ ] `GET /stores/{uuid}/keys/{key}` → read value
+- [ ] `PUT /stores/{uuid}/keys/{key}` → write value  
+- [ ] `DELETE /stores/{uuid}/keys/{key}` → delete
+- [ ] `GET /stores/{uuid}/keys?prefix=...` → list by prefix
+- [ ] Auth via `Authorization: Bearer {token_id}:{secret}` header
+- [ ] Rate limiting per token
 
 *Gossip Reliability*
 - [ ] Handle gossip gaps (missed updates while offline)
 - [ ] Periodic anti-entropy sync to catch missed entries
 - [ ] Detect stale gossip (peer hasn't sent in N seconds → trigger sync)
 - [ ] Gossip ack/nack for delivery confirmation?
+
+*Orphan Gap-Filling (backpressure)* ✓
+- [x] Store orphan's seq in orphans.db value (8-byte LE + entry bytes)
+- [x] Gap detection: emit `GapInfo` event via broadcast channel on orphan insert
+- [x] `SigChainManager::subscribe_gaps()` for network layer to listen
+- [x] `sync_author_all()`: targeted sync for specific author across all peers
+- [x] Gap watcher task in LatticeServer: listens for gaps, triggers sync
+- [x] Deduplication: skip duplicate gap events while sync in progress
+- [x] Handle `RecvError::Lagged` gracefully (don't kill task)
+- [x] Iterative orphan resolution (prevent stack overflow)
+- [ ] Retry logic: if gap persists after sync attempt, retry with different peer
 
 *Sync Resilience*
 - [ ] Retry failed syncs with backoff
@@ -243,8 +272,12 @@ Entries can arrive out-of-order via gossip when:
 - [x] Store should not know about network; network should not know about entry internals
 - [x] Added `Operation::put()`/`delete()` constructors for clean operation creation
 - [ ] Extract `Store`, `SigChain`, `StoreActor` into separate `lattice-store` crate
-- [ ] Define trait boundary between store and network layers
-- [ ] Consider: `trait SyncableStore` for sync protocol to consume without proto details
+- [ ] Define trait boundary between store and network layers:
+  - `trait KvStore`: user-facing ops (`get`, `put`, `delete`, `list`, `watch`)
+  - `trait SyncStore`: network ops (`ingest_entry`, `sync_state`, `read_entries_after`, `subscribe_gaps`)
+  - Network layer takes `impl SyncStore` (can't call `put`)
+  - CLI/app takes `impl KvStore` (can't call `ingest_entry`)
+  - Zero runtime cost, compile-time enforcement
 - [ ] Consider: Entry validation/signing as pluggable strategy
 - [ ] Goal: `lattice-core` becomes thin orchestration layer
 

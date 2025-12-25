@@ -7,14 +7,21 @@ use lattice_core::SyncState;
 use prost::Message;
 
 /// Send entries that peer is missing based on state diff.
+/// If author_filter is non-empty, only send entries for those authors.
 /// Returns (entries_sent, optional_error).
 pub async fn send_missing_entries(
     sink: &mut MessageSink,
     store: &StoreHandle,
     my_state: &SyncState,
     peer_state: &SyncState,
+    author_filter: &[[u8; 32]],
 ) -> Result<u64, String> {
-    let missing = peer_state.diff(my_state);
+    let mut missing = peer_state.diff(my_state);
+    
+    // Filter by authors if specified
+    if !author_filter.is_empty() {
+        missing.retain(|r| author_filter.contains(&r.author));
+    }
     
     // Get entries in causal order (merged across all authors)
     let entries = store.read_missing_entries(missing).await
@@ -58,7 +65,7 @@ pub async fn receive_entries(
             Ok(Some(msg)) => match msg.message {
                 Some(peer_message::Message::SyncEntry(entry)) => {
                     if let Ok(signed) = SignedEntry::decode(&entry.signed_entry[..]) {
-                        if store.apply_entry(signed).await.is_ok() {
+                        if store.ingest_entry(signed).await.is_ok() {
                             entries_applied += 1;
                         }
                     }

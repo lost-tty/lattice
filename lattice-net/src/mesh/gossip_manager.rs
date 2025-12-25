@@ -41,7 +41,7 @@ impl GossipManager {
     
     /// Setup gossip for a store - uses node.watch_peers() for bootstrap peers
     #[tracing::instrument(skip(self, node, store), fields(store_id = %store.id()))]
-    pub async fn setup_for_store(&self, node: &Node, store: &StoreHandle) -> Result<(), GossipError> {
+    pub async fn setup_for_store(&self, node: std::sync::Arc<Node>, store: &StoreHandle) -> Result<(), GossipError> {
         let store_id = store.id();
         
         // Watch peer status - initial snapshot gives bootstrap peers
@@ -70,7 +70,7 @@ impl GossipManager {
         self.senders.write().await.insert(store_id, sender);
         
         // Spawn background tasks
-        self.spawn_receiver(store.clone(), receiver);
+        self.spawn_receiver(store.clone(), receiver, node.clone());
         self.spawn_forwarder(store_id, store.subscribe_entries());
         self.spawn_peer_watcher(store_id, rx);
         
@@ -89,16 +89,27 @@ impl GossipManager {
             .map_err(|e| GossipError::Broadcast(e.to_string()))
     }
     
-    fn spawn_receiver(&self, store: StoreHandle, mut rx: iroh_gossip::api::GossipReceiver) {
+    fn spawn_receiver(&self, store: StoreHandle, mut rx: iroh_gossip::api::GossipReceiver, node: std::sync::Arc<Node>) {
         let store_id = store.id();
         tokio::spawn(async move {
             tracing::debug!(store_id = %store_id, "Gossip receiver started");
             while let Some(event) = futures_util::StreamExt::next(&mut rx).await {
                 match event {
                     Ok(iroh_gossip::api::Event::Received(msg)) => {
+                        // Check if sender is authorized before processing
+                        let sender_bytes: [u8; 32] = *msg.delivered_from.as_bytes();
+                        if node.verify_peer_status(&sender_bytes, &[PeerStatus::Active]).await.is_err() {
+                            tracing::warn!(
+                                store_id = %store_id,
+                                sender = %hex::encode(&sender_bytes)[..8],
+                                "Rejected gossip from unauthorized peer"
+                            );
+                            continue;
+                        }
+                        
                         tracing::debug!(store_id = %store_id, bytes = msg.content.len(), "Received gossip message");
                         if let Ok(entry) = SignedEntry::decode(&msg.content[..]) {
-                            let _ = store.apply_entry(entry).await;
+                            let _ = store.ingest_entry(entry).await;
                         }
                     }
                     Ok(other) => {
