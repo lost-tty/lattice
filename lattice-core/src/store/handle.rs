@@ -35,12 +35,29 @@ impl Clone for StoreHandle {
 impl StoreHandle {
     /// Spawn a store actor in a new thread, returning a handle to it.
     /// Uses std::thread since redb is blocking.
+    /// 
+    /// On spawn, replays all log files to ensure crash consistency.
+    /// This recovers any entries that were committed to sigchain but not applied to state.
     pub fn spawn(
         store_id: Uuid,
         store: Store,
         logs_dir: PathBuf,
         node: NodeIdentity,
     ) -> Self {
+        // Crash recovery: replay all log files to recover entries
+        // that were committed to sigchain but not applied to state
+        if let Ok(entries) = std::fs::read_dir(&logs_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "log") {
+                    let replayed = store.replay_log(&path).unwrap_or(0);
+                    if replayed > 0 {
+                        eprintln!("[info] Crash recovery: replayed {} entries from {:?}", replayed, path.file_name());
+                    }
+                }
+            }
+        }
+        
         let (tx, rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(64);
         let actor = StoreActor::new(store_id, store, logs_dir, node, rx, entry_tx.clone());

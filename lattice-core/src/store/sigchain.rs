@@ -37,6 +37,20 @@ pub enum SigChainError {
     Decode(#[from] prost::DecodeError),
 }
 
+/// Result of sigchain validation without appending
+#[derive(Debug)]
+pub enum SigchainValidation {
+    /// Entry is valid and can be appended
+    Valid,
+    /// Entry is orphaned - awaiting a parent entry
+    Orphan {
+        gap: GapInfo,
+        prev_hash: [u8; 32],
+    },
+    /// Entry has fatal error (bad signature, wrong store, etc)
+    Error(SigChainError),
+}
+
 /// An append-only log where each entry is cryptographically signed
 /// and hash-linked to the previous entry, scoped to a specific store.
 pub struct SigChain {
@@ -212,11 +226,10 @@ impl SigChain {
         Ok(())
     }
     
-    /// Append a signed entry to the chain (validates first)
-    pub fn append(&mut self, signed_entry: &SignedEntry) -> Result<(), SigChainError> {
-        // Validate
-        self.validate(signed_entry)?;
-        
+    /// Append a signed entry to the chain WITHOUT validation.
+    /// Caller must have already called validate() and checked state.
+    /// Use this for unified validation where sigchain + state are checked together.
+    pub fn append_unchecked(&mut self, signed_entry: &SignedEntry) -> Result<(), SigChainError> {
         // Write to log
         append_entry(&self.log_path, signed_entry)?;
         
@@ -226,6 +239,14 @@ impl SigChain {
         
         Ok(())
     }
+    
+    /// Append with validation - used by tests. Production code uses validate_entry + commit_entry.
+    #[cfg(test)]
+    pub fn append(&mut self, signed_entry: &SignedEntry) -> Result<(), SigChainError> {
+        self.validate(signed_entry)?;
+        self.append_unchecked(signed_entry)
+    }
+
     
     /// Build a new entry using the node's key (does NOT append - caller must use ingest)
     pub fn build_entry(
@@ -309,77 +330,110 @@ impl SigChainManager {
         self.chains.get(author)
     }
     
-    /// Ingest an entry from any source (local put, sync, gossip).
-    /// Routes to the appropriate SigChain which handles validation.
-    /// Returns entries ready to apply. If entry is orphan, buffers it and
-    /// emits GapInfo via broadcast channel (subscribe via subscribe_gaps()).
-    /// When parent arrives, buffered orphans are applied and returned.
-    pub fn ingest(&mut self, entry: &SignedEntry) -> Result<Vec<SignedEntry>, SigChainError> {
-        // Use work queue instead of recursion to avoid stack overflow
-        let mut work_queue = vec![entry.clone()];
+    /// Validate an entry against sigchain WITHOUT appending.
+    /// Returns validation result that actor can use to decide next steps.
+    pub fn validate_entry(&mut self, entry: &SignedEntry) -> SigchainValidation {
+        let author: [u8; 32] = match entry.author_id.clone().try_into() {
+            Ok(a) => a,
+            Err(_) => return SigchainValidation::Error(SigChainError::WrongAuthor {
+                expected: "32 bytes".to_string(),
+                got: format!("{} bytes", entry.author_id.len()),
+            }),
+        };
+        
+        let chain = self.get_or_create(author);
+        let next_seq = chain.next_seq;
+        let last_hash = chain.last_hash;
+        
+        match chain.validate(entry) {
+            Ok(()) => SigchainValidation::Valid,
+            Err(SigChainError::InvalidPrevHash { .. }) | Err(SigChainError::InvalidSequence { .. }) => {
+                // Orphan - extract info for buffering
+                let decoded = Entry::decode(&entry.entry_bytes[..]).ok();
+                let prev_hash: [u8; 32] = decoded.as_ref()
+                    .and_then(|e| e.prev_hash.clone().try_into().ok())
+                    .unwrap_or([0u8; 32]);
+                let seq = decoded.as_ref().map(|e| e.seq).unwrap_or(0);
+                
+                SigchainValidation::Orphan {
+                    gap: GapInfo {
+                        author,
+                        from_seq: next_seq,
+                        to_seq: seq,
+                        last_known_hash: Some(last_hash),
+                    },
+                    prev_hash,
+                }
+            }
+            Err(e) => SigchainValidation::Error(e),
+        }
+    }
+    
+    /// Commit a validated entry to the sigchain log.
+    /// Caller MUST have validated via validate_entry() first.
+    /// Returns any orphans that become ready after this entry is committed,
+    /// along with metadata for deferred deletion (author, prev_hash, orphan_hash).
+    /// Caller MUST call delete_sigchain_orphan after successfully processing each orphan.
+    pub fn commit_entry(&mut self, entry: &SignedEntry) -> Result<Vec<(SignedEntry, [u8; 32], [u8; 32], [u8; 32])>, SigChainError> {
+        let author: [u8; 32] = entry.author_id.clone()
+            .try_into()
+            .map_err(|_| SigChainError::WrongAuthor {
+                expected: "32 bytes".to_string(),
+                got: format!("{} bytes", entry.author_id.len()),
+            })?;
+        
+        let chain = self.get_or_create(author);
+        chain.append_unchecked(entry)?;
+        
+        // Check for orphans waiting for this entry
+        let entry_hash = hash_signed_entry(entry);
         let mut ready = Vec::new();
         
-        while let Some(current) = work_queue.pop() {
-            let author: [u8; 32] = current.author_id.clone()
-                .try_into()
-                .map_err(|_| SigChainError::WrongAuthor {
-                    expected: "32 bytes".to_string(),
-                    got: format!("{} bytes", current.author_id.len()),
-                })?;
-            
-            // Route to the correct SigChain - it handles validation
-            let chain = self.get_or_create(author);
-            let chain_next_seq = chain.next_seq;
-            let chain_last_hash = chain.last_hash;
-            
-            // Try to append - this validates seq, prev_hash, and updates in-memory state
-            match chain.append(&current) {
-                Ok(()) => {
-                    // Entry applied successfully - check for orphans waiting for this entry
-                    let entry_hash = hash_signed_entry(&current);
-                    ready.push(current);
-                    
-                    // Find orphans waiting for this entry as their parent and add to work queue
-                    if let Ok(orphans) = self.orphan_store.find_by_prev_hash(&author, &entry_hash) {
-                        for (_seq, orphan_entry, orphan_hash) in orphans {
-                            // Delete from orphan store first
-                            let _ = self.orphan_store.delete(&author, &entry_hash, &orphan_hash);
-                            // Add to work queue for processing
-                            work_queue.push(orphan_entry);
-                        }
-                    }
-                }
-                Err(SigChainError::InvalidPrevHash { .. }) | Err(SigChainError::InvalidSequence { .. }) => {
-                    // Orphan entry - buffer it for later
-                    let entry_hash = hash_signed_entry(&current);
-                    let decoded = Entry::decode(&current.entry_bytes[..]).ok();
-                    let prev_hash: [u8; 32] = decoded.as_ref()
-                        .and_then(|e| e.prev_hash.clone().try_into().ok())
-                        .unwrap_or([0u8; 32]);
-                    let seq = decoded.as_ref().map(|e| e.seq).unwrap_or(0);
-                    
-                    let is_new = self.orphan_store.insert(&author, &prev_hash, &entry_hash, seq, &current)
-                        .map_err(|e| SigChainError::WrongAuthor { 
-                            expected: "orphan store insert".to_string(), 
-                            got: e.to_string() 
-                        })?;
-                    
-                    // Only emit gap event for NEW orphans, not duplicates
-                    if is_new {
-                        let gap = GapInfo {
-                            author,
-                            from_seq: chain_next_seq,
-                            to_seq: seq,
-                            last_known_hash: Some(chain_last_hash),
-                        };
-                        let _ = self.gap_tx.send(gap);
-                    }
-                }
-                Err(e) => return Err(e),
+        if let Ok(orphans) = self.orphan_store.find_by_prev_hash(&author, &entry_hash) {
+            for (_seq, orphan_entry, orphan_hash) in orphans {
+                // DON'T delete here - return metadata for caller to delete after processing
+                ready.push((orphan_entry, author, entry_hash, orphan_hash));
             }
         }
         
         Ok(ready)
+    }
+    
+    /// Delete a sigchain orphan after it's been successfully processed.
+    /// Call this AFTER the orphan has been fully validated, committed, and applied.
+    pub fn delete_sigchain_orphan(&mut self, author: &[u8; 32], prev_hash: &[u8; 32], entry_hash: &[u8; 32]) {
+        let _ = self.orphan_store.delete(author, prev_hash, entry_hash);
+    }
+    
+    /// Buffer an entry as a sigchain orphan and emit gap event.
+    pub fn buffer_sigchain_orphan(
+        &mut self, 
+        entry: &SignedEntry,
+        author: [u8; 32],
+        prev_hash: [u8; 32], 
+        seq: u64,
+        next_seq: u64,
+        last_hash: [u8; 32],
+    ) -> Result<(), SigChainError> {
+        let entry_hash = hash_signed_entry(entry);
+        
+        let is_new = self.orphan_store.insert(&author, &prev_hash, &entry_hash, seq, entry)
+            .map_err(|e| SigChainError::WrongAuthor { 
+                expected: "orphan store insert".to_string(), 
+                got: e.to_string() 
+            })?;
+        
+        if is_new {
+            let gap = GapInfo {
+                author,
+                from_seq: next_seq,
+                to_seq: seq,
+                last_known_hash: Some(last_hash),
+            };
+            let _ = self.gap_tx.send(gap);
+        }
+        
+        Ok(())
     }
     
     /// Get the logs directory path
@@ -393,6 +447,38 @@ impl SigChainManager {
         let files = self.log_files();
         let total_size: u64 = files.iter().map(|(_, size, _)| size).sum();
         (files.len(), total_size, orphan_count)
+    }
+    
+    /// Buffer an entry as a DAG orphan (awaiting parent_hash to become a head)
+    pub fn buffer_dag_orphan(
+        &mut self,
+        entry: &SignedEntry,
+        key: &[u8],
+        parent_hash: &[u8; 32],
+    ) -> Result<(), SigChainError> {
+        let entry_hash = hash_signed_entry(entry);
+        let _ = self.orphan_store.insert_dag_orphan(key, parent_hash, &entry_hash, entry)
+            .map_err(|e| SigChainError::WrongAuthor { 
+                expected: "dag orphan store insert".to_string(), 
+                got: e.to_string() 
+            })?;
+        Ok(())
+    }
+    
+    /// Find DAG orphans waiting for a specific hash to become a head
+    pub fn find_dag_orphans(&self, parent_hash: &[u8; 32]) -> Vec<(Vec<u8>, SignedEntry, [u8; 32])> {
+        self.orphan_store.find_dag_orphans_by_parent(parent_hash).unwrap_or_default()
+    }
+    
+    /// Delete a DAG orphan after it's been applied
+    pub fn delete_dag_orphan(&mut self, key: &[u8], parent_hash: &[u8; 32], entry_hash: &[u8; 32]) {
+        let _ = self.orphan_store.delete_dag_orphan(key, parent_hash, entry_hash);
+    }
+    
+    /// Count sigchain orphans (for testing crash recovery)
+    #[cfg(test)]
+    pub fn sigchain_orphan_count(&self) -> usize {
+        self.orphan_store.count().unwrap_or(0)
     }
     
     /// Get log file paths for detailed stats (hashing done by caller to avoid blocking actor)
@@ -716,9 +802,10 @@ mod tests {
             .sign(&node);
         let hash_3 = hash_signed_entry(&entry_3);
         
-        // Step 1: Ingest entry_1 -> should succeed and update state
-        let ready = manager.ingest(&entry_1).expect("entry_1 should ingest");
-        assert_eq!(ready.len(), 1, "Should return 1 entry ready to apply");
+        // Step 1: Ingest entry_1 -> should be Valid
+        assert!(matches!(manager.validate_entry(&entry_1), SigchainValidation::Valid));
+        let orphans = manager.commit_entry(&entry_1).unwrap();
+        assert_eq!(orphans.len(), 0, "No orphans waiting for entry_1");
         
         // Verify in-memory chain state is updated
         let chain = manager.get(&node.public_key_bytes()).expect("chain should exist");
@@ -726,18 +813,29 @@ mod tests {
         assert_eq!(chain.last_hash(), &hash_1, "After entry_1: last_hash should be hash_1");
         
         // Step 2: Ingest entry_3 (orphan - skipping entry_2)
-        // This should be BUFFERED (not fail) - returns empty ready list
-        let ready = manager.ingest(&entry_3).expect("entry_3 should be buffered, not fail");
-        assert_eq!(ready.len(), 0, "Orphan entry_3 should return empty (buffered)");
+        match manager.validate_entry(&entry_3) {
+            SigchainValidation::Orphan { gap, prev_hash } => {
+                manager.buffer_sigchain_orphan(
+                    &entry_3, gap.author, prev_hash, gap.to_seq, gap.from_seq,
+                    gap.last_known_hash.unwrap_or([0u8; 32])
+                ).unwrap();
+            }
+            other => panic!("Expected Orphan, got {:?}", other),
+        }
         
         // State should be unchanged
         let chain = manager.get(&node.public_key_bytes()).expect("chain should exist");
         assert_eq!(chain.next_seq(), 2, "After buffered entry_3: next_seq should still be 2");
         
         // Step 3: Ingest entry_2 -> should succeed AND trigger buffered entry_3
-        let ready = manager.ingest(&entry_2).expect("entry_2 should ingest");
-        // Should return BOTH entry_2 AND entry_3 (which was waiting in buffer)
-        assert_eq!(ready.len(), 2, "Should return entry_2 AND buffered entry_3");
+        assert!(matches!(manager.validate_entry(&entry_2), SigchainValidation::Valid));
+        let orphans = manager.commit_entry(&entry_2).unwrap();
+        assert_eq!(orphans.len(), 1, "entry_3 should be returned as ready orphan");
+        
+        // Process the returned orphan (entry_3)
+        assert!(matches!(manager.validate_entry(&orphans[0].0), SigchainValidation::Valid));
+        let more_orphans = manager.commit_entry(&orphans[0].0).unwrap();
+        assert_eq!(more_orphans.len(), 0, "No more orphans");
         
         let chain = manager.get(&node.public_key_bytes()).expect("chain should exist");
         assert_eq!(chain.next_seq(), 4, "After entry_2+3: next_seq should be 4");
@@ -779,8 +877,15 @@ mod tests {
             .sign(&node);
         
         // Ingest entry_2 first (orphan - entry_1 missing)
-        let ready = manager.ingest(&entry_2).expect("should buffer orphan");
-        assert!(ready.is_empty(), "Orphan should be buffered");
+        match manager.validate_entry(&entry_2) {
+            SigchainValidation::Orphan { gap, prev_hash } => {
+                manager.buffer_sigchain_orphan(
+                    &entry_2, gap.author, prev_hash, gap.to_seq, gap.from_seq,
+                    gap.last_known_hash.unwrap_or([0u8; 32])
+                ).unwrap();
+            }
+            other => panic!("Expected Orphan, got {:?}", other),
+        }
         
         // Should receive a gap event
         let gap = gap_rx.try_recv().expect("Should receive gap event");
@@ -789,8 +894,13 @@ mod tests {
         assert_eq!(gap.to_seq, 2);   // We received seq 2
         
         // Now ingest entry_1 (parent arrives)
-        let ready = manager.ingest(&entry_1).expect("entry_1 should apply");
-        assert_eq!(ready.len(), 2, "Should apply entry_1 and buffered entry_2");
+        assert!(matches!(manager.validate_entry(&entry_1), SigchainValidation::Valid));
+        let orphans = manager.commit_entry(&entry_1).unwrap();
+        assert_eq!(orphans.len(), 1, "entry_2 should be returned as ready");
+        
+        // Process the orphan
+        assert!(matches!(manager.validate_entry(&orphans[0].0), SigchainValidation::Valid));
+        manager.commit_entry(&orphans[0].0).unwrap();
         
         // No more gap events (gap was filled)
         assert!(gap_rx.try_recv().is_err(), "No more gap events expected");
@@ -837,9 +947,12 @@ mod tests {
         let hash_3 = hash_signed_entry(&entry_3);
         
         // Peer A applies all entries
-        manager_a.ingest(&entry_1).unwrap();
-        manager_a.ingest(&entry_2).unwrap();
-        manager_a.ingest(&entry_3).unwrap();
+        assert!(matches!(manager_a.validate_entry(&entry_1), SigchainValidation::Valid));
+        manager_a.commit_entry(&entry_1).unwrap();
+        assert!(matches!(manager_a.validate_entry(&entry_2), SigchainValidation::Valid));
+        manager_a.commit_entry(&entry_2).unwrap();
+        assert!(matches!(manager_a.validate_entry(&entry_3), SigchainValidation::Valid));
+        manager_a.commit_entry(&entry_3).unwrap();
         
         let chain_a = manager_a.get(&node.public_key_bytes()).unwrap();
         assert_eq!(chain_a.next_seq(), 4);
@@ -850,20 +963,34 @@ mod tests {
         let mut gap_rx = manager_b.subscribe_gaps();
         
         // Entry 3 arrives first - should be buffered as orphan
-        let ready = manager_b.ingest(&entry_3).unwrap();
-        assert!(ready.is_empty(), "Entry 3 should be buffered");
+        match manager_b.validate_entry(&entry_3) {
+            SigchainValidation::Orphan { gap, prev_hash } => {
+                manager_b.buffer_sigchain_orphan(
+                    &entry_3, gap.author, prev_hash, gap.to_seq, gap.from_seq,
+                    gap.last_known_hash.unwrap_or([0u8; 32])
+                ).unwrap();
+            }
+            other => panic!("Expected Orphan for entry_3, got {:?}", other),
+        }
         
         // Gap event should be emitted
         let gap = gap_rx.try_recv().expect("Gap should be detected");
         assert_eq!(gap.from_seq, 1);
         assert_eq!(gap.to_seq, 3);
         
-        // Simulate sync: Peer B gets entries 1 and 2 from Peer A
-        let ready = manager_b.ingest(&entry_1).unwrap();
-        assert_eq!(ready.len(), 1, "Entry 1 should apply");
+        // Simulate sync: Peer B gets entry 1 from Peer A
+        assert!(matches!(manager_b.validate_entry(&entry_1), SigchainValidation::Valid));
+        let orphans = manager_b.commit_entry(&entry_1).unwrap();
+        assert_eq!(orphans.len(), 0, "No orphans waiting for entry 1");
         
-        let ready = manager_b.ingest(&entry_2).unwrap();
-        assert_eq!(ready.len(), 2, "Entry 2 + buffered entry 3 should apply");
+        // Peer B gets entry 2 from Peer A - should trigger entry_3
+        assert!(matches!(manager_b.validate_entry(&entry_2), SigchainValidation::Valid));
+        let orphans = manager_b.commit_entry(&entry_2).unwrap();
+        assert_eq!(orphans.len(), 1, "entry_3 should be returned as ready");
+        
+        // Process entry_3 (the orphan)
+        assert!(matches!(manager_b.validate_entry(&orphans[0].0), SigchainValidation::Valid));
+        manager_b.commit_entry(&orphans[0].0).unwrap();
         
         // Verify Peer B state matches Peer A
         let chain_b = manager_b.get(&node.public_key_bytes()).unwrap();
