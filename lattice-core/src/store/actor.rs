@@ -106,6 +106,12 @@ pub enum StoreCmd {
     LogStats {
         resp: oneshot::Sender<(usize, u64, usize)>,
     },
+    LogPaths {
+        resp: oneshot::Sender<Vec<(String, u64, std::path::PathBuf)>>,
+    },
+    OrphanList {
+        resp: oneshot::Sender<Vec<([u8; 32], u64, [u8; 32])>>,
+    },
     /// Watch keys matching a regex pattern, returns initial snapshot + receiver for changes
     Watch {
         pattern: String,
@@ -247,6 +253,12 @@ impl StoreActor {
                 }
                 StoreCmd::LogStats { resp } => {
                     let _ = resp.send(self.chain_manager.log_stats());
+                }
+                StoreCmd::LogPaths { resp } => {
+                    let _ = resp.send(self.chain_manager.log_paths());
+                }
+                StoreCmd::OrphanList { resp } => {
+                    let _ = resp.send(self.chain_manager.orphan_list());
                 }
                 StoreCmd::Watch { pattern, include_deleted, resp } => {
                     match Regex::new(&pattern) {

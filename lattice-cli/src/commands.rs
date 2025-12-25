@@ -164,7 +164,15 @@ pub enum StoreSubcommand {
     /// List all stores
     List,
     /// Show current store info
-    Status,
+    Status {
+        /// Show detailed file info
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Debug: list all log entries per author
+    Debug,
+    /// Show sync watermark (authors/seqs/heads)
+    Watermark,
 }
 
 #[derive(Subcommand)]
@@ -212,7 +220,15 @@ pub async fn handle_command(
             StoreSubcommand::Create => crate::node_commands::cmd_create_store(node, store, server.as_deref(), &[], writer).await,
             StoreSubcommand::Use { uuid } => crate::node_commands::cmd_use_store(node, store, server.as_deref(), &[uuid], writer).await,
             StoreSubcommand::List => crate::node_commands::cmd_list_stores(node, store, server.as_deref(), &[], writer).await,
-            StoreSubcommand::Status => crate::store_commands::cmd_store_status(node, store, server.as_deref(), &[], writer).await,
+            StoreSubcommand::Status { verbose } => {
+                let mut args = vec![];
+                if verbose {
+                    args.push("-v".to_string());
+                }
+                crate::store_commands::cmd_store_status(node, store, server.as_deref(), &args, writer).await
+            },
+            StoreSubcommand::Debug => crate::store_commands::cmd_store_debug(node, store, server.as_deref(), &[], writer).await,
+            StoreSubcommand::Watermark => crate::store_commands::cmd_store_watermark(node, store, server.as_deref(), &[], writer).await,
         },
         LatticeCommand::Peer { subcommand } => match subcommand {
             PeerSubcommand::List => crate::node_commands::cmd_peers(node, store, server.as_deref(), &[], writer).await,
