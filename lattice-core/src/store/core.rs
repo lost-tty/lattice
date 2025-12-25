@@ -6,7 +6,7 @@
 //! - meta: String → Vec<u8> (system metadata: last_seq, last_hash, etc.)
 //! - author: [u8; 32] → AuthorState (per-author replay tracking)
 
-use crate::store::log::{read_entries, LogError};
+use crate::store::log::{iter_entries_after, LogError};
 use crate::store::sigchain::SigChainError;
 use crate::store::signed_entry::hash_signed_entry;
 use crate::proto::{operation, AuthorState, Entry, HeadInfo, HeadList, SignedEntry};
@@ -71,10 +71,11 @@ impl Store {
     /// Replay a log file and apply all entries to the store (batched)
     /// Returns the number of newly applied entries (skipped entries not counted)
     pub fn replay_log(&self, log_path: impl AsRef<Path>) -> Result<u64, StoreError> {
-        let entries = read_entries(log_path)?;
-        if entries.is_empty() {
-            return Ok(0);
-        }
+        let entries_iter = match iter_entries_after(&log_path, None) {
+            Ok(iter) => iter,
+            Err(LogError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e.into()),
+        };
         
         let write_txn = self.db.begin_write()?;
         let mut applied = 0u64;
@@ -82,8 +83,9 @@ impl Store {
             let mut kv_table = write_txn.open_table(KV_TABLE)?;
             let mut author_table = write_txn.open_table(AUTHOR_TABLE)?;
             
-            for signed_entry in &entries {
-                if Self::apply_ops_to_tables(signed_entry, &mut kv_table, &mut author_table)? {
+            for result in entries_iter {
+                let signed_entry = result?;
+                if Self::apply_ops_to_tables(&signed_entry, &mut kv_table, &mut author_table)? {
                     applied += 1;
                 }
             }
@@ -355,6 +357,22 @@ mod tests {
     }
 
     const TEST_STORE: [u8; 16] = [1u8; 16];
+    
+    /// Test helper - read all entries
+    fn read_entries(path: impl AsRef<std::path::Path>) -> Vec<SignedEntry> {
+        crate::store::log::iter_entries_after(&path, None)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+    
+    /// Test helper - read entries after hash
+    fn read_entries_after(path: impl AsRef<std::path::Path>, hash: Option<[u8; 32]>) -> Vec<SignedEntry> {
+        crate::store::log::iter_entries_after(&path, hash)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
 
     #[test]
     fn test_single_write_one_head() {
@@ -1177,10 +1195,10 @@ mod tests {
         assert_eq!(missing[0].to_seq, 3);    // A has 3 entries
         
         // Fetch entries from A's log (using from_hash = 0 means read all)
-        let entries = crate::store::log::read_entries_after(
+        let entries = read_entries_after(
             &log_path_a,
             if missing[0].from_hash == [0u8; 32] { None } else { Some(missing[0].from_hash) }
-        ).unwrap();
+        );
         assert_eq!(entries.len(), 3);
         
         // Apply entries to B
@@ -1259,13 +1277,13 @@ mod tests {
         assert_eq!(b_needs[0].author, node_a.public_key_bytes());
         
         // Sync A → B
-        let entries_a = crate::store::log::read_entries(&log_path_a).unwrap();
+        let entries_a = read_entries(&log_path_a);
         for entry in &entries_a {
             store_b.apply_entry(entry).unwrap();
         }
         
         // Sync B → A
-        let entries_b = crate::store::log::read_entries(&log_path_b).unwrap();
+        let entries_b = read_entries(&log_path_b);
         for entry in &entries_b {
             store_a.apply_entry(entry).unwrap();
         }
@@ -1334,26 +1352,26 @@ mod tests {
         crate::store::log::append_entry(&log_path_c, &entry_c).unwrap();
         
         // Sync A ↔ B
-        for entry in crate::store::log::read_entries(&log_path_a).unwrap() {
+        for entry in read_entries(&log_path_a) {
             store_b.apply_entry(&entry).unwrap();
         }
-        for entry in crate::store::log::read_entries(&log_path_b).unwrap() {
+        for entry in read_entries(&log_path_b) {
             store_a.apply_entry(&entry).unwrap();
         }
         
         // Sync B ↔ C
-        for entry in crate::store::log::read_entries(&log_path_b).unwrap() {
+        for entry in read_entries(&log_path_b) {
             store_c.apply_entry(&entry).unwrap();
         }
-        for entry in crate::store::log::read_entries(&log_path_c).unwrap() {
+        for entry in read_entries(&log_path_c) {
             store_b.apply_entry(&entry).unwrap();
         }
         
         // Sync A ↔ C (A should get C's entry, C should get A's entry)
-        for entry in crate::store::log::read_entries(&log_path_a).unwrap() {
+        for entry in read_entries(&log_path_a) {
             store_c.apply_entry(&entry).unwrap();
         }
-        for entry in crate::store::log::read_entries(&log_path_c).unwrap() {
+        for entry in read_entries(&log_path_c) {
             store_a.apply_entry(&entry).unwrap();
         }
         
@@ -1416,10 +1434,10 @@ mod tests {
         assert_eq!(store_b.get(b"/shared_key").unwrap(), Some(b"value_from_b".to_vec()));
         
         // Sync A → B and B → A
-        for entry in crate::store::log::read_entries(&log_path_a).unwrap() {
+        for entry in read_entries(&log_path_a) {
             store_b.apply_entry(&entry).unwrap();
         }
-        for entry in crate::store::log::read_entries(&log_path_b).unwrap() {
+        for entry in read_entries(&log_path_b) {
             store_a.apply_entry(&entry).unwrap();
         }
         

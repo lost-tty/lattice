@@ -85,16 +85,16 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server:
         let author_short = hex::encode(&author[..8]);
         let _ = writeln!(w, "Author {} (seq: {}, heads: {})", author_short, info.seq, info.heads.len());
         
-        // Get all entries for this author
-        let entries = match h.read_entries_after(&author, None).await {
-            Ok(e) => e,
+        // Stream entries for this author
+        let mut rx = match h.stream_entries_after(&author, None).await {
+            Ok(rx) => rx,
             Err(e) => {
                 let _ = writeln!(w, "  Error reading entries: {}", e);
                 continue;
             }
         };
         
-        for entry in entries {
+        while let Some(entry) = rx.recv().await {
             // Decode entry to show details
             let hash = lattice_core::store::hash_signed_entry(&entry);
             let hash_short = hex::encode(&hash[..8]);
