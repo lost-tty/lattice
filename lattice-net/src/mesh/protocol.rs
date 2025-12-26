@@ -1,6 +1,6 @@
 //! Protocol - shared logic for bidirectional sync entry exchange
 
-use crate::{MessageSink, MessageStream};
+use crate::{MessageSink, MessageStream, LatticeNetError};
 use lattice_core::StoreHandle;
 use lattice_core::proto::{peer_message, PeerMessage, SignedEntry};
 use lattice_core::SyncState;
@@ -17,7 +17,7 @@ pub async fn send_missing_entries(
     my_state: &SyncState,
     peer_state: &SyncState,
     author_filter: &[[u8; 32]],
-) -> Result<u64, String> {
+) -> Result<u64, LatticeNetError> {
     let mut missing = peer_state.diff(my_state);
     
     // Filter by authors if specified
@@ -33,8 +33,7 @@ pub async fn send_missing_entries(
         let from_hash = if range.from_hash == [0u8; 32] { None } else { Some(range.from_hash) };
         
         // Get streaming receiver for this author's entries
-        let mut rx = store.stream_entries_after(&author, from_hash).await
-            .map_err(|e| format!("Failed to start entry stream: {}", e))?;
+        let mut rx = store.stream_entries_after(&author, from_hash).await?;
         
         // Stream entries as they arrive from background thread
         while let Some(entry) = rx.recv().await {
@@ -65,7 +64,7 @@ pub async fn send_missing_entries(
 pub async fn receive_entries(
     stream: &mut MessageStream,
     store: &StoreHandle,
-) -> Result<(u64, u64), String> {
+) -> Result<(u64, u64), LatticeNetError> {
     let mut entries_applied = 0u64;
     let mut entries_reported = 0u64;
     

@@ -1,6 +1,6 @@
 //! Server - LatticeServer for mesh networking
 
-use crate::{MessageSink, MessageStream, LatticeEndpoint, LATTICE_ALPN};
+use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN};
 use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle};
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
@@ -182,12 +182,12 @@ impl LatticeServer {
                 node_pubkey: self.node.node_id().to_vec(),
             })),
         };
-        sink.send(&req).await.map_err(|e| NodeError::Actor(e))?;
-        sink.finish().await.map_err(|e| NodeError::Actor(e))?;
+        sink.send(&req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
+        sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Receive JoinResponse
         let msg = stream.recv().await
-            .map_err(|e| NodeError::Actor(e))?
+            .map_err(|e| NodeError::Actor(e.to_string()))?
             .ok_or_else(|| NodeError::Actor("Peer closed stream".to_string()))?;
         
         match msg.message {
@@ -232,10 +232,10 @@ impl LatticeServer {
                 author_ids: authors.iter().map(|a| a.to_vec()).collect(),
             })),
         };
-        sink.send(&req).await.map_err(|e| NodeError::Actor(e))?;
+        sink.send(&req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Receive SyncResponse
-        let resp_msg = stream.recv().await.map_err(|e| NodeError::Actor(e))?
+        let resp_msg = stream.recv().await.map_err(|e| NodeError::Actor(e.to_string()))?
             .ok_or_else(|| NodeError::Actor("Peer closed stream".to_string()))?;
         
         let peer_state = match resp_msg.message {
@@ -248,12 +248,12 @@ impl LatticeServer {
         
         // Exchange entries
         let _entries_sent = protocol::send_missing_entries(&mut sink, store, &my_state, &peer_state, authors).await
-            .map_err(|e| NodeError::Actor(e))?;
+            .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         let (entries_applied, entries_sent_by_peer) = protocol::receive_entries(&mut stream, store).await
-            .map_err(|e| NodeError::Actor(e))?;
+            .map_err(|e| NodeError::Actor(e.to_string()))?;
         
-        sink.finish().await.map_err(|e| NodeError::Actor(e))?;
+        sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
         
         Ok(SyncResult { entries_applied, entries_sent_by_peer })
     }
@@ -329,26 +329,26 @@ impl LatticeServer {
 async fn handle_connection(
     node: Arc<Node>,
     conn: Connection,
-) -> Result<(), String> {
+) -> Result<(), LatticeNetError> {
     let remote_id = conn.remote_id();
     let remote_hex = hex::encode(remote_id.as_bytes());
     tracing::debug!("[Incoming] {} (ALPN: {})", remote_id.fmt_short(), String::from_utf8_lossy(conn.alpn()));
     
     // Parse remote pubkey
     let remote_pubkey: [u8; 32] = hex::decode(&remote_hex)
-        .map_err(|_| "Invalid pubkey hex")?
+        .map_err(|_| LatticeNetError::Connection("Invalid pubkey hex".into()))?
         .try_into()
-        .map_err(|_| "Invalid pubkey length")?;
+        .map_err(|_| LatticeNetError::Connection("Invalid pubkey length".into()))?;
     
     let (send, recv) = conn.accept_bi().await
-        .map_err(|e| format!("Accept stream error: {}", e))?;
+        .map_err(|e| LatticeNetError::Connection(format!("Accept stream error: {}", e)))?;
     
     let sink = MessageSink::new(send);
     let mut stream = MessageStream::new(recv);
     
     // Read first message to determine request type
     let msg = stream.recv().await?
-        .ok_or_else(|| "Peer closed stream".to_string())?;
+        .ok_or_else(|| LatticeNetError::Connection("Peer closed stream".into()))?;
     
     match msg.message {
         Some(peer_message::Message::JoinRequest(req)) => {
@@ -357,7 +357,7 @@ async fn handle_connection(
         Some(peer_message::Message::SyncRequest(req)) => {
             handle_sync_request(&node, &remote_pubkey, req, sink, stream).await
         }
-        _ => Err("Unexpected message type".to_string()),
+        _ => Err(LatticeNetError::Connection("Unexpected message type".into())),
     }
 }
 
@@ -367,12 +367,11 @@ async fn handle_join_request(
     remote_pubkey: &[u8; 32],
     req: lattice_core::proto::JoinRequest,
     mut sink: MessageSink,
-) -> Result<(), String> {
+) -> Result<(), LatticeNetError> {
     tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
     
     // Accept the join - verifies invited, sets active, returns store ID
-    let acceptance = node.accept_join(remote_pubkey).await
-        .map_err(|e| e.to_string())?;
+    let acceptance = node.accept_join(remote_pubkey).await?;
     
     let resp = PeerMessage {
         message: Some(peer_message::Message::JoinResponse(JoinResponse {
@@ -394,27 +393,24 @@ async fn handle_sync_request(
     peer_request: lattice_core::proto::SyncRequest,
     mut sink: MessageSink,
     mut stream: MessageStream,
-) -> Result<(), String> {
+) -> Result<(), LatticeNetError> {
     // Verify peer is active (allowed to sync)
-    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active]).await
-        .map_err(|e| e.to_string())?;
+    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active]).await?;
     tracing::debug!("[Sync] Verified peer as active");
     
     // Parse store_id from request
     let store_id = Uuid::from_slice(&peer_request.store_id)
-        .map_err(|_| format!("Invalid store_id in SyncRequest: {} bytes, expected 16", peer_request.store_id.len()))?;
+        .map_err(|_| LatticeNetError::Connection(format!("Invalid store_id: {} bytes", peer_request.store_id.len())))?;
     
     tracing::debug!("[Sync] Received SyncRequest for store {}", store_id);
     
     // Open the requested store (uses cache if available)
-    let (store, _info) = node.open_store(store_id).await
-        .map_err(|e| format!("Failed to open store {}: {}", store_id, e))?;
+    let (store, _info) = node.open_store(store_id).await?;
     
     tracing::debug!("[Sync] Received SyncRequest");
     
     // Get our sync state
-    let my_state = store.sync_state().await
-        .map_err(|e| format!("Failed to get sync state: {}", e))?;
+    let my_state = store.sync_state().await?;
     
     // 1. Send our sync state as response
     let resp = PeerMessage {

@@ -3,6 +3,7 @@
 //! Provides a clean interface for sending/receiving length-prefixed PeerMessage
 //! over QUIC streams without manual buffer management.
 
+use crate::error::LatticeNetError;
 use futures_util::{SinkExt, StreamExt};
 use lattice_core::proto::PeerMessage;
 use prost::Message;
@@ -21,14 +22,14 @@ impl MessageSink {
     }
 
     /// Send a PeerMessage (length-prefixed)
-    pub async fn send(&mut self, msg: &PeerMessage) -> Result<(), String> {
+    pub async fn send(&mut self, msg: &PeerMessage) -> Result<(), LatticeNetError> {
         let bytes = msg.encode_to_vec();
         self.inner.send(bytes.into()).await
-            .map_err(|e| format!("Send error: {}", e))
+            .map_err(|e| LatticeNetError::Io(e.into()))
     }
 
     /// Finish the stream (signal we're done sending)
-    pub async fn finish(self) -> Result<(), String> {
+    pub async fn finish(self) -> Result<(), LatticeNetError> {
         let mut stream = self.inner.into_inner();
         let _ = stream.finish();
         stream.stopped().await.ok();
@@ -49,14 +50,14 @@ impl MessageStream {
     }
 
     /// Receive next PeerMessage (or None if stream closed)
-    pub async fn recv(&mut self) -> Result<Option<PeerMessage>, String> {
+    pub async fn recv(&mut self) -> Result<Option<PeerMessage>, LatticeNetError> {
         match self.inner.next().await {
             Some(Ok(bytes)) => {
                 PeerMessage::decode(&bytes[..])
                     .map(Some)
-                    .map_err(|e| format!("Decode error: {}", e))
+                    .map_err(LatticeNetError::from)
             }
-            Some(Err(e)) => Err(format!("Read error: {}", e)),
+            Some(Err(e)) => Err(LatticeNetError::Io(e.into())),
             None => Ok(None),
         }
     }
