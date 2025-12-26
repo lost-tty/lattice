@@ -46,7 +46,7 @@ async fn main() {
         .add_directive("lattice_core=info".parse().unwrap())
         .add_directive("iroh_net::magicsock=error".parse().unwrap())
         .add_directive("iroh::magicsock=error".parse().unwrap())
-        .add_directive("mdns=error".parse().unwrap());
+        .add_directive("swarm_discovery=error".parse().unwrap());
 
     tracing_subscriber::fmt()
         .with_writer(make_writer)
