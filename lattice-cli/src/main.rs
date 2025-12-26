@@ -38,11 +38,15 @@ async fn main() {
     
     // Initialize tracing with SharedWriter (as early as possible)
     // Uses RUST_LOG env var, defaults to info for lattice crates
+    // Suppresses noisy iroh warnings (mDNS, magicsock unreachable hosts)
     let make_writer = tracing_writer::SharedWriterMakeWriter::new(writer.clone());
     let filter = EnvFilter::from_default_env()
         .add_directive("warn".parse().unwrap())
         .add_directive("lattice_net=info".parse().unwrap())
-        .add_directive("lattice_core=info".parse().unwrap());
+        .add_directive("lattice_core=info".parse().unwrap())
+        .add_directive("iroh_net::magicsock=error".parse().unwrap())
+        .add_directive("iroh::magicsock=error".parse().unwrap())
+        .add_directive("mdns=error".parse().unwrap());
 
     tracing_subscriber::fmt()
         .with_writer(make_writer)

@@ -257,39 +257,6 @@ impl Grid {
         
         output
     }
-    
-    /// Render grid to string with separators at specified rows
-    pub fn render_with_separators(&self, labels: &[String], separator_rows: &std::collections::HashSet<usize>) -> String {
-        let mut output = String::new();
-        
-        for y in 0..self.height {
-            // Add empty line before new tree (but not at row 0)
-            if y > 0 && separator_rows.contains(&y) {
-                output.push('\n');
-            }
-            
-            // Render graph columns
-            for x in 0..self.width {
-                let cell = self.get(x, y);
-                if cell.color > 0 {
-                    write!(output, "\x1b[{}m{}\x1b[0m", cell.color, cell.to_char()).unwrap();
-                } else {
-                    output.push(cell.to_char());
-                }
-            }
-            
-            // Append label if present
-            if let Some(label) = labels.get(y) {
-                if !label.is_empty() {
-                    write!(output, " {}", label).unwrap();
-                }
-            }
-            
-            output.push('\n');
-        }
-        
-        output
-    }
 }
 
 /// Entry info for history rendering
@@ -595,11 +562,11 @@ mod tests {
     
     #[test]
     fn test_grid_cell_chars() {
-        assert_eq!(GridCell::new(DOT, 0).to_char(), '●');
-        assert_eq!(GridCell::new(VER, 0).to_char(), '│');
-        assert_eq!(GridCell::new(HOR, 0).to_char(), '─');
-        assert_eq!(GridCell::new(R_D, 0).to_char(), '╭');
-        assert_eq!(GridCell::new(L_U, 0).to_char(), '╯');
+        assert_eq!(GridCell { character: DOT, persistence: 0, color: 0 }.to_char(), '●');
+        assert_eq!(GridCell { character: VER, persistence: 0, color: 0 }.to_char(), '│');
+        assert_eq!(GridCell { character: HOR, persistence: 0, color: 0 }.to_char(), '─');
+        assert_eq!(GridCell { character: R_D, persistence: 0, color: 0 }.to_char(), '╭');
+        assert_eq!(GridCell { character: L_U, persistence: 0, color: 0 }.to_char(), '╯');
     }
     
     #[test]
@@ -618,7 +585,7 @@ mod tests {
     fn test_grid_crossing() {
         let mut grid = Grid::new(5, 5);
         grid.vline(2, 0, 5, 1);
-        grid.hline(2, 0, 4, false, 1);
+        grid.hline(2, 0, 4, false, false, 1);
         
         assert_eq!(grid.get(2, 2).character, CROSS);
     }

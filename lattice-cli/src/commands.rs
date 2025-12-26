@@ -179,6 +179,8 @@ pub enum StoreSubcommand {
     Debug,
     /// Show sync watermark (authors/seqs/heads)
     Watermark,
+    /// Cleanup stale orphans
+    OrphanCleanup,
 }
 
 #[derive(Subcommand)]
@@ -235,6 +237,7 @@ pub async fn handle_command(
             },
             StoreSubcommand::Debug => crate::store_commands::cmd_store_debug(node, store, server.as_deref(), &[], writer).await,
             StoreSubcommand::Watermark => crate::store_commands::cmd_store_watermark(node, store, server.as_deref(), &[], writer).await,
+            StoreSubcommand::OrphanCleanup => crate::store_commands::cmd_orphan_cleanup(node, store, server.as_deref(), &[], writer).await,
         },
         LatticeCommand::Peer { subcommand } => match subcommand {
             PeerSubcommand::List => crate::node_commands::cmd_peers(node, store, server.as_deref(), &[], writer).await,

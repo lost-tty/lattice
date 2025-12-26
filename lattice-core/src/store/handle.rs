@@ -167,12 +167,21 @@ impl StoreHandle {
         }).await.unwrap_or_default()
     }
     
-    /// Get list of orphaned entries (author, seq, prev_hash)
-    pub async fn orphan_list(&self) -> Vec<([u8; 32], u64, [u8; 32])> {
+    /// Get list of orphaned entries (author, seq, prev_hash, entry_hash)
+    pub async fn orphan_list(&self) -> Vec<([u8; 32], u64, [u8; 32], [u8; 32])> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self.tx.send(StoreCmd::OrphanList { resp: resp_tx }).await;
         resp_rx.await.unwrap_or_default()
+    }
+    
+    /// Cleanup stale orphans that are already in the sigchain
+    /// Returns the number of orphans removed
+    pub async fn orphan_cleanup(&self) -> usize {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(StoreCmd::OrphanCleanup { resp: resp_tx }).await;
+        resp_rx.await.unwrap_or(0)
     }
 
     pub async fn sync_state(&self) -> Result<super::sync_state::SyncState, NodeError> {

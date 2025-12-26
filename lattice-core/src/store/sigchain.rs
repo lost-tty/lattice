@@ -565,8 +565,8 @@ impl SigChainManager {
         }).collect()
     }
     
-    /// List all orphans as (author, seq, prev_hash)
-    pub fn orphan_list(&self) -> Vec<([u8; 32], u64, [u8; 32])> {
+    /// List all orphans as (author, seq, prev_hash, entry_hash)
+    pub fn orphan_list(&self) -> Vec<([u8; 32], u64, [u8; 32], [u8; 32])> {
         self.orphan_store.list_all().unwrap_or_default()
     }
 }

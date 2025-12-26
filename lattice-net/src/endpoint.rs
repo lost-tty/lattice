@@ -32,7 +32,7 @@ impl LatticeEndpoint {
                 LATTICE_ALPN.to_vec(),
                 iroh_gossip::ALPN.to_vec(),  // Also accept gossip protocol
             ])
-            .discovery(mdns)  // Add mDNS on top of default DNS
+            .discovery(mdns)
             .bind()
             .await?;
         Ok(Self { endpoint })
