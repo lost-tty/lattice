@@ -478,6 +478,10 @@ impl StoreActor {
                         gap.last_known_hash.unwrap_or([0u8; 32])
                     )?;
                 }
+                SigchainValidation::Duplicate => {
+                    // Entry already applied - silently ignore
+                    // This can happen during re-sync or gossip replay
+                }
                 SigchainValidation::Error(e) => {
                     // Primary entry error - return error to caller
                     // Cascaded orphan errors are logged but don't propagate
@@ -1267,6 +1271,106 @@ mod tests {
         let head_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
         assert!(head_hashes.contains(&hash_h1.to_vec()), "H1 should be a head");
         assert!(head_hashes.contains(&hash_h2.to_vec()), "H2 should be a head");
+    }
+    
+    /// Test that orphans are cleaned up when the same entry is ingested twice.
+    /// Scenario:
+    /// 1. Entry B (seq:2) arrives before Entry A (seq:1) -> B becomes orphan
+    /// 2. Entry A arrives via sync (in order: A then B again)
+    /// 3. Entry B is ingested again (duplicate)
+    /// 4. Verify: orphan store should be empty
+    /// 
+    /// This reproduces a bug where re-syncing already-orphaned entries leaves stale orphans.
+    #[test]
+    fn test_orphan_cleanup_on_duplicate_ingest() {
+        let dir = temp_test_dir("orphan_duplicate_cleanup");
+        let _ = std::fs::remove_dir_all(&dir);
+        let state_path = dir.join("state.db");
+        let logs_dir = dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        
+        let store = Store::open(&state_path).unwrap();
+        let node = NodeIdentity::generate();
+        
+        // Spawn actor
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let (entry_tx, _entry_rx) = broadcast::channel(16);
+        
+        let actor = StoreActor::new(
+            Uuid::from_bytes(TEST_STORE),
+            store,
+            logs_dir,
+            node.clone(),
+            cmd_rx, 
+            entry_tx,
+        );
+        let actor_handle = std::thread::spawn(move || actor.run());
+        
+        // Create entry A (seq 1)
+        let clock_a = MockClock::new(1000);
+        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock_a))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put(b"/key", b"value_a".to_vec()))
+            .sign(&node);
+        let hash_a = hash_signed_entry(&entry_a);
+        
+        // Create entry B (seq 2) - requires A
+        let clock_b = MockClock::new(2000);
+        let entry_b = EntryBuilder::new(2, HLC::now_with_clock(&clock_b))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash(hash_a.to_vec())
+            .parent_hashes(vec![hash_a.to_vec()])
+            .operation(Operation::put(b"/key", b"value_b".to_vec()))
+            .sign(&node);
+        
+        // Step 1: Send B first -> becomes orphan
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
+        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        
+        // Verify orphan exists
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::OrphanList { resp: resp_tx }).unwrap();
+        let orphans = resp_rx.blocking_recv().unwrap();
+        assert_eq!(orphans.len(), 1, "B should be orphaned");
+        
+        // Step 2: Send A -> A applies, B should be resolved and applied
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
+        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        
+        // Step 3: Send B again (duplicate - simulating sync resending)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
+        // This may succeed or fail (already applied), either is fine
+        let _ = resp_rx.blocking_recv();
+        
+        // Step 4: Send A again (duplicate)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
+        let _ = resp_rx.blocking_recv();
+        
+        // Verify value is correct
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::Get { key: b"/key".to_vec(), resp: resp_tx }).unwrap();
+        let value = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(value, Some(b"value_b".to_vec()));
+        
+        // Step 5: Check orphan store is empty
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::OrphanList { resp: resp_tx }).unwrap();
+        let orphans = resp_rx.blocking_recv().unwrap();
+        assert!(orphans.is_empty(), 
+            "Orphan store should be empty after duplicates. Found {} orphans: {:?}", 
+            orphans.len(),
+            orphans.iter().map(|(a, s, h)| format!("author:{} seq:{} awaiting:{}", hex::encode(&a[..4]), s, hex::encode(&h[..4]))).collect::<Vec<_>>()
+        );
+        
+        // Shutdown
+        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
+        actor_handle.join().unwrap();
     }
 }
 
