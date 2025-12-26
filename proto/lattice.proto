@@ -140,6 +140,8 @@ message PeerMessage {
     SyncResponse sync_response = 4;
     SyncEntry sync_entry = 5;
     SyncDone sync_done = 6;
+    StatusRequest status_request = 7;
+    StatusResponse status_response = 8;
   }
 }
 
@@ -147,4 +149,23 @@ message PeerMessage {
 message OrphanedEntry {
   uint64 seq = 1;            // Sequence number of the orphaned entry
   SignedEntry entry = 2;     // The orphaned entry itself
+}
+
+// 10. Gossip Message Wrapper
+message GossipMessage {
+  oneof payload {
+    SignedEntry entry = 1;        // Regular entry broadcast
+  }
+}
+
+// Request sync status from peers
+message StatusRequest {
+  bytes store_id = 1;        // Store UUID to get status for (16 bytes)
+  SyncState sync_state = 2;  // Sender's current sync state
+}
+
+// Response with sync status
+message StatusResponse {
+  bytes store_id = 1;        // Store UUID (16 bytes)
+  SyncState sync_state = 2;  // Responder's current sync state
 }

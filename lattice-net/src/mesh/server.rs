@@ -5,7 +5,7 @@ use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle};
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
-use lattice_core::proto::{PeerMessage, peer_message, JoinRequest, JoinResponse};
+use lattice_core::proto::{PeerMessage, peer_message, JoinRequest, JoinResponse, StatusRequest, StatusResponse};
 use super::protocol;
 
 /// Result of a sync operation with a peer
@@ -163,6 +163,82 @@ impl LatticeServer {
     /// Access the gossip manager
     pub fn gossip_manager(&self) -> &super::gossip_manager::GossipManager {
         &self.gossip_manager
+    }
+    
+    /// Get currently connected gossip peers with last-seen timestamp
+    pub async fn connected_peers(&self) -> std::collections::HashMap<iroh::PublicKey, std::time::Instant> {
+        self.gossip_manager.online_peers().await
+    }
+    
+    /// Request status from a single peer, returns their sync state
+    pub async fn status_peer(&self, peer_id: iroh::PublicKey, store_id: Uuid, our_sync_state: Option<lattice_core::proto::SyncState>) 
+        -> Result<(u64, Option<lattice_core::proto::SyncState>), LatticeNetError> 
+    {
+        let start = std::time::Instant::now();
+        
+        let conn = self.endpoint.connect(peer_id).await
+            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
+        let (send, recv) = conn.open_bi().await
+            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
+        
+        let mut sink = MessageSink::new(send);
+        let mut stream = MessageStream::new(recv);
+        
+        // Send status request with store_id
+        let req = PeerMessage {
+            message: Some(peer_message::Message::StatusRequest(StatusRequest {
+                store_id: store_id.as_bytes().to_vec(),
+                sync_state: our_sync_state,
+            })),
+        };
+        sink.send(&req).await?;
+        
+        // Wait for response with timeout to prevent indefinite hang
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.recv()
+        ).await
+            .map_err(|_| LatticeNetError::Connection("Status request timed out".into()))?
+            ?
+            .ok_or_else(|| LatticeNetError::Connection("No status response".into()))?;
+        
+        let sync_state = match resp.message {
+            Some(peer_message::Message::StatusResponse(res)) => res.sync_state,
+            _ => return Err(LatticeNetError::Connection("Expected StatusResponse".into())),
+        };
+        
+        let rtt_ms = start.elapsed().as_millis() as u64;
+        Ok((rtt_ms, sync_state))
+    }
+    
+    /// Request status from all known active peers
+    pub async fn status_all(&self, store_id: Uuid, our_sync_state: Option<lattice_core::proto::SyncState>) 
+        -> std::collections::HashMap<iroh::PublicKey, Result<(u64, Option<lattice_core::proto::SyncState>), String>> 
+    {
+        let peers = match self.node.list_peers().await {
+            Ok(p) => p,
+            Err(_) => return std::collections::HashMap::new(),
+        };
+        
+        let active_peers: Vec<_> = peers.iter()
+            .filter(|p| p.status == lattice_core::PeerStatus::Active && p.pubkey != self.node.node_id())
+            .filter_map(|p| iroh::PublicKey::from_bytes(&p.pubkey).ok())
+            .collect();
+        
+        // Query all peers concurrently
+        let results = futures_util::future::join_all(
+            active_peers.iter().map(|pk| {
+                let pk = *pk;
+                let sync_state = our_sync_state.clone();
+                async move {
+                    let result = self.status_peer(pk, store_id, sync_state).await
+                        .map_err(|e| e.to_string());
+                    (pk, result)
+                }
+            })
+        ).await;
+        
+        results.into_iter().collect()
     }
     
     /// Join an existing mesh by connecting to a peer.
@@ -357,6 +433,9 @@ async fn handle_connection(
         Some(peer_message::Message::SyncRequest(req)) => {
             handle_sync_request(&node, &remote_pubkey, req, sink, stream).await
         }
+        Some(peer_message::Message::StatusRequest(req)) => {
+            handle_status_request(&node, req, sink).await
+        }
         _ => Err(LatticeNetError::Connection("Unexpected message type".into())),
     }
 }
@@ -440,5 +519,39 @@ async fn handle_sync_request(
     sink.finish().await?;
     
     tracing::debug!("[Sync] Applied {} entries from peer", entries_applied);
+    Ok(())
+}
+
+/// Handle an incoming status request - respond with our sync state
+async fn handle_status_request(
+    node: &Node,
+    req: StatusRequest,
+    mut sink: MessageSink,
+) -> Result<(), LatticeNetError> {
+    // Parse store_id from request
+    let store_id = Uuid::from_slice(&req.store_id).ok();
+    
+    tracing::debug!("[Status] Received status request for store {:?}", store_id);
+    
+    // Get sync state for the requested store
+    let sync_state = if let Some(store_id) = store_id {
+        if let Ok((store, _)) = node.open_store(store_id).await {
+            store.sync_state().await.ok().map(|s| s.to_proto())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    
+    let resp = PeerMessage {
+        message: Some(peer_message::Message::StatusResponse(StatusResponse {
+            store_id: req.store_id,
+            sync_state,
+        })),
+    };
+    sink.send(&resp).await?;
+    sink.finish().await?;
+    
     Ok(())
 }

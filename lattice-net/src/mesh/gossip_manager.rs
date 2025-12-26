@@ -3,10 +3,11 @@
 use crate::{parse_node_id, LatticeEndpoint};
 use super::error::GossipError;
 use lattice_core::{Uuid, Node, StoreHandle, PeerStatus, PeerWatchEvent, PeerWatchEventKind};
-use lattice_core::proto::SignedEntry;
+use lattice_core::proto::{SignedEntry, GossipMessage, gossip_message::Payload};
 use iroh_gossip::Gossip;
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::time::Instant;
 use tokio::sync::RwLock;
 use prost::Message;
 
@@ -21,6 +22,7 @@ pub fn topic_for_store(store_id: Uuid) -> iroh_gossip::TopicId {
 pub struct GossipManager {
     gossip: Gossip,
     senders: Arc<RwLock<HashMap<Uuid, iroh_gossip::api::GossipSender>>>,
+    online_peers: Arc<RwLock<HashMap<iroh::PublicKey, Instant>>>,
     my_pubkey: iroh::PublicKey,
 }
 
@@ -30,6 +32,7 @@ impl GossipManager {
         Self {
             gossip: Gossip::builder().spawn(endpoint.endpoint().clone()),
             senders: Arc::new(RwLock::new(HashMap::new())),
+            online_peers: Arc::new(RwLock::new(HashMap::new())),
             my_pubkey: endpoint.public_key(),
         }
     }
@@ -61,16 +64,17 @@ impl GossipManager {
         }
         tracing::info!(bootstrap_peers = bootstrap_peers.len(), "Gossip subscribing");
         
-        // Subscribe to gossip topic
+        // Subscribe to gossip topic (bootstrap_peers used for initial connections)
         let topic = topic_for_store(store_id);
-        let (sender, receiver) = self.gossip.subscribe(topic, bootstrap_peers).await
-            .map_err(|e| GossipError::Subscribe(e.to_string()))?
-            .split();
+        let topic_handle = self.gossip.subscribe(topic, bootstrap_peers).await
+            .map_err(|e| GossipError::Subscribe(e.to_string()))?;
         
+        // Split to get sender and receiver
+        let (sender, receiver) = topic_handle.split();
         self.senders.write().await.insert(store_id, sender);
         
         // Spawn background tasks
-        self.spawn_receiver(store.clone(), receiver, node.clone());
+        self.spawn_receiver(store.clone(), receiver, node.clone(), self.online_peers.clone());
         self.spawn_forwarder(store_id, store.subscribe_entries());
         self.spawn_peer_watcher(store_id, rx);
         
@@ -78,22 +82,32 @@ impl GossipManager {
         Ok(())
     }
     
-    /// Broadcast an entry to gossip
-    #[tracing::instrument(skip(self, entry), fields(store_id = %store_id))]
-    pub async fn broadcast(&self, store_id: Uuid, entry: &SignedEntry) -> Result<(), GossipError> {
-        let senders = self.senders.read().await;
-        let sender = senders.get(&store_id)
-            .ok_or_else(|| GossipError::NoSender(store_id))?;
-        
-        sender.broadcast(entry.encode_to_vec().into()).await
-            .map_err(|e| GossipError::Broadcast(e.to_string()))
+    /// Get currently connected gossip peers with last-seen time
+    pub async fn online_peers(&self) -> HashMap<iroh::PublicKey, Instant> {
+        let peers = self.online_peers.read().await.clone();
+        tracing::debug!(count = peers.len(), "online_peers() called");
+        for (pk, _) in &peers {
+            tracing::debug!(peer = %pk.fmt_short(), "online_peer entry");
+        }
+        peers
     }
     
-    fn spawn_receiver(&self, store: StoreHandle, mut rx: iroh_gossip::api::GossipReceiver, node: std::sync::Arc<Node>) {
+    fn spawn_receiver(&self, store: StoreHandle, mut rx: iroh_gossip::api::GossipReceiver, node: std::sync::Arc<Node>, online_peers: Arc<RwLock<HashMap<iroh::PublicKey, Instant>>>) {
         let store_id = store.id();
+        
         tokio::spawn(async move {
-            tracing::debug!(store_id = %store_id, "Gossip receiver started");
+            // Get initial neighbors and add to online_peers
+            {
+                let mut online = online_peers.write().await;
+                for peer in rx.neighbors() {
+                    tracing::info!(peer = %peer.fmt_short(), "Initial gossip neighbor");
+                    online.insert(peer, Instant::now());
+                }
+            }
+            tracing::info!(store_id = %store_id, "Gossip receiver started");
+            
             while let Some(event) = futures_util::StreamExt::next(&mut rx).await {
+                tracing::debug!(store_id = %store_id, event = ?event, "Gossip event");
                 match event {
                     Ok(iroh_gossip::api::Event::Received(msg)) => {
                         // Check if sender is authorized before processing
@@ -107,13 +121,30 @@ impl GossipManager {
                             continue;
                         }
                         
-                        tracing::debug!(store_id = %store_id, bytes = msg.content.len(), "Received gossip message");
-                        if let Ok(entry) = SignedEntry::decode(&msg.content[..]) {
+                        // Decode GossipMessage wrapper
+                        let gossip_msg = match GossipMessage::decode(&msg.content[..]) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                tracing::warn!(store_id = %store_id, error = %e, "Failed to decode gossip message");
+                                continue;
+                            }
+                        };
+                        
+                        if let Some(Payload::Entry(entry)) = gossip_msg.payload {
+                            tracing::debug!(store_id = %store_id, from = %msg.delivered_from.fmt_short(), "Gossip entry received");
                             let _ = store.ingest_entry(entry).await;
                         }
                     }
-                    Ok(other) => {
-                        tracing::debug!(store_id = %store_id, event = ?other, "Gossip event");
+                    Ok(iroh_gossip::api::Event::NeighborUp(peer_id)) => {
+                        tracing::info!(peer = %peer_id.fmt_short(), "Gossip peer connected");
+                        online_peers.write().await.insert(peer_id, Instant::now());
+                    }
+                    Ok(iroh_gossip::api::Event::NeighborDown(peer_id)) => {
+                        tracing::info!(peer = %peer_id.fmt_short(), "Gossip peer disconnected");
+                        online_peers.write().await.remove(&peer_id);
+                    }
+                    Ok(iroh_gossip::api::Event::Lagged) => {
+                        tracing::warn!(store_id = %store_id, "Gossip receiver lagged");
                     }
                     Err(e) => {
                         tracing::warn!(store_id = %store_id, error = %e, "Gossip receive error");
@@ -135,7 +166,11 @@ impl GossipManager {
             while let Ok(entry) = entry_rx.recv().await {
                 tracing::debug!(store_id = %store_id, "Broadcasting entry via gossip");
                 if let Some(sender) = senders.read().await.get(&store_id) {
-                    if let Err(e) = sender.broadcast(entry.encode_to_vec().into()).await {
+                    // Wrap entry in GossipMessage
+                    let msg = GossipMessage {
+                        payload: Some(Payload::Entry(entry)),
+                    };
+                    if let Err(e) = sender.broadcast(msg.encode_to_vec().into()).await {
                         tracing::warn!(error = %e, "Gossip broadcast failed");
                     }
                 } else {

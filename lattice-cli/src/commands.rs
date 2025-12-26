@@ -187,6 +187,8 @@ pub enum StoreSubcommand {
 pub enum PeerSubcommand {
     /// List all peers
     List,
+    /// Show sync status matrix with RTT
+    Status,
     /// Invite a peer
     Invite {
         pubkey: String,
@@ -241,6 +243,7 @@ pub async fn handle_command(
         },
         LatticeCommand::Peer { subcommand } => match subcommand {
             PeerSubcommand::List => crate::node_commands::cmd_peers(node, store, server.as_deref(), &[], writer).await,
+            PeerSubcommand::Status => crate::node_commands::cmd_status(node, store, server.as_deref(), &[], writer).await,
             PeerSubcommand::Invite { pubkey } => crate::node_commands::cmd_invite(node, store, server.as_deref(), &[pubkey], writer).await,
             PeerSubcommand::Remove { pubkey } => crate::node_commands::cmd_remove(node, store, server.as_deref(), &[pubkey], writer).await,
             PeerSubcommand::Sync { node_id } => {
