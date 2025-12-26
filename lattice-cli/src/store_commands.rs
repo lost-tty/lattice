@@ -47,10 +47,28 @@ pub async fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _server
         let _ = writeln!(w);
         let _ = writeln!(w, "Orphaned Entries:");
         let orphans = h.orphan_list().await;
-        for (author, seq, prev_hash) in orphans {
+        for (author, seq, prev_hash, _entry_hash) in orphans {
             let _ = writeln!(w, "  author:{}  seq:{}  awaiting:{}", 
                 hex::encode(&author[..8]), seq, hex::encode(&prev_hash[..8]));
         }
+    }
+    
+    CommandResult::Ok
+}
+
+pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+    let Some(h) = store else {
+        let mut w = writer.clone();
+        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
+        return CommandResult::Ok;
+    };
+    
+    let mut w = writer.clone();
+    let removed = h.orphan_cleanup().await;
+    if removed > 0 {
+        let _ = writeln!(w, "Cleaned up {} stale orphan(s)", removed);
+    } else {
+        let _ = writeln!(w, "No stale orphans to clean up");
     }
     
     CommandResult::Ok

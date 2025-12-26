@@ -241,8 +241,8 @@ impl OrphanStore {
         Ok(table.len()? as usize)
     }
     
-    /// List all orphans as (author, seq, prev_hash)
-    pub fn list_all(&self) -> Result<Vec<([u8; 32], u64, [u8; 32])>, OrphanStoreError> {
+    /// List all orphans as (author, seq, prev_hash, entry_hash)
+    pub fn list_all(&self) -> Result<Vec<([u8; 32], u64, [u8; 32], [u8; 32])>, OrphanStoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(ORPHANS_TABLE)?;
         
@@ -253,7 +253,7 @@ impl OrphanStore {
                 .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
             
             let orphaned = crate::proto::OrphanedEntry::decode(value.value())?;
-            orphans.push((key.author, orphaned.seq, key.prev_hash));
+            orphans.push((key.author, orphaned.seq, key.prev_hash, key.entry_hash));
         }
         
         // Sort by author then seq
