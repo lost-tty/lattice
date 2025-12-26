@@ -90,6 +90,12 @@ pub enum LatticeCommand {
         /// Optional pubkey (defaults to self)
         pubkey: Option<String>,
     },
+    /// Show history/DAG for a key
+    #[command(next_help_heading = "Key-Value Operations")]
+    History {
+        /// Key to show history for
+        key: String,
+    },
     /// Exit the CLI
     #[command(next_help_heading = "General")]
     Quit,
@@ -261,6 +267,9 @@ pub async fn handle_command(
         LatticeCommand::AuthorState { pubkey } => {
             let args = pubkey.map(|p| vec![p]).unwrap_or_default();
             crate::store_commands::cmd_author_state(node, store, server.as_deref(), &args, writer).await
+        },
+        LatticeCommand::History { key } => {
+            crate::store_commands::cmd_key_history(node, store, server.as_deref(), &[key], writer).await
         },
         LatticeCommand::Quit => {
             let mut w = writer.clone();
