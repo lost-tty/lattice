@@ -66,14 +66,14 @@ lattice-net                           lattice-core
          │                                     │
          │ uses StoreHandle API                │ spawns
          ▼                                     ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │                    StoreHandle                          │
-  │  • put(key, value), get(key), delete(key)               │
-  │  • subscribe_entries() → for gossip broadcast           │
-  │  • apply_entry(SignedEntry) → for receiving gossip/sync │
-  │  • read_missing_entries(missing_ranges) → for sync send │
-  │  • sync_state() → for sync negotiation                  │
-  └─────────────────────────────────────────────────────────┘
+  ┌───────────────────────────────────────────────────────────┐
+  │                    StoreHandle                            │
+  │  • put(key, value), get(key), delete(key)                 │
+  │  • subscribe_entries() → for gossip broadcast             │
+  │  • ingest_entry(SignedEntry) → for receiving gossip/sync  │
+  │  • stream_missing_entries(missing_ranges) → for sync send │
+  │  • sync_state() → for sync negotiation                    │
+  └───────────────────────────────────────────────────────────┘
 ```
 
 ## Parts

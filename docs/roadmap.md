@@ -14,55 +14,49 @@ Store actor pattern (dedicated thread, channel commands), tokio runtime, async C
 ### M2: Two-Node Sync ✓
 Iroh integration (mDNS + DNS discovery), peer management via `/nodes/` keys, join protocol with store UUID exchange, bidirectional sync with SyncState diff, framed protobuf messaging.
 
+### M3: Multi-Node Mesh (Partial) ✓
+LatticeServer refactor, gossip protocol (iroh-gossip), Key Watcher for reactive patterns, unified entry validation with hash index, orphan gap-filling with targeted sync.
+
 ---
 
-## Milestone 3: Multi-Node Mesh (Current)
+## Priority 1: Stability
 
-**Goal:** N nodes form a gossip mesh for real-time sync.
+**Goal:** Fix known bugs and add diagnostic tooling.
 
-### Completed
+### Regressions
+- [ ] On join, node does not reliably join gossip
 
-**LatticeServer Refactor** ✓
-- `LatticeServer` struct wrapping `Arc<Node>` + `Endpoint`
-- Encapsulated accept loop via Router + ProtocolHandler
+### Diagnostics
+- [ ] Lightweight peer ping: broadcast (no arg) or unicast (peer id), returns sync_state/watermark
 
-**Gossip Protocol** ✓ (iroh-gossip)
-- Router handles `lattice-sync/1` and `/iroh-gossip/1` ALPNs
-- Auto-join gossip topic on root store activation
-- Broadcast local entries, receive and apply gossip entries
-- Topic ID via `blake3::hash("lattice/{store_id}")`
-- Bootstrap peers from `/nodes/` via Key Watcher
-
-**Key Watcher** ✓
-- `store.watch(regex) -> (initial, Receiver<WatchEvent>)`
-- StoreActor tracks watchers, emits on matching put/delete
-- Enables reactive patterns: config changes, presence, app-level subscriptions
-
-**Unified Entry Validation** ✓
-- Entry written to log ONLY when sigchain AND DAG parent checks pass
-- Hash index in SigChainManager for O(1) parent existence checks
-- OrphanStore for buffering entries awaiting parents
-- Iterative orphan resolution (prevent stack overflow)
-
-**Orphan Gap-Filling** ✓
-- Gap detection emits `GapInfo` event via broadcast channel
-- `sync_author_all()` for targeted sync across peers
-- Gap watcher task triggers sync on detected gaps
-- Duplicate entry detection (SigchainValidation::Duplicate) prevents stale orphans
-
-### In Progress
-
-**Orphan Management**
+### Orphan Management
 - [ ] TTL expiry for long-lived orphans
 - [ ] Retry logic: if gap persists after sync, retry with different peer
 
-**Regressions**
-- [ ] Syncing new peer leads to multi-head key (corrupted/missing seq:1 for some authors)
-- [ ] On join, node does not reliably join gossip
+### Tech Debt
+- [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip regression)
+- [ ] Proto: Change `HeadInfo.hlc` to proper `HLC` message type
+- [ ] Proto: Change `HLC.counter` from `uint32` to `uint16`
 
 ---
 
-## Phase 3: Multi-Store & Reliability (Next)
+## Priority 2: Sync & Gossip Reliability
+
+**Goal:** Production-ready mesh networking.
+
+### Gossip Reliability
+- [ ] **REGRESSION**: Gossip loses connectivity after sleep/wake
+- [ ] Periodic anti-entropy sync to catch missed entries
+- [ ] Detect stale gossip → trigger sync
+
+### Sync Resilience
+- [ ] Retry failed syncs with backoff
+- [ ] Handle partial sync (peer disconnects mid-sync)
+- [ ] Offline nodes should not block sync (timeout + skip)
+
+---
+
+## Priority 3: Multi-Store
 
 **Goal:** Root store as control plane for declaring/managing additional stores.
 
@@ -82,53 +76,60 @@ Iroh integration (mDNS + DNS discovery), peer management via `/nodes/` keys, joi
 - [ ] All stores use root store peer list (`/nodes/`)
 - [ ] Peer authorization checked against root store on ingest
 
-### 3E: HTTP API Access Tokens
+---
+
+## Priority 4: HTTP API
+
+**Goal:** External access to stores via REST.
+
+### 4A: Access Tokens
 - [ ] Token storage: `/tokens/{id}/store_id`, `/tokens/{id}/secret_hash`, `/tokens/{id}/permissions`
 - [ ] CLI: `create-token`, `list-tokens`, `revoke-token`
 
-### 3F: HTTP API Server (lattice-http crate)
+### 4B: HTTP Server (lattice-http crate)
 - [ ] REST endpoints: `GET/PUT/DELETE /stores/{uuid}/keys/{key}`
 - [ ] Auth via `Authorization: Bearer {token_id}:{secret}`
 
-### Gossip Reliability
-- [ ] **REGRESSION**: Gossip loses connectivity after sleep/wake
-- [ ] Periodic anti-entropy sync to catch missed entries
-- [ ] Detect stale gossip → trigger sync
+---
 
-### Sync Resilience
-- [ ] Retry failed syncs with backoff
-- [ ] Handle partial sync (peer disconnects mid-sync)
-- [ ] Offline nodes should not block sync (timeout + skip)
+## Priority 5: WebAssembly Consensus Bus
+
+**Goal:** Transform from passive KV store to replicated state machine.
+
+See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for detailed design.
+
+### Phase 1: Protocol
+- [ ] Add `Instruction` message alongside legacy `Operation` enum
+- [ ] Backward compatible: existing put/delete still works
+
+### Phase 2: Dispatcher
+- [ ] Refactor `StoreActor` to route by `program_id`
+- [ ] Native handler for `sys` (existing redb logic)
+
+### Phase 3: Runtime
+- [ ] Embed `wasmtime` runtime
+- [ ] Define host functions: `db_get`, `db_put`
+
+### Phase 4: Pilot
+- [ ] Deploy first WASM contract (Counter or Tagging bot)
 
 ---
 
 ## Technical Debt
 
-**Crate Refactoring: lattice-store**
-- [ ] Extract `Store`, `SigChain`, `StoreActor` into separate crate
+**Crate Refactoring** (larger effort, defer)
+- [ ] Extract `Store`, `SigChain`, `StoreActor` into `lattice-store` crate
 - [ ] Trait boundaries: `KvStore` (user ops) vs `SyncStore` (network ops)
-
-**Proto Schema**
-- [ ] Change `HeadInfo.hlc` to proper `HLC` message type
-- [ ] Change `HLC.counter` from `uint32` to `uint16`
-
-**Lifecycle Management**
-- [ ] Graceful shutdown with `CancellationToken` for spawned tasks
-
-**Error Handling**
-- [ ] Replace `Result<..., String>` with proper error types
 
 ---
 
 ## Future
 
-- Offline nodes should not delay sync
 - Transitive sync across all peers
 - CRDTs: PN-Counters, OR-Sets for peer list
 - Transaction Groups: atomic batched operations
 - Watermark tracking & log pruning
 - Snapshots: fast bootstrap, point-in-time restore
-  - Needs architecture discussion: diffing approach without intermediate log
 - Mobile clients (iOS/Android)
 - Key rotation
 - Secure storage (Keychain, TPM)
