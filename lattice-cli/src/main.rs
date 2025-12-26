@@ -3,6 +3,7 @@
 mod commands;
 mod node_commands;
 mod store_commands;
+mod graph_renderer;
 mod tracing_writer;
 
 use lattice_net::LatticeServer;

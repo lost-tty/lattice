@@ -411,8 +411,8 @@ impl StoreActor {
             // Step 1: Validate sigchain
             match self.chain_manager.validate_entry(&current) {
                 SigchainValidation::Valid => {
-                    // Step 2: Validate state (parent_hashes)
-                    match self.store.validate_parent_hashes(&current) {
+                    // Step 2: Validate state (parent_hashes exist in history)
+                    match self.store.validate_parent_hashes_with_index(&current, |hash| self.chain_manager.hash_exists(hash)) {
                         Ok(()) => {
                             // Both valid - commit to sigchain and apply to state
                             let ready_orphans = self.chain_manager.commit_entry(&current)?;
@@ -1154,6 +1154,119 @@ mod tests {
         assert_eq!(orphan_count_after, 1, 
             "BUG: Sigchain orphan B should NOT be deleted until fully processed! \
              If this fails, orphans can be lost on crash.");
+    }
+    
+    /// Test concurrent offline writes scenario.
+    /// 
+    /// Scenario:
+    /// 1. Both nodes start with key `a` having head H0
+    /// 2. Node A (offline) writes a=1 → creates H1 (parents: [H0])
+    /// 3. Node B (offline) writes a=2 → creates H2 (parents: [H0])
+    /// 4. Node A receives H2 from sync
+    /// 
+    /// Expected: H2 should apply, creating conflict [H1, H2]
+    /// Bug: H2 becomes DAG orphan because H0 is no longer a current head
+    #[test]
+    fn test_concurrent_offline_writes_create_conflict() {
+        let dir = temp_test_dir("concurrent_offline");
+        let _ = std::fs::remove_dir_all(&dir);
+        let state_path = dir.join("state.db");
+        let logs_dir = dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        
+        let store = Store::open(&state_path).unwrap();
+        
+        // Two different nodes
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        
+        // Initial state: both nodes have H0 as head for key `a`
+        // Simulated by node_a writing the initial value
+        let clock_0 = MockClock::new(1000);
+        let entry_h0 = EntryBuilder::new(1, HLC::now_with_clock(&clock_0))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put(b"/key_a", b"initial".to_vec()))
+            .sign(&node_a);
+        let hash_h0 = hash_signed_entry(&entry_h0);
+        
+        // Apply H0 to the store
+        store.apply_entry(&entry_h0).unwrap();
+        
+        // Verify H0 is the only head
+        let heads = store.get_heads(b"/key_a").unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].hash, hash_h0.to_vec());
+        
+        // Node A goes offline and writes a=1 → H1 (parents: [H0])
+        let clock_a = MockClock::new(2000);
+        let entry_h1 = EntryBuilder::new(2, HLC::now_with_clock(&clock_a))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash(hash_h0.to_vec())
+            .parent_hashes(vec![hash_h0.to_vec()])
+            .operation(Operation::put(b"/key_a", b"value_a".to_vec()))
+            .sign(&node_a);
+        let hash_h1 = hash_signed_entry(&entry_h1);
+        
+        // Apply H1 - this supersedes H0
+        store.apply_entry(&entry_h1).unwrap();
+        
+        // Verify H1 is now the only head (H0 was superseded)
+        let heads = store.get_heads(b"/key_a").unwrap();
+        assert_eq!(heads.len(), 1, "H1 should be the only head");
+        assert_eq!(heads[0].hash, hash_h1.to_vec());
+        
+        // Node B goes offline and writes a=2 → H2 (parents: [H0])
+        // Note: H2 references H0, not H1, because B was offline
+        let clock_b = MockClock::new(2500);
+        let entry_h2 = EntryBuilder::new(1, HLC::now_with_clock(&clock_b))
+            .store_id(TEST_STORE.to_vec())
+            .prev_hash([0u8; 32].to_vec())  // B's first entry
+            .parent_hashes(vec![hash_h0.to_vec()])  // References H0, not H1!
+            .operation(Operation::put(b"/key_a", b"value_b".to_vec()))
+            .sign(&node_b);
+        let hash_h2 = hash_signed_entry(&entry_h2);
+        
+        // Create a SigChainManager to track hash history
+        let mut manager = crate::store::sigchain::SigChainManager::new(&logs_dir, TEST_STORE);
+        
+        // Manually register H0 and H1 in the hash index (simulating they were committed)
+        manager.register_hash(hash_h0);
+        manager.register_hash(hash_h1);
+        
+        // Now Node A receives H2 via sync
+        // H2 references H0 as parent, but H0 is no longer a current head (H1 replaced it)
+        // 
+        // CURRENT BUG (with old method): validate_parent_hashes will fail because H0 is not a current head
+        // FIX (with new method): validate_parent_hashes_with_index should succeed (H0 exists in history)
+        
+        let validation_result = store.validate_parent_hashes_with_index(
+            &entry_h2,
+            |hash| manager.hash_exists(hash)
+        );
+        
+        // With the fix: this should succeed (H0 exists in history)
+        assert!(validation_result.is_ok(), 
+            "BUG: Entry referencing superseded parent should still be valid! \
+             Concurrent offline writes should create conflicts, not orphans. \
+             Got: {:?}", validation_result);
+        
+        // Apply H2
+        store.apply_entry(&entry_h2).unwrap();
+        
+        // Verify we now have TWO heads (conflict state)
+        let heads = store.get_heads(b"/key_a").unwrap();
+        assert_eq!(heads.len(), 2, 
+            "Should have 2 heads (conflict) after concurrent offline writes. \
+             Got {} heads: {:?}", 
+            heads.len(), 
+            heads.iter().map(|h| hex::encode(&h.hash[..8])).collect::<Vec<_>>());
+        
+        // Verify both H1 and H2 are present
+        let head_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
+        assert!(head_hashes.contains(&hash_h1.to_vec()), "H1 should be a head");
+        assert!(head_hashes.contains(&hash_h2.to_vec()), "H2 should be a head");
     }
 }
 

@@ -407,3 +407,114 @@ fn format_hlc(hlc: u64) -> String {
 fn format_hlc_proto(hlc: &lattice_core::proto::Hlc) -> String {
     format_hlc_parts(hlc.wall_time, hlc.counter)
 }
+
+/// Entry info for history display
+#[derive(Clone)]
+struct HistoryEntry {
+    author: [u8; 32],
+    hlc: u64,
+    value: Vec<u8>,
+    tombstone: bool,
+    parent_hashes: Vec<[u8; 32]>,
+}
+
+pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+    let Some(h) = store else {
+        let mut w = writer.clone();
+        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
+        return CommandResult::Ok;
+    };
+    
+    if args.is_empty() {
+        let mut w = writer.clone();
+        let _ = writeln!(w, "Usage: history <key>");
+        return CommandResult::Ok;
+    }
+    
+    let key = args[0].as_bytes();
+    let mut w = writer.clone();
+    
+    // Get sync state to find all authors
+    let sync_state = match h.sync_state().await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(w, "Error getting sync state: {}", e);
+            return CommandResult::Ok;
+        }
+    };
+    
+    // Collect all entries that touch this key
+    let mut entries: std::collections::HashMap<[u8; 32], HistoryEntry> = std::collections::HashMap::new();
+    
+    for (author, _info) in sync_state.authors() {
+        // Stream entries for this author
+        let mut rx = match h.stream_entries_after(&author, None).await {
+            Ok(rx) => rx,
+            Err(_) => continue,
+        };
+        
+        while let Some(entry) = rx.recv().await {
+            // Decode entry
+            let Ok(decoded) = <lattice_core::proto::Entry as prost::Message>::decode(&entry.entry_bytes[..]) else {
+                continue;
+            };
+            
+            // Check if this entry touches our key
+            for op in &decoded.ops {
+                use lattice_core::proto::operation::OpType;
+                let (op_key, value, tombstone) = match &op.op_type {
+                    Some(OpType::Put(p)) => (&p.key, &p.value, false),
+                    Some(OpType::Delete(d)) => (&d.key, &vec![], true),
+                    None => continue,
+                };
+                
+                if op_key == key {
+                    let hash = lattice_core::store::hash_signed_entry(&entry);
+                    let hlc = decoded.timestamp.as_ref()
+                        .map(|t| (t.wall_time << 16) | t.counter as u64)
+                        .unwrap_or(0);
+                    let parent_hashes: Vec<[u8; 32]> = decoded.parent_hashes.iter()
+                        .filter_map(|h| h.clone().try_into().ok())
+                        .collect();
+                    
+                    entries.insert(hash, HistoryEntry {
+                        author: *author,
+                        hlc,
+                        value: value.clone(),
+                        tombstone,
+                        parent_hashes,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+    
+    if entries.is_empty() {
+        let _ = writeln!(w, "(no history found)");
+        return CommandResult::Ok;
+    }
+    
+    // Convert to RenderEntry format for the grid renderer
+    let render_entries: std::collections::HashMap<[u8; 32], crate::graph_renderer::RenderEntry> = entries
+        .into_iter()
+        .map(|(hash, e)| {
+            let is_merge = e.parent_hashes.len() > 1;
+            (hash, crate::graph_renderer::RenderEntry {
+                author: e.author,
+                hlc: e.hlc,
+                value: e.value,
+                tombstone: e.tombstone,
+                parent_hashes: e.parent_hashes,
+                is_merge,
+            })
+        })
+        .collect();
+    
+    // Use the grid-based renderer
+    let _ = writeln!(w, "History for key: {}\n", format_value(key));
+    let output = crate::graph_renderer::render_dag(&render_entries, key);
+    let _ = write!(w, "{}", output);
+    
+    CommandResult::Ok
+}

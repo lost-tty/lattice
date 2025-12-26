@@ -124,9 +124,54 @@ impl Store {
         Ok(())
     }
     
-    /// Validate that parent_hashes in entry match current heads for affected keys.
+    /// Validate that parent_hashes in entry exist in history.
     /// Returns Ok(()) if valid (entry can be applied), Err with missing parent info if not.
     /// Empty parent_hashes is always valid (creates new head).
+    /// 
+    /// The hash_exists function should return true if the hash has ever been applied
+    /// (checked against the hash index, not just current heads).
+    pub fn validate_parent_hashes_with_index<F>(
+        &self,
+        signed_entry: &SignedEntry,
+        hash_exists: F,
+    ) -> Result<(), ParentValidationError> 
+    where F: Fn(&[u8; 32]) -> bool
+    {
+        let entry = Entry::decode(&signed_entry.entry_bytes[..])
+            .map_err(|e| ParentValidationError::Decode(e.to_string()))?;
+        
+        // If no parent_hashes, this is a "new head" operation - always valid
+        if entry.parent_hashes.is_empty() {
+            return Ok(());
+        }
+        
+        // For each parent hash, check it exists in history
+        for parent in &entry.parent_hashes {
+            let parent_hash: [u8; 32] = parent.clone().try_into()
+                .map_err(|_| ParentValidationError::Decode("Invalid parent hash length".to_string()))?;
+            
+            if !hash_exists(&parent_hash) {
+                // Get the key for the error message (from first op)
+                let key = entry.ops.first()
+                    .and_then(|op| match &op.op_type {
+                        Some(operation::OpType::Put(p)) => Some(p.key.clone()),
+                        Some(operation::OpType::Delete(d)) => Some(d.key.clone()),
+                        None => None,
+                    })
+                    .unwrap_or_default();
+                
+                return Err(ParentValidationError::MissingParent {
+                    key,
+                    awaited_hash: parent.clone(),
+                });
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Legacy validation - checks parent_hashes are current heads.
+    /// Use validate_parent_hashes_with_index for proper CRDT behavior.
     pub fn validate_parent_hashes(&self, signed_entry: &SignedEntry) -> Result<(), ParentValidationError> {
         let entry = Entry::decode(&signed_entry.entry_bytes[..])
             .map_err(|e| ParentValidationError::Decode(e.to_string()))?;

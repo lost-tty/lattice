@@ -288,6 +288,11 @@ pub struct SigChainManager {
     
     /// Broadcast channel for gap detection events
     gap_tx: broadcast::Sender<GapInfo>,
+    
+    /// In-memory hash index: set of all entry hashes that exist in logs.
+    /// Built on startup by scanning logs, updated on each commit.
+    /// Used for parent_hash validation (check if hash exists in history).
+    hash_index: std::collections::HashSet<[u8; 32]>,
 }
 
 impl SigChainManager {
@@ -299,13 +304,57 @@ impl SigChainManager {
             .expect("Failed to open orphan store");
         let (gap_tx, _) = broadcast::channel(64);
         
+        // Build hash index by scanning all log files
+        let hash_index = Self::build_hash_index(&logs_path)
+            .expect("Failed to build hash index - log files may be corrupted or unreadable");
+        
         Self {
             logs_dir: logs_path,
             store_id,
             chains: std::collections::HashMap::new(),
             orphan_store,
             gap_tx,
+            hash_index,
         }
+    }
+    
+    /// Build hash index by scanning all log files in directory
+    fn build_hash_index(logs_dir: &Path) -> Result<std::collections::HashSet<[u8; 32]>, LogError> {
+        use crate::store::log::iter_entries_after;
+        use crate::store::signed_entry::hash_signed_entry;
+        
+        let mut index = std::collections::HashSet::new();
+        
+        // Find all .log files
+        let Ok(entries) = std::fs::read_dir(logs_dir) else {
+            return Ok(index);
+        };
+        
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "log").unwrap_or(false) {
+                // Iterate entries in this log - propagate errors
+                let iter = iter_entries_after(&path, None)?;
+                for result in iter {
+                    if let Ok(signed_entry) = result {
+                        let hash = hash_signed_entry(&signed_entry);
+                        index.insert(hash);
+                    }
+                }
+            }
+        }
+        
+        Ok(index)
+    }
+    
+    /// Check if an entry hash exists in history
+    pub fn hash_exists(&self, hash: &[u8; 32]) -> bool {
+        self.hash_index.contains(hash)
+    }
+    
+    /// Register an entry hash in the index (called after commit)
+    pub fn register_hash(&mut self, hash: [u8; 32]) {
+        self.hash_index.insert(hash);
     }
     
     /// Subscribe to gap detection events
@@ -385,8 +434,11 @@ impl SigChainManager {
         let chain = self.get_or_create(author);
         chain.append_unchecked(entry)?;
         
-        // Check for orphans waiting for this entry
+        // Compute hash and register in index
         let entry_hash = hash_signed_entry(entry);
+        self.register_hash(entry_hash);
+        
+        // Check for orphans waiting for this entry
         let mut ready = Vec::new();
         
         if let Ok(orphans) = self.orphan_store.find_by_prev_hash(&author, &entry_hash) {
