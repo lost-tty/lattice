@@ -411,6 +411,7 @@ fn format_hlc_proto(hlc: &lattice_core::proto::Hlc) -> String {
 /// Entry info for history display
 #[derive(Clone)]
 struct HistoryEntry {
+    key: Vec<u8>,
     author: [u8; 32],
     hlc: u64,
     value: Vec<u8>,
@@ -425,13 +426,8 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
         return CommandResult::Ok;
     };
     
-    if args.is_empty() {
-        let mut w = writer.clone();
-        let _ = writeln!(w, "Usage: history <key>");
-        return CommandResult::Ok;
-    }
-    
-    let key = args[0].as_bytes();
+    // Key is optional - empty means show all entries
+    let key: Option<&[u8]> = if args.is_empty() { None } else { Some(args[0].as_bytes()) };
     let mut w = writer.clone();
     
     // Get sync state to find all authors
@@ -443,7 +439,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
         }
     };
     
-    // Collect all entries that touch this key
+    // Collect entries (all or filtered by key)
     let mut entries: std::collections::HashMap<[u8; 32], HistoryEntry> = std::collections::HashMap::new();
     
     for (author, _info) in sync_state.authors() {
@@ -459,7 +455,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
                 continue;
             };
             
-            // Check if this entry touches our key
+            // Check if this entry should be included
             for op in &decoded.ops {
                 use lattice_core::proto::operation::OpType;
                 let (op_key, value, tombstone) = match &op.op_type {
@@ -468,7 +464,8 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
                     None => continue,
                 };
                 
-                if op_key == key {
+                // Include if: no key filter OR key matches
+                if key.is_none() || key == Some(op_key.as_slice()) {
                     let hash = lattice_core::store::hash_signed_entry(&entry);
                     let hlc = decoded.timestamp.as_ref()
                         .map(|t| (t.wall_time << 16) | t.counter as u64)
@@ -478,6 +475,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
                         .collect();
                     
                     entries.insert(hash, HistoryEntry {
+                        key: op_key.clone(),
                         author: *author,
                         hlc,
                         value: value.clone(),
@@ -501,6 +499,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
         .map(|(hash, e)| {
             let is_merge = e.parent_hashes.len() > 1;
             (hash, crate::graph_renderer::RenderEntry {
+                key: e.key,
                 author: e.author,
                 hlc: e.hlc,
                 value: e.value,
@@ -512,9 +511,15 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
         .collect();
     
     // Use the grid-based renderer
-    let _ = writeln!(w, "History for key: {}\n", format_value(key));
-    let output = crate::graph_renderer::render_dag(&render_entries, key);
-    let _ = write!(w, "{}", output);
+    if let Some(k) = key {
+        let _ = writeln!(w, "History for key: {}\n", format_value(k));
+        let output = crate::graph_renderer::render_dag(&render_entries, k);
+        let _ = write!(w, "{}", output);
+    } else {
+        let _ = writeln!(w, "Complete history\n");
+        let output = crate::graph_renderer::render_dag(&render_entries, b"*");
+        let _ = write!(w, "{}", output);
+    }
     
     CommandResult::Ok
 }

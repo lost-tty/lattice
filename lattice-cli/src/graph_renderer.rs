@@ -9,25 +9,29 @@ use std::fmt::Write;
 pub const SPACE: u8 = 0;
 pub const DOT: u8 = 1;      // ● entry marker
 pub const CIRCLE: u8 = 2;   // ○ merge entry marker
-pub const VER: u8 = 3;      // │ vertical line
-pub const HOR: u8 = 4;      // ─ horizontal line
-pub const CROSS: u8 = 5;    // ┼ crossing
-pub const R_U: u8 = 6;      // ╰ right-up corner
-pub const R_D: u8 = 7;      // ╭ right-down corner
-pub const L_D: u8 = 8;      // ╮ left-down corner
-pub const L_U: u8 = 9;      // ╯ left-up corner
-pub const VER_L: u8 = 10;   // ┤ vertical with left branch
-pub const VER_R: u8 = 11;   // ├ vertical with right branch
-pub const HOR_U: u8 = 12;   // ┴ horizontal with up branch
-pub const HOR_D: u8 = 13;   // ┬ horizontal with down branch
-pub const ARR_L: u8 = 14;   // ⟨ left angle bracket (merge indicator)
-pub const ARR_R: u8 = 15;   // ⟩ right angle bracket (merge indicator)
+pub const ROOT: u8 = 3;     // ⊙ root entry marker (no parents)
+pub const TOMBSTONE: u8 = 4; // ✖ delete entry marker
+pub const VER: u8 = 5;      // │ vertical line
+pub const HOR: u8 = 6;      // ─ horizontal line
+pub const CROSS: u8 = 7;    // ┼ crossing
+pub const R_U: u8 = 8;      // ╰ right-up corner
+pub const R_D: u8 = 9;      // ╭ right-down corner
+pub const L_D: u8 = 10;     // ╮ left-down corner
+pub const L_U: u8 = 11;     // ╯ left-up corner
+pub const VER_L: u8 = 12;   // ┤ vertical with left branch
+pub const VER_R: u8 = 13;   // ├ vertical with right branch
+pub const HOR_U: u8 = 14;   // ┴ horizontal with up branch
+pub const HOR_D: u8 = 15;   // ┬ horizontal with down branch
+pub const ARR_L: u8 = 16;   // ⟨ left angle bracket (merge indicator)
+pub const ARR_R: u8 = 17;   // ⟩ right angle bracket (merge indicator)
 
 // Character mappings
-const CHARS: [char; 16] = [
+const CHARS: [char; 18] = [
     ' ',  // SPACE
     '●',  // DOT
     '○',  // CIRCLE
+    '⊙',  // ROOT
+    '✖',  // TOMBSTONE
     '│',  // VER
     '─',  // HOR
     '┼',  // CROSS
@@ -253,11 +257,45 @@ impl Grid {
         
         output
     }
+    
+    /// Render grid to string with separators at specified rows
+    pub fn render_with_separators(&self, labels: &[String], separator_rows: &std::collections::HashSet<usize>) -> String {
+        let mut output = String::new();
+        
+        for y in 0..self.height {
+            // Add empty line before new tree (but not at row 0)
+            if y > 0 && separator_rows.contains(&y) {
+                output.push('\n');
+            }
+            
+            // Render graph columns
+            for x in 0..self.width {
+                let cell = self.get(x, y);
+                if cell.color > 0 {
+                    write!(output, "\x1b[{}m{}\x1b[0m", cell.color, cell.to_char()).unwrap();
+                } else {
+                    output.push(cell.to_char());
+                }
+            }
+            
+            // Append label if present
+            if let Some(label) = labels.get(y) {
+                if !label.is_empty() {
+                    write!(output, " {}", label).unwrap();
+                }
+            }
+            
+            output.push('\n');
+        }
+        
+        output
+    }
 }
 
 /// Entry info for history rendering
 #[derive(Clone)]
 pub struct RenderEntry {
+    pub key: Vec<u8>,
     pub author: [u8; 32],
     pub hlc: u64,
     pub value: Vec<u8>,
@@ -269,7 +307,7 @@ pub struct RenderEntry {
 /// Render a DAG of entries to a grid-based graph
 pub fn render_dag(
     entries: &std::collections::HashMap<[u8; 32], RenderEntry>,
-    key: &[u8],
+    _key: &[u8],
 ) -> String {
     use std::collections::{HashMap, HashSet};
     
@@ -278,7 +316,6 @@ pub fn render_dag(
     }
     
     let mut output = String::new();
-    let key_str = String::from_utf8_lossy(key);
     
     // Build parent/child relationships
     let entry_hashes: HashSet<[u8; 32]> = entries.keys().cloned().collect();
@@ -292,100 +329,159 @@ pub fn render_dag(
         }
     }
     
-    // Find roots (no parents in set)
-    let mut roots: Vec<[u8; 32]> = entries.iter()
-        .filter(|(_, e)| e.parent_hashes.is_empty() || 
-                !e.parent_hashes.iter().any(|p| entry_hashes.contains(p)))
-        .map(|(h, _)| *h)
-        .collect();
-    roots.sort_by_key(|h| entries.get(h).map(|e| e.hlc).unwrap_or(0));
+    // Kahn's algorithm with HLC priority for global interleaving
+    // This ensures entries from different trees are interleaved by timestamp
+    // while respecting causal dependencies (parents before children)
     
-    // Sort children by HLC descending (newest first)
-    for kids in children.values_mut() {
-        kids.sort_by_key(|h| std::cmp::Reverse(entries.get(h).map(|e| e.hlc).unwrap_or(0)));
+    // Count incoming edges (parents in set) for each entry
+    let mut in_degree: HashMap<[u8; 32], usize> = HashMap::new();
+    for hash in entries.keys() {
+        let parents_in_set = entries.get(hash).unwrap().parent_hashes.iter()
+            .filter(|p| entry_hashes.contains(*p))
+            .count();
+        in_degree.insert(*hash, parents_in_set);
     }
     
-    // Topological sort (leaves first)
-    let mut visited = HashSet::new();
+    // Use BinaryHeap with HLC as priority (min-heap via Reverse)
+    use std::collections::BinaryHeap;
+    use std::cmp::Reverse;
+    
+    // (Reverse(hlc), hash) - Reverse for min-heap behavior (oldest first)
+    let mut ready: BinaryHeap<(Reverse<u64>, [u8; 32])> = BinaryHeap::new();
+    
+    // Start with all entries that have no parents (in_degree = 0)
+    for (hash, &degree) in &in_degree {
+        if degree == 0 {
+            let hlc = entries.get(hash).map(|e| e.hlc).unwrap_or(0);
+            ready.push((Reverse(hlc), *hash));
+        }
+    }
+    
     let mut order: Vec<[u8; 32]> = Vec::new();
     
-    fn visit(hash: [u8; 32], children: &HashMap<[u8; 32], Vec<[u8; 32]>>, 
-             visited: &mut HashSet<[u8; 32]>, order: &mut Vec<[u8; 32]>) {
-        if visited.contains(&hash) { return; }
-        visited.insert(hash);
+    while let Some((_, hash)) = ready.pop() {
+        order.push(hash);
+        
+        // Decrease in_degree for all children
         if let Some(kids) = children.get(&hash) {
             for child in kids {
-                visit(*child, children, visited, order);
+                if let Some(degree) = in_degree.get_mut(child) {
+                    *degree -= 1;
+                    if *degree == 0 {
+                        let hlc = entries.get(child).map(|e| e.hlc).unwrap_or(0);
+                        ready.push((Reverse(hlc), *child));
+                    }
+                }
             }
         }
-        order.push(hash);
     }
+    // order is now oldest first (roots at top), newest last (leaves at bottom)
     
-    for root in &roots {
-        visit(*root, &children, &mut visited, &mut order);
-    }
-    // order is now leaves first, roots last - reverse so oldest (roots) at top, newest at bottom
-    order.reverse();
-    
-    // Calculate column assignments using branch tracing
-    // Each entry needs a column; forks create new columns to the right
+    // Calculate column assignments with column reuse
+    // Track which columns have active vertical lines at each row
     let mut hash_to_col: HashMap<[u8; 32], usize> = HashMap::new();
     let mut hash_to_row: HashMap<[u8; 32], usize> = HashMap::new();
-    let mut max_col = 0usize;
     
     // Assign rows (order index)
     for (row, hash) in order.iter().enumerate() {
         hash_to_row.insert(*hash, row);
     }
     
-    // Assign columns by tracing from roots (oldest) to leaves (newest)
-    // First child inherits parent column, additional children get new columns (fork right)
+    // Track which columns are "in use" (have a line continuing below current row)
+    // A column is freed when its last descendant is processed
+    let mut active_columns: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut max_col_used = 0usize;
+    
+    // For each entry, find the row of its last descendant (to know when column becomes free)
+    let mut last_descendant_row: HashMap<[u8; 32], usize> = HashMap::new();
     for hash in order.iter() {
         let entry = entries.get(hash).unwrap();
-        let parents: Vec<[u8; 32]> = entry.parent_hashes.iter()
-            .filter(|p| entry_hashes.contains(*p))
-            .cloned()
-            .collect();
-        
-        if parents.is_empty() {
-            // Root - assign new column
-            hash_to_col.insert(*hash, max_col);
-            max_col += 1;
-        } else if parents.len() > 1 {
-            // MERGE: multiple parents - use the leftmost parent's column
-            // This keeps the graph compact after merges
-            let min_col = parents.iter()
-                .filter_map(|p| hash_to_col.get(p))
-                .min()
-                .copied()
-                .unwrap_or(0);
-            hash_to_col.insert(*hash, min_col);
-        } else {
-            // Single parent - check if we're first child
-            let parent = parents[0];
-            if let Some(&parent_col) = hash_to_col.get(&parent) {
-                let siblings = children.get(&parent).map(|s| s.len()).unwrap_or(0);
-                if siblings <= 1 {
-                    hash_to_col.insert(*hash, parent_col);
-                } else {
-                    // Fork - first sibling inherits, others branch right
-                    let first_sibling = children.get(&parent).and_then(|s| s.first());
-                    if first_sibling == Some(hash) {
-                        hash_to_col.insert(*hash, parent_col);
-                    } else {
-                        hash_to_col.insert(*hash, max_col);
-                        max_col += 1;
-                    }
-                }
-            } else {
-                hash_to_col.insert(*hash, max_col);
-                max_col += 1;
+        let my_row = hash_to_row[hash];
+        // Update each parent's last descendant
+        for parent in &entry.parent_hashes {
+            if entry_hashes.contains(parent) {
+                let current = last_descendant_row.get(parent).copied().unwrap_or(0);
+                last_descendant_row.insert(*parent, current.max(my_row));
             }
         }
     }
     
+    // Find leftmost free column
+    fn find_free_column(active: &std::collections::HashSet<usize>, max_used: usize) -> usize {
+        for col in 0..=max_used {
+            if !active.contains(&col) {
+                return col;
+            }
+        }
+        max_used + 1
+    }
+    
+    // Assign columns with reuse
+    for (row, hash) in order.iter().enumerate() {
+        let entry = entries.get(hash).unwrap();
+        let parents_in_set: Vec<[u8; 32]> = entry.parent_hashes.iter()
+            .filter(|p| entry_hashes.contains(*p))
+            .cloned()
+            .collect();
+        
+        let col = if parents_in_set.is_empty() {
+            // Root - find leftmost free column
+            let col = find_free_column(&active_columns, max_col_used);
+            max_col_used = max_col_used.max(col);
+            col
+        } else if parents_in_set.len() > 1 {
+            // MERGE: use leftmost parent's column
+            parents_in_set.iter()
+                .filter_map(|p| hash_to_col.get(p))
+                .min()
+                .copied()
+                .unwrap_or(0)
+        } else {
+            // Single parent
+            let parent = parents_in_set[0];
+            if let Some(&parent_col) = hash_to_col.get(&parent) {
+                let siblings = children.get(&parent).map(|s| s.len()).unwrap_or(0);
+                if siblings <= 1 {
+                    parent_col
+                } else {
+                    // Fork - first sibling inherits, others get new column
+                    let first_sibling = children.get(&parent).and_then(|s| s.first());
+                    if first_sibling == Some(hash) {
+                        parent_col
+                    } else {
+                        let col = find_free_column(&active_columns, max_col_used);
+                        max_col_used = max_col_used.max(col);
+                        col
+                    }
+                }
+            } else {
+                let col = find_free_column(&active_columns, max_col_used);
+                max_col_used = max_col_used.max(col);
+                col
+            }
+        };
+        
+        hash_to_col.insert(*hash, col);
+        
+        // A column is active as long as there's a vertical line in it
+        // This happens when an entry has descendants (children or merge children)
+        // The column should stay active until the LAST row that needs it
+        let has_descendants = last_descendant_row.get(hash).map(|&r| r > row).unwrap_or(false);
+        if has_descendants {
+            active_columns.insert(col);
+        } else {
+            // This entry has no more descendants - free its column
+            // But only if we're the one who made it active
+            active_columns.remove(&col);
+        }
+        
+        // Also need to keep parent columns active until this row if parent is in different column
+        // (the vertical line from parent to here blocks that column)
+        // This is already handled by parents not being freed until their last_descendant_row
+    }
+    
     // Create grid (2 chars per column for spacing)
-    let grid_width = (max_col + 1) * 2;
+    let grid_width = (max_col_used + 1) * 2;
     let grid_height = order.len();
     let mut grid = Grid::new(grid_width, grid_height);
     
@@ -403,13 +499,30 @@ pub fn render_dag(
         // Avoid black (30) and white (37) for better visibility
         let color_code = 31 + (entry.author[0] % 6); // 31-36: red, green, yellow, blue, magenta, cyan
         
+        // Count parents in our entry set (not all parents may be in filtered history)
+        let parents_in_set: Vec<[u8; 32]> = entry.parent_hashes.iter()
+            .filter(|p| entry_hashes.contains(*p))
+            .cloned()
+            .collect();
+        let is_root = parents_in_set.is_empty();
+        
         // Draw entry marker with author color
-        let marker = if entry.is_merge { CIRCLE } else { DOT };
+        // Priority: tombstone > root > merge > normal
+        let marker = if entry.tombstone { 
+            TOMBSTONE 
+        } else if is_root { 
+            ROOT 
+        } else if entry.is_merge { 
+            CIRCLE 
+        } else { 
+            DOT 
+        };
         grid.set_colored(grid_x, row, marker, 0, color_code); // Entries have highest priority
         
         // Create colored label
         let hash_short = hex::encode(&hash[..4]);
         let author_short = hex::encode(&entry.author[..4]);
+        let key_display = String::from_utf8_lossy(&entry.key);
         let val_str = if entry.tombstone { 
             "⊗".to_string() 
         } else { 
@@ -417,24 +530,27 @@ pub fn render_dag(
         };
         
         // Format with ANSI color: \x1b[{color}m ... \x1b[0m
-        let marker_char = if entry.is_merge { '○' } else { '●' };
+        let marker_char = if entry.tombstone { 
+            '✖' 
+        } else if is_root { 
+            '⊙' 
+        } else if entry.is_merge { 
+            '○' 
+        } else { 
+            '●' 
+        };
         labels[row] = format!(
             "\x1b[{}m{}\x1b[0m [{}] {}={} \x1b[{}m(a:{})\x1b[0m", 
-            color_code, marker_char, hash_short, key_str, val_str, color_code, author_short
+            color_code, marker_char, hash_short, key_display, val_str, color_code, author_short
         );
         
-        // Draw connections to parents
-        let parents: Vec<[u8; 32]> = entry.parent_hashes.iter()
-            .filter(|p| entry_hashes.contains(*p))
-            .cloned()
-            .collect();
-        
-        for (p_idx, parent) in parents.iter().enumerate() {
+        // Draw connections to parents (use parents_in_set from above)
+        for (p_idx, parent) in parents_in_set.iter().enumerate() {
             let parent_row = hash_to_row[parent];
             let parent_col = hash_to_col[parent];
             let parent_x = parent_col * 2;
             let persistence = (p_idx + 1) as u8;
-            let is_merge = parents.len() > 1;
+            let is_merge = parents_in_set.len() > 1;
             
             if col == parent_col {
                 // Same column - vertical line
