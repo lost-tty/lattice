@@ -42,11 +42,13 @@ pub enum SigChainError {
 pub enum SigchainValidation {
     /// Entry is valid and can be appended
     Valid,
-    /// Entry is orphaned - awaiting a parent entry
+    /// Entry is orphaned - awaiting a parent entry (seq > next_seq)
     Orphan {
         gap: GapInfo,
         prev_hash: [u8; 32],
     },
+    /// Entry is a duplicate - already applied (seq < next_seq)
+    Duplicate,
     /// Entry has fatal error (bad signature, wrong store, etc)
     Error(SigChainError),
 }
@@ -397,21 +399,28 @@ impl SigChainManager {
         match chain.validate(entry) {
             Ok(()) => SigchainValidation::Valid,
             Err(SigChainError::InvalidPrevHash { .. }) | Err(SigChainError::InvalidSequence { .. }) => {
-                // Orphan - extract info for buffering
+                // Decode to get seq number
                 let decoded = Entry::decode(&entry.entry_bytes[..]).ok();
-                let prev_hash: [u8; 32] = decoded.as_ref()
-                    .and_then(|e| e.prev_hash.clone().try_into().ok())
-                    .unwrap_or([0u8; 32]);
                 let seq = decoded.as_ref().map(|e| e.seq).unwrap_or(0);
                 
-                SigchainValidation::Orphan {
-                    gap: GapInfo {
-                        author,
-                        from_seq: next_seq,
-                        to_seq: seq,
-                        last_known_hash: Some(last_hash),
-                    },
-                    prev_hash,
+                if seq < next_seq {
+                    // Entry is behind our current position - already applied (duplicate)
+                    SigchainValidation::Duplicate
+                } else {
+                    // Entry is ahead of our current position - orphan waiting for parent
+                    let prev_hash: [u8; 32] = decoded.as_ref()
+                        .and_then(|e| e.prev_hash.clone().try_into().ok())
+                        .unwrap_or([0u8; 32]);
+                    
+                    SigchainValidation::Orphan {
+                        gap: GapInfo {
+                            author,
+                            from_seq: next_seq,
+                            to_seq: seq,
+                            last_known_hash: Some(last_hash),
+                        },
+                        prev_hash,
+                    }
                 }
             }
             Err(e) => SigchainValidation::Error(e),
