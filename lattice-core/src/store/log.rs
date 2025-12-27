@@ -30,70 +30,6 @@ pub enum LogError {
     HashMismatch,
 }
 
-/// Append a SignedEntry to a log file as a LogRecord
-pub fn append_entry(path: impl AsRef<Path>, entry: &SignedEntry) -> Result<u64, LogError> {
-    let path = path.as_ref();
-    
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    
-    let mut writer = BufWriter::new(file);
-    
-    // Serialize the SignedEntry
-    let entry_bytes = entry.encode_to_vec();
-    
-    if entry_bytes.len() > MAX_ENTRY_SIZE {
-        return Err(LogError::EntryTooLarge(entry_bytes.len()));
-    }
-    
-    // Compute hash
-    let hash: [u8; 32] = blake3::hash(&entry_bytes).into();
-    
-    // Create LogRecord
-    let record = LogRecord {
-        hash: hash.to_vec(),
-        entry_bytes,
-    };
-    
-    // Write length-delimited LogRecord
-    let mut buf = Vec::new();
-    record.encode_length_delimited(&mut buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    
-    writer.write_all(&buf)?;
-    writer.flush()?;
-    
-    // Ensure data is physically written to disk
-    writer.get_ref().sync_all()?;
-    
-    // Return new file size
-    let metadata = std::fs::metadata(path)?;
-    Ok(metadata.len())
-}
-
-/// Return an iterator over entries in a log file, optionally filtered by sequence range.
-/// - from_seq=0: start from beginning
-/// - to_seq=0: iterate until end
-pub fn iter_entries(path: impl AsRef<Path>, from_seq: u64, to_seq: u64) -> Result<impl Iterator<Item = Result<SignedEntry, LogError>>, LogError> {
-    let reader = match LogReader::open(&path) {
-        Ok(r) => r,
-        Err(LogError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(EntryIter::empty());
-        }
-        Err(e) => return Err(e),
-    };
-    
-    Ok(EntryIter::new(reader, from_seq, to_seq))
-}
-
-/// Convenience wrapper to iterate all entries in a log file.
-#[inline]
-pub fn iter_all_entries(path: impl AsRef<Path>) -> Result<impl Iterator<Item = Result<SignedEntry, LogError>>, LogError> {
-    iter_entries(path, 0, 0)
-}
-
 /// Iterator over entries in a log file with optional sequence range filtering.
 pub struct EntryIter {
     reader: Option<LogReader>,
@@ -107,14 +43,6 @@ impl EntryIter {
             reader: Some(reader),
             from_seq,
             to_seq,
-        }
-    }
-    
-    fn empty() -> Self {
-        Self {
-            reader: None,
-            from_seq: 0,
-            to_seq: 0,
         }
     }
 }
@@ -159,10 +87,11 @@ pub struct LogReader {
     reader: BufReader<File>,
 }
 
-impl LogReader {
-    /// Open a log file for reading
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, LogError> {
-        let file = File::open(path)?;
+impl LogReader {    
+    /// Create a reader from an existing file, seeking to start
+    pub fn from_file(mut file: File) -> Result<Self, LogError> {
+        use std::io::Seek;
+        file.seek(std::io::SeekFrom::Start(0))?;
         Ok(Self {
             reader: BufReader::new(file),
         })
@@ -178,6 +107,95 @@ impl Iterator for LogReader {
             Ok(None) => None,
             Err(e) => Some(Err(e)),
         }
+    }
+}
+
+use std::path::PathBuf;
+
+/// A log file with proper file handle ownership.
+/// Opened once, kept open for the lifetime of the struct.
+pub struct Log {
+    path: PathBuf,
+    writer: BufWriter<File>,
+}
+
+impl Log {
+    /// Open an existing log file for reading and appending.
+    /// Returns error if file doesn't exist.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, LogError> {
+        let path = path.as_ref().to_path_buf();
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&path)?;
+        Ok(Self {
+            path,
+            writer: BufWriter::new(file),
+        })
+    }
+    
+    /// Open an existing log file, or create new if it doesn't exist.
+    pub fn open_or_create(path: impl AsRef<Path>) -> Result<Self, LogError> {
+        let path = path.as_ref().to_path_buf();
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&path)?;
+        Ok(Self {
+            path,
+            writer: BufWriter::new(file),
+        })
+    }
+    
+    /// Append a SignedEntry to this log.
+    pub fn append(&mut self, entry: &SignedEntry) -> Result<(), LogError> {
+        let entry_bytes = entry.encode_to_vec();
+        
+        if entry_bytes.len() > MAX_ENTRY_SIZE {
+            return Err(LogError::EntryTooLarge(entry_bytes.len()));
+        }
+        
+        // Compute hash
+        let hash: [u8; 32] = blake3::hash(&entry_bytes).into();
+        
+        // Create LogRecord
+        let record = LogRecord {
+            hash: hash.to_vec(),
+            entry_bytes,
+        };
+        
+        // Write length-delimited LogRecord
+        let mut buf = Vec::new();
+        record.encode_length_delimited(&mut buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        
+        self.writer.write_all(&buf)?;
+        self.writer.flush()?;
+        self.writer.get_ref().sync_all()?;
+        
+        Ok(())
+    }
+    
+    /// Iterate all entries in this log.
+    /// Uses try_clone() on the underlying file to share the file descriptor.
+    pub fn iter(&self) -> Result<EntryIter, LogError> {
+        let file = self.writer.get_ref().try_clone()?;
+        let reader = LogReader::from_file(file)?;
+        Ok(EntryIter::new(reader, 0, 0))
+    }
+    
+    /// Iterate entries in this log within a sequence range.
+    /// Uses try_clone() on the underlying file to share the file descriptor.
+    pub fn iter_range(&self, from_seq: u64, to_seq: u64) -> Result<EntryIter, LogError> {
+        let file = self.writer.get_ref().try_clone()?;
+        let reader = LogReader::from_file(file)?;
+        Ok(EntryIter::new(reader, from_seq, to_seq))
+    }
+    
+    /// Get the path to this log file.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -272,7 +290,7 @@ mod tests {
     
     /// Test helper - read all entries from log
     fn read_entries(path: impl AsRef<std::path::Path>) -> Result<Vec<SignedEntry>, LogError> {
-        iter_all_entries(path)?.collect()
+        Log::open(&path)?.iter()?.collect()
     }
 
     #[test]
@@ -288,7 +306,7 @@ mod tests {
             .operation(Operation::put("/test/key", b"value".to_vec()))
             .sign(&node);
         
-        append_entry(&path, &entry).unwrap();
+        Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         
         let entries = read_entries(&path).unwrap();
         assert_eq!(entries.len(), 1);
@@ -309,7 +327,7 @@ mod tests {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                 .operation(Operation::put(format!("/key/{}", i), format!("value{}", i).into_bytes()))
                 .sign(&node);
-            append_entry(&path, &entry).unwrap();
+            Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         }
         
         let entries = read_entries(&path).unwrap();
@@ -330,7 +348,7 @@ mod tests {
             .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         let expected_hash = compute_entry_hash(&entry);
-        append_entry(&path, &entry).unwrap();
+        Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         
         let mut reader = LogReader::open(&path).unwrap();
         let (hash, _) = reader.next().unwrap().unwrap();
@@ -357,8 +375,13 @@ mod tests {
         let path = temp_log_path("nonexistent_v6");
         std::fs::remove_file(&path).ok();
         
-        let entries = read_entries(&path).unwrap();
-        assert_eq!(entries.len(), 0);
+        // Log::open returns NotFound error for missing files
+        let result = Log::open(&path);
+        assert!(result.is_err());
+        match result {
+            Err(LogError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+            _ => panic!("Expected NotFound error"),
+        }
     }
 
     // --- Negative Tests ---
@@ -376,7 +399,7 @@ mod tests {
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .operation(Operation::put("/key", b"original".to_vec()))
             .sign(&node);
-        append_entry(&path, &entry).unwrap();
+        Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         
         // Corrupt the file: change a byte in the middle
         let mut file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -407,7 +430,7 @@ mod tests {
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .operation(Operation::put("/key", b"data".to_vec()))
             .sign(&node);
-        append_entry(&path, &entry).unwrap();
+        Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         
         // Truncate file by 1 byte
         let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -442,7 +465,7 @@ mod tests {
             .operation(Operation::put("/huge", huge_payload))
             .sign(&node);
         
-        let result = append_entry(&path, &entry);
+        let result = Log::open_or_create(&path).unwrap().append(&entry);
         
         match result {
             Err(LogError::EntryTooLarge(size)) => assert!(size > crate::MAX_ENTRY_SIZE),
@@ -491,7 +514,7 @@ mod tests {
             let entry = EntryBuilder::new(i + 1, HLC::now_with_clock(&clock))
                 .operation(Operation::put(format!("/key/{}", i), b"val"))
                 .sign(&node);
-            append_entry(&path, &entry).unwrap();
+            Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         }
         
         // Corrupt a byte in the middle of the file

@@ -3,7 +3,7 @@
 //! A SigChain manages a single author's append-only log. It validates entries
 //! before appending (correct seq, prev_hash, valid signature) and persists to disk.
 
-use crate::store::log::{append_entry, iter_all_entries, LogError};
+use crate::store::log::{Log, LogError};
 use crate::proto::{Entry, SignedEntry};
 use crate::store::signed_entry::{hash_signed_entry, verify_signed_entry};
 use crate::store::orphan_store::GapInfo;
@@ -56,8 +56,8 @@ pub enum SigchainValidation {
 /// An append-only log where each entry is cryptographically signed
 /// and hash-linked to the previous entry, scoped to a specific store.
 pub struct SigChain {
-    /// Path to the log file
-    log_path: PathBuf,
+    /// The log file handle
+    log: Log,
     
     /// Store UUID (16 bytes)
     store_id: [u8; 16],
@@ -74,22 +74,29 @@ pub struct SigChain {
 
 impl SigChain {
     /// Create a new empty sigchain for a (store, author) pair
-    pub fn new(log_path: impl AsRef<Path>, store_id: [u8; 16], author_id: [u8; 32]) -> Self {
-        Self {
-            log_path: log_path.as_ref().to_path_buf(),
+    pub fn new(log_path: impl AsRef<Path>, store_id: [u8; 16], author_id: [u8; 32]) -> Result<Self, SigChainError> {
+        let log = Log::open_or_create(log_path)?;
+        Ok(Self {
+            log,
             store_id,
             author_id,
             next_seq: 1,
             last_hash: [0u8; 32],
-        }
+        })
     }
     
     /// Load a sigchain from an existing log file
     pub fn from_log(log_path: impl AsRef<Path>, store_id: [u8; 16], author_id: [u8; 32]) -> Result<Self, SigChainError> {
-        let log_path = log_path.as_ref().to_path_buf();
-        let entries_iter = iter_all_entries(&log_path)?;
+        let log = Log::open(log_path)?;
+        let entries_iter = log.iter()?;
         
-        let mut chain = Self::new(&log_path, store_id, author_id);
+        let mut chain = Self {
+            log,
+            store_id,
+            author_id,
+            next_seq: 1,
+            last_hash: [0u8; 32],
+        };
         
         for result in entries_iter {
             let signed_entry = result?;
@@ -233,7 +240,7 @@ impl SigChain {
     /// Use this for unified validation where sigchain + state are checked together.
     pub fn append_unchecked(&mut self, signed_entry: &SignedEntry) -> Result<(), SigChainError> {
         // Write to log
-        append_entry(&self.log_path, signed_entry)?;
+        self.log.append(signed_entry)?;
         
         // Update state
         self.last_hash = hash_signed_entry(signed_entry);
@@ -322,7 +329,7 @@ impl SigChainManager {
     
     /// Build hash index by scanning all log files in directory
     fn build_hash_index(logs_dir: &Path) -> Result<std::collections::HashSet<[u8; 32]>, LogError> {
-        use crate::store::log::iter_all_entries;
+        use crate::store::log::Log;
         use crate::store::signed_entry::hash_signed_entry;
         
         let mut index = std::collections::HashSet::new();
@@ -336,7 +343,8 @@ impl SigChainManager {
             let path = entry.path();
             if path.extension().map(|e| e == "log").unwrap_or(false) {
                 // Iterate entries in this log - propagate errors
-                let iter = iter_all_entries(&path)?;
+                let log = Log::open(&path)?;
+                let iter = log.iter()?;
                 for result in iter {
                     if let Ok(signed_entry) = result {
                         let hash = hash_signed_entry(&signed_entry);
@@ -372,7 +380,7 @@ impl SigChainManager {
             
             // Try to load existing log, or create new
             SigChain::from_log(&log_path, self.store_id, author)
-                .unwrap_or_else(|_| SigChain::new(&log_path, self.store_id, author))
+                .unwrap_or_else(|_| SigChain::new(&log_path, self.store_id, author).unwrap())
         })
     }
     
@@ -592,7 +600,7 @@ mod tests {
         let path = temp_log_path("new");
         let author = [1u8; 32];
         
-        let chain = SigChain::new(&path, TEST_STORE, author);
+        let chain = SigChain::new(&path, TEST_STORE, author).unwrap();
         
         assert_eq!(chain.author_id(), &author);
         assert_eq!(chain.next_seq(), 1);
@@ -608,7 +616,7 @@ mod tests {
         
         let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
-        let mut chain = SigChain::new(&path, TEST_STORE, author);
+        let mut chain = SigChain::new(&path, TEST_STORE, author).unwrap();
         
         let clock = MockClock::new(1000);
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
@@ -633,7 +641,7 @@ mod tests {
         
         let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
-        let mut chain = SigChain::new(&path, TEST_STORE, author);
+        let mut chain = SigChain::new(&path, TEST_STORE, author).unwrap();
         let clock = MockClock::new(1000);
         
         for i in 1..=3 {
@@ -662,7 +670,7 @@ mod tests {
         
         // Write some entries
         {
-            let mut chain = SigChain::new(&path, TEST_STORE, author);
+            let mut chain = SigChain::new(&path, TEST_STORE, author).unwrap();
             for i in 1..=3 {
                 let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
                     .store_id(TEST_STORE.to_vec())
@@ -689,7 +697,7 @@ mod tests {
         
         let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
-        let mut chain = SigChain::new(&path, TEST_STORE, author);
+        let mut chain = SigChain::new(&path, TEST_STORE, author).unwrap();
         let clock = MockClock::new(1000);
         
         // Try to append with wrong seq (2 instead of 1)
@@ -713,7 +721,7 @@ mod tests {
         
         let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
-        let mut chain = SigChain::new(&path, TEST_STORE, author);
+        let mut chain = SigChain::new(&path, TEST_STORE, author).unwrap();
         let clock = MockClock::new(1000);
         
         // First entry
@@ -745,7 +753,7 @@ mod tests {
         
         let node = NodeIdentity::generate();
         let other_author = [99u8; 32]; // Different author
-        let mut chain = SigChain::new(&path, TEST_STORE, other_author);
+        let mut chain = SigChain::new(&path, TEST_STORE, other_author).unwrap();
         let clock = MockClock::new(1000);
         
         // Entry signed by node but chain expects other_author
@@ -769,7 +777,7 @@ mod tests {
         
         let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
-        let mut chain = SigChain::new(&path, TEST_STORE, author);
+        let mut chain = SigChain::new(&path, TEST_STORE, author).unwrap();
         
         let ops = vec![Operation::put(b"/test", b"hello")];
         
@@ -782,7 +790,8 @@ mod tests {
         assert_eq!(chain.len(), 1);
         
         // Verify it was written
-        let entries: Vec<_> = crate::store::log::iter_all_entries(&path)
+        let log = crate::store::log::Log::open(&path).unwrap();
+        let entries: Vec<_> = log.iter()
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -807,7 +816,7 @@ mod tests {
         let store_b = [0xBBu8; 16];
         
         // Create valid entry for store A
-        let mut chain_a = SigChain::new(&path_a, store_a, author);
+        let mut chain_a = SigChain::new(&path_a, store_a, author).unwrap();
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .store_id(store_a.to_vec())
             .prev_hash([0u8; 32].to_vec())
@@ -816,7 +825,7 @@ mod tests {
         chain_a.append(&entry).unwrap();
         
         // Try to replay that entry into store B's chain
-        let mut chain_b = SigChain::new(&path_b, store_b, author);
+        let mut chain_b = SigChain::new(&path_b, store_b, author).unwrap();
         let result = chain_b.append(&entry);
         
         assert!(matches!(result, Err(SigChainError::WrongStoreId { .. })));

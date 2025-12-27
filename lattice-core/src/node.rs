@@ -515,7 +515,9 @@ impl Node {
         
         let store = Store::open(self.data_dir.store_state_db(store_id))?;
         let entries_replayed = if log_path.exists() {
-            store.replay_log(&log_path)?
+            let log = crate::store::Log::open(&log_path)?;
+            let iter = log.iter()?;
+            store.replay_entries(iter)?
         } else {
             0
         };

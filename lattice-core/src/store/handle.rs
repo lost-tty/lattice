@@ -50,9 +50,13 @@ impl StoreHandle {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.extension().map_or(false, |ext| ext == "log") {
-                    let replayed = store.replay_log(&path).unwrap_or(0);
-                    if replayed > 0 {
-                        eprintln!("[info] Crash recovery: replayed {} entries from {:?}", replayed, path.file_name());
+                    if let Ok(log) = super::log::Log::open(&path) {
+                        if let Ok(iter) = log.iter() {
+                            let replayed = store.replay_entries(iter).unwrap_or(0);
+                            if replayed > 0 {
+                                eprintln!("[info] Crash recovery: replayed {} entries from {:?}", replayed, path.file_name());
+                            }
+                        }
                     }
                 }
             }

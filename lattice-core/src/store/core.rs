@@ -6,7 +6,7 @@
 //! - meta: String → Vec<u8> (system metadata: last_seq, last_hash, etc.)
 //! - author: [u8; 32] → AuthorState (per-author replay tracking)
 
-use crate::store::log::{iter_all_entries, LogError};
+use crate::store::log::LogError;
 use crate::store::sigchain::SigChainError;
 use crate::store::signed_entry::hash_signed_entry;
 use crate::proto::{operation, AuthorState, Entry, HeadInfo, HeadList, Hlc, SignedEntry};
@@ -87,22 +87,19 @@ impl Store {
         Ok(Self { db })
     }
     
-    /// Replay a log file and apply all entries to the store (batched)
+    /// Replay entries from an iterator and apply them to the store (batched)
     /// Returns the number of newly applied entries (skipped entries not counted)
-    pub fn replay_log(&self, log_path: impl AsRef<Path>) -> Result<u64, StoreError> {
-        let entries_iter = match iter_all_entries(&log_path) {
-            Ok(iter) => iter,
-            Err(LogError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e.into()),
-        };
-        
+    pub fn replay_entries<I>(&self, entries: I) -> Result<u64, StoreError>
+    where
+        I: Iterator<Item = Result<SignedEntry, LogError>>,
+    {
         let write_txn = self.db.begin_write()?;
         let mut applied = 0u64;
         {
             let mut kv_table = write_txn.open_table(KV_TABLE)?;
             let mut author_table = write_txn.open_table(AUTHOR_TABLE)?;
             
-            for result in entries_iter {
+            for result in entries {
                 let signed_entry = result?;
                 if Self::apply_ops_to_tables(&signed_entry, &mut kv_table, &mut author_table)? {
                     applied += 1;
@@ -517,7 +514,9 @@ mod tests {
     
     /// Test helper - read all entries
     fn read_entries(path: impl AsRef<std::path::Path>) -> Vec<SignedEntry> {
-        crate::store::log::iter_all_entries(&path)
+        crate::store::log::Log::open(&path)
+            .unwrap()
+            .iter()
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
@@ -977,7 +976,7 @@ mod tests {
         
         let store = Store::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes());
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes()).unwrap();
         
         // First write: a = 1
         let clock1 = MockClock::new(1000);
@@ -1014,7 +1013,7 @@ mod tests {
         assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 2, "author seq persisted");
         
         // Replay log - entries already applied, skip all
-        let replayed = store.replay_log(&log_path).unwrap();
+        let replayed = crate::store::log::Log::open(&log_path).and_then(|l| l.iter()).map(|iter| store.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         assert_eq!(replayed, 0, "0 new entries (all skipped)");
         
         let final_heads = store.get_heads(b"/key").unwrap();
@@ -1040,7 +1039,7 @@ mod tests {
         let store = Store::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes());
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes()).unwrap();
         
         // Apply 3 entries with proper chaining
         for i in 1u64..=3 {
@@ -1063,7 +1062,7 @@ mod tests {
         drop(sigchain);
         
         let store = Store::open(&state_path).unwrap();
-        let replayed = store.replay_log(&log_path).unwrap();
+        let replayed = crate::store::log::Log::open(&log_path).and_then(|l| l.iter()).map(|iter| store.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         
         // All 3 entries were read but skipped (already applied)
         assert_eq!(replayed, 0, "0 new entries (all skipped)");
@@ -1088,7 +1087,7 @@ mod tests {
         let store = Store::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes());
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes()).unwrap();
         
         // Write 5 entries to log with proper chaining
         for i in 1u64..=5 {
@@ -1115,7 +1114,7 @@ mod tests {
         drop(sigchain);
         
         let store = Store::open(&state_path).unwrap();
-        let replayed = store.replay_log(&log_path).unwrap();
+        let replayed = crate::store::log::Log::open(&log_path).and_then(|l| l.iter()).map(|iter| store.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         
         assert_eq!(replayed, 2, "Only 2 new entries applied (3 skipped)");
         assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 5, "seq updated to 5");
@@ -1147,7 +1146,7 @@ mod tests {
         let store = Store::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes());
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes()).unwrap();
         
         // Apply first 3 entries
         for i in 1u64..=3 {
@@ -1198,7 +1197,7 @@ mod tests {
         assert!(store.get_heads(b"/key4").unwrap().is_empty(), "key4 not in restored state");
         
         // Replay log - should apply entries 4 and 5 (skip 1-3)
-        let replayed = store.replay_log(&log_path).unwrap();
+        let replayed = crate::store::log::Log::open(&log_path).and_then(|l| l.iter()).map(|iter| store.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         assert_eq!(replayed, 2, "Only 2 new entries applied (3 skipped)");
         
         // Now seq should be 5 and keys 4-5 should exist
@@ -1324,7 +1323,7 @@ mod tests {
                 .operation(Operation::put(format!("/key{}", i), format!("value{}", i).into_bytes()))
                 .sign(&node_a);
             store_a.apply_entry(&entry).unwrap();
-            crate::store::log::append_entry(&log_path_a, &entry).unwrap();
+            crate::store::log::Log::open_or_create(&log_path_a).unwrap().append(&entry).unwrap();
         }
         
         // Node B is empty
@@ -1393,7 +1392,7 @@ mod tests {
                 .operation(Operation::put(format!("/a{}", i), format!("from_a{}", i).into_bytes()))
                 .sign(&node_a);
             store_a.apply_entry(&entry).unwrap();
-            crate::store::log::append_entry(&log_path_a, &entry).unwrap();
+            crate::store::log::Log::open_or_create(&log_path_a).unwrap().append(&entry).unwrap();
         }
         
         // Node B writes different entries
@@ -1405,7 +1404,7 @@ mod tests {
                 .operation(Operation::put(format!("/b{}", i), format!("from_b{}", i).into_bytes()))
                 .sign(&node_b);
             store_b.apply_entry(&entry).unwrap();
-            crate::store::log::append_entry(&log_path_b, &entry).unwrap();
+            crate::store::log::Log::open_or_create(&log_path_b).unwrap().append(&entry).unwrap();
         }
         
         // Get sync states
@@ -1479,7 +1478,7 @@ mod tests {
             .operation(Operation::put("/key_a", b"from_a".to_vec()))
             .sign(&node_a);
         store_a.apply_entry(&entry_a).unwrap();
-        crate::store::log::append_entry(&log_path_a, &entry_a).unwrap();
+        crate::store::log::Log::open_or_create(&log_path_a).unwrap().append(&entry_a).unwrap();
         
         let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(2000)))
             .store_id(TEST_STORE.to_vec())
@@ -1487,7 +1486,7 @@ mod tests {
             .operation(Operation::put("/key_b", b"from_b".to_vec()))
             .sign(&node_b);
         store_b.apply_entry(&entry_b).unwrap();
-        crate::store::log::append_entry(&log_path_b, &entry_b).unwrap();
+        crate::store::log::Log::open_or_create(&log_path_b).unwrap().append(&entry_b).unwrap();
         
         let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(3000)))
             .store_id(TEST_STORE.to_vec())
@@ -1495,7 +1494,7 @@ mod tests {
             .operation(Operation::put("/key_c", b"from_c".to_vec()))
             .sign(&node_c);
         store_c.apply_entry(&entry_c).unwrap();
-        crate::store::log::append_entry(&log_path_c, &entry_c).unwrap();
+        crate::store::log::Log::open_or_create(&log_path_c).unwrap().append(&entry_c).unwrap();
         
         // Sync A ↔ B
         for entry in read_entries(&log_path_a) {
@@ -1565,7 +1564,7 @@ mod tests {
             .operation(Operation::put("/shared_key", b"value_from_a".to_vec()))
             .sign(&node_a);
         store_a.apply_entry(&entry_a).unwrap();
-        crate::store::log::append_entry(&log_path_a, &entry_a).unwrap();
+        crate::store::log::Log::open_or_create(&log_path_a).unwrap().append(&entry_a).unwrap();
         
         let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))  // Same HLC!
             .store_id(TEST_STORE.to_vec())
@@ -1573,7 +1572,7 @@ mod tests {
             .operation(Operation::put("/shared_key", b"value_from_b".to_vec()))
             .sign(&node_b);
         store_b.apply_entry(&entry_b).unwrap();
-        crate::store::log::append_entry(&log_path_b, &entry_b).unwrap();
+        crate::store::log::Log::open_or_create(&log_path_b).unwrap().append(&entry_b).unwrap();
         
         // Before sync: A has A's value, B has B's value
         assert_eq!(store_a.get(b"/shared_key").unwrap(), Some(b"value_from_a".to_vec()));

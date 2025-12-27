@@ -576,7 +576,11 @@ impl StoreActor {
         
         // Spawn thread to stream entries
         std::thread::spawn(move || {
-            let iter = match log::iter_entries(&log_path, from_seq, to_seq) {
+            let log = match log::Log::open(&log_path) {
+                Ok(l) => l,
+                Err(_) => return,
+            };
+            let iter = match log.iter_range(from_seq, to_seq) {
                 Ok(iter) => iter,
                 Err(_) => return,
             };
@@ -1077,7 +1081,7 @@ mod tests {
         
         // Write 3 entries to sigchain log directly (simulating commits)
         let log_path = logs_dir.join(format!("{}.log", hex::encode(author)));
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, author);
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, author).unwrap();
         
         let mut entries = Vec::new();
         for i in 1u64..=3 {
