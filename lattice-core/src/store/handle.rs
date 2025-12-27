@@ -167,8 +167,8 @@ impl StoreHandle {
         }).await.unwrap_or_default()
     }
     
-    /// Get list of orphaned entries (author, seq, prev_hash, entry_hash)
-    pub async fn orphan_list(&self) -> Vec<([u8; 32], u64, [u8; 32], [u8; 32])> {
+    /// Get list of orphaned entries
+    pub async fn orphan_list(&self) -> Vec<super::orphan_store::OrphanInfo> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self.tx.send(StoreCmd::OrphanList { resp: resp_tx }).await;

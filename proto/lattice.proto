@@ -149,6 +149,7 @@ message PeerMessage {
 message OrphanedEntry {
   uint64 seq = 1;            // Sequence number of the orphaned entry
   SignedEntry entry = 2;     // The orphaned entry itself
+  uint64 received_at = 3;    // Unix timestamp (seconds) when orphan was received
 }
 
 // 10. Gossip Message Wrapper

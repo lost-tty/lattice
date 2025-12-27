@@ -112,7 +112,7 @@ pub enum StoreCmd {
         resp: oneshot::Sender<Vec<(String, u64, std::path::PathBuf)>>,
     },
     OrphanList {
-        resp: oneshot::Sender<Vec<([u8; 32], u64, [u8; 32], [u8; 32])>>,
+        resp: oneshot::Sender<Vec<super::orphan_store::OrphanInfo>>,
     },
     OrphanCleanup {
         resp: oneshot::Sender<usize>,
@@ -383,12 +383,12 @@ impl StoreActor {
         let orphans = self.chain_manager.orphan_list();
         let mut removed = 0;
         
-        for (author, seq, prev_hash, entry_hash) in orphans {
+        for orphan in orphans {
             // Check if this entry is already in the sigchain
-            let chain = self.chain_manager.get_or_create(author);
-            if seq < chain.next_seq() {
+            let chain = self.chain_manager.get_or_create(orphan.author);
+            if orphan.seq < chain.next_seq() {
                 // Entry is behind the current position - it's already applied
-                self.chain_manager.delete_sigchain_orphan(&author, &prev_hash, &entry_hash);
+                self.chain_manager.delete_sigchain_orphan(&orphan.author, &orphan.prev_hash, &orphan.entry_hash);
                 removed += 1;
             }
         }
@@ -1389,7 +1389,7 @@ mod tests {
         assert!(orphans.is_empty(), 
             "Orphan store should be empty after duplicates. Found {} orphans: {:?}", 
             orphans.len(),
-            orphans.iter().map(|(a, s, h, _)| format!("author:{} seq:{} awaiting:{}", hex::encode(&a[..4]), s, hex::encode(&h[..4]))).collect::<Vec<_>>()
+            orphans.iter().map(|o| format!("author:{} seq:{} awaiting:{}", hex::encode(&o.author[..4]), o.seq, hex::encode(&o.prev_hash[..4]))).collect::<Vec<_>>()
         );
         
         // Shutdown

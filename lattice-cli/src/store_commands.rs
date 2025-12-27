@@ -47,9 +47,14 @@ pub async fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _server
         let _ = writeln!(w);
         let _ = writeln!(w, "Orphaned Entries:");
         let orphans = h.orphan_list().await;
-        for (author, seq, prev_hash, _entry_hash) in orphans {
-            let _ = writeln!(w, "  author:{}  seq:{}  awaiting:{}", 
-                hex::encode(&author[..8]), seq, hex::encode(&prev_hash[..8]));
+        for orphan in orphans {
+            use chrono::{DateTime, Utc};
+            let received = DateTime::<Utc>::from_timestamp(orphan.received_at as i64, 0)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let _ = writeln!(w, "  author:{}  seq:{}  awaiting:{}  received:{}", 
+                hex::encode(&orphan.author[..8]), orphan.seq, 
+                hex::encode(&orphan.prev_hash[..8]), received);
         }
     }
     

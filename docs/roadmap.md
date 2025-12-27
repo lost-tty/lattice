@@ -31,7 +31,7 @@ LatticeServer refactor, gossip protocol (iroh-gossip), Key Watcher for reactive 
 - [x] Track gossip NeighborUp/Down events for real-time peer online status in `peers` command
 
 ### Orphan Management
-- [ ] TTL expiry for long-lived orphans
+- [x] Track received_at timestamp for orphans (preparation for TTL)
 - [ ] Retry logic: if gap persists after sync, retry with different peer
 
 ### Tech Debt
@@ -126,6 +126,7 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 
 ## Future
 
+- TTL expiry for long-lived orphans (received_at timestamp now tracked)
 - Transitive sync across all peers
 - CRDTs: PN-Counters, OR-Sets for peer list
 - Transaction Groups: atomic batched operations

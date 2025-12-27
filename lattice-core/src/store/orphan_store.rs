@@ -140,6 +140,21 @@ pub struct GapInfo {
     pub last_known_hash: Option<[u8; 32]>,
 }
 
+/// Information about an orphaned entry
+#[derive(Clone, Debug)]
+pub struct OrphanInfo {
+    /// Author of the orphaned entry
+    pub author: [u8; 32],
+    /// Sequence number of the orphaned entry
+    pub seq: u64,
+    /// Hash this entry is waiting for (its prev_hash)
+    pub prev_hash: [u8; 32],
+    /// Hash of this orphaned entry
+    pub entry_hash: [u8; 32],
+    /// Unix timestamp (seconds) when orphan was received
+    pub received_at: u64,
+}
+
 /// Persistent storage for orphan entries
 pub struct OrphanStore {
     db: Database,
@@ -171,6 +186,12 @@ impl OrphanStore {
     ) -> Result<bool, OrphanStoreError> {
         let key = OrphanKey::new(*author, *prev_hash, *entry_hash);
         
+        // Get current timestamp
+        let received_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        
         let write_txn = self.db.begin_write()?;
         let is_new = {
             let mut table = write_txn.open_table(ORPHANS_TABLE)?;
@@ -178,7 +199,11 @@ impl OrphanStore {
             if table.get(key.as_bytes().as_slice())?.is_some() {
                 false
             } else {
-                let value = OrphanedEntry { seq, entry: Some(entry.clone()) }.encode_to_vec();
+                let value = OrphanedEntry { 
+                    seq, 
+                    entry: Some(entry.clone()),
+                    received_at,
+                }.encode_to_vec();
                 table.insert(key.as_bytes().as_slice(), value.as_slice())?;
                 true
             }
@@ -241,8 +266,8 @@ impl OrphanStore {
         Ok(table.len()? as usize)
     }
     
-    /// List all orphans as (author, seq, prev_hash, entry_hash)
-    pub fn list_all(&self) -> Result<Vec<([u8; 32], u64, [u8; 32], [u8; 32])>, OrphanStoreError> {
+    /// List all orphans
+    pub fn list_all(&self) -> Result<Vec<OrphanInfo>, OrphanStoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(ORPHANS_TABLE)?;
         
@@ -253,11 +278,17 @@ impl OrphanStore {
                 .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
             
             let orphaned = crate::proto::OrphanedEntry::decode(value.value())?;
-            orphans.push((key.author, orphaned.seq, key.prev_hash, key.entry_hash));
+            orphans.push(OrphanInfo {
+                author: key.author,
+                seq: orphaned.seq,
+                prev_hash: key.prev_hash,
+                entry_hash: key.entry_hash,
+                received_at: orphaned.received_at,
+            });
         }
         
         // Sort by author then seq
-        orphans.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        orphans.sort_by(|a, b| a.author.cmp(&b.author).then(a.seq.cmp(&b.seq)));
         Ok(orphans)
     }
     
