@@ -1,33 +1,32 @@
 //! Sync state for causality tracking and reconciliation
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Author ID type (32-byte Ed25519 public key)
 pub type Author = [u8; 32];
 
-/// Per-author sync information: seq + all head hashes.
+/// Per-author sync information: seq, head hash, max HLC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorInfo {
     pub seq: u64,
-    pub heads: HashSet<[u8; 32]>,  // All head hashes for this author
+    pub hash: [u8; 32],             // Head hash (tip of sigchain)
+    pub hlc: Option<(u64, u32)>,    // (wall_time, counter) - max HLC from this author
 }
 
 impl AuthorInfo {
     pub fn new(seq: u64, hash: [u8; 32]) -> Self {
-        let mut heads = HashSet::new();
-        heads.insert(hash);
-        Self { seq, heads }
+        Self { seq, hash, hlc: None }
     }
     
-    pub fn with_heads(seq: u64, heads: HashSet<[u8; 32]>) -> Self {
-        Self { seq, heads }
+    pub fn with_hlc(seq: u64, hash: [u8; 32], hlc: Option<(u64, u32)>) -> Self {
+        Self { seq, hash, hlc }
     }
 }
 
 /// Sync state tracking per-author sequence numbers and head hashes.
 ///
 /// Used during reconciliation to identify missing entries between peers.
-/// Tracks all head hashes per author to handle forks correctly.
+/// Each author has exactly one head (tip of their sigchain).
 #[derive(Debug, Clone, Default)]
 pub struct SyncState {
     authors: HashMap<Author, AuthorInfo>,
@@ -60,36 +59,48 @@ impl SyncState {
         self.authors.get(author).map(|i| i.seq).unwrap_or(0)
     }
     
-    /// Get head hashes for an author (returns empty set if not present).
-    pub fn heads(&self, author: &Author) -> HashSet<[u8; 32]> {
-        self.authors.get(author).map(|i| i.heads.clone()).unwrap_or_default()
+    /// Get head hash for an author (returns zero hash if not present).
+    pub fn hash(&self, author: &Author) -> [u8; 32] {
+        self.authors.get(author).map(|i| i.hash).unwrap_or([0u8; 32])
     }
 
-    /// Set the info for an author (single hash convenience method).
+    /// Set the info for an author.
     pub fn set(&mut self, author: Author, seq: u64, hash: [u8; 32]) {
         self.authors.insert(author, AuthorInfo::new(seq, hash));
     }
     
-    /// Set the info for an author with multiple heads.
-    pub fn set_heads(&mut self, author: Author, seq: u64, heads: HashSet<[u8; 32]>) {
-        self.authors.insert(author, AuthorInfo::with_heads(seq, heads));
-    }
-    
-    /// Add a head hash for an author (updates seq if higher).
-    pub fn add_head(&mut self, author: Author, seq: u64, hash: [u8; 32]) {
-        if let Some(info) = self.authors.get_mut(&author) {
-            info.heads.insert(hash);
-            if seq > info.seq {
-                info.seq = seq;
-            }
-        } else {
-            self.set(author, seq, hash);
-        }
+    /// Set the info for an author with HLC.
+    pub fn set_with_hlc(&mut self, author: Author, seq: u64, hash: [u8; 32], hlc: Option<(u64, u32)>) {
+        self.authors.insert(author, AuthorInfo::with_hlc(seq, hash, hlc));
     }
 
     /// Get all authors and their info.
     pub fn authors(&self) -> &HashMap<Author, AuthorInfo> {
         &self.authors
+    }
+    
+    /// Compute the "common HLC" - the minimum of max HLCs across all authors.
+    /// This represents the point at which all logs are synchronized.
+    /// Returns None if any author has no HLC or there are no authors.
+    pub fn common_hlc(&self) -> Option<(u64, u32)> {
+        if self.authors.is_empty() {
+            return None;
+        }
+        
+        let mut min_hlc: Option<(u64, u32)> = None;
+        for info in self.authors.values() {
+            match (min_hlc, info.hlc) {
+                (None, Some(hlc)) => min_hlc = Some(hlc),
+                (Some(current), Some(hlc)) => {
+                    // Compare: first by wall_time, then by counter
+                    if hlc.0 < current.0 || (hlc.0 == current.0 && hlc.1 < current.1) {
+                        min_hlc = Some(hlc);
+                    }
+                }
+                (_, None) => return None, // Author without HLC = no common HLC
+            }
+        }
+        min_hlc
     }
 
     /// Compute what entries we're missing compared to a peer's state.
@@ -101,32 +112,25 @@ impl SyncState {
 
         for (author, peer_info) in peer.authors() {
             let my_seq = self.seq(author);
-            let my_heads = self.heads(author);
+            let my_hash = self.hash(author);
             
             // We need entries if:
             // 1. Peer's seq is higher than ours, OR
-            // 2. Peer's seq equals ours but they have heads we don't (fork)
+            // 2. Peer's seq equals ours but they have a different hash (divergence)
             let need_entries = if peer_info.seq > my_seq {
                 true
             } else if peer_info.seq == my_seq && my_seq > 0 {
-                // Same seq - check for forks (different hashes at same seq)
-                peer_info.heads.iter().any(|h| !my_heads.contains(h))
+                // Same seq - check if hashes differ (shouldn't happen in sigchain)
+                peer_info.hash != my_hash
             } else {
                 false
             };
             
             if need_entries {
-                // Request from our common ancestor (or start if we have nothing)
-                let from_hash = if my_heads.is_empty() {
-                    [0u8; 32]
-                } else {
-                    *my_heads.iter().next().unwrap()
-                };
-                
                 missing.push(MissingRange {
                     author: *author,
                     from_seq: my_seq,
-                    from_hash,
+                    from_hash: my_hash,
                     to_seq: peer_info.seq,
                 });
             }
@@ -135,17 +139,15 @@ impl SyncState {
         missing
     }
 
-    /// Merge another sync state into this one (union of heads, max seq).
+    /// Merge another sync state into this one (takes max seq).
     pub fn merge(&mut self, other: &SyncState) {
         for (author, info) in other.authors() {
             if let Some(my_info) = self.authors.get_mut(author) {
-                // Union heads
-                for h in &info.heads {
-                    my_info.heads.insert(*h);
-                }
-                // Take max seq
+                // Take max seq and associated hash
                 if info.seq > my_info.seq {
                     my_info.seq = info.seq;
+                    my_info.hash = info.hash;
+                    my_info.hlc = info.hlc;
                 }
             } else {
                 self.authors.insert(*author, info.clone());
@@ -155,42 +157,46 @@ impl SyncState {
 
     /// Convert to proto message for network transmission
     pub fn to_proto(&self) -> crate::proto::SyncState {
-        let frontiers = self.authors.iter().map(|(author, info)| {
-            crate::proto::Frontier {
+        let authors = self.authors.iter().map(|(author, info)| {
+            crate::proto::SyncAuthor {
                 author_id: author.to_vec(),
-                max_seq: info.seq,
-                head_hashes: info.heads.iter().map(|h| h.to_vec()).collect(),
+                state: Some(crate::proto::AuthorState {
+                    seq: info.seq,
+                    hash: info.hash.to_vec(),
+                    log_offset: 0,
+                    hlc: info.hlc.map(|(wall_time, counter)| crate::proto::Hlc { wall_time, counter }),
+                }),
             }
         }).collect();
+        
+        // Compute common HLC (min of max HLCs across all authors)
+        let common_hlc = self.common_hlc()
+            .map(|(wall_time, counter)| crate::proto::Hlc { wall_time, counter });
+        
         crate::proto::SyncState {
-            frontiers,
+            authors,
             sender_hlc: None,
+            common_hlc,
         }
     }
 
     /// Create from proto message
     pub fn from_proto(proto: &crate::proto::SyncState) -> Self {
         let mut state = Self::new();
-        for frontier in &proto.frontiers {
-            if frontier.author_id.len() == 32 {
+        
+        for sync_author in &proto.authors {
+            if sync_author.author_id.len() == 32 {
                 let mut author = [0u8; 32];
-                author.copy_from_slice(&frontier.author_id);
+                author.copy_from_slice(&sync_author.author_id);
                 
-                let mut heads = HashSet::new();
-                for hash_bytes in &frontier.head_hashes {
-                    if hash_bytes.len() == 32 {
-                        let mut hash = [0u8; 32];
-                        hash.copy_from_slice(hash_bytes);
-                        heads.insert(hash);
+                if let Some(author_state) = &sync_author.state {
+                    let mut hash = [0u8; 32];
+                    if author_state.hash.len() == 32 {
+                        hash.copy_from_slice(&author_state.hash);
                     }
+                    let hlc = author_state.hlc.as_ref().map(|h| (h.wall_time, h.counter));
+                    state.set_with_hlc(author, author_state.seq, hash, hlc);
                 }
-                
-                if heads.is_empty() {
-                    // Fallback: empty hash if no heads provided
-                    heads.insert([0u8; 32]);
-                }
-                
-                state.set_heads(author, frontier.max_seq, heads);
             }
         }
         state

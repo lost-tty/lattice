@@ -156,7 +156,6 @@ impl GossipManager {
                             let formatted = format_sync_state(&sync_state);
                             
                             let info = PeerSyncInfo {
-                                store_id: store_id.as_bytes().to_vec(),
                                 sync_state: Some(sync_state),
                                 updated_at: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -307,12 +306,12 @@ impl GossipManager {
 /// Helper to format SyncState for logging (hex authors/hashes)
 fn format_sync_state(state: &lattice_core::proto::SyncState) -> String {
     let mut parts = Vec::new();
-    for frontier in &state.frontiers {
-        let author = hex::encode(&frontier.author_id).chars().take(8).collect::<String>();
-        let heads: Vec<String> = frontier.head_hashes.iter()
-            .map(|h| hex::encode(h).chars().take(8).collect())
-            .collect();
-        parts.push(format!("{}:{} heads={:?}", author, frontier.max_seq, heads));
+    for sync_author in &state.authors {
+        let author = hex::encode(&sync_author.author_id).chars().take(8).collect::<String>();
+        if let Some(author_state) = &sync_author.state {
+            let hash_short = hex::encode(&author_state.hash).chars().take(8).collect::<String>();
+            parts.push(format!("{}:{} hash={}", author, author_state.seq, hash_short));
+        }
     }
     format!("[{}]", parts.join(", "))
 }

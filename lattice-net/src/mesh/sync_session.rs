@@ -109,7 +109,6 @@ impl<'a> SyncSession<'a> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let info = lattice_core::proto::PeerSyncInfo {
-            store_id: self.store.id().as_bytes().to_vec(),
             sync_state: Some(state.to_proto()),
             updated_at: now,
         };

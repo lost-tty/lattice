@@ -49,11 +49,12 @@ message HeadList {
   repeated HeadInfo heads = 1;
 }
 
-// AuthorState: tracks last applied entry per author for replay optimization
+// AuthorState: per-author sync state (used for both DB and wire)
 message AuthorState {
-  uint64 seq = 1;        // Last applied seq for this author's sigchain
-  bytes hash = 2;        // Hash of last applied entry
-  uint64 log_offset = 3; // Byte offset in log file for fast resume
+  uint64 seq = 1;              // Highest sequence number from this author
+  bytes hash = 2;              // Hash of last entry (tip of sigchain)
+  uint64 log_offset = 3;       // Byte offset in log file (local-only)
+  HLC hlc = 4;                 // Highest HLC seen from this author
 }
 
 // Hybrid Logical Clock
@@ -83,14 +84,15 @@ message DeleteOp {
 
 // 4. The Sync Handshake (Vector Clocks)
 message SyncState {
-  repeated Frontier frontiers = 1;
-  HLC sender_hlc = 2;  // Sender's current clock (for peer time awareness)
+  repeated SyncAuthor authors = 1;  // Per-author sync state
+  HLC sender_hlc = 2;               // Sender's current clock
+  HLC common_hlc = 3;               // Min of max HLCs across all authors
 }
 
-message Frontier {
-  bytes author_id = 1;  // Ed25519 public key (32 bytes)
-  uint64 max_seq = 2;   // Highest sequence number seen from this author
-  repeated bytes head_hashes = 3;  // All head hashes for this author
+// Per-author sync info for wire format (includes author_id)
+message SyncAuthor {
+  bytes author_id = 1;         // Ed25519 public key (32 bytes)
+  AuthorState state = 2;       // The author's sync state
 }
 
 // 5. Log File Record (wrapper for storage)
@@ -142,9 +144,8 @@ message SyncStateAnnounce {
 
 // 12. Stored peer sync info (for state.db)
 message PeerSyncInfo {
-  bytes store_id = 1;        // Store UUID (16 bytes)
-  SyncState sync_state = 2;  // Peer's last known sync state
-  uint64 updated_at = 3;     // Unix timestamp (seconds) when received
+  SyncState sync_state = 1;  // Peer's last known sync state
+  uint64 updated_at = 2;     // Unix timestamp (seconds) when received
 }
 
 // 13. Fetch Protocol Messages (targeted entry fetching)

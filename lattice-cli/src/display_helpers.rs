@@ -54,12 +54,14 @@ pub struct PeerSyncRow {
     pub pubkey: [u8; 32],
     pub label: String,
     pub frontiers: std::collections::HashMap<[u8; 32], u64>,
+    pub common_hlc: Option<(u64, u32)>,  // Min of max HLCs across all authors
 }
 
 /// Render the peer sync state matrix to a string
 pub fn render_peer_sync_matrix(
     my_pubkey: [u8; 32],
     our_authors: &std::collections::HashMap<[u8; 32], u64>,
+    our_common_hlc: Option<(u64, u32)>,
     peers: &[PeerSyncRow],
 ) -> String {
     use std::fmt::Write;
@@ -109,8 +111,9 @@ pub fn render_peer_sync_matrix(
         let label = colored_author(author, *author == my_pubkey, seq_width);
         header.push_str(&format!(" {}", label));
     }
+    header.push_str("  HLC");
     let _ = writeln!(output, "{}", header);
-    let _ = writeln!(output, "{}", "-".repeat(peer_col_width + (authors.len() * (seq_width + 1))));
+    let _ = writeln!(output, "{}", "-".repeat(peer_col_width + (authors.len() * (seq_width + 1)) + 20));
     
     // Self row
     {
@@ -121,6 +124,11 @@ pub fn render_peer_sync_matrix(
             let our_seq = our_authors.get(author).copied().unwrap_or(0);
             row.push_str(&format!(" {:>width$}", our_seq, width = seq_width));
         }
+        // Add Self's HLC
+        let hlc_str = our_common_hlc
+            .map(|(w, c)| format!("{}.{}", w, c))
+            .unwrap_or_else(|| "-".to_string());
+        row.push_str(&format!("  {}", hlc_str));
         let _ = writeln!(output, "{}", row);
     }
     
@@ -135,6 +143,11 @@ pub fn render_peer_sync_matrix(
             let our_seq = our_authors.get(author).copied().unwrap_or(0);
             row.push_str(&format!(" {}", format_sync_delta(peer_seq, our_seq, seq_width)));
         }
+        // Add HLC column
+        let hlc_str = peer.common_hlc
+            .map(|(w, c)| format!("{}.{}", w, c))
+            .unwrap_or_else(|| "-".to_string());
+        row.push_str(&format!("  {}", hlc_str));
         let _ = writeln!(output, "{}", row);
     }
     
@@ -147,7 +160,7 @@ use crate::commands::Writer;
 use lattice_core::{Node, StoreHandle};
 use std::io::Write;
 
-/// Write basic store summary (ID, seq, keys, logs, orphans)
+/// Write basic store summary (ID, seq, keys, logs, orphans, common HLC)
 pub async fn write_store_summary(w: &mut Writer, h: &StoreHandle) {
     let _ = writeln!(w, "Store ID: {}", h.id());
     let _ = writeln!(w, "Log Seq:  {}", h.log_seq().await);
@@ -155,6 +168,13 @@ pub async fn write_store_summary(w: &mut Writer, h: &StoreHandle) {
     
     let all = h.list(false).await.unwrap_or_default();
     let _ = writeln!(w, "Keys:     {}", all.len());
+    
+    // Display common HLC (min of max HLCs across all authors)
+    if let Ok(sync_state) = h.sync_state().await {
+        if let Some((wall_time, counter)) = sync_state.common_hlc() {
+            let _ = writeln!(w, "HLC:      {}.{}", wall_time, counter);
+        }
+    }
     
     let (file_count, total_size, orphan_count) = h.log_stats().await;
     if file_count > 0 {
@@ -224,20 +244,29 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &StoreHandle
                 .map(|n| format!("{} ({})", n, &hex::encode(&peer[..4])))
                 .unwrap_or_else(|| hex::encode(&peer[..8]));
             
-            let frontiers: std::collections::HashMap<[u8; 32], u64> = info.sync_state.as_ref()
-                .map(|ss| ss.frontiers.iter().filter_map(|f| {
-                    if f.author_id.len() == 32 {
-                        let mut author = [0u8; 32];
-                        author.copy_from_slice(&f.author_id);
-                        Some((author, f.max_seq))
-                    } else { None }
-                }).collect())
+            let (frontiers, common_hlc) = info.sync_state.as_ref()
+                .map(|ss| {
+                    let frs: std::collections::HashMap<[u8; 32], u64> = ss.authors.iter().filter_map(|sa| {
+                        if sa.author_id.len() == 32 {
+                            let mut author = [0u8; 32];
+                            author.copy_from_slice(&sa.author_id);
+                            let seq = sa.state.as_ref().map(|s| s.seq).unwrap_or(0);
+                            Some((author, seq))
+                        } else { None }
+                    }).collect();
+                    // Use pre-computed common_hlc from proto
+                    let hlc = ss.common_hlc.as_ref().map(|h| (h.wall_time, h.counter));
+                    (frs, hlc)
+                })
                 .unwrap_or_default();
             
-            PeerSyncRow { pubkey: *peer, label, frontiers }
+            PeerSyncRow { pubkey: *peer, label, frontiers, common_hlc }
         })
         .collect();
     
-    let matrix = render_peer_sync_matrix(node.node_id(), &our_authors, &peers);
+    // Get our common HLC
+    let our_common_hlc = our_state.as_ref().and_then(|s| s.common_hlc());
+    
+    let matrix = render_peer_sync_matrix(node.node_id(), &our_authors, our_common_hlc, &peers);
     let _ = write!(w, "{}", matrix);
 }

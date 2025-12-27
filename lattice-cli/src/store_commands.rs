@@ -114,7 +114,8 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server:
     
     for (author, info) in sorted_authors {
         let author_short = hex::encode(&author[..8]);
-        let _ = writeln!(w, "Author {} (seq: {}, heads: {})", author_short, info.seq, info.heads.len());
+        let hash_short = hex::encode(&info.hash[..8]);
+        let _ = writeln!(w, "Author {} (seq: {}, hash: {})", author_short, info.seq, hash_short);
         
         // Stream entries for this author
         let mut rx = match h.stream_entries_in_range(&author, 1, 0).await {

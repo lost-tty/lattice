@@ -265,6 +265,7 @@ impl Store {
             seq: entry.seq,
             hash: entry_hash.to_vec(),
             log_offset: 0,  // TODO: track actual log offset
+            hlc: entry_hlc.clone(),
         };
         author_table.insert(&author[..], author_state.encode_to_vec().as_slice())?;
         
@@ -437,7 +438,9 @@ impl Store {
                     if author_state.hash.len() == 32 {
                         hash.copy_from_slice(&author_state.hash);
                     }
-                    state.set(author, author_state.seq, hash);
+                    // Extract HLC if present
+                    let hlc = author_state.hlc.map(|h| (h.wall_time, h.counter));
+                    state.set_with_hlc(author, author_state.seq, hash, hlc);
                 }
             }
         }
@@ -1731,9 +1734,9 @@ mod tests {
         
         println!("Store A sync state:");
         for (author, info) in sync_state_a.authors() {
-            println!("  author {:?}: seq={}, heads={:?}", 
+            println!("  author {:?}: seq={}, hash={:?}", 
                 hex::encode(&author[..4]), info.seq, 
-                info.heads.iter().map(|h| hex::encode(&h[..4])).collect::<Vec<_>>());
+                hex::encode(&info.hash[..4]));
         }
         
         // 4. Store D is empty, compute diff
