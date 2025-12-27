@@ -72,18 +72,21 @@ impl LatticeServer {
             router,
         });
         
+        // Subscribe to events before spawning handler to prevent race condition.
+        // If we subscribe inside the spawned task, events emitted between spawn()
+        // and subscribe() would be lost (broadcast channels don't buffer for late subscribers).
+        let event_rx = node.subscribe_events();
+        
         // Spawn background task to handle store events
         let server_clone = server.clone();
         tokio::spawn(async move {
-            Self::run_node_ready_handler(server_clone).await;
+            Self::run_node_ready_handler(server_clone, event_rx).await;
         });
         
         Ok(server)
     }
     
-    async fn run_node_ready_handler(server: Arc<Self>) {
-        let mut event_rx = server.node.subscribe_events();
-        
+    async fn run_node_ready_handler(server: Arc<Self>, mut event_rx: tokio::sync::broadcast::Receiver<NodeEvent>) {
         while let Ok(event) = event_rx.recv().await {
             match event {
                 NodeEvent::StoreReady(store) => {

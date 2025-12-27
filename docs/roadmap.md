@@ -24,7 +24,7 @@ LatticeServer refactor, gossip protocol (iroh-gossip), Key Watcher for reactive 
 **Goal:** Fix known bugs and add diagnostic tooling.
 
 ### Regressions
-- [ ] On join, node does not reliably join gossip
+- [x] On join, node does not reliably join gossip
 
 ### Diagnostics
 - [x] Unicast `peer status` command with sync matrix and RTT
