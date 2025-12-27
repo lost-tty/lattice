@@ -264,7 +264,6 @@ impl Store {
         let author_state = AuthorState {
             seq: entry.seq,
             hash: entry_hash.to_vec(),
-            log_offset: 0,  // TODO: track actual log offset
             hlc: entry_hlc.clone(),
         };
         author_table.insert(&author[..], author_state.encode_to_vec().as_slice())?;
@@ -416,6 +415,23 @@ impl Store {
             Some(v) => Ok(AuthorState::decode(v.value()).ok()),
             None => Ok(None),
         }
+    }
+
+    /// Set author states from sigchain data
+    pub fn set_author_states(&self, chain_states: &std::collections::HashMap<[u8; 32], AuthorState>) -> Result<u64, StoreError> {
+        let write_txn = self.db.begin_write()?;
+        let mut count = 0u64;
+        {
+            let mut table = write_txn.open_table(AUTHOR_TABLE)?;
+            for (author, state) in chain_states {
+                if state.seq > 0 {
+                    table.insert(&author[..], state.encode_to_vec().as_slice())?;
+                    count += 1;
+                }
+            }
+        }
+        write_txn.commit()?;
+        Ok(count)
     }
 
     /// Get sync state for all authors (for reconciliation).

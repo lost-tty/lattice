@@ -375,7 +375,6 @@ pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _server:
             let _ = writeln!(w, "Author: {}", hex::encode(&author_bytes));
             let _ = writeln!(w, "  seq: {}", state.seq);
             let _ = writeln!(w, "  hash: {}", hex::encode(&state.hash));
-            let _ = writeln!(w, "  log_offset: {}", state.log_offset);
         }
         Ok(None) => {
             let _ = writeln!(w, "No state for author: {}", hex::encode(&author_bytes));

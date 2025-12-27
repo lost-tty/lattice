@@ -22,7 +22,7 @@ rustyline = "17"
 clap = { version = "4", features = ["derive"] }
 
 # Networking (Iroh)
-iroh = { version = "0.95", features = ["discovery-local-network"] }
+iroh = { version = "0.95", features = ["discovery-local-network", "discovery-pkarr-dht"] }
 iroh-gossip = "0.95"
 
 # Cryptography

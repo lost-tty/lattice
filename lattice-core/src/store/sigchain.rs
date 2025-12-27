@@ -70,6 +70,9 @@ pub struct SigChain {
     
     /// Hash of the last entry (zeroes if empty)
     last_hash: [u8; 32],
+    
+    /// HLC timestamp of the last entry (None if empty)
+    last_hlc: Option<crate::proto::Hlc>,
 }
 
 impl SigChain {
@@ -82,6 +85,7 @@ impl SigChain {
             author_id,
             next_seq: 1,
             last_hash: [0u8; 32],
+            last_hlc: None,
         })
     }
     
@@ -96,6 +100,7 @@ impl SigChain {
             author_id,
             next_seq: 1,
             last_hash: [0u8; 32],
+            last_hlc: None,
         };
         
         for result in entries_iter {
@@ -150,6 +155,7 @@ impl SigChain {
             
             // Update state
             chain.last_hash = hash_signed_entry(&signed_entry);
+            chain.last_hlc = entry.timestamp;
             chain.next_seq += 1;
         }
         
@@ -172,9 +178,23 @@ impl SigChain {
         &self.last_hash
     }
     
+    /// Get the HLC timestamp of the last entry
+    pub fn last_hlc(&self) -> Option<&crate::proto::Hlc> {
+        self.last_hlc.as_ref()
+    }
+    
     /// Get the current length of the chain
     pub fn len(&self) -> u64 {
         self.next_seq - 1
+    }
+    
+    /// Get author state as proto message
+    pub fn author_state(&self) -> crate::proto::AuthorState {
+        crate::proto::AuthorState {
+            seq: self.len(),
+            hash: self.last_hash.to_vec(),
+            hlc: self.last_hlc.clone(),
+        }
     }
     
     /// Check if the chain is empty
@@ -244,6 +264,9 @@ impl SigChain {
         
         // Update state
         self.last_hash = hash_signed_entry(signed_entry);
+        if let Ok(entry) = Entry::decode(&signed_entry.entry_bytes[..]) {
+            self.last_hlc = entry.timestamp;
+        }
         self.next_seq += 1;
         
         Ok(())
@@ -313,48 +336,62 @@ impl SigChainManager {
             .expect("Failed to open orphan store");
         let (gap_tx, _) = broadcast::channel(64);
         
-        // Build hash index by scanning all log files
-        let hash_index = Self::build_hash_index(&logs_path)
-            .expect("Failed to build hash index - log files may be corrupted or unreadable");
+        // Load all chains and build hash index in one pass
+        let (chains, hash_index) = Self::load_chains_and_build_index(&logs_path, store_id);
         
         Self {
             logs_dir: logs_path,
             store_id,
-            chains: std::collections::HashMap::new(),
+            chains,
             orphan_store,
             gap_tx,
             hash_index,
         }
     }
     
-    /// Build hash index by scanning all log files in directory
-    fn build_hash_index(logs_dir: &Path) -> Result<std::collections::HashSet<[u8; 32]>, LogError> {
-        use crate::store::log::Log;
+    /// Load all chains and build hash index by scanning all log files
+    fn load_chains_and_build_index(
+        logs_dir: &Path, 
+        store_id: [u8; 16]
+    ) -> (std::collections::HashMap<[u8; 32], SigChain>, std::collections::HashSet<[u8; 32]>) {
         use crate::store::signed_entry::hash_signed_entry;
         
-        let mut index = std::collections::HashSet::new();
+        let mut chains = std::collections::HashMap::new();
+        let mut hash_index = std::collections::HashSet::new();
         
-        // Find all .log files
         let Ok(entries) = std::fs::read_dir(logs_dir) else {
-            return Ok(index);
+            return (chains, hash_index);
         };
         
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map(|e| e == "log").unwrap_or(false) {
-                // Iterate entries in this log - propagate errors
-                let log = Log::open(&path)?;
-                let iter = log.iter()?;
-                for result in iter {
-                    if let Ok(signed_entry) = result {
-                        let hash = hash_signed_entry(&signed_entry);
-                        index.insert(hash);
+                // Extract author from filename
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+                let Ok(author_bytes) = hex::decode(stem) else { continue };
+                if author_bytes.len() != 32 { continue }
+                
+                let mut author = [0u8; 32];
+                author.copy_from_slice(&author_bytes);
+                
+                // Load chain (populates last_hash, last_hlc, etc)
+                if let Ok(chain) = SigChain::from_log(&path, store_id, author) {
+                    // Build hash index from this chain's log
+                    if let Ok(log) = Log::open(&path) {
+                        if let Ok(iter) = log.iter() {
+                            for result in iter {
+                                if let Ok(signed_entry) = result {
+                                    hash_index.insert(hash_signed_entry(&signed_entry));
+                                }
+                            }
+                        }
                     }
+                    chains.insert(author, chain);
                 }
             }
         }
         
-        Ok(index)
+        (chains, hash_index)
     }
     
     /// Check if an entry hash exists in history
@@ -387,6 +424,13 @@ impl SigChainManager {
     /// Get the local node's sigchain (for creating new entries)
     pub fn get(&self, author: &[u8; 32]) -> Option<&SigChain> {
         self.chains.get(author)
+    }
+    
+    /// Get AuthorState for all loaded chains
+    pub fn get_author_states(&self) -> std::collections::HashMap<[u8; 32], crate::proto::AuthorState> {
+        self.chains.iter()
+            .map(|(author, chain)| (*author, chain.author_state()))
+            .collect()
     }
     
     /// Validate an entry against sigchain WITHOUT appending.

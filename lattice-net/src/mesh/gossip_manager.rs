@@ -303,15 +303,21 @@ impl GossipManager {
     }
 }
 
-/// Helper to format SyncState for logging (hex authors/hashes)
+/// Helper to format SyncState for logging (hex authors/hashes/hlc)
 fn format_sync_state(state: &lattice_core::proto::SyncState) -> String {
     let mut parts = Vec::new();
     for sync_author in &state.authors {
         let author = hex::encode(&sync_author.author_id).chars().take(8).collect::<String>();
         if let Some(author_state) = &sync_author.state {
             let hash_short = hex::encode(&author_state.hash).chars().take(8).collect::<String>();
-            parts.push(format!("{}:{} hash={}", author, author_state.seq, hash_short));
+            let hlc_str = author_state.hlc.as_ref()
+                .map(|h| format!("{}.{}", h.wall_time, h.counter))
+                .unwrap_or_else(|| "-".to_string());
+            parts.push(format!("{}:{} hash={} hlc={}", author, author_state.seq, hash_short, hlc_str));
         }
     }
-    format!("[{}]", parts.join(", "))
+    let common = state.common_hlc.as_ref()
+        .map(|h| format!("{}.{}", h.wall_time, h.counter))
+        .unwrap_or_else(|| "-".to_string());
+    format!("[{} common={}]", parts.join(", "), common)
 }

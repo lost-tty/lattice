@@ -7,6 +7,8 @@
 
 use iroh::{Endpoint, endpoint::{BindError, Connection, ConnectError}};
 use iroh::discovery::mdns::MdnsDiscovery;
+use iroh::discovery::pkarr::dht::DhtDiscovery;
+use iroh::discovery::dns::DnsDiscovery;
 pub use iroh::PublicKey;
 
 /// ALPN protocol identifier for Lattice sync
@@ -26,6 +28,12 @@ impl LatticeEndpoint {
         // mDNS for local network discovery
         let mdns = MdnsDiscovery::builder();
         
+        // DHT for internet-wide discovery (pkarr/mainline)
+        let dht = DhtDiscovery::builder();
+        
+        // DNS discovery (iroh.link)
+        let dns = DnsDiscovery::n0_dns();
+        
         let endpoint = Endpoint::builder()
             .secret_key(secret_key)
             .alpns(vec![
@@ -33,6 +41,8 @@ impl LatticeEndpoint {
                 iroh_gossip::ALPN.to_vec(),  // Also accept gossip protocol
             ])
             .discovery(mdns)
+            .discovery(dht)
+            .discovery(dns)
             .bind()
             .await?;
         Ok(Self { endpoint })

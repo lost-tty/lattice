@@ -192,10 +192,13 @@ impl StoreActor {
         rx: mpsc::Receiver<StoreCmd>,
         entry_tx: broadcast::Sender<SignedEntry>,
     ) -> Self {
-        // Create chain manager - it will create/load sigchains as needed
+        // Create chain manager - loads all chains and builds hash index
         let mut chain_manager = SigChainManager::new(&logs_dir, *store_id.as_bytes());
         let local_author = node.public_key_bytes();
-        chain_manager.get_or_create(local_author);  // Pre-initialize local chain
+        chain_manager.get_or_create(local_author);  // Ensure local chain exists
+        
+        // Set author states from loaded chains
+        let _ = store.set_author_states(&chain_manager.get_author_states());
         
         Self {
             store,

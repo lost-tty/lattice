@@ -163,7 +163,6 @@ impl SyncState {
                 state: Some(crate::proto::AuthorState {
                     seq: info.seq,
                     hash: info.hash.to_vec(),
-                    log_offset: 0,
                     hlc: info.hlc.map(|(wall_time, counter)| crate::proto::Hlc { wall_time, counter }),
                 }),
             }

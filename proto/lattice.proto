@@ -53,7 +53,6 @@ message HeadList {
 message AuthorState {
   uint64 seq = 1;              // Highest sequence number from this author
   bytes hash = 2;              // Hash of last entry (tip of sigchain)
-  uint64 log_offset = 3;       // Byte offset in log file (local-only)
   HLC hlc = 4;                 // Highest HLC seen from this author
 }
 

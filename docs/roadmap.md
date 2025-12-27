@@ -39,6 +39,7 @@ Iroh integration (mDNS + DNS discovery), peer management via `/nodes/` keys, joi
 **Goal:** Production-ready mesh networking with simple, unified sync loop.
 
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may need iroh fix)
+- [x] Add highest HLC common to all local logs to SyncState and show it in `store status` for each node
 
 ---
 
