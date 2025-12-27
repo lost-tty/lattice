@@ -87,7 +87,7 @@ pub struct LogReader {
     reader: BufReader<File>,
 }
 
-impl LogReader {    
+impl LogReader {
     /// Create a reader from an existing file, seeking to start
     pub fn from_file(mut file: File) -> Result<Self, LogError> {
         use std::io::Seek;
@@ -197,6 +197,12 @@ impl Log {
     pub fn path(&self) -> &Path {
         &self.path
     }
+    
+    /// Get reference to the underlying writer's file (for testing/cloning)
+    #[cfg(test)]
+    pub fn writer_file(&self) -> &File {
+        self.writer.get_ref()
+    }
 }
 
 /// Read a single LogRecord, returning (hash, SignedEntry)
@@ -276,11 +282,6 @@ mod tests {
     use crate::node_identity::NodeIdentity;
     use crate::store::signed_entry::EntryBuilder;
     use crate::proto::Operation;
-    use std::env::temp_dir;
-
-    fn temp_log_path(name: &str) -> std::path::PathBuf {
-        temp_dir().join(format!("lattice_test_{}.log", name))
-    }
     
     /// Compute hash the same way append_entry does
     fn compute_entry_hash(entry: &SignedEntry) -> [u8; 32] {
@@ -295,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_append_and_read_single() {
-        let path = temp_log_path("single_v6");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -317,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_append_multiple() {
-        let path = temp_log_path("multiple_v6");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -338,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_log_reader_returns_hash() {
-        let path = temp_log_path("reader_hash_v6");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -348,9 +349,13 @@ mod tests {
             .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         let expected_hash = compute_entry_hash(&entry);
-        Log::open_or_create(&path).unwrap().append(&entry).unwrap();
+        let log = Log::open_or_create(&path).unwrap();
+        let mut log = log;
+        log.append(&entry).unwrap();
         
-        let mut reader = LogReader::open(&path).unwrap();
+        // Get LogReader from the Log's file handle
+        let file = log.writer_file().try_clone().unwrap();
+        let mut reader = LogReader::from_file(file).unwrap();
         let (hash, _) = reader.next().unwrap().unwrap();
         assert_eq!(hash, expected_hash);
         
@@ -359,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_read_empty_file() {
-        let path = temp_log_path("empty_v6");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.log");
         std::fs::remove_file(&path).ok();
         
         File::create(&path).unwrap();
@@ -372,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_read_nonexistent() {
-        let path = temp_log_path("nonexistent_v6");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.log");
         std::fs::remove_file(&path).ok();
         
         // Log::open returns NotFound error for missing files
@@ -390,7 +395,7 @@ mod tests {
     fn test_corrupted_entry_detected() {
         use std::io::Seek;
         
-        let path = temp_log_path("corrupted_v6");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -421,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_truncated_file() {
-        let path = temp_log_path("truncated_v6");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -452,7 +457,7 @@ mod tests {
 
     #[test]
     fn test_append_too_large() {
-        let path = temp_log_path("too_large_v6");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -476,7 +481,7 @@ mod tests {
 
     #[test]
     fn test_read_entry_exceeding_limit() {
-        let path = temp_log_path("huge_read_v6");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.log");
         std::fs::remove_file(&path).ok();
         
         // Write a length prefix claiming the entry is > MAX_ENTRY_SIZE
@@ -503,7 +508,7 @@ mod tests {
 
     #[test]
     fn test_corruption_in_middle_of_stream() {
-        let path = temp_log_path("corruption_middle_v6");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();

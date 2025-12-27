@@ -134,11 +134,10 @@ impl MetaStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env::temp_dir;
 
     #[test]
     fn test_add_and_list_stores() {
-        let path = temp_dir().join("meta_store_test.db");
+        let path = tempfile::tempdir().expect("tempdir").keep().join("meta_store_test.db");
         let _ = std::fs::remove_file(&path);
         
         let meta = MetaStore::open(&path).unwrap();
@@ -159,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_root_store() {
-        let path = temp_dir().join("meta_store_root.db");
+        let path = tempfile::tempdir().expect("tempdir").keep().join("meta_store_root.db");
         let _ = std::fs::remove_file(&path);
         
         let meta = MetaStore::open(&path).unwrap();

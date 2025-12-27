@@ -503,12 +503,6 @@ mod tests {
     use crate::node_identity::NodeIdentity;
     use crate::store::signed_entry::EntryBuilder;
     use crate::proto::Operation;
-    use std::env::temp_dir;
-
-    fn temp_db_path(name: &str) -> std::path::PathBuf {
-        let tid = std::thread::current().id();
-        temp_dir().join(format!("lattice_dag_store_test_{}_{:?}.db", name, tid))
-    }
 
     const TEST_STORE: [u8; 16] = [1u8; 16];
     
@@ -524,7 +518,7 @@ mod tests {
 
     #[test]
     fn test_single_write_one_head() {
-        let path = temp_db_path("single_write");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -574,7 +568,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_writes_multiple_heads() {
-        let path = temp_db_path("concurrent");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -609,7 +603,7 @@ mod tests {
 
     #[test]
     fn test_merge_write_single_head() {
-        let path = temp_db_path("merge");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -656,7 +650,7 @@ mod tests {
 
     #[test]
     fn test_delete_preserves_concurrent_heads() {
-        let path = temp_db_path("delete_concurrent");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -708,7 +702,7 @@ mod tests {
 
     #[test]
     fn test_delete_all_heads_removes_key() {
-        let path = temp_db_path("delete_all");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -756,7 +750,7 @@ mod tests {
         // 3. Bob (offline): Put K = v2 citing H1 (doesn't know about delete)
         // 4. Result: Should have 2 heads (tombstone + v2), not just v2
         
-        let path = temp_db_path("concurrent_delete_put");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -815,7 +809,7 @@ mod tests {
         // 4. Charlie (sees both) creates K = v3 citing H1 and H2
         // 5. Result: 1 head (merged)
         
-        let path = temp_db_path("two_authors_merge");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -875,7 +869,7 @@ mod tests {
         // Applying the same entry twice should not duplicate the head
         // This is critical for log replay and network message deduplication
         
-        let path = temp_db_path("idempotent");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -908,7 +902,7 @@ mod tests {
         // Simulates: put a=1, put a=2, then replay from log
         // After replay, should have only 1 head (the latest)
         
-        let path = temp_db_path("sequential_replay");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -969,8 +963,8 @@ mod tests {
         // This simulates: put a=1, put a=2, then restart and replay from log
         // The replay should skip already-applied entries
         
-        let state_path = temp_db_path("replay_existing_state");
-        let log_path = temp_db_path("replay_existing_log");
+        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().join("test.db");
+        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.db");
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
         
@@ -1031,8 +1025,8 @@ mod tests {
         use crate::store::sigchain::SigChain;
         
         // Fast resume: entries already applied are skipped based on per-author seq
-        let state_path = temp_db_path("fast_resume_state");
-        let log_path = temp_db_path("fast_resume_log");
+        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().join("test.db");
+        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.db");
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
         
@@ -1079,8 +1073,8 @@ mod tests {
         
         // Simulates: log has 5 entries, state.db only has first 3 applied (crash)
         // Replay should apply entries 4 and 5
-        let state_path = temp_db_path("partial_replay_state");
-        let log_path = temp_db_path("partial_replay_log");
+        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().join("test.db");
+        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.db");
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
         
@@ -1136,9 +1130,9 @@ mod tests {
         // 4. Restore state.db from backup
         // 5. Restart and replay - should apply entries 4-5
         
-        let state_path = temp_db_path("rollback_state");
-        let backup_path = temp_db_path("rollback_backup");
-        let log_path = temp_db_path("rollback_log");
+        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().join("test.db");
+        let _tmp_backup = tempfile::tempdir().unwrap(); let backup_path = _tmp_backup.path().join("test.db");
+        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.db");
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&backup_path);
         let _ = std::fs::remove_file(&log_path);
@@ -1303,9 +1297,9 @@ mod tests {
     #[test]
     fn test_sync_state_diff_and_apply() {
         // Test that two stores can compute diff and sync entries
-        let path_a = temp_db_path("sync_a");
-        let path_b = temp_db_path("sync_b");
-        let log_path_a = temp_db_path("sync_a_log");
+        let _tmp_a = tempfile::tempdir().unwrap(); let path_a = _tmp_a.path().join("test.db");
+        let _tmp_b = tempfile::tempdir().unwrap(); let path_b = _tmp_b.path().join("test.db");
+        let _tmp_log_a = tempfile::tempdir().unwrap(); let log_path_a = _tmp_log_a.path().join("test.db");
         let _ = std::fs::remove_file(&path_a);
         let _ = std::fs::remove_file(&path_b);
         let _ = std::fs::remove_file(&log_path_a);
@@ -1369,10 +1363,10 @@ mod tests {
     #[test]
     fn test_bidirectional_sync() {
         // Test that two stores can sync in both directions
-        let path_a = temp_db_path("bidir_a");
-        let path_b = temp_db_path("bidir_b");
-        let log_path_a = temp_db_path("bidir_log_a");
-        let log_path_b = temp_db_path("bidir_log_b");
+        let _tmp_a = tempfile::tempdir().unwrap(); let path_a = _tmp_a.path().join("test.db");
+        let _tmp_b = tempfile::tempdir().unwrap(); let path_b = _tmp_b.path().join("test.db");
+        let _tmp_log_a = tempfile::tempdir().unwrap(); let log_path_a = _tmp_log_a.path().join("test.db");
+        let _tmp_log_b = tempfile::tempdir().unwrap(); let log_path_b = _tmp_log_b.path().join("test.db");
         let _ = std::fs::remove_file(&path_a);
         let _ = std::fs::remove_file(&path_b);
         let _ = std::fs::remove_file(&log_path_a);
@@ -1454,12 +1448,12 @@ mod tests {
     #[test]
     fn test_three_way_sync() {
         // Test that three stores can all sync with each other
-        let path_a = temp_db_path("three_a");
-        let path_b = temp_db_path("three_b");
-        let path_c = temp_db_path("three_c");
-        let log_path_a = temp_db_path("three_log_a");
-        let log_path_b = temp_db_path("three_log_b");
-        let log_path_c = temp_db_path("three_log_c");
+        let _tmp_a = tempfile::tempdir().unwrap(); let path_a = _tmp_a.path().join("test.db");
+        let _tmp_b = tempfile::tempdir().unwrap(); let path_b = _tmp_b.path().join("test.db");
+        let _tmp_c = tempfile::tempdir().unwrap(); let path_c = _tmp_c.path().join("test.db");
+        let _tmp_log_a = tempfile::tempdir().unwrap(); let log_path_a = _tmp_log_a.path().join("test.db");
+        let _tmp_log_b = tempfile::tempdir().unwrap(); let log_path_b = _tmp_log_b.path().join("test.db");
+        let _tmp_log_c = tempfile::tempdir().unwrap(); let log_path_c = _tmp_log_c.path().join("test.db");
         for p in [&path_a, &path_b, &path_c, &log_path_a, &log_path_b, &log_path_c] {
             let _ = std::fs::remove_file(p);
         }
@@ -1543,10 +1537,10 @@ mod tests {
     #[test]
     fn test_conflict_deterministic_resolution() {
         // Test that two nodes writing the same key resolve deterministically
-        let path_a = temp_db_path("conflict_a");
-        let path_b = temp_db_path("conflict_b");
-        let log_path_a = temp_db_path("conflict_log_a");
-        let log_path_b = temp_db_path("conflict_log_b");
+        let _tmp_a = tempfile::tempdir().unwrap(); let path_a = _tmp_a.path().join("test.db");
+        let _tmp_b = tempfile::tempdir().unwrap(); let path_b = _tmp_b.path().join("test.db");
+        let _tmp_log_a = tempfile::tempdir().unwrap(); let log_path_a = _tmp_log_a.path().join("test.db");
+        let _tmp_log_b = tempfile::tempdir().unwrap(); let log_path_b = _tmp_log_b.path().join("test.db");
         for p in [&path_a, &path_b, &log_path_a, &log_path_b] {
             let _ = std::fs::remove_file(p);
         }
@@ -1615,7 +1609,7 @@ mod tests {
     #[test]
     fn test_hlc_tiebreak_explicit() {
         // Explicit test: equal HLC, winner determined by node ID (author bytes)
-        let path = temp_db_path("tiebreak");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -1668,8 +1662,8 @@ mod tests {
     /// 5. Node D should end up with same state as A (1 head, not 3)
     #[test]
     fn test_multinode_sync_after_merge() {
-        let path_a = temp_db_path("multinode_a");
-        let path_d = temp_db_path("multinode_d");
+        let _tmp_a = tempfile::tempdir().unwrap(); let path_a = _tmp_a.path().join("test.db");
+        let _tmp_d = tempfile::tempdir().unwrap(); let path_d = _tmp_d.path().join("test.db");
         let _ = std::fs::remove_file(&path_a);
         let _ = std::fs::remove_file(&path_d);
         
@@ -1787,7 +1781,7 @@ mod tests {
     /// - The merge entry arrives BEFORE the entries it merges!
     #[test]
     fn test_multinode_sync_wrong_order() {
-        let path = temp_db_path("wrongorder");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();
@@ -1859,7 +1853,7 @@ mod tests {
 
     #[test]
     fn test_list_by_prefix_filters_tombstones() {
-        let path = temp_db_path("list_tombstones");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
         let store = Store::open(&path).unwrap();

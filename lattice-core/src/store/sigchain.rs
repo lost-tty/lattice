@@ -587,17 +587,12 @@ mod tests {
     use crate::node_identity::NodeIdentity;
     use crate::proto::Operation;
     use crate::store::signed_entry::EntryBuilder;
-    use std::env::temp_dir;
-
-    fn temp_log_path(name: &str) -> PathBuf {
-        temp_dir().join(format!("lattice_sigchain_test_{}.log", name))
-    }
 
     const TEST_STORE: [u8; 16] = [1u8; 16];
 
     #[test]
     fn test_new_sigchain() {
-        let path = temp_log_path("new");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("sigchain.log");
         let author = [1u8; 32];
         
         let chain = SigChain::new(&path, TEST_STORE, author).unwrap();
@@ -611,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_append_entry() {
-        let path = temp_log_path("append");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("sigchain.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -636,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_append_multiple() {
-        let path = temp_log_path("multiple");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("sigchain.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -661,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_from_log() {
-        let path = temp_log_path("from_log");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("sigchain.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -692,7 +687,7 @@ mod tests {
 
     #[test]
     fn test_reject_wrong_sequence() {
-        let path = temp_log_path("wrong_seq");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("sigchain.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -716,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_reject_wrong_prev_hash() {
-        let path = temp_log_path("wrong_prev");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("sigchain.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -748,7 +743,7 @@ mod tests {
 
     #[test]
     fn test_reject_wrong_author() {
-        let path = temp_log_path("wrong_author");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("sigchain.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -772,7 +767,7 @@ mod tests {
 
     #[test]
     fn test_build_and_append_entry() {
-        let path = temp_log_path("create");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("sigchain.log");
         std::fs::remove_file(&path).ok();
         
         let node = NodeIdentity::generate();
@@ -803,8 +798,8 @@ mod tests {
 
     #[test]
     fn test_reject_wrong_store_id() {
-        let path_a = temp_log_path("storeid_a");
-        let path_b = temp_log_path("storeid_b");
+        let _tmp_a = tempfile::tempdir().unwrap(); let path_a = _tmp_a.path().join("sigchain.log");
+        let _tmp_b = tempfile::tempdir().unwrap(); let path_b = _tmp_b.path().join("sigchain.log");
         std::fs::remove_file(&path_a).ok();
         std::fs::remove_file(&path_b).ok();
         
@@ -839,7 +834,7 @@ mod tests {
     /// when their parent arrives.
     #[test]
     fn test_ingest_validates_and_buffers_orphans() {
-        let logs_dir = temp_dir().join("lattice_ingest_test_logs");
+        let logs_dir = tempfile::tempdir().expect("tempdir").keep().join("lattice_ingest_test_logs");
         let _ = std::fs::remove_dir_all(&logs_dir);
         std::fs::create_dir_all(&logs_dir).unwrap();
         
@@ -919,7 +914,7 @@ mod tests {
     /// Simulates receiving entries out-of-order and verifies GapInfo is broadcast.
     #[test]
     fn test_gap_events_emitted_on_orphan() {
-        let logs_dir = temp_dir().join("lattice_gap_events_test");
+        let logs_dir = tempfile::tempdir().expect("tempdir").keep().join("lattice_gap_events_test");
         let _ = std::fs::remove_dir_all(&logs_dir);
         std::fs::create_dir_all(&logs_dir).unwrap();
         
@@ -982,8 +977,8 @@ mod tests {
     /// Peer A has entries 1,2,3. Peer B receives 3 first (orphan), then gets 1,2 via sync.
     #[test]
     fn test_two_peer_gap_fill_simulation() {
-        let logs_dir_a = temp_dir().join("lattice_peer_a");
-        let logs_dir_b = temp_dir().join("lattice_peer_b");
+        let logs_dir_a = tempfile::tempdir().expect("tempdir").keep().join("lattice_peer_a");
+        let logs_dir_b = tempfile::tempdir().expect("tempdir").keep().join("lattice_peer_b");
         let _ = std::fs::remove_dir_all(&logs_dir_a);
         let _ = std::fs::remove_dir_all(&logs_dir_b);
         std::fs::create_dir_all(&logs_dir_a).unwrap();

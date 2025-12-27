@@ -609,20 +609,15 @@ mod tests {
     use crate::node_identity::NodeIdentity;
     use crate::proto::Operation;
     use crate::store::signed_entry::{EntryBuilder, hash_signed_entry};
-    use std::env::temp_dir;
     
     const TEST_STORE: [u8; 16] = [1u8; 16];
-    
-    fn temp_test_dir(name: &str) -> std::path::PathBuf {
-        let tid = std::thread::current().id();
-        temp_dir().join(format!("lattice_actor_test_{}_{:?}", name, tid))
-    }
 
     /// Test that entries with invalid parent_hashes are buffered as DAG orphans
     /// and applied when the parent entry arrives.
     #[test]
     fn test_dag_orphan_buffering_and_retry() {
-        let dir = temp_test_dir("dag_orphan");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");
@@ -725,7 +720,7 @@ mod tests {
     /// B arrives -> C becomes ready and is applied.
     #[test]
     fn test_merge_conflict_partial_parent_satisfaction() {
-        let dir = temp_test_dir("merge_conflict");
+        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");
@@ -860,7 +855,7 @@ mod tests {
     /// B arrives -> C wakes up, both parents present -> C applies.
     #[test]
     fn test_merge_conflict_rebuffer_on_partial_satisfaction() {
-        let dir = temp_test_dir("merge_rebuffer");
+        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");
@@ -974,7 +969,7 @@ mod tests {
     /// Bug: old "C waiting for A" record was never deleted.
     #[test]
     fn test_orphan_store_cleanup_on_rebuffer() {
-        let dir = temp_test_dir("orphan_cleanup");
+        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");
@@ -1069,7 +1064,7 @@ mod tests {
     fn test_crash_recovery_on_actor_spawn() {
         use crate::store::sigchain::SigChain;
         
-        let dir = temp_test_dir("crash_recovery");
+        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");
@@ -1146,7 +1141,7 @@ mod tests {
     fn test_sigchain_orphan_not_lost_on_crash() {
         use crate::store::sigchain::SigChainManager;
         
-        let dir = temp_test_dir("sigchain_orphan_loss");
+        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
@@ -1218,7 +1213,7 @@ mod tests {
     /// Bug: H2 becomes DAG orphan because H0 is no longer a current head
     #[test]
     fn test_concurrent_offline_writes_create_conflict() {
-        let dir = temp_test_dir("concurrent_offline");
+        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");
@@ -1329,7 +1324,7 @@ mod tests {
     /// This reproduces a bug where re-syncing already-orphaned entries leaves stale orphans.
     #[test]
     fn test_orphan_cleanup_on_duplicate_ingest() {
-        let dir = temp_test_dir("orphan_duplicate_cleanup");
+        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");
@@ -1423,7 +1418,7 @@ mod tests {
     /// Simulates a stale orphan (seq < next_seq) and verifies cleanup removes it.
     #[test]
     fn test_orphan_cleanup_command() {
-        let dir = temp_test_dir("orphan_cleanup_cmd");
+        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");

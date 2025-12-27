@@ -164,7 +164,6 @@ impl PeerStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env::temp_dir;
 
     #[test]
     fn test_generate() {
@@ -201,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_save_and_load() {
-        let temp_path = temp_dir().join("lattice_test_identity.key");
+        let temp_path = tempfile::tempdir().expect("tempdir").keep().join("lattice_test_identity.key");
         
         // Generate and save
         let node1 = NodeIdentity::generate();
@@ -220,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_load_or_generate() {
-        let temp_path = temp_dir().join("lattice_test_identity2.key");
+        let temp_path = tempfile::tempdir().expect("tempdir").keep().join("lattice_test_identity2.key");
         
         // Remove if exists
         fs::remove_file(&temp_path).ok();

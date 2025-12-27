@@ -386,7 +386,6 @@ pub struct DagOrphanedEntry {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::env::temp_dir;
     use redb::ReadableTableMetadata;
     
     /// Count total DAG orphan entries in the store (test helper)
@@ -398,7 +397,7 @@ pub(crate) mod tests {
     
     #[test]
     fn test_orphan_store_basic() {
-        let path = temp_dir().join("test_orphan_store.db");
+        let path = tempfile::tempdir().expect("tempdir").keep().join("test_orphan_store.db");
         let _ = std::fs::remove_file(&path);
         
         let store = OrphanStore::open(&path).unwrap();

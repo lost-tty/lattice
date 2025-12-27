@@ -584,17 +584,11 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env::temp_dir;
-
-    fn temp_data_dir(name: &str) -> DataDir {
-        let path = temp_dir().join(format!("lattice_node_test_{}", name));
-        let _ = std::fs::remove_dir_all(&path);
-        DataDir::new(path)
-    }
 
     #[tokio::test]
     async fn test_create_and_open_store() {
-        let data_dir = temp_data_dir("meta_store");
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -617,7 +611,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_isolation() {
-        let data_dir = temp_data_dir("meta_isolation");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -639,7 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_creates_root_store() {
-        let data_dir = temp_data_dir("init_root");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -657,7 +651,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_init_fails() {
-        let data_dir = temp_data_dir("init_dup");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -679,7 +673,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_root_store_in_info_after_init() {
-        let data_dir = temp_data_dir("init_info");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         // First session: init
         let node = NodeBuilder { data_dir: data_dir.clone() }
@@ -700,7 +694,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_idempotent_put_and_delete() {
-        let data_dir = temp_data_dir("idempotent");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -731,7 +725,7 @@ mod tests {
     
     #[tokio::test]
     async fn test_set_name_updates_store() {
-        let data_dir = temp_data_dir("set_name");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -774,7 +768,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invite_peer() {
-        let data_dir = temp_data_dir("invite_peer");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -798,7 +792,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_accept_join() {
-        let data_dir = temp_data_dir("accept_join");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -827,8 +821,10 @@ mod tests {
     #[tokio::test]
     async fn test_invite_join_sync_flow() {
         // Node A: creator, Node B: joiner
-        let data_dir_a = temp_data_dir("flow_a");
-        let data_dir_b = temp_data_dir("flow_b");
+        let tmp_a = tempfile::tempdir().unwrap();
+        let data_dir_a = DataDir::new(tmp_a.path().to_path_buf());
+        let tmp_b = tempfile::tempdir().unwrap();
+        let data_dir_b = DataDir::new(tmp_b.path().to_path_buf());
         
         let node_a = NodeBuilder { data_dir: data_dir_a.clone() }
             .build()
@@ -880,7 +876,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_receives_put_event() {
-        let data_dir = temp_data_dir("watch_put");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -911,7 +907,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_receives_delete_event() {
-        let data_dir = temp_data_dir("watch_delete");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -937,7 +933,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_only_matching_keys() {
-        let data_dir = temp_data_dir("watch_filter");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -965,7 +961,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_complex_regex() {
-        let data_dir = temp_data_dir("watch_complex");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -993,7 +989,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_invalid_regex_fails() {
-        let data_dir = temp_data_dir("watch_invalid");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
@@ -1012,7 +1008,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_multiple_watchers() {
-        let data_dir = temp_data_dir("watch_multi");
+        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
             .build()
