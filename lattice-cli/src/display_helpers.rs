@@ -67,7 +67,6 @@ pub fn format_elapsed(elapsed: std::time::Duration) -> String {
 pub struct PeerSyncRow {
     pub pubkey: [u8; 32],
     pub label: String,
-    pub updated_ago: std::time::Duration,
     pub frontiers: std::collections::HashMap<[u8; 32], u64>,
 }
 
@@ -119,19 +118,19 @@ pub fn render_peer_sync_matrix(
     let seq_width = max_seq_width.max(7);
     
     // Header
-    let mut header = format!("{:<width$} {:>10}", "Peer", "Updated", width = peer_col_width);
+    let mut header = format!("{:<width$}", "Peer", width = peer_col_width);
     for author in &authors {
         let label = colored_author(author, *author == my_pubkey, seq_width);
         header.push_str(&format!(" {}", label));
     }
     let _ = writeln!(output, "{}", header);
-    let _ = writeln!(output, "{}", "-".repeat(peer_col_width + 11 + (authors.len() * (seq_width + 1))));
+    let _ = writeln!(output, "{}", "-".repeat(peer_col_width + (authors.len() * (seq_width + 1))));
     
     // Self row
     {
         let self_label = format!("{}", "Self*".color(author_color(&my_pubkey)));
         let padded_self = format!("{:<width$}", self_label, width = peer_col_width + 10);
-        let mut row = format!("{} {:>10}", padded_self, "-");
+        let mut row = padded_self;
         for author in &authors {
             let our_seq = our_authors.get(author).copied().unwrap_or(0);
             row.push_str(&format!(" {:>width$}", our_seq, width = seq_width));
@@ -143,8 +142,7 @@ pub fn render_peer_sync_matrix(
     for peer in peers {
         let colored_label = format!("{}", peer.label.color(author_color(&peer.pubkey)));
         let padded_label = format!("{:<width$}", colored_label, width = peer_col_width + 10);
-        let updated = format_elapsed(peer.updated_ago);
-        let mut row = format!("{} {:>10}", padded_label, updated);
+        let mut row = padded_label;
         
         for author in &authors {
             let peer_seq = peer.frontiers.get(author).copied().unwrap_or(0);
@@ -233,13 +231,8 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &StoreHandle
         .unwrap_or_default();
     
     // Build peer rows
-    let now = std::time::SystemTime::now();
     let peers: Vec<PeerSyncRow> = peer_states.iter()
         .map(|(peer, info)| {
-            let updated_ago = now.duration_since(std::time::UNIX_EPOCH)
-                .map(|d| std::time::Duration::from_secs(d.as_secs().saturating_sub(info.updated_at)))
-                .unwrap_or_default();
-            
             let peer_name = peer_names.get(peer).and_then(|n| n.as_ref());
             let label = peer_name
                 .map(|n| format!("{} ({})", n, &hex::encode(&peer[..4])))
@@ -255,7 +248,7 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &StoreHandle
                 }).collect())
                 .unwrap_or_default();
             
-            PeerSyncRow { pubkey: *peer, label, updated_ago, frontiers }
+            PeerSyncRow { pubkey: *peer, label, frontiers }
         })
         .collect();
     

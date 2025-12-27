@@ -14,9 +14,6 @@ Store actor pattern (dedicated thread, channel commands), tokio runtime, async C
 ### M2: Two-Node Sync ✓
 Iroh integration (mDNS + DNS discovery), peer management via `/nodes/` keys, join protocol with store UUID exchange, bidirectional sync with SyncState diff, framed protobuf messaging.
 
-### M3: Multi-Node Mesh (Partial) ✓
-LatticeServer refactor, gossip protocol (iroh-gossip), Key Watcher for reactive patterns, unified entry validation with hash index, orphan gap-filling with targeted sync.
-
 ---
 
 ## Priority 1: Stability
@@ -25,6 +22,7 @@ LatticeServer refactor, gossip protocol (iroh-gossip), Key Watcher for reactive 
 
 ### Regressions
 - [x] On join, node does not reliably join gossip
+- [ ] `store sync` seems to be uni-directional now
 
 ### Diagnostics
 - [x] Unicast `peer status` command with sync matrix and RTT
@@ -33,32 +31,14 @@ LatticeServer refactor, gossip protocol (iroh-gossip), Key Watcher for reactive 
 ### Orphan Management
 - [x] Track received_at timestamp for orphans (preparation for TTL)
 
-### Tech Debt
-- [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip regression)
-- [x] Proto: Change `HeadInfo.hlc` to proper `HLC` message type
-- [x] Proto: Change `HLC.counter` from `uint32` to `uint16`
-- [x] rename `history` command to `store history`
-- [x] rename `peer sync` to `store sync`, drop single peer sync functionality
-- [x] `peer invite` should output the node's id for easy joining
-- [ ] split `lattice.proto` into network protocol and storage messages
-- [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
-- [ ] Async streaming in `do_stream_entries_in_range` (currently re-opens Log in sync thread)
 
 ---
 
 ## Priority 2: Sync & Gossip Reliability
 
-**Goal:** Production-ready mesh networking.
+**Goal:** Production-ready mesh networking with simple, unified sync loop.
 
-### Gossip Reliability
-- [ ] **REGRESSION**: Gossip loses connectivity after sleep/wake
-- [ ] Periodic anti-entropy sync to catch missed entries
-- [ ] Detect stale gossip → trigger sync
-
-### Sync Resilience
-- [ ] Retry failed syncs with backoff
-- [ ] Handle partial sync (peer disconnects mid-sync)
-- [ ] Offline nodes should not block sync (timeout + skip)
+- [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may need iroh fix)
 
 ---
 
@@ -126,6 +106,51 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 **Crate Refactoring** (larger effort, defer)
 - [ ] Extract `Store`, `SigChain`, `StoreActor` into `lattice-store` crate
 - [ ] Trait boundaries: `KvStore` (user ops) vs `SyncStore` (network ops)
+- [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip regression)
+- [x] Proto: Change `HeadInfo.hlc` to proper `HLC` message type
+- [x] Proto: Change `HLC.counter` from `uint32` to `uint16`
+- [x] rename `history` command to `store history`
+- [x] rename `peer sync` to `store sync`, drop single peer sync functionality
+- [x] `peer invite` should output the node's id for easy joining
+- [x] Async streaming in `do_stream_entries_in_range` (currently re-opens Log in sync thread)
+- [ ] split `lattice.proto` into network protocol and storage messages
+- [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
+- [ ] Refactor any `.unwrap` uses
+
+---
+
+## Research & Protocol Evolution
+
+Research areas and papers that may inform future Lattice development.
+
+### Sync Efficiency: Negentropy
+Range-based set reconciliation for efficient diff calculation. Replaces O(n) vector clock sync with sub-linear bandwidth. Used by Nostr ecosystem.
+- **Apply to:** `mesh/protocol.rs` sync diff logic
+- **Ref:** [Negentropy Protocol](https://github.com/hoytech/negentropy)
+
+### Data Pruning: Willow Protocol
+3D key space (Author, Path, Time) with authenticated deletion. Newer timestamps deterministically overwrite older, enabling partial replication and actual byte deletion without breaking hash chains.
+- **Apply to:** `store/core.rs` for pruning, `sigchain.rs` for subspace capabilities
+- **Ref:** [Willow Protocol](https://willowprotocol.org/)
+
+### Byzantine Fork Detection
+Formal framework for detecting equivocation (same seq# with different content). Generate `FraudProof` for permanent blocklisting.
+- **Apply to:** `sync_state.rs` fork detection → punitive action
+- **Ref:** [Kleppmann & Howard (2020)](https://arxiv.org/abs/2012.00472)
+
+### Storage: Merkle Search Trees / Prolly Trees
+Order-independent Merkle roots for verifiable O(1) state comparison. Used by Bluesky (AT Protocol) and Dolt.
+- **Apply to:** Snapshot verification, instant sync-state comparison
+- **Ref:** [MST Paper (HAL)](https://hal.inria.fr/hal-02303490/document)
+
+### Probabilistic Filters: IBLTs / Bloom Filters
+Invertible Bloom Lookup Tables for probabilistic set difference. Reduces `missing_ranges` bandwidth when peers mostly in sync.
+- **Apply to:** `SyncRequest` optimization
+
+### Data Integrity: Verified Reads & Corruption Recovery
+Verify all data read from disk (log files, redb store) via hash/signature checks. Gracefully handle corruption by marking damaged ranges and refetching from peers.
+- **Apply to:** `log.rs` entry reads, `Store` operations, `SigChain` validation
+- **Recovery:** Trigger targeted sync for corrupted author/seq ranges
 
 ---
 

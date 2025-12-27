@@ -128,12 +128,10 @@ message OrphanedEntry {
   uint64 received_at = 3;    // Unix timestamp (seconds) when orphan was received
 }
 
-// 10. Gossip Message Wrapper
+// 10. Gossip Message Wrapper (supports piggybacking - both fields in one message)
 message GossipMessage {
-  oneof payload {
-    SignedEntry entry = 1;              // Regular entry broadcast
-    SyncStateAnnounce sync_state = 2;   // Periodic sync state announcement
-  }
+  optional SignedEntry entry = 1;       // Entry broadcast (if any)
+  optional SyncState sender_state = 2;  // Sender's sync state (piggybacked)
 }
 
 // 11. Sync State Announcement (gossip broadcast)

@@ -3,11 +3,12 @@
 use crate::{parse_node_id, LatticeEndpoint};
 use super::error::GossipError;
 use lattice_core::{Uuid, Node, StoreHandle, PeerStatus, PeerWatchEvent, PeerWatchEventKind};
-use lattice_core::proto::{SignedEntry, GossipMessage, gossip_message::Payload};
+use lattice_core::proto::{SignedEntry, GossipMessage, PeerSyncInfo};
 use iroh_gossip::Gossip;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use tokio::sync::RwLock;
 use prost::Message;
 
@@ -73,9 +74,13 @@ impl GossipManager {
         let (sender, receiver) = topic_handle.split();
         self.senders.write().await.insert(store_id, sender);
         
+        // Simple pending flag for SyncState piggybacking. Start true to announce on startup.
+        let pending_syncstate = Arc::new(AtomicBool::new(true));
+        
         // Spawn background tasks
-        self.spawn_receiver(store.clone(), receiver, node.clone(), self.online_peers.clone());
-        self.spawn_forwarder(store_id, store.subscribe_entries());
+        self.spawn_receiver(store.clone(), receiver, node.clone(), self.online_peers.clone(), pending_syncstate.clone());
+        self.spawn_forwarder(store.clone(), store.subscribe_entries(), pending_syncstate.clone());
+        self.spawn_syncstate_fallback(store.clone(), pending_syncstate);
         self.spawn_peer_watcher(store_id, rx);
         
         tracing::debug!("Gossip tasks spawned");
@@ -92,7 +97,14 @@ impl GossipManager {
         peers
     }
     
-    fn spawn_receiver(&self, store: StoreHandle, mut rx: iroh_gossip::api::GossipReceiver, node: std::sync::Arc<Node>, online_peers: Arc<RwLock<HashMap<iroh::PublicKey, Instant>>>) {
+    fn spawn_receiver(
+        &self,
+        store: StoreHandle,
+        mut rx: iroh_gossip::api::GossipReceiver,
+        node: std::sync::Arc<Node>,
+        online_peers: Arc<RwLock<HashMap<iroh::PublicKey, Instant>>>,
+        pending_syncstate: Arc<AtomicBool>,
+    ) {
         let store_id = store.id();
         
         tokio::spawn(async move {
@@ -121,7 +133,7 @@ impl GossipManager {
                             continue;
                         }
                         
-                        // Decode GossipMessage wrapper
+                        // Decode GossipMessage (new optional-field structure)
                         let gossip_msg = match GossipMessage::decode(&msg.content[..]) {
                             Ok(m) => m,
                             Err(e) => {
@@ -130,9 +142,36 @@ impl GossipManager {
                             }
                         };
                         
-                        if let Some(Payload::Entry(entry)) = gossip_msg.payload {
+                        // Handle entry (if present)
+                        if let Some(entry) = gossip_msg.entry {
                             tracing::debug!(store_id = %store_id, from = %msg.delivered_from.fmt_short(), "Gossip entry received");
                             let _ = store.ingest_entry(entry).await;
+                            // Mark pending for SyncState piggybacking on next outbound
+                            pending_syncstate.store(true, Ordering::SeqCst);
+                        }
+                        
+                        // Handle piggybacked sender_state (if present)
+                        if let Some(sync_state) = gossip_msg.sender_state {
+                            // Format before moving
+                            let formatted = format_sync_state(&sync_state);
+                            
+                            let info = PeerSyncInfo {
+                                store_id: store_id.as_bytes().to_vec(),
+                                sync_state: Some(sync_state),
+                                updated_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                            };
+                            if let Err(e) = store.set_peer_sync_state(&sender_bytes, info).await {
+                                tracing::warn!(store_id = %store_id, error = %e, "Failed to update peer sync state");
+                            }
+                            tracing::info!(
+                                store_id = %store_id,
+                                from = %hex::encode(&sender_bytes)[..8],
+                                state = %formatted,
+                                "Received SyncState"
+                            );
                         }
                     }
                     Ok(iroh_gossip::api::Event::NeighborUp(peer_id)) => {
@@ -157,27 +196,78 @@ impl GossipManager {
     
     fn spawn_forwarder(
         &self,
-        store_id: Uuid,
+        store: StoreHandle,
         mut entry_rx: tokio::sync::broadcast::Receiver<SignedEntry>,
+        pending_syncstate: Arc<AtomicBool>,
     ) {
         let senders = self.senders.clone();
+        let store_id = store.id();
+        let my_pubkey_bytes = self.my_pubkey.as_bytes().to_vec();
+        
         tokio::spawn(async move {
             tracing::debug!(store_id = %store_id, "Entry forwarder started");
             while let Ok(entry) = entry_rx.recv().await {
-                tracing::debug!(store_id = %store_id, "Broadcasting entry via gossip");
-                if let Some(sender) = senders.read().await.get(&store_id) {
-                    // Wrap entry in GossipMessage
-                    let msg = GossipMessage {
-                        payload: Some(Payload::Entry(entry)),
-                    };
-                    if let Err(e) = sender.broadcast(msg.encode_to_vec().into()).await {
-                        tracing::warn!(error = %e, "Gossip broadcast failed");
+                // Unified Entry Feed: filtering required
+                if entry.author_id == my_pubkey_bytes {
+                    tracing::debug!(store_id = %store_id, "Broadcasting local entry via gossip");
+                    if let Some(sender) = senders.read().await.get(&store_id) {
+                        // Always piggyback SyncState on local writes
+                        let sender_state = store.sync_state().await.ok().map(|s| s.to_proto());
+                        let msg = GossipMessage {
+                            entry: Some(entry),
+                            sender_state,
+                        };
+                        
+                        if let Err(e) = sender.broadcast(msg.encode_to_vec().into()).await {
+                            tracing::warn!(error = %e, "Gossip broadcast failed");
+                        } else if let Some(state) = &msg.sender_state {
+                             let formatted = format_sync_state(state);
+                             tracing::info!(store_id = %store_id, state = %formatted, "Piggybacked SyncState on entry");
+                        }
                     }
                 } else {
-                    tracing::warn!(store_id = %store_id, "No gossip sender for store");
+                    // Remote entry (Gossip or RPC) - just mark state as pending broadcast
+                    pending_syncstate.store(true, Ordering::SeqCst);
                 }
             }
             tracing::warn!(store_id = %store_id, "Entry forwarder ended");
+        });
+    }
+    
+    /// Fallback timer for read-only nodes - broadcasts SyncState when pending but no outbound entries
+    fn spawn_syncstate_fallback(
+        &self,
+        store: StoreHandle,
+        pending_syncstate: Arc<AtomicBool>,
+    ) {
+        let senders = self.senders.clone();
+        let store_id = store.id();
+        const FALLBACK_INTERVAL: Duration = Duration::from_secs(10);
+        
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(FALLBACK_INTERVAL).await;
+                
+                // If pending (received entries but no outbound), broadcast SyncState alone
+                if pending_syncstate.swap(false, Ordering::SeqCst) {
+                    if let Ok(sync_state) = store.sync_state().await {
+                        if let Some(sender) = senders.read().await.get(&store_id) {
+                            let msg = GossipMessage {
+                                entry: None,
+                                sender_state: Some(sync_state.to_proto()),
+                            };
+                            if let Err(e) = sender.broadcast(msg.encode_to_vec().into()).await {
+                                tracing::warn!(error = %e, "SyncState fallback broadcast failed");
+                            } else {
+                                if let Some(state) = &msg.sender_state {
+                                    let formatted = format_sync_state(state);
+                                    tracing::info!(store_id = %store_id, state = %formatted, "Fallback SyncState broadcast");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         });
     }
     
@@ -212,4 +302,17 @@ impl GossipManager {
             }
         });
     }
+}
+
+/// Helper to format SyncState for logging (hex authors/hashes)
+fn format_sync_state(state: &lattice_core::proto::SyncState) -> String {
+    let mut parts = Vec::new();
+    for frontier in &state.frontiers {
+        let author = hex::encode(&frontier.author_id).chars().take(8).collect::<String>();
+        let heads: Vec<String> = frontier.head_hashes.iter()
+            .map(|h| hex::encode(h).chars().take(8).collect())
+            .collect();
+        parts.push(format!("{}:{} heads={:?}", author, frontier.max_seq, heads));
+    }
+    format!("[{}]", parts.join(", "))
 }

@@ -426,8 +426,7 @@ impl StoreActor {
         // Use unified apply path
         self.apply_ingested_entry(&entry)?;
         
-        // Broadcast the entry to listeners (for gossip)
-        let _ = self.entry_tx.send(entry.clone());
+        // Entry is broadcast via unified path in apply_ingested_entry
 
         Ok(())
     }
@@ -474,6 +473,9 @@ impl StoreActor {
                             
                             // Emit watch events
                             self.emit_watch_events_for_entry(&current);
+
+                            // Broadcast to listeners (Unified Feed: Local + Remote + Orphans)
+                            let _ = self.entry_tx.send(current.clone());
                             
                             // Add any sigchain orphans that became ready (with metadata for deferred deletion)
                             for (orphan, author, prev_hash, orphan_hash) in ready_orphans {
