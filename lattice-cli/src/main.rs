@@ -3,6 +3,7 @@
 mod commands;
 mod node_commands;
 mod store_commands;
+mod display_helpers;
 mod graph_renderer;
 mod tracing_writer;
 

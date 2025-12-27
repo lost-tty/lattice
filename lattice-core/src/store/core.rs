@@ -19,6 +19,7 @@ use thiserror::Error;
 // Table definitions
 const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
 const AUTHOR_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("author");
+const PEER_SYNC_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("peer_sync");
 
 /// Errors that can occur during store operations
 #[derive(Error, Debug)]
@@ -79,6 +80,7 @@ impl Store {
         {
             let _ = write_txn.open_table(KV_TABLE)?;
             let _ = write_txn.open_table(AUTHOR_TABLE)?;
+            let _ = write_txn.open_table(PEER_SYNC_TABLE)?;
         }
         write_txn.commit()?;
         
@@ -444,6 +446,49 @@ impl Store {
         }
         
         Ok(state)
+    }
+    
+    // ==================== Peer Sync State Methods ====================
+    
+    /// Store a peer's sync state (received via gossip or status command)
+    pub fn set_peer_sync_state(&self, peer: &[u8; 32], info: &crate::proto::PeerSyncInfo) -> Result<(), StoreError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(PEER_SYNC_TABLE)?;
+            table.insert(&peer[..], info.encode_to_vec().as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+    
+    /// Get a peer's last known sync state
+    pub fn get_peer_sync_state(&self, peer: &[u8; 32]) -> Result<Option<crate::proto::PeerSyncInfo>, StoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(PEER_SYNC_TABLE)?;
+        
+        match table.get(&peer[..])? {
+            Some(v) => Ok(crate::proto::PeerSyncInfo::decode(v.value()).ok()),
+            None => Ok(None),
+        }
+    }
+    
+    /// List all known peer sync states
+    pub fn list_peer_sync_states(&self) -> Result<Vec<([u8; 32], crate::proto::PeerSyncInfo)>, StoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(PEER_SYNC_TABLE)?;
+        
+        let mut peers = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            if key.value().len() == 32 {
+                if let Ok(info) = crate::proto::PeerSyncInfo::decode(value.value()) {
+                    let mut peer = [0u8; 32];
+                    peer.copy_from_slice(key.value());
+                    peers.push((peer, info));
+                }
+            }
+        }
+        Ok(peers)
     }
 }
 

@@ -142,6 +142,8 @@ message PeerMessage {
     SyncDone sync_done = 6;
     StatusRequest status_request = 7;
     StatusResponse status_response = 8;
+    FetchRequest fetch_request = 9;
+    FetchResponse fetch_response = 10;
   }
 }
 
@@ -155,8 +157,22 @@ message OrphanedEntry {
 // 10. Gossip Message Wrapper
 message GossipMessage {
   oneof payload {
-    SignedEntry entry = 1;        // Regular entry broadcast
+    SignedEntry entry = 1;              // Regular entry broadcast
+    SyncStateAnnounce sync_state = 2;   // Periodic sync state announcement
   }
+}
+
+// 11. Sync State Announcement (gossip broadcast)
+message SyncStateAnnounce {
+  bytes store_id = 1;        // Store UUID (16 bytes)
+  SyncState sync_state = 2;  // Sender's current sync state
+}
+
+// 12. Stored peer sync info (for state.db)
+message PeerSyncInfo {
+  bytes store_id = 1;        // Store UUID (16 bytes)
+  SyncState sync_state = 2;  // Peer's last known sync state
+  uint64 updated_at = 3;     // Unix timestamp (seconds) when received
 }
 
 // Request sync status from peers

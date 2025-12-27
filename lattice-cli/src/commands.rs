@@ -90,12 +90,6 @@ pub enum LatticeCommand {
         /// Optional pubkey (defaults to self)
         pubkey: Option<String>,
     },
-    /// Show history/DAG for a key (or complete history if no key provided)
-    #[command(next_help_heading = "Key-Value Operations")]
-    History {
-        /// Key to show history for (omit for complete history)
-        key: Option<String>,
-    },
     /// Exit the CLI
     #[command(next_help_heading = "General")]
     Quit,
@@ -177,18 +171,21 @@ pub enum StoreSubcommand {
     },
     /// Debug: list all log entries per author
     Debug,
-    /// Show sync watermark (authors/seqs/heads)
-    Watermark,
     /// Cleanup stale orphans
     OrphanCleanup,
+    /// Show history/DAG for a key (or complete history if no key provided)
+    History {
+        /// Key to show history for (omit for complete history)
+        key: Option<String>,
+    },
+    /// Sync with all peers
+    Sync,
 }
 
 #[derive(Subcommand)]
 pub enum PeerSubcommand {
     /// List all peers
     List,
-    /// Show sync status matrix with RTT
-    Status,
     /// Invite a peer
     Invite {
         pubkey: String,
@@ -196,11 +193,6 @@ pub enum PeerSubcommand {
     /// Remove a peer
     Remove {
         pubkey: String,
-    },
-    /// Sync with peers
-    Sync {
-        /// Optional specific peer to sync with
-        node_id: Option<String>,
     },
 }
 
@@ -238,18 +230,17 @@ pub async fn handle_command(
                 crate::store_commands::cmd_store_status(node, store, server.as_deref(), &args, writer).await
             },
             StoreSubcommand::Debug => crate::store_commands::cmd_store_debug(node, store, server.as_deref(), &[], writer).await,
-            StoreSubcommand::Watermark => crate::store_commands::cmd_store_watermark(node, store, server.as_deref(), &[], writer).await,
             StoreSubcommand::OrphanCleanup => crate::store_commands::cmd_orphan_cleanup(node, store, server.as_deref(), &[], writer).await,
+            StoreSubcommand::History { key } => {
+                let args: Vec<String> = key.into_iter().collect();
+                crate::store_commands::cmd_key_history(node, store, server.as_deref(), &args, writer).await
+            },
+            StoreSubcommand::Sync => crate::store_commands::cmd_store_sync(node, store, server.clone(), &[], writer).await,
         },
         LatticeCommand::Peer { subcommand } => match subcommand {
             PeerSubcommand::List => crate::node_commands::cmd_peers(node, store, server.as_deref(), &[], writer).await,
-            PeerSubcommand::Status => crate::node_commands::cmd_status(node, store, server.as_deref(), &[], writer).await,
             PeerSubcommand::Invite { pubkey } => crate::node_commands::cmd_invite(node, store, server.as_deref(), &[pubkey], writer).await,
             PeerSubcommand::Remove { pubkey } => crate::node_commands::cmd_remove(node, store, server.as_deref(), &[pubkey], writer).await,
-            PeerSubcommand::Sync { node_id } => {
-                let args = node_id.map(|id| vec![id]).unwrap_or_default();
-                crate::node_commands::cmd_sync(node, store, server.clone(), &args, writer).await
-            }
         },
         LatticeCommand::Put { key, value } => crate::store_commands::cmd_put(node, store, server.as_deref(), &[key, value], writer).await,
         LatticeCommand::Get { key, verbose } => {
@@ -273,10 +264,6 @@ pub async fn handle_command(
         LatticeCommand::AuthorState { pubkey } => {
             let args = pubkey.map(|p| vec![p]).unwrap_or_default();
             crate::store_commands::cmd_author_state(node, store, server.as_deref(), &args, writer).await
-        },
-        LatticeCommand::History { key } => {
-            let args: Vec<String> = key.into_iter().collect();
-            crate::store_commands::cmd_key_history(node, store, server.as_deref(), &args, writer).await
         },
         LatticeCommand::Quit => {
             let mut w = writer.clone();

@@ -319,8 +319,22 @@ impl LatticeServer {
         
         let peer_state = match resp_msg.message {
             Some(peer_message::Message::SyncResponse(resp)) => {
-                resp.state.map(|s| lattice_core::SyncState::from_proto(&s))
-                    .unwrap_or_default()
+                let state = resp.state.map(|s| lattice_core::SyncState::from_proto(&s))
+                    .unwrap_or_default();
+                
+                // Store peer's sync state for future reference
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let info = lattice_core::proto::PeerSyncInfo {
+                    store_id: store.id().as_bytes().to_vec(),
+                    sync_state: Some(state.to_proto()),
+                    updated_at: now,
+                };
+                let _ = store.set_peer_sync_state(peer_id.as_bytes(), info).await;
+                
+                state
             }
             _ => return Err(NodeError::Actor("Expected SyncResponse".to_string())),
         };

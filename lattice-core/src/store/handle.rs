@@ -325,6 +325,35 @@ impl StoreHandle {
             .map_err(|_| NodeError::ChannelClosed)?
             .map_err(|e| NodeError::Actor(e.to_string()))
     }
+    
+    // ==================== Peer Sync State Methods ====================
+    
+    /// Store a peer's sync state (received via gossip or status command)
+    pub async fn set_peer_sync_state(&self, peer: &[u8; 32], info: crate::proto::PeerSyncInfo) -> Result<(), NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::SetPeerSyncState { peer: *peer, info, resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+    
+    /// Get a peer's last known sync state
+    pub async fn get_peer_sync_state(&self, peer: &[u8; 32]) -> Option<crate::proto::PeerSyncInfo> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(StoreCmd::GetPeerSyncState { peer: *peer, resp: resp_tx }).await;
+        resp_rx.await.ok().flatten()
+    }
+    
+    /// List all known peer sync states
+    pub async fn list_peer_sync_states(&self) -> Vec<([u8; 32], crate::proto::PeerSyncInfo)> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(StoreCmd::ListPeerSyncStates { resp: resp_tx }).await;
+        resp_rx.await.unwrap_or_default()
+    }
 }
 
 impl Drop for StoreHandle {

@@ -125,6 +125,18 @@ pub enum StoreCmd {
     SubscribeGaps {
         resp: oneshot::Sender<broadcast::Receiver<GapInfo>>,
     },
+    SetPeerSyncState {
+        peer: [u8; 32],
+        info: crate::proto::PeerSyncInfo,
+        resp: oneshot::Sender<Result<(), StoreError>>,
+    },
+    GetPeerSyncState {
+        peer: [u8; 32],
+        resp: oneshot::Sender<Option<crate::proto::PeerSyncInfo>>,
+    },
+    ListPeerSyncStates {
+        resp: oneshot::Sender<Vec<([u8; 32], crate::proto::PeerSyncInfo)>>,
+    },
     Shutdown,
 }
 
@@ -302,6 +314,15 @@ impl StoreActor {
                 }
                 StoreCmd::SubscribeGaps { resp } => {
                     let _ = resp.send(self.chain_manager.subscribe_gaps());
+                }
+                StoreCmd::SetPeerSyncState { peer, info, resp } => {
+                    let _ = resp.send(self.store.set_peer_sync_state(&peer, &info));
+                }
+                StoreCmd::GetPeerSyncState { peer, resp } => {
+                    let _ = resp.send(self.store.get_peer_sync_state(&peer).ok().flatten());
+                }
+                StoreCmd::ListPeerSyncStates { resp } => {
+                    let _ = resp.send(self.store.list_peer_sync_states().unwrap_or_default());
                 }
                 StoreCmd::Shutdown => {
                     break;

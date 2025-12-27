@@ -32,7 +32,6 @@ LatticeServer refactor, gossip protocol (iroh-gossip), Key Watcher for reactive 
 
 ### Orphan Management
 - [x] Track received_at timestamp for orphans (preparation for TTL)
-- [ ] Retry logic: if gap persists after sync, retry with different peer
 
 ### Tech Debt
 - [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip regression)

@@ -1,62 +1,70 @@
 //! Store commands - direct KV operations
 
 use crate::commands::{CommandResult, Writer};
+use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
 use lattice_core::{Node, StoreHandle};
 use lattice_net::LatticeServer;
 use std::time::Instant;
 use std::io::Write;
 
-pub async fn cmd_store_status(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_status(node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     
-    let verbose = args.iter().any(|a| a == "-v");
-    
     let mut w = writer.clone();
-    let _ = writeln!(w, "Store ID: {}", h.id());
-    let _ = writeln!(w, "Log Seq:  {}", h.log_seq().await);
-    let _ = writeln!(w, "Applied:  {}", h.applied_seq().await.unwrap_or(0));
+    write_store_summary(&mut w, h).await;
+    write_log_files(&mut w, h).await;
+    write_orphan_details(&mut w, h).await;
+    write_peer_sync_matrix(&mut w, node, h).await;
     
-    let all = h.list(false).await.unwrap_or_default();
-    let _ = writeln!(w, "Keys:     {}", all.len());
-    
-    // Show log directory size
-    let (file_count, total_size, orphan_count) = h.log_stats().await;
-    if file_count > 0 {
-        let _ = writeln!(w, "Logs:     {} files, {} bytes", file_count, total_size);
-    }
-    if orphan_count > 0 {
-        let _ = writeln!(w, "Orphans:  {} (pending parent entries)", orphan_count);
-    }
-    
-    // Show detailed file info with -v
-    if verbose && file_count > 0 {
-        let _ = writeln!(w);
-        let _ = writeln!(w, "Log Files:");
-        let files = h.log_stats_detailed().await;
-        for (name, size, checksum) in files {
-            let _ = writeln!(w, "  {} {:>10} bytes  {}", checksum, size, name);
+    CommandResult::Ok
+}
+
+pub async fn cmd_store_sync(_node: &Node, store: Option<&StoreHandle>, server: Option<std::sync::Arc<LatticeServer>>, _args: &[String], writer: Writer) -> CommandResult {
+    let server = match server {
+        Some(s) => s,
+        None => {
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Iroh endpoint not started.");
+            return CommandResult::Ok;
         }
+    };
+    
+    let store = match store {
+        Some(s) => s.clone(),
+        None => {
+            let mut w = writer.clone();
+            let _ = writeln!(w, "No store open. Use 'init' or 'join' first.");
+            return CommandResult::Ok;
+        }
+    };
+    
+    {
+        let mut w = writer.clone();
+        let _ = writeln!(w, "[Sync] Starting background sync...");
     }
     
-    // Show orphan details with -v
-    if verbose && orphan_count > 0 {
-        let _ = writeln!(w);
-        let _ = writeln!(w, "Orphaned Entries:");
-        let orphans = h.orphan_list().await;
-        for orphan in orphans {
-            use chrono::{DateTime, Utc};
-            let received = DateTime::<Utc>::from_timestamp(orphan.received_at as i64, 0)
-                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let _ = writeln!(w, "  author:{}  seq:{}  awaiting:{}  received:{}", 
-                hex::encode(&orphan.author[..8]), orphan.seq, 
-                hex::encode(&orphan.prev_hash[..8]), received);
+    // Spawn the entire sync operation as a background task
+    tokio::spawn(async move {
+        match server.sync_all(&store).await {
+            Ok(results) => {
+                let mut w = writer.clone();
+                if results.is_empty() {
+                    let _ = writeln!(w, "[Sync] No active peers.");
+                } else {
+                    let total: u64 = results.iter().map(|r| r.entries_applied).sum();
+                    let _ = writeln!(w, "[Sync] Complete! Applied {} entries from {} peer(s).", total, results.len());
+                }
+            }
+            Err(e) => {
+                let mut w = writer.clone();
+                let _ = writeln!(w, "[Sync] Failed: {}", e);
+            }
         }
-    }
+    });
     
     CommandResult::Ok
 }
@@ -170,42 +178,6 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server:
             }
         }
         let _ = writeln!(w);
-    }
-    
-    CommandResult::Ok
-}
-
-pub async fn cmd_store_watermark(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
-    let Some(h) = store else {
-        let mut w = writer.clone();
-        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
-        return CommandResult::Ok;
-    };
-    
-    let mut w = writer.clone();
-    
-    // Get sync state
-    let sync_state = match h.sync_state().await {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = writeln!(w, "Error getting sync state: {}", e);
-            return CommandResult::Ok;
-        }
-    };
-    
-    let authors = sync_state.authors();
-    let _ = writeln!(w, "Sync Watermark - {} authors\n", authors.len());
-    
-    // Sort authors
-    let mut sorted: Vec<_> = authors.into_iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
-    
-    for (author, info) in sorted {
-        let author_hex = hex::encode(&author[..8]);
-        let heads_str: Vec<String> = info.heads.iter()
-            .map(|h| hex::encode(&h[..8]))
-            .collect();
-        let _ = writeln!(w, "{}: seq:{} heads:[{}]", author_hex, info.seq, heads_str.join(", "));
     }
     
     CommandResult::Ok
