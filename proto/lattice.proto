@@ -38,7 +38,7 @@ message Entry {
 // HeadInfo: a tip/head in the DAG for a key
 message HeadInfo {
   bytes value = 1;       // The value at this head
-  uint64 hlc = 2;        // Combined HLC for ordering (wall_time_ms << 16 | counter)
+  HLC hlc = 2;           // HLC for ordering
   bytes author = 3;      // Author's public key (32 bytes)
   bytes hash = 4;        // Hash of the SignedEntry that created this head
   bool tombstone = 5;    // True if this head represents a delete

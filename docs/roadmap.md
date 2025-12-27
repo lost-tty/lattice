@@ -27,7 +27,8 @@ LatticeServer refactor, gossip protocol (iroh-gossip), Key Watcher for reactive 
 - [ ] On join, node does not reliably join gossip
 
 ### Diagnostics
-- [ ] Lightweight peer ping: broadcast (no arg) or unicast (peer id), returns sync_state/watermark
+- [x] Unicast `peer status` command with sync matrix and RTT
+- [x] Track gossip NeighborUp/Down events for real-time peer online status in `peers` command
 
 ### Orphan Management
 - [ ] TTL expiry for long-lived orphans
@@ -35,8 +36,8 @@ LatticeServer refactor, gossip protocol (iroh-gossip), Key Watcher for reactive 
 
 ### Tech Debt
 - [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip regression)
-- [ ] Proto: Change `HeadInfo.hlc` to proper `HLC` message type
-- [ ] Proto: Change `HLC.counter` from `uint32` to `uint16`
+- [x] Proto: Change `HeadInfo.hlc` to proper `HLC` message type
+- [x] Proto: Change `HLC.counter` from `uint32` to `uint16`
 
 ---
 

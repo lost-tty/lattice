@@ -249,10 +249,10 @@ pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _server: Option<
                     let hash_short = if head.hash.len() >= 8 { hex::encode(&head.hash[..8]) } else { "????????".to_string() };
                     if head.tombstone {
                         let _ = writeln!(w, "{} {} (deleted) (hlc:{}, author:{}, hash:{})", 
-                            winner, tombstone, format_hlc(head.hlc), author_short, hash_short);
+                            winner, tombstone, format_hlc(&head.hlc), author_short, hash_short);
                     } else {
                         let _ = writeln!(w, "{} {} (hlc:{}, author:{}, hash:{})", 
-                            winner, format_value(&head.value), format_hlc(head.hlc), author_short, hash_short);
+                            winner, format_value(&head.value), format_hlc(&head.hlc), author_short, hash_short);
                     }
                 }
                 if heads.len() > 1 {
@@ -336,10 +336,10 @@ pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _server: Option
                             let hash_short = if head.hash.len() >= 8 { hex::encode(&head.hash[..8]) } else { "????????".to_string() };
                             if head.tombstone {
                                 let _ = writeln!(w, "  {} ⊗ (deleted) (hlc:{}, author:{}, hash:{})", 
-                                    winner, format_hlc(head.hlc), author_short, hash_short);
+                                    winner, format_hlc(&head.hlc), author_short, hash_short);
                             } else {
                                 let _ = writeln!(w, "  {} {} (hlc:{}, author:{}, hash:{})", 
-                                    winner, format_value(&head.value), format_hlc(head.hlc), author_short, hash_short);
+                                    winner, format_value(&head.value), format_hlc(&head.hlc), author_short, hash_short);
                             }
                         }
                     } else {
@@ -411,19 +411,16 @@ fn format_value(v: &[u8]) -> String {
     std::str::from_utf8(v).map(String::from).unwrap_or_else(|_| format!("0x{}", hex::encode(v)))
 }
 
-/// Format HLC components as "walltime.counter"
-fn format_hlc_parts(wall_time: u64, counter: u32) -> String {
-    format!("{}.{}", wall_time, counter)
-}
-
-/// Format combined HLC value (wall_time << 16 | counter) as "walltime.counter"
-fn format_hlc(hlc: u64) -> String {
-    format_hlc_parts(hlc >> 16, (hlc & 0xFFFF) as u32)
+/// Format HLC as "walltime.counter". Treats None as "0.0" (should never happen).
+fn format_hlc(hlc: &Option<lattice_core::proto::Hlc>) -> String {
+    hlc.as_ref()
+        .map(|h| format!("{}.{}", h.wall_time, h.counter))
+        .unwrap_or_else(|| "0.0".to_string())
 }
 
 /// Format HLC proto message as "walltime.counter"
 fn format_hlc_proto(hlc: &lattice_core::proto::Hlc) -> String {
-    format_hlc_parts(hlc.wall_time, hlc.counter)
+    format!("{}.{}", hlc.wall_time, hlc.counter)
 }
 
 /// Entry info for history display

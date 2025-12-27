@@ -9,7 +9,7 @@
 use crate::store::log::{iter_entries_after, LogError};
 use crate::store::sigchain::SigChainError;
 use crate::store::signed_entry::hash_signed_entry;
-use crate::proto::{operation, AuthorState, Entry, HeadInfo, HeadList, SignedEntry};
+use crate::proto::{operation, AuthorState, Entry, HeadInfo, HeadList, Hlc, SignedEntry};
 use prost::Message;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::collections::HashSet;
@@ -222,7 +222,7 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let entry = Entry::decode(&signed_entry.entry_bytes[..])?;
         let entry_hash = hash_signed_entry(signed_entry);
-        let entry_hlc = entry.timestamp.as_ref().map(|t| (t.wall_time << 16) | t.counter as u64).unwrap_or(0);
+        let entry_hlc = entry.timestamp.clone();
         let author: [u8; 32] = signed_entry.author_id.clone().try_into().unwrap_or([0u8; 32]);
         
         // Check if entry was already applied (per-author seq check)
@@ -329,7 +329,7 @@ impl Store {
                 let mut heads = HeadList::decode(v.value())?.heads;
                 // Sort by winner criteria: highest HLC first, then highest author (deterministic)
                 heads.sort_by(|a, b| {
-                    b.hlc.cmp(&a.hlc)
+                    compare_hlc(&b.hlc, &a.hlc)
                         .then_with(|| b.author.cmp(&a.author))
                 });
                 Ok(heads)
@@ -348,7 +348,7 @@ impl Store {
         } else {
             // Use max_by for correctness even on unsorted input
             heads.iter().max_by(|a, b| {
-                a.hlc.cmp(&b.hlc)
+                    compare_hlc(&a.hlc, &b.hlc)
                     .then_with(|| a.author.cmp(&b.author))
             })
         }
@@ -447,6 +447,12 @@ impl Store {
     }
 }
 
+fn compare_hlc(a: &Option<Hlc>, b: &Option<Hlc>) -> std::cmp::Ordering {
+    let a = a.as_ref().map(|h| (h.wall_time, h.counter)).unwrap_or((0, 0));
+    let b = b.as_ref().map(|h| (h.wall_time, h.counter)).unwrap_or((0, 0));
+    a.cmp(&b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,14 +517,14 @@ mod tests {
             heads: vec![
                 HeadInfo {
                     value: b"older".to_vec(),
-                    hlc: 100,
+                    hlc: Some(Hlc { wall_time: 100, counter: 0 }),
                     author: [1u8; 32].to_vec(),
                     hash: [1u8; 32].to_vec(),
                     tombstone: false,
                 },
                 HeadInfo {
                     value: b"newer".to_vec(),
-                    hlc: 200,
+                    hlc: Some(Hlc { wall_time: 200, counter: 0 }),
                     author: [2u8; 32].to_vec(),
                     hash: [2u8; 32].to_vec(),
                     tombstone: false,
@@ -1180,7 +1186,7 @@ mod tests {
         // Single head with same value = idempotent, no put needed
         let heads = vec![HeadInfo {
             value: b"hello".to_vec(),
-            hlc: 1000,
+            hlc: Some(Hlc { wall_time: 1000, counter: 0 }),
             author: [1u8; 32].to_vec(),
             hash: [2u8; 32].to_vec(),
             tombstone: false,
@@ -1193,7 +1199,7 @@ mod tests {
         // Single head with different value = need put
         let heads = vec![HeadInfo {
             value: b"hello".to_vec(),
-            hlc: 1000,
+            hlc: Some(Hlc { wall_time: 1000, counter: 0 }),
             author: [1u8; 32].to_vec(),
             hash: [2u8; 32].to_vec(),
             tombstone: false,
@@ -1208,14 +1214,14 @@ mod tests {
         let heads = vec![
             HeadInfo {
                 value: b"v1".to_vec(),
-                hlc: 1000,
+                hlc: Some(Hlc { wall_time: 1000, counter: 0 }),
                 author: [1u8; 32].to_vec(),
                 hash: [2u8; 32].to_vec(),
                 tombstone: false,
             },
             HeadInfo {
                 value: b"v2".to_vec(),
-                hlc: 1001,  // Winner (highest HLC)
+                hlc: Some(Hlc { wall_time: 1001, counter: 0 }),  // Winner (highest HLC)
                 author: [3u8; 32].to_vec(),
                 hash: [4u8; 32].to_vec(),
                 tombstone: false,
@@ -1237,7 +1243,7 @@ mod tests {
         // Has non-tombstone heads = need delete
         let heads = vec![HeadInfo {
             value: b"data".to_vec(),
-            hlc: 1000,
+            hlc: Some(Hlc { wall_time: 1000, counter: 0 }),
             author: [1u8; 32].to_vec(),
             hash: [2u8; 32].to_vec(),
             tombstone: false,
@@ -1250,7 +1256,7 @@ mod tests {
         // Winning head is already tombstone = no delete needed
         let heads = vec![HeadInfo {
             value: vec![],
-            hlc: 1000,
+            hlc: Some(Hlc { wall_time: 1000, counter: 0 }),
             author: [1u8; 32].to_vec(),
             hash: [2u8; 32].to_vec(),
             tombstone: true,
