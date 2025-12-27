@@ -5,7 +5,7 @@ use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle};
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
-use lattice_core::proto::{PeerMessage, peer_message, JoinRequest, JoinResponse, StatusRequest, StatusResponse};
+use lattice_core::proto::{PeerMessage, peer_message, JoinRequest, JoinResponse, StatusRequest};
 
 /// Result of a sync operation with a peer
 pub struct SyncResult {
@@ -287,12 +287,8 @@ impl LatticeServer {
         }
     }
     
-    /// Sync with a peer using StatusRequest + FetchRequest protocol.
-    /// 1. Send StatusRequest, receive StatusResponse (exchange states)
-    /// 2. Compute missing ranges based on state diff
-    /// 3. Send FetchRequest for entries we need
-    /// 4. Receive FetchResponse with entries
-    /// Pass empty slice for all authors.
+    /// Sync with a peer using symmetric SyncSession protocol.
+    /// Both sides run the same exchange logic after handshake.
     pub async fn sync_with_peer(&self, store: &StoreHandle, peer_id: iroh::PublicKey, _authors: &[[u8; 32]]) -> Result<SyncResult, NodeError> {
         let conn = self.endpoint.connect(peer_id).await
             .map_err(|e| NodeError::Actor(format!("Connection failed: {}", e)))?;
@@ -303,106 +299,15 @@ impl LatticeServer {
         let mut sink = MessageSink::new(send);
         let mut stream = MessageStream::new(recv);
         
-        let my_state = store.sync_state().await?;
-        
-        // Step 1: Send StatusRequest
-        let status_req = PeerMessage {
-            message: Some(peer_message::Message::StatusRequest(lattice_core::proto::StatusRequest {
-                store_id: store.id().as_bytes().to_vec(),
-                sync_state: Some(my_state.to_proto()),
-            })),
-        };
-        sink.send(&status_req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
-        
-        // Receive StatusResponse
-        let status_resp = stream.recv().await.map_err(|e| NodeError::Actor(e.to_string()))?
-            .ok_or_else(|| NodeError::Actor("Peer closed stream".to_string()))?;
-        
-        let peer_state = match status_resp.message {
-            Some(peer_message::Message::StatusResponse(resp)) => {
-                let state = resp.sync_state.map(|s| lattice_core::SyncState::from_proto(&s))
-                    .unwrap_or_default();
-                
-                // Store peer's sync state for future reference
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let info = lattice_core::proto::PeerSyncInfo {
-                    store_id: store.id().as_bytes().to_vec(),
-                    sync_state: Some(state.to_proto()),
-                    updated_at: now,
-                };
-                let _ = store.set_peer_sync_state(peer_id.as_bytes(), info).await;
-                
-                state
-            }
-            _ => return Err(NodeError::Actor("Expected StatusResponse".to_string())),
-        };
-        
-        // Step 2: Compute what we need from peer
-        // For each author in peer_state where peer has higher seq than us
-        let mut ranges_to_fetch: Vec<lattice_core::proto::AuthorRange> = Vec::new();
-        for (author, peer_info) in peer_state.authors() {
-            let my_seq = my_state.authors().get(author).map(|i| i.seq).unwrap_or(0);
-            if peer_info.seq > my_seq {
-                ranges_to_fetch.push(lattice_core::proto::AuthorRange {
-                    author_id: author.to_vec(),
-                    from_seq: my_seq + 1,
-                    to_seq: peer_info.seq,
-                });
-            }
-        }
-        
-        let mut entries_applied: u64 = 0;
-        
-        // Step 3: Send FetchRequest if we need entries
-        if !ranges_to_fetch.is_empty() {
-            let fetch_req = PeerMessage {
-                message: Some(peer_message::Message::FetchRequest(lattice_core::proto::FetchRequest {
-                    store_id: store.id().as_bytes().to_vec(),
-                    ranges: ranges_to_fetch,
-                })),
-            };
-            sink.send(&fetch_req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
-            
-            // Receive chunked FetchResponse stream until done=true or stream closes
-            loop {
-                match stream.recv().await {
-                    Ok(Some(fetch_resp)) => {
-                        if let Some(peer_message::Message::FetchResponse(resp)) = fetch_resp.message {
-                            for signed_entry in resp.entries {
-                                match store.ingest_entry(signed_entry).await {
-                                    Ok(_) => entries_applied += 1,
-                                    Err(e) => tracing::debug!("Entry ingest failed: {}", e),
-                                }
-                            }
-                            
-                            if resp.done {
-                                break;  // Stream complete
-                            }
-                        } else {
-                            tracing::debug!("Unexpected message type during fetch");
-                            break;
-                        }
-                    }
-                    Ok(None) => {
-                        tracing::debug!("Stream closed during fetch (no done flag)");
-                        break;  // Gracefully handle stream close
-                    }
-                    Err(e) => {
-                        tracing::debug!("Stream error during fetch: {}", e);
-                        break;  // Gracefully handle error
-                    }
-                }
-            }
-        }
+        let peer_bytes: [u8; 32] = *peer_id.as_bytes();
+        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_bytes);
+        let result = session.run_as_initiator().await?;
         
         sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
         
         Ok(SyncResult { 
-            entries_applied, 
-            entries_sent_by_peer: entries_applied,  // Same in new protocol
+            entries_applied: result.entries_received, 
+            entries_sent_by_peer: result.entries_received,
         })
     }
     
@@ -512,7 +417,7 @@ async fn handle_connection(
                 break;  // Join is terminal
             }
             Some(peer_message::Message::StatusRequest(req)) => {
-                handle_status_request(&node, &remote_pubkey, req, &mut sink).await?;
+                handle_status_request(&node, &remote_pubkey, req, &mut sink, &mut stream).await?;
                 // Continue loop - client may send FetchRequest next
             }
             Some(peer_message::Message::FetchRequest(req)) => {
@@ -553,14 +458,14 @@ async fn handle_join_request(
     Ok(())
 }
 
-/// Handle an incoming status request - respond with our sync state
+/// Handle an incoming status request using symmetric SyncSession
 async fn handle_status_request(
     node: &Node,
     remote_pubkey: &[u8; 32],
     req: StatusRequest,
     sink: &mut MessageSink,
+    stream: &mut MessageStream,
 ) -> Result<(), LatticeNetError> {
-    // Parse store_id from request
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
@@ -572,17 +477,14 @@ async fn handle_status_request(
     // Open the store
     let (store, _info) = node.open_store(store_id).await?;
     
-    // Get our sync state
-    let sync_state = store.sync_state().await.ok().map(|s| s.to_proto());
+    // Parse incoming peer state
+    let incoming_state = req.sync_state
+        .map(|s| lattice_core::SyncState::from_proto(&s))
+        .unwrap_or_default();
     
-    // Send StatusResponse
-    let resp = PeerMessage {
-        message: Some(peer_message::Message::StatusResponse(StatusResponse {
-            store_id: req.store_id.clone(),
-            sync_state,
-        })),
-    };
-    sink.send(&resp).await?;
+    // Use SyncSession for symmetric handling
+    let mut session = super::sync_session::SyncSession::new(&store, sink, stream, *remote_pubkey);
+    let _ = session.run_as_responder(incoming_state).await?;
     
     Ok(())
 }

@@ -49,20 +49,6 @@ pub fn delta_string_len(peer_seq: u64, our_seq: u64) -> usize {
     }
 }
 
-/// Format elapsed time as human-readable string
-pub fn format_elapsed(elapsed: std::time::Duration) -> String {
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        format!("{}s ago", secs)
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
-}
-
 /// Prepared peer data for matrix rendering
 pub struct PeerSyncRow {
     pub pubkey: [u8; 32],

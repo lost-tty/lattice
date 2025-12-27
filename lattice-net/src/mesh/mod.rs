@@ -7,6 +7,8 @@
 mod server;
 mod error;
 mod gossip_manager;
+mod sync_session;
 
 pub use server::{LatticeServer, SyncResult};
 pub use error::{ServerError, GossipError};
+pub use sync_session::SyncSession;

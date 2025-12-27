@@ -22,7 +22,7 @@ Iroh integration (mDNS + DNS discovery), peer management via `/nodes/` keys, joi
 
 ### Regressions
 - [x] On join, node does not reliably join gossip
-- [ ] `store sync` seems to be uni-directional now
+- [x] `store sync` seems to be uni-directional now
 
 ### Diagnostics
 - [x] Unicast `peer status` command with sync matrix and RTT
