@@ -117,7 +117,7 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server:
         let _ = writeln!(w, "Author {} (seq: {}, heads: {})", author_short, info.seq, info.heads.len());
         
         // Stream entries for this author
-        let mut rx = match h.stream_entries_after(&author, None).await {
+        let mut rx = match h.stream_entries_in_range(&author, 1, 0).await {
             Ok(rx) => rx,
             Err(e) => {
                 let _ = writeln!(w, "  Error reading entries: {}", e);
@@ -436,7 +436,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
     
     for (author, _info) in sync_state.authors() {
         // Stream entries for this author
-        let mut rx = match h.stream_entries_after(&author, None).await {
+        let mut rx = match h.stream_entries_in_range(&author, 1, 0).await {
             Ok(rx) => rx,
             Err(_) => continue,
         };

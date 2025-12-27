@@ -109,41 +109,15 @@ message JoinResponse {
   bytes inviter_pubkey = 2;  // Inviter's public key for verification
 }
 
-// 7. Sync Protocol Messages (bidirectional sync after join)
-message SyncRequest {
-  bytes store_id = 1;            // Store UUID to sync (16 bytes)
-  SyncState state = 2;           // Sender's sync state (for incremental sync)
-  bool full_sync = 3;            // If true, request all entries (for join)
-  repeated bytes author_ids = 4; // Optional: filter to these authors (empty = all)
-}
-
-message SyncResponse {
-  bytes store_id = 1;     // Store UUID being synced (16 bytes)
-  SyncState state = 2;    // Responder's sync state
-}
-
-message SyncEntry {
-  bytes signed_entry = 1; // Serialized SignedEntry
-  bytes hash = 2;         // Hash for verification
-}
-
-message SyncDone {
-  uint64 entries_sent = 1;
-}
-
-// 8. Peer Message Wrapper (for proper message type discrimination)
+// 7. Peer Message Wrapper (for proper message type discrimination)
 message PeerMessage {
   oneof message {
     JoinRequest join_request = 1;
     JoinResponse join_response = 2;
-    SyncRequest sync_request = 3;
-    SyncResponse sync_response = 4;
-    SyncEntry sync_entry = 5;
-    SyncDone sync_done = 6;
-    StatusRequest status_request = 7;
-    StatusResponse status_response = 8;
-    FetchRequest fetch_request = 9;
-    FetchResponse fetch_response = 10;
+    StatusRequest status_request = 3;
+    StatusResponse status_response = 4;
+    FetchRequest fetch_request = 5;
+    FetchResponse fetch_response = 6;
   }
 }
 
@@ -173,6 +147,25 @@ message PeerSyncInfo {
   bytes store_id = 1;        // Store UUID (16 bytes)
   SyncState sync_state = 2;  // Peer's last known sync state
   uint64 updated_at = 3;     // Unix timestamp (seconds) when received
+}
+
+// 13. Fetch Protocol Messages (targeted entry fetching)
+message AuthorRange {
+  bytes author_id = 1;       // Author public key (32 bytes)
+  uint64 from_seq = 2;       // Inclusive start sequence
+  uint64 to_seq = 3;         // Inclusive end sequence (0 = to latest)
+}
+
+message FetchRequest {
+  bytes store_id = 1;        // Store UUID (16 bytes)
+  repeated AuthorRange ranges = 2;  // Ranges to fetch
+}
+
+message FetchResponse {
+  bytes store_id = 1;        // Store UUID (16 bytes)
+  uint32 status = 2;         // HTTP-like: 200=OK, 206=Partial, 401=Unauthorized, 404=NotFound
+  bool done = 3;             // true = last chunk (stream complete)
+  repeated SignedEntry entries = 4;  // Chunk of entries (may be empty on final message)
 }
 
 // Request sync status from peers

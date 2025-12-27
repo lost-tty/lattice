@@ -13,7 +13,6 @@ mod handle;
 mod sigchain;
 mod log;
 mod signed_entry;
-mod causal_iter;
 mod sync_state;
 mod orphan_store;
 

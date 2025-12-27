@@ -73,47 +73,53 @@ pub fn append_entry(path: impl AsRef<Path>, entry: &SignedEntry) -> Result<u64, 
     Ok(metadata.len())
 }
 
-/// Return an iterator over entries that come AFTER the given hash.
-/// If `last_hash` is None, iterates all entries.
-/// This is the streaming version - use this for large logs to avoid OOM.
-pub fn iter_entries_after(path: impl AsRef<Path>, last_hash: Option<[u8; 32]>) -> Result<impl Iterator<Item = Result<SignedEntry, LogError>>, LogError> {
+/// Return an iterator over entries in a log file, optionally filtered by sequence range.
+/// - from_seq=0: start from beginning
+/// - to_seq=0: iterate until end
+pub fn iter_entries(path: impl AsRef<Path>, from_seq: u64, to_seq: u64) -> Result<impl Iterator<Item = Result<SignedEntry, LogError>>, LogError> {
     let reader = match LogReader::open(&path) {
         Ok(r) => r,
         Err(LogError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(EntryIterAfter::empty());
+            return Ok(EntryIter::empty());
         }
         Err(e) => return Err(e),
     };
     
-    Ok(EntryIterAfter::new(reader, last_hash))
+    Ok(EntryIter::new(reader, from_seq, to_seq))
 }
 
-/// Iterator that skips entries until a target hash is found, then yields the rest.
-pub struct EntryIterAfter {
+/// Convenience wrapper to iterate all entries in a log file.
+#[inline]
+pub fn iter_all_entries(path: impl AsRef<Path>) -> Result<impl Iterator<Item = Result<SignedEntry, LogError>>, LogError> {
+    iter_entries(path, 0, 0)
+}
+
+/// Iterator over entries in a log file with optional sequence range filtering.
+pub struct EntryIter {
     reader: Option<LogReader>,
-    target_hash: Option<[u8; 32]>,
-    found_start: bool,
+    from_seq: u64,
+    to_seq: u64,  // 0 = no upper bound
 }
 
-impl EntryIterAfter {
-    fn new(reader: LogReader, target_hash: Option<[u8; 32]>) -> Self {
+impl EntryIter {
+    fn new(reader: LogReader, from_seq: u64, to_seq: u64) -> Self {
         Self {
             reader: Some(reader),
-            target_hash,
-            found_start: target_hash.is_none(),
+            from_seq,
+            to_seq,
         }
     }
     
     fn empty() -> Self {
         Self {
             reader: None,
-            target_hash: None,
-            found_start: true,
+            from_seq: 0,
+            to_seq: 0,
         }
     }
 }
 
-impl Iterator for EntryIterAfter {
+impl Iterator for EntryIter {
     type Item = Result<SignedEntry, LogError>;
     
     fn next(&mut self) -> Option<Self::Item> {
@@ -121,15 +127,25 @@ impl Iterator for EntryIterAfter {
         
         loop {
             match reader.next()? {
-                Ok((hash, entry)) => {
-                    if self.found_start {
-                        return Some(Ok(entry));
-                    } else if let Some(target) = self.target_hash {
-                        if hash == target {
-                            self.found_start = true;
-                            // Continue to next entry (don't return the target itself)
-                        }
+                Ok((_, signed_entry)) => {
+                    // Skip range filtering if from_seq=0 (return all entries)
+                    if self.from_seq == 0 {
+                        return Some(Ok(signed_entry));
                     }
+                    
+                    // Decode Entry to get sequence
+                    use prost::Message;
+                    let seq = crate::proto::Entry::decode(&signed_entry.entry_bytes[..])
+                        .map(|e| e.seq)
+                        .unwrap_or(0);
+                    
+                    if seq < self.from_seq {
+                        continue; // Skip entries before range
+                    }
+                    if self.to_seq > 0 && seq > self.to_seq {
+                        return None; // Past end of range
+                    }
+                    return Some(Ok(signed_entry));
                 }
                 Err(e) => return Some(Err(e)),
             }
@@ -256,12 +272,7 @@ mod tests {
     
     /// Test helper - read all entries from log
     fn read_entries(path: impl AsRef<std::path::Path>) -> Result<Vec<SignedEntry>, LogError> {
-        read_entries_after(path, None)
-    }
-    
-    /// Test helper - read entries after a hash
-    fn read_entries_after(path: impl AsRef<std::path::Path>, last_hash: Option<[u8; 32]>) -> Result<Vec<SignedEntry>, LogError> {
-        iter_entries_after(path, last_hash)?.collect()
+        iter_all_entries(path)?.collect()
     }
 
     #[test]
@@ -303,58 +314,6 @@ mod tests {
         
         let entries = read_entries(&path).unwrap();
         assert_eq!(entries.len(), 5);
-        
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn test_read_entries_after() {
-        let path = temp_log_path("after_v6");
-        std::fs::remove_file(&path).ok();
-        
-        let node = NodeIdentity::generate();
-        let clock = MockClock::new(1000);
-        
-        let mut entries = Vec::new();
-        let mut hashes = Vec::new();
-        
-        for i in 1..=5 {
-            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
-                .operation(Operation::put(format!("/key/{}", i), format!("value{}", i).into_bytes()))
-                .sign(&node);
-            hashes.push(compute_entry_hash(&entry));
-            append_entry(&path, &entry).unwrap();
-            entries.push(entry);
-        }
-        
-        // Read entries after hash[1] (second entry) -> should get entries 3, 4, 5
-        let result = read_entries_after(&path, Some(hashes[1])).unwrap();
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0].entry_bytes, entries[2].entry_bytes);
-        
-        // Read all entries (no hash)
-        let all = read_entries_after(&path, None).unwrap();
-        assert_eq!(all.len(), 5);
-        
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn test_hash_not_found_returns_empty() {
-        let path = temp_log_path("not_found_v6");
-        std::fs::remove_file(&path).ok();
-        
-        let node = NodeIdentity::generate();
-        let clock = MockClock::new(1000);
-        
-        let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .operation(Operation::put("/key", b"value".to_vec()))
-            .sign(&node);
-        append_entry(&path, &entry).unwrap();
-        
-        let fake_hash = [0u8; 32];
-        let result = read_entries_after(&path, Some(fake_hash)).unwrap();
-        assert_eq!(result.len(), 0);
         
         std::fs::remove_file(&path).ok();
     }
@@ -490,31 +449,6 @@ mod tests {
             _ => panic!("Expected EntryTooLarge error"),
         }
         
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn test_read_after_last_element() {
-        let path = temp_log_path("boundary_last_v6");
-        std::fs::remove_file(&path).ok();
-        
-        let node = NodeIdentity::generate();
-        let clock = MockClock::new(1000);
-        
-        let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .operation(Operation::put("/key", b"val".to_vec()))
-            .sign(&node);
-        append_entry(&path, &entry).unwrap();
-        
-        let hash = compute_entry_hash(&entry);
-        
-        // Ask for everything AFTER the only entry
-        let result = read_entries_after(&path, Some(hash)).unwrap();
-        
-        // Result must be empty
-        assert_eq!(result.len(), 0);
-        
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]

@@ -15,7 +15,7 @@ pub mod mesh;
 pub use endpoint::{LatticeEndpoint, PublicKey, LATTICE_ALPN};
 pub use error::LatticeNetError;
 pub use framing::{MessageSink, MessageStream};
-pub use lattice_core::proto::{SyncRequest, SyncResponse, SyncEntry, SyncDone, SyncState, Frontier};
+pub use lattice_core::proto::{SyncState, Frontier, StatusRequest, StatusResponse, FetchRequest, FetchResponse, AuthorRange};
 pub use mesh::{LatticeServer, SyncResult};
 
 /// Parse a PublicKey (NodeId) from hex or base32 string

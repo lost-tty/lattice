@@ -6,7 +6,7 @@
 //! - meta: String → Vec<u8> (system metadata: last_seq, last_hash, etc.)
 //! - author: [u8; 32] → AuthorState (per-author replay tracking)
 
-use crate::store::log::{iter_entries_after, LogError};
+use crate::store::log::{iter_all_entries, LogError};
 use crate::store::sigchain::SigChainError;
 use crate::store::signed_entry::hash_signed_entry;
 use crate::proto::{operation, AuthorState, Entry, HeadInfo, HeadList, Hlc, SignedEntry};
@@ -90,7 +90,7 @@ impl Store {
     /// Replay a log file and apply all entries to the store (batched)
     /// Returns the number of newly applied entries (skipped entries not counted)
     pub fn replay_log(&self, log_path: impl AsRef<Path>) -> Result<u64, StoreError> {
-        let entries_iter = match iter_entries_after(&log_path, None) {
+        let entries_iter = match iter_all_entries(&log_path) {
             Ok(iter) => iter,
             Err(LogError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(e.into()),
@@ -517,15 +517,7 @@ mod tests {
     
     /// Test helper - read all entries
     fn read_entries(path: impl AsRef<std::path::Path>) -> Vec<SignedEntry> {
-        crate::store::log::iter_entries_after(&path, None)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-    }
-    
-    /// Test helper - read entries after hash
-    fn read_entries_after(path: impl AsRef<std::path::Path>, hash: Option<[u8; 32]>) -> Vec<SignedEntry> {
-        crate::store::log::iter_entries_after(&path, hash)
+        crate::store::log::iter_all_entries(&path)
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
@@ -1351,11 +1343,8 @@ mod tests {
         assert_eq!(missing[0].from_seq, 0);  // B has nothing
         assert_eq!(missing[0].to_seq, 3);    // A has 3 entries
         
-        // Fetch entries from A's log (using from_hash = 0 means read all)
-        let entries = read_entries_after(
-            &log_path_a,
-            if missing[0].from_hash == [0u8; 32] { None } else { Some(missing[0].from_hash) }
-        );
+        // Fetch all entries from A's log (we know B needs everything since from_hash is zero)
+        let entries = read_entries(&log_path_a);
         assert_eq!(entries.len(), 3);
         
         // Apply entries to B

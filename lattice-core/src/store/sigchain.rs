@@ -3,7 +3,7 @@
 //! A SigChain manages a single author's append-only log. It validates entries
 //! before appending (correct seq, prev_hash, valid signature) and persists to disk.
 
-use crate::store::log::{append_entry, iter_entries_after, LogError};
+use crate::store::log::{append_entry, iter_all_entries, LogError};
 use crate::proto::{Entry, SignedEntry};
 use crate::store::signed_entry::{hash_signed_entry, verify_signed_entry};
 use crate::store::orphan_store::GapInfo;
@@ -87,7 +87,7 @@ impl SigChain {
     /// Load a sigchain from an existing log file
     pub fn from_log(log_path: impl AsRef<Path>, store_id: [u8; 16], author_id: [u8; 32]) -> Result<Self, SigChainError> {
         let log_path = log_path.as_ref().to_path_buf();
-        let entries_iter = iter_entries_after(&log_path, None)?;
+        let entries_iter = iter_all_entries(&log_path)?;
         
         let mut chain = Self::new(&log_path, store_id, author_id);
         
@@ -322,7 +322,7 @@ impl SigChainManager {
     
     /// Build hash index by scanning all log files in directory
     fn build_hash_index(logs_dir: &Path) -> Result<std::collections::HashSet<[u8; 32]>, LogError> {
-        use crate::store::log::iter_entries_after;
+        use crate::store::log::iter_all_entries;
         use crate::store::signed_entry::hash_signed_entry;
         
         let mut index = std::collections::HashSet::new();
@@ -336,7 +336,7 @@ impl SigChainManager {
             let path = entry.path();
             if path.extension().map(|e| e == "log").unwrap_or(false) {
                 // Iterate entries in this log - propagate errors
-                let iter = iter_entries_after(&path, None)?;
+                let iter = iter_all_entries(&path)?;
                 for result in iter {
                     if let Ok(signed_entry) = result {
                         let hash = hash_signed_entry(&signed_entry);
@@ -782,7 +782,7 @@ mod tests {
         assert_eq!(chain.len(), 1);
         
         // Verify it was written
-        let entries: Vec<_> = crate::store::log::iter_entries_after(&path, None)
+        let entries: Vec<_> = crate::store::log::iter_all_entries(&path)
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();

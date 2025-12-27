@@ -6,7 +6,6 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
 use lattice_core::proto::{PeerMessage, peer_message, JoinRequest, JoinResponse, StatusRequest, StatusResponse};
-use super::protocol;
 
 /// Result of a sync operation with a peer
 pub struct SyncResult {
@@ -288,9 +287,13 @@ impl LatticeServer {
         }
     }
     
-    /// Sync with a peer, optionally filtering to specific authors.
+    /// Sync with a peer using StatusRequest + FetchRequest protocol.
+    /// 1. Send StatusRequest, receive StatusResponse (exchange states)
+    /// 2. Compute missing ranges based on state diff
+    /// 3. Send FetchRequest for entries we need
+    /// 4. Receive FetchResponse with entries
     /// Pass empty slice for all authors.
-    pub async fn sync_with_peer(&self, store: &StoreHandle, peer_id: iroh::PublicKey, authors: &[[u8; 32]]) -> Result<SyncResult, NodeError> {
+    pub async fn sync_with_peer(&self, store: &StoreHandle, peer_id: iroh::PublicKey, _authors: &[[u8; 32]]) -> Result<SyncResult, NodeError> {
         let conn = self.endpoint.connect(peer_id).await
             .map_err(|e| NodeError::Actor(format!("Connection failed: {}", e)))?;
         
@@ -302,24 +305,22 @@ impl LatticeServer {
         
         let my_state = store.sync_state().await?;
         
-        // Send SyncRequest
-        let req = PeerMessage {
-            message: Some(peer_message::Message::SyncRequest(lattice_core::proto::SyncRequest {
+        // Step 1: Send StatusRequest
+        let status_req = PeerMessage {
+            message: Some(peer_message::Message::StatusRequest(lattice_core::proto::StatusRequest {
                 store_id: store.id().as_bytes().to_vec(),
-                state: Some(my_state.to_proto()),
-                full_sync: false,
-                author_ids: authors.iter().map(|a| a.to_vec()).collect(),
+                sync_state: Some(my_state.to_proto()),
             })),
         };
-        sink.send(&req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
+        sink.send(&status_req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
         
-        // Receive SyncResponse
-        let resp_msg = stream.recv().await.map_err(|e| NodeError::Actor(e.to_string()))?
+        // Receive StatusResponse
+        let status_resp = stream.recv().await.map_err(|e| NodeError::Actor(e.to_string()))?
             .ok_or_else(|| NodeError::Actor("Peer closed stream".to_string()))?;
         
-        let peer_state = match resp_msg.message {
-            Some(peer_message::Message::SyncResponse(resp)) => {
-                let state = resp.state.map(|s| lattice_core::SyncState::from_proto(&s))
+        let peer_state = match status_resp.message {
+            Some(peer_message::Message::StatusResponse(resp)) => {
+                let state = resp.sync_state.map(|s| lattice_core::SyncState::from_proto(&s))
                     .unwrap_or_default();
                 
                 // Store peer's sync state for future reference
@@ -336,19 +337,73 @@ impl LatticeServer {
                 
                 state
             }
-            _ => return Err(NodeError::Actor("Expected SyncResponse".to_string())),
+            _ => return Err(NodeError::Actor("Expected StatusResponse".to_string())),
         };
         
-        // Exchange entries
-        let _entries_sent = protocol::send_missing_entries(&mut sink, store, &my_state, &peer_state, authors).await
-            .map_err(|e| NodeError::Actor(e.to_string()))?;
+        // Step 2: Compute what we need from peer
+        // For each author in peer_state where peer has higher seq than us
+        let mut ranges_to_fetch: Vec<lattice_core::proto::AuthorRange> = Vec::new();
+        for (author, peer_info) in peer_state.authors() {
+            let my_seq = my_state.authors().get(author).map(|i| i.seq).unwrap_or(0);
+            if peer_info.seq > my_seq {
+                ranges_to_fetch.push(lattice_core::proto::AuthorRange {
+                    author_id: author.to_vec(),
+                    from_seq: my_seq + 1,
+                    to_seq: peer_info.seq,
+                });
+            }
+        }
         
-        let (entries_applied, entries_sent_by_peer) = protocol::receive_entries(&mut stream, store).await
-            .map_err(|e| NodeError::Actor(e.to_string()))?;
+        let mut entries_applied: u64 = 0;
+        
+        // Step 3: Send FetchRequest if we need entries
+        if !ranges_to_fetch.is_empty() {
+            let fetch_req = PeerMessage {
+                message: Some(peer_message::Message::FetchRequest(lattice_core::proto::FetchRequest {
+                    store_id: store.id().as_bytes().to_vec(),
+                    ranges: ranges_to_fetch,
+                })),
+            };
+            sink.send(&fetch_req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
+            
+            // Receive chunked FetchResponse stream until done=true or stream closes
+            loop {
+                match stream.recv().await {
+                    Ok(Some(fetch_resp)) => {
+                        if let Some(peer_message::Message::FetchResponse(resp)) = fetch_resp.message {
+                            for signed_entry in resp.entries {
+                                match store.ingest_entry(signed_entry).await {
+                                    Ok(_) => entries_applied += 1,
+                                    Err(e) => tracing::debug!("Entry ingest failed: {}", e),
+                                }
+                            }
+                            
+                            if resp.done {
+                                break;  // Stream complete
+                            }
+                        } else {
+                            tracing::debug!("Unexpected message type during fetch");
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::debug!("Stream closed during fetch (no done flag)");
+                        break;  // Gracefully handle stream close
+                    }
+                    Err(e) => {
+                        tracing::debug!("Stream error during fetch: {}", e);
+                        break;  // Gracefully handle error
+                    }
+                }
+            }
+        }
         
         sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
         
-        Ok(SyncResult { entries_applied, entries_sent_by_peer })
+        Ok(SyncResult { 
+            entries_applied, 
+            entries_sent_by_peer: entries_applied,  // Same in new protocol
+        })
     }
     
     /// Get active peer IDs (excluding self)
@@ -436,25 +491,42 @@ async fn handle_connection(
     let (send, recv) = conn.accept_bi().await
         .map_err(|e| LatticeNetError::Connection(format!("Accept stream error: {}", e)))?;
     
-    let sink = MessageSink::new(send);
+    let mut sink = MessageSink::new(send);
     let mut stream = MessageStream::new(recv);
     
-    // Read first message to determine request type
-    let msg = stream.recv().await?
-        .ok_or_else(|| LatticeNetError::Connection("Peer closed stream".into()))?;
-    
-    match msg.message {
-        Some(peer_message::Message::JoinRequest(req)) => {
-            handle_join_request(&node, &remote_pubkey, req, sink).await
+    // Dispatch loop - handles multiple messages per connection
+    // TODO: Refactor to irpc for proper RPC semantics (tech debt)
+    loop {
+        let msg = match stream.recv().await {
+            Ok(Some(m)) => m,
+            Ok(None) => break,  // Stream closed cleanly
+            Err(e) => {
+                tracing::debug!("Stream recv error: {}", e);
+                break;
+            }
+        };
+        
+        match msg.message {
+            Some(peer_message::Message::JoinRequest(req)) => {
+                handle_join_request(&node, &remote_pubkey, req, &mut sink).await?;
+                break;  // Join is terminal
+            }
+            Some(peer_message::Message::StatusRequest(req)) => {
+                handle_status_request(&node, &remote_pubkey, req, &mut sink).await?;
+                // Continue loop - client may send FetchRequest next
+            }
+            Some(peer_message::Message::FetchRequest(req)) => {
+                handle_fetch_request(&node, &remote_pubkey, req, &mut sink).await?;
+                // Continue loop - client may send more requests
+            }
+            _ => {
+                tracing::debug!("Unexpected message type");
+            }
         }
-        Some(peer_message::Message::SyncRequest(req)) => {
-            handle_sync_request(&node, &remote_pubkey, req, sink, stream).await
-        }
-        Some(peer_message::Message::StatusRequest(req)) => {
-            handle_status_request(&node, req, sink).await
-        }
-        _ => Err(LatticeNetError::Connection("Unexpected message type".into())),
     }
+    
+    sink.finish().await?;
+    Ok(())
 }
 
 /// Handle a join request from an invited peer
@@ -462,7 +534,7 @@ async fn handle_join_request(
     node: &Node,
     remote_pubkey: &[u8; 32],
     req: lattice_core::proto::JoinRequest,
-    mut sink: MessageSink,
+    sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
     tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
     
@@ -476,99 +548,113 @@ async fn handle_join_request(
         })),
     };
     sink.send(&resp).await?;
-    sink.finish().await?;
     
     tracing::debug!("[Join] Sent JoinResponse, peer now active");
-    Ok(())
-}
-
-/// Handle a sync request - bidirectional exchange of entries
-async fn handle_sync_request(
-    node: &Node,
-    remote_pubkey: &[u8; 32],
-    peer_request: lattice_core::proto::SyncRequest,
-    mut sink: MessageSink,
-    mut stream: MessageStream,
-) -> Result<(), LatticeNetError> {
-    // Verify peer is active (allowed to sync)
-    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active]).await?;
-    tracing::debug!("[Sync] Verified peer as active");
-    
-    // Parse store_id from request
-    let store_id = Uuid::from_slice(&peer_request.store_id)
-        .map_err(|_| LatticeNetError::Connection(format!("Invalid store_id: {} bytes", peer_request.store_id.len())))?;
-    
-    tracing::debug!("[Sync] Received SyncRequest for store {}", store_id);
-    
-    // Open the requested store (uses cache if available)
-    let (store, _info) = node.open_store(store_id).await?;
-    
-    tracing::debug!("[Sync] Received SyncRequest");
-    
-    // Get our sync state
-    let my_state = store.sync_state().await?;
-    
-    // 1. Send our sync state as response
-    let resp = PeerMessage {
-        message: Some(peer_message::Message::SyncResponse(lattice_core::proto::SyncResponse {
-            store_id: store.id().as_bytes().to_vec(),
-            state: Some(my_state.to_proto()),
-        })),
-    };
-    sink.send(&resp).await?;
-    
-    // 2. Send entries peer is missing
-    let peer_state = peer_request.state
-        .map(|s| lattice_core::SyncState::from_proto(&s))
-        .unwrap_or_default();
-    
-    // Parse author filter from request
-    let author_filter: Vec<[u8; 32]> = peer_request.author_ids.iter()
-        .filter_map(|a| a.as_slice().try_into().ok())
-        .collect();
-    
-    let entries_sent = protocol::send_missing_entries(&mut sink, &store, &my_state, &peer_state, &author_filter).await?;
-    tracing::debug!("[Sync] Sent {} entries, now receiving from peer...", entries_sent);
-    
-    // 3. Receive entries from requester (bidirectional)
-    let (entries_applied, _) = protocol::receive_entries(&mut stream, &store).await?;
-    
-    sink.finish().await?;
-    
-    tracing::debug!("[Sync] Applied {} entries from peer", entries_applied);
     Ok(())
 }
 
 /// Handle an incoming status request - respond with our sync state
 async fn handle_status_request(
     node: &Node,
+    remote_pubkey: &[u8; 32],
     req: StatusRequest,
-    mut sink: MessageSink,
+    sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
     // Parse store_id from request
-    let store_id = Uuid::from_slice(&req.store_id).ok();
+    let store_id = Uuid::from_slice(&req.store_id)
+        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
-    tracing::debug!("[Status] Received status request for store {:?}", store_id);
+    tracing::debug!("[Status] Received status request for store {}", store_id);
     
-    // Get sync state for the requested store
-    let sync_state = if let Some(store_id) = store_id {
-        if let Ok((store, _)) = node.open_store(store_id).await {
-            store.sync_state().await.ok().map(|s| s.to_proto())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    // Verify peer is active
+    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active]).await?;
     
+    // Open the store
+    let (store, _info) = node.open_store(store_id).await?;
+    
+    // Get our sync state
+    let sync_state = store.sync_state().await.ok().map(|s| s.to_proto());
+    
+    // Send StatusResponse
     let resp = PeerMessage {
         message: Some(peer_message::Message::StatusResponse(StatusResponse {
-            store_id: req.store_id,
+            store_id: req.store_id.clone(),
             sync_state,
         })),
     };
     sink.send(&resp).await?;
-    sink.finish().await?;
     
     Ok(())
 }
+
+/// Handle a FetchRequest - streams entries in chunks
+async fn handle_fetch_request(
+    node: &Node,
+    remote_pubkey: &[u8; 32],
+    req: lattice_core::proto::FetchRequest,
+    sink: &mut MessageSink,
+) -> Result<(), LatticeNetError> {
+    let store_id = Uuid::from_slice(&req.store_id)
+        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
+    
+    // Verify peer is active
+    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active]).await?;
+    
+    // Open the store
+    let (store, _info) = node.open_store(store_id).await?;
+    
+    // Stream entries in chunks
+    stream_entries_to_sink(sink, &store, &req.store_id, &req.ranges).await?;
+    
+    Ok(())
+}
+
+/// Stream entries for requested ranges in chunks
+/// Sends multiple FetchResponse messages with done=false, then final with done=true
+const CHUNK_SIZE: usize = 100;
+
+async fn stream_entries_to_sink(
+    sink: &mut MessageSink,
+    store: &StoreHandle,
+    store_id: &[u8],
+    ranges: &[lattice_core::proto::AuthorRange],
+) -> Result<(), LatticeNetError> {
+    let mut chunk: Vec<lattice_core::proto::SignedEntry> = Vec::with_capacity(CHUNK_SIZE);
+    
+    for range in ranges {
+        if let Ok(author) = <[u8; 32]>::try_from(range.author_id.as_slice()) {
+            if let Ok(mut rx) = store.stream_entries_in_range(&author, range.from_seq, range.to_seq).await {
+                while let Some(entry) = rx.recv().await {
+                    chunk.push(entry);
+                    
+                    // Send chunk when full
+                    if chunk.len() >= CHUNK_SIZE {
+                        let resp = PeerMessage {
+                            message: Some(peer_message::Message::FetchResponse(lattice_core::proto::FetchResponse {
+                                store_id: store_id.to_vec(),
+                                status: 200,
+                                done: false,
+                                entries: std::mem::take(&mut chunk),
+                            })),
+                        };
+                        sink.send(&resp).await?;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Send final chunk (may be empty) with done=true
+    let resp = PeerMessage {
+        message: Some(peer_message::Message::FetchResponse(lattice_core::proto::FetchResponse {
+            store_id: store_id.to_vec(),
+            status: 200,
+            done: true,
+            entries: chunk,
+        })),
+    };
+    sink.send(&resp).await?;
+    
+    Ok(())
+}
+

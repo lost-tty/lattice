@@ -91,15 +91,8 @@ pub enum StoreCmd {
         author: [u8; 32],
         resp: oneshot::Sender<Result<Option<AuthorState>, StoreError>>,
     },
-    // Sync-related commands
     SyncState {
         resp: oneshot::Sender<Result<SyncState, StoreError>>,
-    },
-    /// Streaming version - returns a channel receiver for entries
-    ReadEntriesAfterStream {
-        author: [u8; 32],
-        from_hash: Option<[u8; 32]>,
-        resp: oneshot::Sender<Result<mpsc::Receiver<SignedEntry>, StoreError>>,
     },
     IngestEntry {
         entry: SignedEntry,
@@ -136,6 +129,12 @@ pub enum StoreCmd {
     },
     ListPeerSyncStates {
         resp: oneshot::Sender<Vec<([u8; 32], crate::proto::PeerSyncInfo)>>,
+    },
+    StreamEntriesInRange {
+        author: [u8; 32],
+        from_seq: u64,
+        to_seq: u64,
+        resp: oneshot::Sender<Result<mpsc::Receiver<SignedEntry>, StoreError>>,
     },
     Shutdown,
 }
@@ -253,10 +252,6 @@ impl StoreActor {
                 StoreCmd::SyncState { resp } => {
                     let _ = resp.send(self.store.sync_state());
                 }
-                StoreCmd::ReadEntriesAfterStream { author, from_hash, resp } => {
-                    let result = self.do_stream_entries_after(&author, from_hash);
-                    let _ = resp.send(result);
-                }
                 StoreCmd::IngestEntry { entry, resp } => {
                     let result = self.apply_ingested_entry(&entry)
                         .map_err(|e| match e {
@@ -323,6 +318,10 @@ impl StoreActor {
                 }
                 StoreCmd::ListPeerSyncStates { resp } => {
                     let _ = resp.send(self.store.list_peer_sync_states().unwrap_or_default());
+                }
+                StoreCmd::StreamEntriesInRange { author, from_seq, to_seq, resp } => {
+                    let result = self.do_stream_entries_in_range(&author, from_seq, to_seq);
+                    let _ = resp.send(result);
                 }
                 StoreCmd::Shutdown => {
                     break;
@@ -562,38 +561,36 @@ impl StoreActor {
             }
         }
     }
-
-    /// Spawn a thread to stream entries via channel. Thread terminates when receiver is dropped.
-    fn do_stream_entries_after(
+    /// Spawn a thread to stream entries in a sequence range via channel.
+    fn do_stream_entries_in_range(
         &self,
         author: &[u8; 32],
-        from_hash: Option<[u8; 32]>,
+        from_seq: u64,
+        to_seq: u64,
     ) -> Result<mpsc::Receiver<SignedEntry>, StoreError> {
         let author_hex = hex::encode(author);
         let log_path = self.chain_manager.logs_dir().join(format!("{}.log", author_hex));
         
-        // Channel with backpressure - thread waits if consumer is slow
+        // Channel with backpressure
         let (tx, rx) = mpsc::channel(256);
         
         // Spawn thread to stream entries
         std::thread::spawn(move || {
-            let iter = match log::iter_entries_after(&log_path, from_hash) {
+            let iter = match log::iter_entries(&log_path, from_seq, to_seq) {
                 Ok(iter) => iter,
-                Err(_) => return,  // No file or error - just close channel
+                Err(_) => return,
             };
             
             for result in iter {
                 match result {
                     Ok(entry) => {
-                        // blocking_send returns Err when receiver is dropped
                         if tx.blocking_send(entry).is_err() {
-                            return;  // Consumer dropped, exit cleanly
+                            return;  // Consumer dropped
                         }
                     }
-                    Err(_) => return,  // Read error, stop streaming
+                    Err(_) => return,
                 }
             }
-            // Iterator exhausted, thread exits, channel closes
         });
         
         Ok(rx)

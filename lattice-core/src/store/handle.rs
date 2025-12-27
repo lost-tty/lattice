@@ -194,71 +194,6 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    /// Streaming version - returns a channel receiver for entries.
-    /// Entries are streamed in order from a background thread.
-    /// Thread terminates when receiver is dropped - no cleanup needed.
-    pub async fn stream_entries_after(
-        &self, 
-        author: &[u8; 32], 
-        from_hash: Option<[u8; 32]>,
-    ) -> Result<mpsc::Receiver<crate::proto::SignedEntry>, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::ReadEntriesAfterStream { 
-            author: *author, 
-            from_hash, 
-            resp: resp_tx 
-        }).await.map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    /// Stream entries that peer is missing, in causal (HLC) order.
-    /// Returns a receiver that yields entries as they become available.
-    /// 
-    /// Buffers per-author entries internally for causal ordering, but output
-    /// is streamed via the returned receiver.
-    pub async fn stream_missing_entries(&self, missing: Vec<super::sync_state::MissingRange>) -> Result<mpsc::Receiver<crate::proto::SignedEntry>, NodeError> {
-        use std::collections::VecDeque;
-        use super::causal_iter::CausalEntryIter;
-        
-        // First, collect all streams (quick - just sets up receivers)
-        let mut receivers: Vec<(mpsc::Receiver<crate::proto::SignedEntry>,)> = Vec::new();
-        for range in &missing {
-            let from_hash = if range.from_hash == [0u8; 32] { None } else { Some(range.from_hash) };
-            let rx = self.stream_entries_after(&range.author, from_hash).await?;
-            receivers.push((rx,));
-        }
-        
-        // Output channel
-        let (tx, rx) = mpsc::channel(256);
-        
-        // Spawn task to buffer per-author, merge causally, and stream output
-        tokio::spawn(async move {
-            // Buffer per-author entries
-            let mut author_entries: Vec<VecDeque<crate::proto::SignedEntry>> = Vec::new();
-            for (mut author_rx,) in receivers {
-                let mut entries = VecDeque::new();
-                while let Some(entry) = author_rx.recv().await {
-                    entries.push_back(entry);
-                }
-                if !entries.is_empty() {
-                    author_entries.push(entries);
-                }
-            }
-            
-            // Stream in causal order
-            for entry in CausalEntryIter::new(author_entries) {
-                if tx.send(entry).await.is_err() {
-                    break;  // Receiver dropped
-                }
-            }
-        });
-        
-        Ok(rx)
-    }
-
     pub async fn ingest_entry(&self, entry: crate::proto::SignedEntry) -> Result<(), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -353,6 +288,27 @@ impl StoreHandle {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self.tx.send(StoreCmd::ListPeerSyncStates { resp: resp_tx }).await;
         resp_rx.await.unwrap_or_default()
+    }
+    
+    /// Stream entries for an author within a sequence range [from_seq, to_seq]
+    /// If to_seq is 0, streams entries from from_seq to latest
+    pub async fn stream_entries_in_range(
+        &self,
+        author: &[u8; 32],
+        from_seq: u64,
+        to_seq: u64,
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::proto::SignedEntry>, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::StreamEntriesInRange { 
+            author: *author, 
+            from_seq, 
+            to_seq, 
+            resp: resp_tx 
+        }).await.map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
     }
 }
 
