@@ -17,6 +17,19 @@
 - Atomic Batch Writes: Multiple key updates as single entry.
 - Conditional Updates (CAS): Update only if current value matches expected hash.
 
+**Content-Addressable Store (CAS):** *(TBD)*
+- Separate `lattice-cas` crate for clean boundaries.
+- Optional per-node blob storage by content hash.
+- Not all nodes required to store blobs (heterogeneous storage).
+- **Pin Map**: Regular KV entries with state:
+  - `/cas/pins/{node_pubkey}/{hash} = pending|stored|evicting`
+  - `pending` = declared, not yet fetched
+  - `stored` = fetched and stored locally
+  - `evicting` = marked for removal, GC will delete
+  - Nodes watch their own prefix and fetch+store declared blobs
+- **Fetch**: Ask gossip peers "who has {hash}?", first responder sends blob.
+- **Caching**: On read, nodes cache fetched blobs and auto-pin if declared.
+
 **CRDTs:**
 - LWW-Register: Last-writer-wins for single values.
 - LWW-Element-Set: Set with add/remove, element present if add > remove timestamp.

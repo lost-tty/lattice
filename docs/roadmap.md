@@ -31,7 +31,6 @@ Iroh integration (mDNS + DNS discovery), peer management via `/nodes/` keys, joi
 ### Orphan Management
 - [x] Track received_at timestamp for orphans (preparation for TTL)
 
-
 ---
 
 ## Priority 2: Sync & Gossip Reliability
@@ -40,6 +39,7 @@ Iroh integration (mDNS + DNS discovery), peer management via `/nodes/` keys, joi
 
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may need iroh fix)
 - [x] Add highest HLC common to all local logs to SyncState and show it in `store status` for each node
+- [ ] Auto-trigger direct sync with peer when sync state discrepancy detected (with throttling)
 
 ---
 
@@ -116,7 +116,8 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 - [x] Async streaming in `do_stream_entries_in_range` (currently re-opens Log in sync thread)
 - [ ] split `lattice.proto` into network protocol and storage messages
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
-- [ ] Refactor any `.unwrap` uses
+- [ ] Refactor any `.unwrap` uses
+- [ ] Remove redundant `AUTHOR_TABLE` from DB - SigChainManager already loads all chains on startup
 
 ---
 
@@ -161,10 +162,11 @@ Verify all data read from disk (log files, redb store) via hash/signature checks
 - Transitive sync across all peers
 - CRDTs: PN-Counters, OR-Sets for peer list
 - Transaction Groups: atomic batched operations
-- Watermark tracking & log pruning
+- Watermark tracking & log pruning, possibly using HLC instead of sequence numbers
 - Snapshots: fast bootstrap, point-in-time restore
 - Mobile clients (iOS/Android)
 - Key rotation
 - Secure storage (Keychain, TPM)
 - FUSE filesystem mount
 - Merkle-ized state (signed root hash, O(1) sync checks)
+- **CAS (Content-Addressable Store)**: Optional per-node blob storage by hash. Not all nodes required to store blobs. A separate "pin map" (CRDT) in a regular store dictates which objects each node should persistently store. On read, nodes cache fetched blobs and pin anything declared in the shared pin map.
