@@ -39,7 +39,7 @@ LatticeServer refactor, gossip protocol (iroh-gossip), Key Watcher for reactive 
 - [x] Proto: Change `HLC.counter` from `uint32` to `uint16`
 - [x] rename `history` command to `store history`
 - [x] rename `peer sync` to `store sync`, drop single peer sync functionality
-- [ ] `peer invite` should output the node's id for easy joining
+- [x] `peer invite` should output the node's id for easy joining
 - [ ] split `lattice.proto` into network protocol and storage messages
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] Async streaming in `do_stream_entries_in_range` (currently re-opens Log in sync thread)

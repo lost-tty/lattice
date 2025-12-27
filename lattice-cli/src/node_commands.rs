@@ -168,6 +168,8 @@ pub async fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _server: Opti
             let mut w = writer.clone();
             let _ = writeln!(w, "Invited peer: {}", pubkey_hex);
             let _ = writeln!(w, "  Status: {} (will become active after sync)", PeerStatus::Invited.as_str());
+            let _ = writeln!(w, "\nFor the invited peer to join, run:");
+            let _ = writeln!(w, "  node join {}", hex::encode(node.info().node_id));
         }
         Err(e) => {
             let mut w = writer.clone();
@@ -305,7 +307,7 @@ pub async fn cmd_join(_node: &Node, store: Option<&StoreHandle>, server: Option<
     match server.join_mesh(peer_id).await {
         Ok(handle) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "Joined mesh! Use 'sync' command to sync entries.");
+            let _ = writeln!(w, "Joined mesh!");
             CommandResult::SwitchTo(handle)
         }
         Err(e) => {
