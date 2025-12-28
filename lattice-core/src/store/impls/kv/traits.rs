@@ -14,9 +14,3 @@ pub trait Store: Send + Sync {
     /// Get the latest chain tip for a given author
     fn chain_tip(&self, author: &PubKey) -> Result<Option<ChainTip>, StateError>;
 }
-
-/// Peer Synchronization Store
-/// Abstraction for managing sync state with peers.
-pub trait SyncStore: Send + Sync {
-    // Methods to be defined later matching PeerSyncStore capabilities
-}

@@ -3,7 +3,7 @@
 use crate::{
     NodeIdentity, Uuid, PubKey, Head,
     proto::storage::ChainTip,
-    store::kv::Operation,
+    store::impls::kv::Operation,
     entry::SignedEntry,
 };
 use crate::store::{
@@ -369,7 +369,7 @@ impl StoreActor {
     }
 
     fn do_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), StoreActorError> {
-        use crate::store::kv::Operation;
+        use crate::store::impls::kv::Operation;
         
         let heads = self.state.get_heads(key)?;
         
@@ -393,7 +393,7 @@ impl StoreActor {
     }
 
     fn do_delete(&mut self, key: &[u8]) -> Result<(), StoreActorError> {
-        use crate::store::kv::Operation;
+        use crate::store::impls::kv::Operation;
         
         let heads = self.state.get_heads(key)?;
         
@@ -470,7 +470,7 @@ impl StoreActor {
         let local_author = self.node.public_key();
         let sigchain = self.chain_manager.get_or_create(local_author);
         use prost::Message;
-        use crate::store::kv::KvPayload;
+        use crate::store::impls::kv::KvPayload;
         let payload = KvPayload { ops }.encode_to_vec();
         let entry = sigchain.build_entry(&self.node, parent_hashes, payload);
         
@@ -600,13 +600,12 @@ impl StoreActor {
     
     /// Emit watch events for all operations in an entry
     fn emit_watch_events_for_entry(&mut self, entry: &SignedEntry) {
-        use crate::store::kv::KvPayload;
+        use crate::store::impls::kv::{KvPayload, OpType};
         use prost::Message;
         
         // Try decoding as KV payload (ignore if not KV - different store type?)
         if let Ok(kv_payload) = KvPayload::decode(entry.entry.payload.as_slice()) {
             for op in &kv_payload.ops {
-                use crate::store::kv::operation::OpType;
                 match &op.op_type {
                     Some(OpType::Put(put_op)) => {
                         self.emit_watch_event(&put_op.key, WatchEventKind::Put { 
@@ -689,11 +688,11 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::store::kv::Operation;
+    use crate::store::impls::kv::Operation;
     use crate::entry::{Entry, ChainTip};
     use crate::types::{Hash, PubKey};
     use prost::Message;
-    use crate::store::kv::KvPayload;
+    use crate::store::impls::kv::KvPayload;
     
     fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
         KvPayload { ops }.encode_to_vec()
@@ -1172,7 +1171,7 @@ mod tests {
         let node = NodeIdentity::generate();
         let author = node.public_key();
         
-        use crate::store::kv::KvPayload;
+        use crate::store::impls::kv::KvPayload;
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
              KvPayload { ops }.encode_to_vec()
         }
@@ -1246,7 +1245,7 @@ mod tests {
     #[test]
     fn test_sigchain_orphan_not_lost_on_crash() {
         use crate::store::sigchain::SigChainManager;
-        use crate::store::kv::KvPayload;
+        use crate::store::impls::kv::KvPayload;
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
              KvPayload { ops }.encode_to_vec()
         }
@@ -1322,7 +1321,7 @@ mod tests {
     /// Bug: H2 becomes DAG orphan because H0 is no longer a current head
     #[test]
     fn test_concurrent_offline_writes_create_conflict() {
-         use crate::store::kv::KvPayload;
+         use crate::store::impls::kv::KvPayload;
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
              KvPayload { ops }.encode_to_vec()
         }
@@ -1438,7 +1437,7 @@ mod tests {
     /// This reproduces a bug where re-syncing already-orphaned entries leaves stale orphans.
     #[test]
     fn test_orphan_cleanup_on_duplicate_ingest() {
-        use crate::store::kv::KvPayload;
+        use crate::store::impls::kv::KvPayload;
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
              KvPayload { ops }.encode_to_vec()
         }
@@ -1539,7 +1538,7 @@ mod tests {
     /// Simulates a stale orphan (seq < next_seq) and verifies cleanup removes it.
     #[test]
     fn test_orphan_cleanup_command() {
-         use crate::store::kv::KvPayload;
+         use crate::store::impls::kv::KvPayload;
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
              KvPayload { ops }.encode_to_vec()
         }
@@ -1973,7 +1972,7 @@ mod tests {
     /// Test that three stores can all sync with each other.
     #[test]
     fn test_three_way_sync() {
-         use crate::store::kv::KvPayload;
+         use crate::store::impls::kv::KvPayload;
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
              KvPayload { ops }.encode_to_vec()
         }
@@ -2131,7 +2130,7 @@ mod tests {
     /// Test multi-node sync after merge: 3 nodes create multi-heads, then merge, then sync to new node.
     #[test]
     fn test_multinode_sync_after_merge() {
-         use crate::store::kv::KvPayload;
+         use crate::store::impls::kv::KvPayload;
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
              KvPayload { ops }.encode_to_vec()
         }

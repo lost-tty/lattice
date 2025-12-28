@@ -64,6 +64,7 @@ Move decoupled store logic into separate crate.
 - [ ] Export public API (`StoreHandle`, traits)
 - [ ] Update `lattice-core` to depend on `lattice-store`
 - [ ] Verify `lattice-net` integration
+- [ ] Verify signatures of entries against peer public keys in root store
 
 ---
 

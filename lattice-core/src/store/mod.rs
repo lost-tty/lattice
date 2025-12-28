@@ -16,14 +16,15 @@ mod error;
 pub mod sigchain;
 pub mod interfaces;
 pub mod impls;
-pub mod kv;
+
 
 // Re-export interface types for convenience
-pub use interfaces::{Patch, ReadContext, StateBackend, KvPatch, Store, SyncStore};
+pub use interfaces::{Patch, ReadContext};
+pub use impls::kv::{KvPatch, Store};
 
 // Public API - types needed by Node and LatticeServer
 pub use error::{StateError, ParentValidationError};
-pub use kv::KvStore;
+pub use impls::kv::KvStore;
 pub use handle::StoreHandle;
 pub use actor::{WatchEvent, WatchEventKind, WatchError};
 pub use peer_sync_store::PeerSyncStore;

@@ -6,8 +6,7 @@
 //! - meta: String → Vec<u8> (system metadata: last_seq, last_hash, etc.)
 //! - author: PubKey → AuthorState (per-author replay tracking)
 
-use crate::store::interfaces::{StateBackend, KvPatch, Store};
-use crate::store::impls::redb::RedbBackend;
+use super::{KvPatch, Store};
 use crate::store::error::{StateError, ParentValidationError};
 use crate::store::LogError;
 use crate::entry::{SignedEntry, ChainTip};
@@ -19,26 +18,45 @@ use crate::head::Head;
 use prost::Message;
 use std::collections::{HashSet, HashMap};
 use std::path::Path;
+use redb::{Database, TableDefinition};
 
-// Internal prefixes for multiplexing data types in the backend
-const PREFIX_KV: u8 = b'k';
-const PREFIX_TIP: u8 = b't';
+// Internal table names
+const TABLE_KV: &str = "kv";
+const TABLE_TIPS: &str = "tips";
 
 /// Persistent state for KV with DAG conflict resolution
 /// This is a derived materialized view from the log (SigChain)
 pub struct KvStore {
-    backend: Box<dyn StateBackend<KvPatch>>,
+    db: Database,
 }
 
 impl KvStore {
     /// Open or create a state at the given path
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StateError> {
-        let backend = RedbBackend::new(path)?;
-        Ok(Self { backend: Box::new(backend) })
+        let db = Database::create(path)?;
+        Ok(Self { db })
     }
     
-    /// Replay entries from an iterator and apply them to the store (batched)
-    /// Returns the number of newly applied entries (skipped entries not counted)
+    /// Internal: Apply a patch to Redb
+    fn apply_patch(&self, patch: KvPatch) -> Result<(), StateError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            for (table_name, ops) in patch.updates {
+                let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(&table_name);
+                let mut table = write_txn.open_table(table_def)?;
+                
+                for (key, val) in ops.puts {
+                    table.insert(key.as_slice(), val.as_slice())?;
+                }
+                for key in ops.deletes {
+                    table.remove(key.as_slice())?;
+                }
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
     /// Replay entries from an iterator and apply them to the store (batched)
     /// Returns the number of newly applied entries (skipped entries not counted)
     pub fn replay_entries<I>(&self, entries: I) -> Result<u64, StateError>
@@ -59,7 +77,7 @@ impl KvStore {
         }
         
         if applied > 0 {
-            self.backend.apply_patch(patch)?;
+            self.apply_patch(patch)?;
         }
         
         Ok(applied)
@@ -72,7 +90,7 @@ impl KvStore {
         let mut overlay = HashMap::new();
         
         self.apply_ops_to_patch(signed_entry, None, &mut patch, &mut overlay)?;
-        self.backend.apply_patch(patch)?;
+        self.apply_patch(patch)?;
         Ok(())
     }
     
@@ -170,11 +188,24 @@ impl KvStore {
     }
 
     /// Internal: helper to read from overlay or backend
-    fn get_from_overlay_or_backend(&self, key: &[u8], overlay: &HashMap<Vec<u8>, Option<Vec<u8>>>) -> Result<Option<Vec<u8>>, StateError> {
-        if let Some(val) = overlay.get(key) {
-            return Ok(val.clone());
+    fn get_from_overlay_or_backend(&self, table: &str, key: &[u8], overlay: &HashMap<Vec<u8>, Option<Vec<u8>>>) -> Result<Option<Vec<u8>>, StateError> {
+        let overlay_key = [table.as_bytes(), b":", key].concat();
+        
+        if let Some(val) = overlay.get(&overlay_key) {
+           return Ok(val.clone());
         }
-        self.backend.get(key)
+        
+        // Read from DB
+        let txn = self.db.begin_read()?;
+        let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(table);
+        match txn.open_table(table_def) {
+            Ok(t) => {
+                let val = t.get(key)?.map(|v| v.value().to_vec());
+                Ok(val)
+            },
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+            Err(e) => Err(StateError::Backend(e.to_string())),
+        }
     }
 
     /// Internal: apply operations from a signed entry to patch/overlay
@@ -190,11 +221,11 @@ impl KvStore {
         let entry_hlc: HLC = entry.timestamp;
         let author = signed_entry.author_id;
         
-        // Form the Tip Key (t + author)
-        let tip_key = [&[PREFIX_TIP], author.as_slice()].concat();
+        // Tip Key for backend
+        let tip_key = author.as_slice();
 
         // Check if entry properly chains to the previous one
-        let tip = match self.get_from_overlay_or_backend(&tip_key, overlay)? {
+        let tip = match self.get_from_overlay_or_backend(TABLE_TIPS, tip_key, overlay)? {
             Some(tip_bytes) => ChainTip::decode(tip_bytes.as_slice())?,
             None => ChainTip::genesis(),
         };
@@ -243,8 +274,10 @@ impl KvStore {
 
         let tip = ChainTip::from(signed_entry);
         let tip_bytes = tip.encode();
-        patch.puts.push((tip_key.clone(), tip_bytes.clone()));
-        overlay.insert(tip_key, Some(tip_bytes));
+        
+        patch.put(TABLE_TIPS, tip_key.to_vec(), tip_bytes.clone());
+        let overlay_key = [TABLE_TIPS.as_bytes(), b":", tip_key].concat();
+        overlay.insert(overlay_key, Some(tip_bytes));
         
         Ok(())
     }
@@ -258,9 +291,8 @@ impl KvStore {
         patch: &mut KvPatch,
         overlay: &mut HashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> Result<(), StateError> {
-        let kv_key = [&[PREFIX_KV], key].concat();
-        
-        let mut heads: Vec<Head> = match self.get_from_overlay_or_backend(&kv_key, overlay)? {
+        // Read current heads
+        let mut heads: Vec<Head> = match self.get_from_overlay_or_backend(TABLE_KV, key, overlay)? {
             Some(v) => {
                 let list = HeadList::decode(v.as_slice())?;
                 list.heads.into_iter()
@@ -275,8 +307,7 @@ impl KvStore {
             return Ok(());
         }
 
-        // Filter out ancestors (heads that are in parent_hashes)
-        // If a head is in parent_hashes, it is an ancestor of the new head and should be removed.
+        // Filter out ancestors
         let parent_set: HashSet<Hash> = parent_hashes.iter().cloned().collect();
         heads.retain(|h| !parent_set.contains(&h.hash));
         
@@ -287,8 +318,9 @@ impl KvStore {
         let proto_heads: Vec<ProtoHeadInfo> = heads.into_iter().map(Into::into).collect();
         let encoded = HeadList { heads: proto_heads }.encode_to_vec();
         
-        patch.puts.push((kv_key.clone(), encoded.clone()));
-        overlay.insert(kv_key, Some(encoded));
+        patch.put(TABLE_KV, key.to_vec(), encoded.clone());
+        let overlay_key = [TABLE_KV.as_bytes(), b":", key].concat();
+        overlay.insert(overlay_key, Some(encoded));
         Ok(())
     }
     
@@ -305,17 +337,21 @@ impl KvStore {
     /// Get all heads for a key (for conflict inspection).
     /// Heads are sorted deterministically: highest HLC first, ties broken by author.
     pub fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, StateError> {
-        let kv_key = [&[PREFIX_KV], key].concat();
-        let val = self.backend.get(&kv_key)?;
+        let txn = self.db.begin_read()?;
+        let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(TABLE_KV);
+        let val = match txn.open_table(table_def) {
+            Ok(t) => t.get(key)?.map(|v| v.value().to_vec()),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(StateError::Backend(e.to_string())),
+        };
         
         match val {
-            Some(v) => {
+             Some(v) => {
                 let proto_heads = HeadList::decode(v.as_slice())?.heads;
                 let mut heads: Vec<Head> = proto_heads.into_iter()
                     .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
                     .collect::<Result<Vec<_>, StateError>>()?;
                     
-                // Sort by winner criteria: highest HLC first, then highest author (deterministic)
                 heads.sort_by(|a, b| {
                     b.hlc.cmp(&a.hlc)
                         .then_with(|| b.author.cmp(&a.author))
@@ -328,7 +364,7 @@ impl KvStore {
     
     /// Pick deterministic winner from heads: highest HLC, then highest author bytes.
     /// Heads should already be sorted by get_heads(), so winner is first.
-    fn pick_winner(heads: &[Head]) -> Option<&Head> {
+    pub fn pick_winner(heads: &[Head]) -> Option<&Head> {
         // If heads are already sorted (via get_heads), first is winner
         // If not sorted, compute winner via max
         if heads.is_empty() {
@@ -362,13 +398,20 @@ impl KvStore {
     
     /// Get author state for a specific author
     pub fn chain_tip(&self, author: &PubKey) -> Result<Option<ChainTip>, StateError> {
-        let tip_key = [&[PREFIX_TIP], author.as_slice()].concat();
-        let val = self.backend.get(&tip_key)?;
+        let txn = self.db.begin_read()?;
+        let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(TABLE_TIPS);
+        let val = match txn.open_table(table_def) {
+            Ok(t) => t.get(author.as_slice())?.map(|v| v.value().to_vec()),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(StateError::Backend(e.to_string())),
+        };
+        
         match val {
             Some(v) => Ok(ChainTip::decode(v.as_slice()).ok()),
             None => Ok(None),
         }
     }
+
     /// List all key-value pairs (winner values only)
     /// If include_deleted is true, includes tombstoned entries
     pub fn list_all(&self, include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
@@ -378,20 +421,31 @@ impl KvStore {
     /// List all key-value pairs matching a prefix (winner values only)
     /// If include_deleted is true, includes tombstoned entries
     pub fn list_by_prefix(&self, prefix: &[u8], include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
-        let scan_prefix = [&[PREFIX_KV], prefix].concat();
-        let entries = self.backend.scan(&scan_prefix)?;
-        let mut result = Vec::new();
+        let txn = self.db.begin_read()?;
+        let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(TABLE_KV);
         
-        for (full_key, value) in entries {
-            if full_key.is_empty() { continue; }
-            let key_bytes = full_key[1..].to_vec(); // Strip prefix
-            
+        let entries = match txn.open_table(table_def) {
+            Ok(t) => {
+                let mut result = Vec::new();
+                for entry in t.range(prefix..)? {
+                     let (k, v) = entry?;
+                     let k_bytes = k.value();
+                     if !k_bytes.starts_with(prefix) { break; }
+                     result.push((k_bytes.to_vec(), v.value().to_vec()));
+                }
+                result
+            },
+            Err(redb::TableError::TableDoesNotExist(_)) => Vec::new(),
+            Err(e) => return Err(StateError::Backend(e.to_string())),
+        };
+        
+        let mut result = Vec::new();
+        for (key_bytes, value) in entries {
             let proto_heads = HeadList::decode(value.as_slice())?.heads;
             let heads: Vec<Head> = proto_heads.into_iter()
                     .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
                     .collect::<Result<Vec<_>, StateError>>()?;
             if let Some(winner) = Self::pick_winner(&heads) {
-                // Skip tombstones unless include_deleted is true
                 if include_deleted || !winner.tombstone {
                     result.push((key_bytes, winner.value.clone()));
                 }
@@ -415,6 +469,12 @@ impl Store for KvStore {
     }
 }
 
+impl crate::store::interfaces::ReadContext for KvStore {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
+        KvStore::get(self, key)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,7 +483,7 @@ mod tests {
     use crate::node_identity::NodeIdentity;
     use crate::entry::{Entry, SignedEntry, ChainTip};
     use crate::proto::storage::{Entry as ProtoEntry, SignedEntry as ProtoSignedEntry};
-    use crate::store::kv::{Operation, KvPayload};
+    use crate::store::impls::kv::{Operation, KvPayload};
     use crate::store::Log;
     use prost::Message;
     use uuid::Uuid;

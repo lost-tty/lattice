@@ -284,7 +284,7 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::store::kv::{Operation, KvPayload};
+    use crate::store::impls::kv::{Operation, KvPayload};
     use crate::entry::EntryBuilder;
     use prost::Message;
     
