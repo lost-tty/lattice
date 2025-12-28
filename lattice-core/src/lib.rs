@@ -17,6 +17,7 @@ pub mod proto;
 pub mod data_dir;
 pub mod meta_store;
 pub mod store;
+pub mod types;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (16 MB)
@@ -32,6 +33,10 @@ pub use store::{LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
 
 // Proto exports
 pub use proto::storage::HeadInfo;
+
+// Type exports
+pub use types::{Hash, PubKey, Signature};
+pub use ed25519_dalek::SigningKey;
 
 // Other exports
 pub use entry::{Entry, SignedEntry};

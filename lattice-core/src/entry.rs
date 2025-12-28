@@ -3,6 +3,7 @@
 use crate::hlc::HLC;
 use crate::proto::storage::{Operation, Entry as ProtoEntry, SignedEntry as ProtoSignedEntry, ChainTip as ProtoChainTip};
 use crate::node_identity::{NodeIdentity, NodeError};
+use crate::types::{Hash, PubKey, Signature as Sig};
 use ed25519_dalek::{Signature, VerifyingKey};
 use prost::Message;
 use thiserror::Error;
@@ -29,6 +30,8 @@ pub enum EntryError {
     InvalidPrevHashLength(usize),
 }
 
+use uuid::Uuid;
+
 /// A strongly-typed atomic operation entry.
 ///
 /// Ensures all fields are valid (e.g. fixed-size hashes, existing timestamp)
@@ -36,9 +39,9 @@ pub enum EntryError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub version: u32,
-    pub store_id: Vec<u8>,
-    pub prev_hash: [u8; 32],
-    pub parent_hashes: Vec<[u8; 32]>,
+    pub store_id: Uuid,
+    pub prev_hash: Hash,
+    pub parent_hashes: Vec<Hash>,
     pub seq: u64,
     pub timestamp: HLC,
     pub ops: Vec<Operation>,
@@ -51,7 +54,7 @@ pub struct ChainTip {
     /// Sequence number of the last entry
     pub seq: u64,
     /// Hash of the last entry
-    pub hash: [u8; 32],
+    pub hash: Hash,
     /// HLC timestamp of the last entry
     pub hlc: HLC,
 }
@@ -84,12 +87,12 @@ impl TryFrom<ProtoChainTip> for ChainTip {
     type Error = EntryError;
 
     fn try_from(proto: ProtoChainTip) -> Result<Self, Self::Error> {
-        let hash: [u8; 32] = proto.hash.try_into()
+        let hash: Hash = proto.hash.try_into()
             .map_err(|v: Vec<u8>| EntryError::InvalidPrevHashLength(v.len()))?;
             
         Ok(ChainTip {
             seq: proto.seq,
-            hash,
+            hash: Hash::from(hash),
             hlc: proto.hlc.map(Into::into).unwrap_or_default(),
         })
     }
@@ -103,8 +106,8 @@ impl TryFrom<ProtoChainTip> for ChainTip {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignedEntry {
     pub entry: Entry,
-    pub signature: [u8; 64],
-    pub author_id: [u8; 32],
+    pub signature: Sig,
+    pub author_id: PubKey,
 }
 
 impl Entry {
@@ -131,8 +134,8 @@ impl Entry {
         
         SignedEntry {
             entry: self,
-            signature: signature.to_bytes(),
-            author_id: node.public_key_bytes().try_into().unwrap(),
+            signature: Sig::from(signature.to_bytes()),
+            author_id: node.public_key(),
         }
     }
 
@@ -144,7 +147,7 @@ impl Entry {
 
     /// Check if this entry is a genesis entry (no predecessor).
     pub fn is_genesis(&self) -> bool {
-        self.prev_hash == [0u8; 32]
+        self.prev_hash == Hash::ZERO
     }
 }
 
@@ -166,11 +169,11 @@ impl SignedEntry {
     /// Verify the signature against the entry content.
     /// This re-serializes the entry to check the signature.
     pub fn verify(&self) -> Result<(), EntryError> {
-        let pk_bytes = self.author_id;
+        let pk_bytes = *self.author_id;
         let public_key = VerifyingKey::from_bytes(&pk_bytes)
             .map_err(|_| NodeError::InvalidSignature)?;
             
-        let sig_bytes = self.signature;
+        let sig_bytes = *self.signature;
         let signature = Signature::from_bytes(&sig_bytes);
         
         // Re-serialize entry to bytes
@@ -182,10 +185,10 @@ impl SignedEntry {
     }
     
     /// Compute the hash of this signed entry (deterministically).
-    pub fn hash(&self) -> [u8; 32] {
+    pub fn hash(&self) -> Hash {
         let proto: ProtoSignedEntry = self.clone().into();
         let bytes = proto.encode_to_vec();
-        blake3::hash(&bytes).into()
+        Hash::from(*blake3::hash(&bytes).as_bytes())
     }
 }
 
@@ -195,7 +198,7 @@ impl From<Entry> for ProtoEntry {
     fn from(e: Entry) -> Self {
         ProtoEntry {
             version: e.version,
-            store_id: e.store_id,
+            store_id: e.store_id.as_bytes().to_vec(),
             prev_hash: e.prev_hash.to_vec(),
             parent_hashes: e.parent_hashes.iter().map(|h| h.to_vec()).collect(),
             seq: e.seq,
@@ -210,7 +213,7 @@ impl TryFrom<ProtoEntry> for Entry {
 
     fn try_from(p: ProtoEntry) -> Result<Self, Self::Error> {
         let prev_hash = if p.prev_hash.is_empty() {
-             [0u8; 32]
+             Hash::ZERO
         } else {
              p.prev_hash.try_into().map_err(|v: Vec<u8>| EntryError::InvalidPrevHashLength(v.len()))?
         };
@@ -226,7 +229,7 @@ impl TryFrom<ProtoEntry> for Entry {
 
         Ok(Entry {
             version: p.version,
-            store_id: p.store_id,
+            store_id: Uuid::from_slice(&p.store_id).map_err(|_| EntryError::Decode(prost::DecodeError::new("Invalid store_id length")))?,
             prev_hash,
             parent_hashes,
             seq: p.seq,
@@ -262,7 +265,7 @@ impl TryFrom<ProtoSignedEntry> for SignedEntry {
             return Err(EntryError::InvalidSignatureLength(p.signature.len()));
         }
         
-        let author_id: [u8; 32] = p.author_id.try_into().unwrap();
+        let author_id: PubKey = p.author_id.try_into().unwrap();
         let signature_bytes: [u8; 64] = p.signature.try_into().unwrap();
         
         // 2. Verify signature against *raw bytes* before decoding
@@ -279,8 +282,8 @@ impl TryFrom<ProtoSignedEntry> for SignedEntry {
 
         Ok(SignedEntry {
             entry,
-            signature: signature_bytes,
-            author_id,
+            signature: Sig::from(signature_bytes),
+            author_id: PubKey::from(author_id),
         })
     }
 }
@@ -296,8 +299,8 @@ impl EntryBuilder {
         Self {
             entry: Entry {
                 version: 1,
-                store_id: Vec::new(),
-                prev_hash: [0u8; 32],
+                store_id: Uuid::nil(),
+                prev_hash: Hash::ZERO,
                 parent_hashes: Vec::new(),
                 seq,
                 timestamp,
@@ -306,23 +309,18 @@ impl EntryBuilder {
         }
     }
 
-    pub fn store_id(mut self, id: impl Into<Vec<u8>>) -> Self {
-        self.entry.store_id = id.into();
+    pub fn store_id(mut self, id: Uuid) -> Self {
+        self.entry.store_id = id;
         self
     }
 
-    pub fn prev_hash(mut self, hash: impl Into<Vec<u8>>) -> Self {
-        let v = hash.into();
-        if v.len() == 32 {
-            self.entry.prev_hash = v.try_into().unwrap();
-        }
+    pub fn prev_hash(mut self, hash: Hash) -> Self {
+        self.entry.prev_hash = hash;
         self
     }
     
-    pub fn parent_hashes(mut self, hashes: Vec<Vec<u8>>) -> Self {
-        self.entry.parent_hashes = hashes.into_iter()
-            .filter_map(|h| h.try_into().ok())
-            .collect();
+    pub fn parent_hashes(mut self, hashes: Vec<Hash>) -> Self {
+        self.entry.parent_hashes = hashes;
         self
     }
     

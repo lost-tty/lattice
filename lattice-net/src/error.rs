@@ -19,4 +19,7 @@ pub enum LatticeNetError {
     
     #[error("Connection error: {0}")]
     Connection(String),
+
+    #[error("Validation error: {0}")]
+    Validation(String),
 }

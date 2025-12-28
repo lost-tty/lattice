@@ -4,12 +4,13 @@
 //! Tables:
 //! - kv: Vec<u8> → HeadList (multi-head DAG tips per key)
 //! - meta: String → Vec<u8> (system metadata: last_seq, last_hash, etc.)
-//! - author: [u8; 32] → AuthorState (per-author replay tracking)
+//! - author: PubKey → AuthorState (per-author replay tracking)
 
 use crate::store::log::LogError;
 use crate::store::sigchain::SigChainError;
 use crate::entry::{SignedEntry, ChainTip};
-use crate::proto::storage::{operation, HeadInfo, HeadList, Hlc};
+use crate::proto::storage::{operation, HeadInfo, HeadList, Hlc, PeerSyncInfo};
+use crate::types::{Hash, PubKey};
 use prost::Message;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::collections::HashSet;
@@ -141,7 +142,7 @@ impl State {
         signed_entry: &SignedEntry,
         hash_exists: F,
     ) -> Result<(), ParentValidationError> 
-    where F: Fn(&[u8; 32]) -> bool
+    where F: Fn(&Hash) -> bool
     {
         let entry = &signed_entry.entry;
         
@@ -184,7 +185,7 @@ impl State {
         }
         
         // Convert parent_hashes to HashSet for O(1) lookup
-        let parent_set: HashSet<[u8; 32]> = entry.parent_hashes.iter().cloned().collect();
+        let parent_set: HashSet<Hash> = entry.parent_hashes.iter().cloned().collect();
         
         // For each operation, check that ALL parent_hashes are in current heads for that key
         for op in &entry.ops {
@@ -278,7 +279,7 @@ impl State {
         kv_table: &mut redb::Table<&[u8], &[u8]>,
         key: &[u8],
         new_head: HeadInfo,
-        parent_hashes: &[[u8; 32]],
+        parent_hashes: &[Hash],
     ) -> Result<(), StateError> {
         let mut heads = match kv_table.get(key)? {
             Some(v) => HeadList::decode(v.value()).map(|h| h.heads).unwrap_or_default(),
@@ -409,7 +410,7 @@ impl State {
     }
     
     /// Get author state for a specific author
-    pub fn chain_tip(&self, author: &[u8; 32]) -> Result<Option<ChainTip>, StateError> {
+    pub fn chain_tip(&self, author: &PubKey) -> Result<Option<ChainTip>, StateError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(CHAIN_TIPS_TABLE)?;
         
@@ -422,29 +423,29 @@ impl State {
     // ==================== Peer Sync State Methods ====================
     
     /// State a peer's sync state (received via gossip or status command)
-    pub fn set_peer_sync_state(&self, peer: &[u8; 32], info: &crate::proto::storage::PeerSyncInfo) -> Result<(), StateError> {
+    pub fn set_peer_sync_state(&self, peer: &PubKey, info: &PeerSyncInfo) -> Result<(), StateError> {
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(PEER_SYNC_TABLE)?;
-            table.insert(&peer[..], info.encode_to_vec().as_slice())?;
+            table.insert(&peer.0[..], info.encode_to_vec().as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
     }
     
     /// Get a peer's last known sync state
-    pub fn get_peer_sync_state(&self, peer: &[u8; 32]) -> Result<Option<crate::proto::storage::PeerSyncInfo>, StateError> {
+    pub fn get_peer_sync_state(&self, peer: &PubKey) -> Result<Option<PeerSyncInfo>, StateError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(PEER_SYNC_TABLE)?;
         
-        match table.get(&peer[..])? {
-            Some(v) => Ok(crate::proto::storage::PeerSyncInfo::decode(v.value()).ok()),
+        match table.get(&peer.0[..])? {
+            Some(v) => Ok(PeerSyncInfo::decode(v.value()).ok()),
             None => Ok(None),
         }
     }
     
     /// List all known peer sync states
-    pub fn list_peer_sync_states(&self) -> Result<Vec<([u8; 32], crate::proto::storage::PeerSyncInfo)>, StateError> {
+    pub fn list_peer_sync_states(&self) -> Result<Vec<(PubKey, PeerSyncInfo)>, StateError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(PEER_SYNC_TABLE)?;
         
@@ -452,9 +453,9 @@ impl State {
         for entry in table.iter()? {
             let (key, value) = entry?;
             if key.value().len() == 32 {
-                if let Ok(info) = crate::proto::storage::PeerSyncInfo::decode(value.value()) {
-                    let mut peer = [0u8; 32];
-                    peer.copy_from_slice(key.value());
+                if let Ok(info) = PeerSyncInfo::decode(value.value()) {
+                    let mut peer = PubKey::default();
+                    peer.0.copy_from_slice(key.value());
                     peers.push((peer, info));
                 }
             }
@@ -476,13 +477,17 @@ mod tests {
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::entry::{Entry, SignedEntry, ChainTip};
-    use crate::proto::storage::{Hlc, Operation};
+    use crate::proto::storage::{Hlc, Operation, Entry as ProtoEntry, SignedEntry as ProtoSignedEntry};
+    use crate::store::log::Log;    
 
-    const TEST_STORE: [u8; 16] = [1u8; 16];
+    use crate::types::PubKey;
+    use uuid::Uuid;
+
+    const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
     
     /// Test helper - read all entries
     fn read_entries(path: impl AsRef<std::path::Path>) -> Vec<SignedEntry> {
-        crate::store::log::Log::open(&path)
+        Log::open(&path)
             .unwrap()
             .iter()
             .unwrap()
@@ -501,7 +506,7 @@ mod tests {
         
         let entry = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         
@@ -552,7 +557,7 @@ mod tests {
         // First write
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         state.apply_entry(&entry1).unwrap();
@@ -561,7 +566,7 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
             .timestamp(HLC::now_with_clock(&clock2))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![]) // Also no parent (doesn't know about entry1)
             .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
@@ -586,7 +591,7 @@ mod tests {
         let clock1 = MockClock::new(1000);
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
@@ -595,7 +600,7 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
             .timestamp(HLC::now_with_clock(&clock2))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
@@ -609,8 +614,8 @@ mod tests {
         let clock3 = MockClock::new(3000);
         let entry3 = Entry::next_after(Some(&ChainTip::from(&entry2)))
             .timestamp(HLC::now_with_clock(&clock3))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash1.to_vec(), hash2.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash1, hash2])
             .operation(Operation::put("/key", b"merged".to_vec()))
             .sign(&node);
         state.apply_entry(&entry3).unwrap();
@@ -636,7 +641,7 @@ mod tests {
         let clock1 = MockClock::new(1000);
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         state.apply_entry(&entry1).unwrap();
@@ -644,7 +649,7 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let entry2 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock2))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node2);
         state.apply_entry(&entry2).unwrap();
@@ -656,11 +661,11 @@ mod tests {
         // We replicate this by fabricating a tip at seq 2.
         let hash1 = entry1.hash();
         let clock3 = MockClock::new(3000);
-        let fake_tip = ChainTip { seq: 2, hash: hash1, hlc: entry1.entry.timestamp };
+        let fake_tip = ChainTip { seq: 2, hash: Hash::from(hash1), hlc: entry1.entry.timestamp };
         let entry3 = Entry::next_after(Some(&fake_tip))
             .timestamp(HLC::now_with_clock(&clock3))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash1.to_vec()]) // Only cites entry1
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash1]) // Only cites entry1
             .operation(Operation::delete("/key"))
             .sign(&node);
         state.apply_entry(&entry3).unwrap();
@@ -690,7 +695,7 @@ mod tests {
         let clock1 = MockClock::new(1000);
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         state.apply_entry(&entry1).unwrap();
@@ -702,8 +707,8 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
             .timestamp(HLC::now_with_clock(&clock2))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash1.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash1])
             .operation(Operation::delete("/key"))
             .sign(&node);
         state.apply_entry(&entry2).unwrap();
@@ -739,7 +744,7 @@ mod tests {
         let clock1 = MockClock::new(1000);
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .operation(Operation::put(b"/key", b"v1".to_vec()))
             .sign(&alice);
         state.apply_entry(&entry1).unwrap();
@@ -749,7 +754,7 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
             .timestamp(HLC::now_with_clock(&clock2))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .operation(Operation::delete(b"/key"))
             .sign(&alice);
         state.apply_entry(&entry2).unwrap();
@@ -758,8 +763,8 @@ mod tests {
         let clock3 = MockClock::new(2500);
         let entry3 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock3))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![h1.to_vec()])  // Cites H1 as parent
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![h1])  // Cites H1 as parent
             .operation(Operation::put(b"/key", b"v2".to_vec()))
             .sign(&bob);
         state.apply_entry(&entry3).unwrap();
@@ -798,7 +803,7 @@ mod tests {
         let clock1 = MockClock::new(1000);
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .operation(Operation::put(b"/key", b"alice_v1".to_vec()))
             .sign(&alice);
         state.apply_entry(&entry1).unwrap();
@@ -808,7 +813,7 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let entry2 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock2))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             // No parent_hashes = concurrent/diverged
             .operation(Operation::put(b"/key", b"bob_v2".to_vec()))
             .sign(&bob);
@@ -827,8 +832,8 @@ mod tests {
         let clock3 = MockClock::new(3000);
         let entry3 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock3))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![h1.to_vec(), h2.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![h1, h2])
             .operation(Operation::put(b"/key", b"charlie_merged".to_vec()))
             .sign(&charlie);
         state.apply_entry(&entry3).unwrap();
@@ -855,7 +860,7 @@ mod tests {
         let clock1 = MockClock::new(1000);
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/key", b"value".to_vec()))
             .sign(&node);
@@ -896,7 +901,7 @@ mod tests {
         let clock1 = MockClock::new(1000);
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/key", b"1".to_vec()))
             .sign(&node);
@@ -909,8 +914,8 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
             .timestamp(HLC::now_with_clock(&clock2))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![h1.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![h1])
             .operation(Operation::put(b"/key", b"2".to_vec()))
             .sign(&node);
         state.apply_entry(&entry2).unwrap();
@@ -923,8 +928,8 @@ mod tests {
         let state = State::open(&path).unwrap();
         
         // Check what parent_hashes entry2 actually has
-        let proto: crate::proto::storage::SignedEntry = entry2.clone().into();
-        let decoded_entry2: Entry = crate::proto::storage::Entry::decode(&proto.entry_bytes[..]).unwrap().try_into().unwrap();
+        let proto: ProtoSignedEntry = entry2.clone().into();
+        let decoded_entry2: Entry = ProtoEntry::decode(&proto.entry_bytes[..]).unwrap().try_into().unwrap();
         eprintln!("Entry2 parent_hashes: {:?}", decoded_entry2.parent_hashes);
         eprintln!("H1: {:?}", h1);
         
@@ -955,13 +960,13 @@ mod tests {
         
         let state = State::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes()).unwrap();
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, PubKey::from(*node.public_key())).unwrap();
         
         // First write: a = 1
         let clock1 = MockClock::new(1000);
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/key", b"1".to_vec()))
             .sign(&node);
@@ -973,15 +978,15 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
             .timestamp(HLC::now_with_clock(&clock2))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![h1.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![h1])
             .operation(Operation::put(b"/key", b"2".to_vec()))
             .sign(&node);
         sigchain.append(&entry2).unwrap();
         state.apply_entry(&entry2).unwrap();
         
         assert_eq!(state.get_heads(b"/key").unwrap().len(), 1, "Before restart");
-        let author = node.public_key_bytes();
+        let author = node.public_key();
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 2, "author seq should be 2");
         
         // Simulate restart: reopen state.db (persisted) and replay log
@@ -992,7 +997,7 @@ mod tests {
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 2, "author seq persisted");
         
         // Replay log - entries already applied, skip all
-        let replayed = crate::store::log::Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
+        let replayed = Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         assert_eq!(replayed, 0, "0 new entries (all skipped)");
         
         let final_heads = state.get_heads(b"/key").unwrap();
@@ -1017,15 +1022,15 @@ mod tests {
         
         let state = State::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
-        let author = node.public_key_bytes();
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes()).unwrap();
+        let author = node.public_key();
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, PubKey::from(*node.public_key())).unwrap();
         
         // Apply 3 entries with proper chaining
         for i in 1u64..=3 {
             let clock = MockClock::new(i * 1000);
             let entry = Entry::next_after(sigchain.tip())
                 .timestamp(HLC::now_with_clock(&clock))
-                .store_id(TEST_STORE.to_vec())
+                .store_id(TEST_STORE)
                 .parent_hashes(vec![])
                 .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
@@ -1041,7 +1046,7 @@ mod tests {
         drop(sigchain);
         
         let state = State::open(&state_path).unwrap();
-        let replayed = crate::store::log::Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
+        let replayed = Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         
         // All 3 entries were read but skipped (already applied)
         assert_eq!(replayed, 0, "0 new entries (all skipped)");
@@ -1065,15 +1070,15 @@ mod tests {
         
         let state = State::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
-        let author = node.public_key_bytes();
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes()).unwrap();
+        let author = node.public_key();
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, PubKey::from(*node.public_key())).unwrap();
         
         // Write 5 entries to log with proper chaining
         for i in 1u64..=5 {
             let clock = MockClock::new(i * 1000);
             let entry = Entry::next_after(sigchain.tip())
                 .timestamp(HLC::now_with_clock(&clock))
-                .store_id(TEST_STORE.to_vec())
+                .store_id(TEST_STORE)
                 .parent_hashes(vec![])
                 .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
@@ -1093,7 +1098,7 @@ mod tests {
         drop(sigchain);
         
         let state = State::open(&state_path).unwrap();
-        let replayed = crate::store::log::Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
+        let replayed = Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         
         assert_eq!(replayed, 2, "Only 2 new entries applied (3 skipped)");
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 5, "seq updated to 5");
@@ -1124,15 +1129,15 @@ mod tests {
         
         let state = State::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
-        let author = node.public_key_bytes();
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, node.public_key_bytes()).unwrap();
+        let author = node.public_key();
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, PubKey::from(*node.public_key())).unwrap();
         
         // Apply first 3 entries
         for i in 1u64..=3 {
             let clock = MockClock::new(i * 1000);
             let entry = Entry::next_after(sigchain.tip())
                 .timestamp(HLC::now_with_clock(&clock))
-                .store_id(TEST_STORE.to_vec())
+                .store_id(TEST_STORE)
                 .parent_hashes(vec![])
                 .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
@@ -1152,7 +1157,7 @@ mod tests {
             let clock = MockClock::new(i * 1000);
             let entry = Entry::next_after(sigchain.tip())
                 .timestamp(HLC::now_with_clock(&clock))
-                .store_id(TEST_STORE.to_vec())
+                .store_id(TEST_STORE)
                 .parent_hashes(vec![])
                 .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
@@ -1176,7 +1181,7 @@ mod tests {
         assert!(state.get_heads(b"/key4").unwrap().is_empty(), "key4 not in restored state");
         
         // Replay log - should apply entries 4 and 5 (skip 1-3)
-        let replayed = crate::store::log::Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
+        let replayed = Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         assert_eq!(replayed, 2, "Only 2 new entries applied (3 skipped)");
         
         // Now seq should be 5 and keys 4-5 should exist
@@ -1300,21 +1305,21 @@ mod tests {
         // Use same HLC to force conflict (tie-break on author)
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&MockClock::new(1000)))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/shared_key", b"value_from_a".to_vec()))
             .sign(&node_a);
         store_a.apply_entry(&entry_a).unwrap();
-        crate::store::log::Log::open_or_create(&log_path_a).unwrap().append(&entry_a).unwrap();
+        Log::open_or_create(&log_path_a).unwrap().append(&entry_a).unwrap();
         
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&MockClock::new(1000)))  // Same HLC!
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/shared_key", b"value_from_b".to_vec()))
             .sign(&node_b);
         store_b.apply_entry(&entry_b).unwrap();
-        crate::store::log::Log::open_or_create(&log_path_b).unwrap().append(&entry_b).unwrap();
+        Log::open_or_create(&log_path_b).unwrap().append(&entry_b).unwrap();
         
         // Before sync: A has A's value, B has B's value
         assert_eq!(store_a.get(b"/shared_key").unwrap(), Some(b"value_from_a".to_vec()));
@@ -1365,7 +1370,7 @@ mod tests {
         let node_high = NodeIdentity::generate();
         
         // Determine which node has "higher" author bytes
-        let (high_node, low_node) = if node_high.public_key_bytes() > node_low.public_key_bytes() {
+        let (high_node, low_node) = if *node_high.public_key() > *node_low.public_key() {
             (&node_high, &node_low)
         } else {
             (&node_low, &node_high)
@@ -1376,7 +1381,7 @@ mod tests {
         
         let entry_low = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/tiebreak_key", b"from_low".to_vec()))
             .sign(low_node);
@@ -1384,7 +1389,7 @@ mod tests {
         
         let entry_high = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/tiebreak_key", b"from_high".to_vec()))
             .sign(high_node);
@@ -1397,7 +1402,7 @@ mod tests {
         let heads = state.get_heads(b"/tiebreak_key").unwrap();
         assert_eq!(heads.len(), 2);
         assert_eq!(heads[0].value, b"from_high".to_vec(), "heads[0] should be winner");
-        assert_eq!(heads[0].author, high_node.public_key_bytes().to_vec());
+        assert_eq!(heads[0].author, high_node.public_key().to_vec());
         
         let _ = std::fs::remove_file(path);
     }
@@ -1426,21 +1431,21 @@ mod tests {
         // Create entries (same as before)
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_a".to_vec()))
             .sign(&node_a);
         
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_b".to_vec()))
             .sign(&node_b);
         
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_c".to_vec()))
             .sign(&node_c);
@@ -1452,8 +1457,8 @@ mod tests {
         
         let merge_entry = Entry::next_after(Some(&ChainTip::from(&entry_a)))
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash_a.to_vec(), hash_b.to_vec(), hash_c.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash_a, hash_b, hash_c])
             .operation(Operation::put("/a", b"merged".to_vec()))
             .sign(&node_a);
         
@@ -1496,7 +1501,7 @@ mod tests {
         let clock1 = MockClock::new(1000);
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/test/key1", b"value1".to_vec()))
             .sign(&node);
@@ -1506,7 +1511,7 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
             .timestamp(HLC::now_with_clock(&clock2))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/test/key2", b"value2".to_vec()))
             .sign(&node);
@@ -1516,8 +1521,8 @@ mod tests {
         let clock3 = MockClock::new(3000);
         let entry3 = Entry::next_after(Some(&ChainTip::from(&entry2)))
             .timestamp(HLC::now_with_clock(&clock3))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![entry2.hash().to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![entry2.hash()])
             .operation(Operation::delete(b"/test/key1"))
             .sign(&node);
         state.apply_entry(&entry3).unwrap();

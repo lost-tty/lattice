@@ -54,7 +54,7 @@ async fn test_production_flow_gossip() {
     let server_b = LatticeServer::new_from_node(node_b.clone()).await.expect("server b");
     
     // === Node A: Invites B ===
-    node_a.invite_peer(&node_b.node_id()).await.expect("invite");
+    node_a.invite_peer(node_b.node_id()).await.expect("invite");
     
     let a_pubkey = server_a.endpoint().public_key();
     sleep(Duration::from_millis(300)).await;

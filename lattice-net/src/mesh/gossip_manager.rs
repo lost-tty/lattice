@@ -1,8 +1,8 @@
 //! GossipManager - Encapsulates gossip subsystem complexity
 
-use crate::{parse_node_id, LatticeEndpoint};
+use crate::{parse_node_id, LatticeEndpoint, ToLattice};
 use super::error::GossipError;
-use lattice_core::{Uuid, Node, StoreHandle, PeerStatus, PeerWatchEvent, PeerWatchEventKind};
+use lattice_core::{Uuid, Node, StoreHandle, PeerStatus, PeerWatchEvent, PeerWatchEventKind, PubKey};
 use lattice_core::proto::storage::PeerSyncInfo;
 use lattice_core::proto::network::GossipMessage;
 use iroh_gossip::Gossip;
@@ -124,11 +124,11 @@ impl GossipManager {
                 match event {
                     Ok(iroh_gossip::api::Event::Received(msg)) => {
                         // Check if sender is authorized before processing
-                        let sender_bytes: [u8; 32] = *msg.delivered_from.as_bytes();
-                        if node.verify_peer_status(&sender_bytes, &[PeerStatus::Active]).await.is_err() {
+                        let sender: PubKey = msg.delivered_from.to_lattice();
+                        if node.verify_peer_status(sender, &[PeerStatus::Active]).await.is_err() {
                             tracing::warn!(
                                 store_id = %store_id,
-                                sender = %hex::encode(&sender_bytes)[..8],
+                                sender = %sender,
                                 "Rejected gossip from unauthorized peer"
                             );
                             continue;
@@ -167,13 +167,13 @@ impl GossipManager {
                                     .as_secs(),
                             };
                             
-                            if let Err(e) = store.set_peer_sync_state(&sender_bytes, info).await {
+                            if let Err(e) = store.set_peer_sync_state(&sender, info).await {
                                 tracing::warn!(store_id = %store_id, error = %e, "Failed to update peer sync state");
                             }
                             
                             tracing::info!(
                                 store_id = %store_id,
-                                from = %hex::encode(&sender_bytes)[..8],
+                                from = %sender,
                                 state = %formatted,
                                 "Received SyncState"
                             );
@@ -213,7 +213,7 @@ impl GossipManager {
             tracing::debug!(store_id = %store_id, "Entry forwarder started");
             while let Ok(entry) = entry_rx.recv().await {
                 // Unified Entry Feed: filtering required
-                if my_pubkey_bytes == entry.author_id {
+                if my_pubkey_bytes.as_slice() == entry.author_id.as_ref() {
                     tracing::debug!(store_id = %store_id, "Broadcasting local entry via gossip");
                     if let Some(sender) = senders.read().await.get(&store_id) {
                         // Always piggyback SyncState on local writes

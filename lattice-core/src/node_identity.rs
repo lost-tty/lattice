@@ -7,7 +7,7 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::Path;
 use thiserror::Error;
 
@@ -59,15 +59,19 @@ impl NodeIdentity {
 
     /// Load a node's identity from a key file.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, NodeError> {
-        let mut file = fs::File::open(path)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        use zeroize::Zeroizing;
+        
+        // Read file into Zeroizing wrapper to ensure heap memory is wiped
+        let bytes = Zeroizing::new(fs::read(path)?);
         
         if bytes.len() != 32 {
             return Err(NodeError::InvalidKeyLength(bytes.len()));
         }
         
-        let key_bytes: [u8; 32] = bytes.try_into().unwrap();
+        // Copy to stack array, also wrapped in Zeroizing to wipe stack memory
+        let mut key_bytes = Zeroizing::new([0u8; 32]);
+        key_bytes.copy_from_slice(&bytes);
+        
         let signing_key = SigningKey::from_bytes(&key_bytes);
         Ok(Self { signing_key })
     }
@@ -86,25 +90,20 @@ impl NodeIdentity {
         Ok(())
     }
 
-    /// Get the node's public key (identity).
-    pub fn public_key(&self) -> VerifyingKey {
+    /// Get the node's verification key (dalek type).
+    pub fn verifying_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
     }
 
-    /// Get the node's public key as bytes (32 bytes).
-    pub fn public_key_bytes(&self) -> [u8; 32] {
-        self.signing_key.verifying_key().to_bytes()
+    /// Get the node's public key (identity) as a strong type.
+    pub fn public_key(&self) -> crate::types::PubKey {
+        crate::types::PubKey::from(self.signing_key.verifying_key().to_bytes())
     }
 
-    /// Get the signing key for creating signatures.
+    /// Get the signing key for creating signatures and Iroh integration.
+    /// Use `.to_bytes()` when raw bytes are needed.
     pub fn signing_key(&self) -> &SigningKey {
         &self.signing_key
-    }
-
-    /// Get the secret key bytes (32 bytes) for Iroh integration.
-    /// WARNING: Handle with care - this exposes the private key material.
-    pub fn secret_key_bytes(&self) -> [u8; 32] {
-        self.signing_key.to_bytes()
     }
 
     /// Sign a message.
@@ -114,7 +113,7 @@ impl NodeIdentity {
 
     /// Verify a signature against this node's public key.
     pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), NodeError> {
-        self.public_key()
+        self.verifying_key()
             .verify(message, signature)
             .map_err(|_| NodeError::InvalidSignature)
     }
@@ -168,7 +167,7 @@ mod tests {
     #[test]
     fn test_generate() {
         let node = NodeIdentity::generate();
-        let pk = node.public_key_bytes();
+        let pk = node.public_key();
         assert_eq!(pk.len(), 32);
     }
 
@@ -204,12 +203,12 @@ mod tests {
         
         // Generate and save
         let node1 = NodeIdentity::generate();
-        let pk1 = node1.public_key_bytes();
+        let pk1 = node1.public_key();
         node1.save(&temp_path).unwrap();
         
         // Load and verify same key
         let node2 = NodeIdentity::load(&temp_path).unwrap();
-        let pk2 = node2.public_key_bytes();
+        let pk2 = node2.public_key();
         
         assert_eq!(pk1, pk2);
         
@@ -226,11 +225,11 @@ mod tests {
         
         // First call: generates
         let node1 = NodeIdentity::load_or_generate(&temp_path).unwrap();
-        let pk1 = node1.public_key_bytes();
+        let pk1 = node1.public_key();
         
         // Second call: loads existing
         let node2 = NodeIdentity::load_or_generate(&temp_path).unwrap();
-        let pk2 = node2.public_key_bytes();
+        let pk2 = node2.public_key();
         
         assert_eq!(pk1, pk2);
         
@@ -241,7 +240,7 @@ mod tests {
     #[test]
     fn test_verify_with_key_static() {
         let node = NodeIdentity::generate();
-        let pk = node.public_key();
+        let pk = node.verifying_key();
         let message = b"test message";
         
         let signature = node.sign(message);

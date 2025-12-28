@@ -1,7 +1,7 @@
 //! Node commands - operations on the node (mesh, peers, status)
 
 use crate::commands::{CommandResult, Writer};
-use lattice_core::{Node, StoreHandle, PeerStatus, Uuid};
+use lattice_core::{Node, StoreHandle, PeerStatus, PubKey, Uuid};
 use lattice_net::LatticeServer;
 use chrono::DateTime;
 use owo_colors::OwoColorize;
@@ -153,20 +153,19 @@ pub async fn cmd_node_status(node: &Node, _store: Option<&StoreHandle>, _server:
 // --- Peer management ---
 
 pub async fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
-    let pubkey_hex = &args[0];
-    let pubkey: [u8; 32] = match hex::decode(pubkey_hex) {
-        Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
-        _ => {
+    let pubkey = match PubKey::from_hex(&args[0]) {
+        Ok(pk) => pk,
+        Err(e) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "Invalid pubkey: expected 64 hex chars (32 bytes)");
+            let _ = writeln!(w, "Invalid pubkey: {}", e);
             return CommandResult::Ok;
         }
     };
     
-    match node.invite_peer(&pubkey).await {
+    match node.invite_peer(pubkey).await {
         Ok(()) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "Invited peer: {}", pubkey_hex);
+            let _ = writeln!(w, "Invited peer: {}", pubkey);
             let _ = writeln!(w, "  Status: {} (will become active after sync)", PeerStatus::Invited.as_str());
             let _ = writeln!(w, "\nFor the invited peer to join, run:");
             let _ = writeln!(w, "  node join {}", hex::encode(node.info().node_id));
@@ -196,10 +195,10 @@ pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, server: Option
     }
     
     // Get connected (online) peers from gossip with last-seen time
-    let online_peers: std::collections::HashMap<[u8; 32], std::time::Instant> = if let Some(s) = server {
+    let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = if let Some(s) = server {
         s.connected_peers().await
             .into_iter()
-            .map(|(pk, last_seen)| (*pk.as_bytes(), last_seen))
+            .map(|(pk, last_seen)| (PubKey::from(*pk.as_bytes()), last_seen))
             .collect()
     } else {
         std::collections::HashMap::new()
@@ -249,20 +248,19 @@ pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, server: Option
 }
 
 pub async fn cmd_remove(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
-    let pubkey_hex = &args[0];
-    let pubkey: [u8; 32] = match hex::decode(pubkey_hex) {
-        Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
-        _ => {
+    let pubkey = match PubKey::from_hex(&args[0]) {
+        Ok(pk) => pk,
+        Err(e) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "Invalid pubkey: expected 64 hex characters");
+            let _ = writeln!(w, "Invalid pubkey: {}", e);
             return CommandResult::Ok;
         }
     };
     
-    match node.remove_peer(&pubkey).await {
+    match node.remove_peer(pubkey).await {
         Ok(()) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "Removed peer: {}...", &pubkey_hex[..10]);
+            let _ = writeln!(w, "Removed peer: {}", pubkey);
         }
         Err(e) => {
             let mut w = writer.clone();

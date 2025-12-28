@@ -1,10 +1,11 @@
 //! Log file I/O for append-only entry storage
 //!
 //! Each author has a log file containing length-delimited LogRecord messages.
-//! LogRecord = { hash: [u8; 32], entry_bytes: SignedEntry }
+//! LogRecord = { hash: Hash, entry_bytes: SignedEntry }
 
 use crate::proto::storage::{LogRecord, SignedEntry as ProtoSignedEntry};
 use crate::entry::{SignedEntry, EntryError};
+use crate::types::Hash;
 use crate::MAX_ENTRY_SIZE;
 use prost::Message;
 use std::fs::{File, OpenOptions};
@@ -100,7 +101,7 @@ impl LogReader {
 }
 
 impl Iterator for LogReader {
-    type Item = Result<([u8; 32], SignedEntry), LogError>;
+    type Item = Result<(Hash, SignedEntry), LogError>;
     
     fn next(&mut self) -> Option<Self::Item> {
         match read_one_record(&mut self.reader) {
@@ -208,7 +209,7 @@ impl Log {
 }
 
 /// Read a single LogRecord, returning (hash, SignedEntry)
-fn read_one_record<R: Read>(reader: &mut R) -> Result<Option<([u8; 32], SignedEntry)>, LogError> {
+fn read_one_record<R: Read>(reader: &mut R) -> Result<Option<(Hash, SignedEntry)>, LogError> {
     // Read length-delimited bytes
     let record_bytes = match read_length_delimited_bytes(reader) {
         Ok(bytes) => bytes,
@@ -220,8 +221,8 @@ fn read_one_record<R: Read>(reader: &mut R) -> Result<Option<([u8; 32], SignedEn
     let record = LogRecord::decode(&record_bytes[..])?;
     
     // Verify hash
-    let computed_hash: [u8; 32] = blake3::hash(&record.entry_bytes).into();
-    let stored_hash: [u8; 32] = record.hash.try_into()
+    let computed_hash: Hash = Hash::from(*blake3::hash(&record.entry_bytes).as_bytes());
+    let stored_hash: Hash = record.hash.try_into()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid hash length"))?;
     
     if computed_hash != stored_hash {

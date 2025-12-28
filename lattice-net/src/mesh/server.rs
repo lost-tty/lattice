@@ -1,7 +1,7 @@
 //! Server - LatticeServer for mesh networking
 
-use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN};
-use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle};
+use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
+use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle, PubKey};
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
@@ -49,7 +49,7 @@ impl LatticeServer {
     /// Create a new LatticeServer from just a Node (creates endpoint internally).
     #[tracing::instrument(skip(node))]
     pub async fn new_from_node(node: Arc<Node>) -> Result<Arc<Self>, super::error::ServerError> {
-        let endpoint = LatticeEndpoint::new(node.secret_key_bytes()).await
+        let endpoint = LatticeEndpoint::new(node.signing_key().clone()).await
             .map_err(|e| super::error::ServerError::Endpoint(e.to_string()))?;
         Self::new(node, endpoint).await
     }
@@ -122,7 +122,7 @@ impl LatticeServer {
             
             use std::collections::HashSet;
             use tokio::sync::broadcast::error::RecvError;
-            let syncing = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::<[u8; 32]>::new()));
+            let syncing = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::<lattice_core::PubKey>::new()));
             
             loop {
                 match gap_rx.recv().await {
@@ -177,8 +177,8 @@ impl LatticeServer {
             
             let cooldown = Duration::from_secs(COOLDOWN_SECS);
             let defer_delay = Duration::from_secs(DEFER_SECS);
-            let mut last_attempt: HashMap<[u8; 32], Instant> = HashMap::new();
-            let mut pending_peers: HashSet<[u8; 32]> = HashSet::new();
+            let mut last_attempt: HashMap<PubKey, Instant> = HashMap::new();
+            let mut pending_peers: HashSet<PubKey> = HashSet::new();
             let mut pending_timers: FuturesUnordered<_> = FuturesUnordered::new();
             let store_id = store.id();
             
@@ -202,7 +202,7 @@ impl LatticeServer {
                                 
                                 // Queue deferred check
                                 pending_peers.insert(needed.peer);
-                                let peer = needed.peer;
+                                let peer: PubKey = needed.peer;
                                 pending_timers.push(async move {
                                     tokio::time::sleep(defer_delay).await;
                                     peer
@@ -428,7 +428,7 @@ impl LatticeServer {
     
     /// Sync with a peer using symmetric SyncSession protocol.
     /// Both sides run the same exchange logic after handshake.
-    pub async fn sync_with_peer(&self, store: &StoreHandle, peer_id: iroh::PublicKey, _authors: &[[u8; 32]]) -> Result<SyncResult, NodeError> {
+    pub async fn sync_with_peer(&self, store: &StoreHandle, peer_id: iroh::PublicKey, _authors: &[PubKey]) -> Result<SyncResult, NodeError> {
         let conn = self.endpoint.connect(peer_id).await
             .map_err(|e| NodeError::Actor(format!("Connection failed: {}", e)))?;
         
@@ -438,8 +438,8 @@ impl LatticeServer {
         let mut sink = MessageSink::new(send);
         let mut stream = MessageStream::new(recv);
         
-        let peer_bytes: [u8; 32] = *peer_id.as_bytes();
-        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_bytes);
+        let peer_pubkey: lattice_core::PubKey = peer_id.to_lattice();
+        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_pubkey);
         let result = session.run_as_initiator().await?;
         
         sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
@@ -463,7 +463,7 @@ impl LatticeServer {
     }
     
     /// Sync with specific peers in parallel, optionally filtering authors
-    async fn sync_peers(&self, store: &StoreHandle, peer_ids: &[iroh::PublicKey], authors: &[[u8; 32]]) -> Vec<SyncResult> {
+    async fn sync_peers(&self, store: &StoreHandle, peer_ids: &[iroh::PublicKey], authors: &[PubKey]) -> Vec<SyncResult> {
         use futures_util::future::join_all;
         use std::time::Duration;
         
@@ -491,7 +491,7 @@ impl LatticeServer {
     }
     
     /// Sync a specific author with all active peers in parallel (for gap filling)
-    pub async fn sync_author_all(&self, store: &StoreHandle, author: [u8; 32]) -> Result<u64, NodeError> {
+    pub async fn sync_author_all(&self, store: &StoreHandle, author: PubKey) -> Result<u64, NodeError> {
         let peer_ids = self.active_peer_ids().await?;
         if peer_ids.is_empty() {
             return Ok(0);
@@ -523,14 +523,9 @@ async fn handle_connection(
     conn: Connection,
 ) -> Result<(), LatticeNetError> {
     let remote_id = conn.remote_id();
-    let remote_hex = hex::encode(remote_id.as_bytes());
     tracing::debug!("[Incoming] {} (ALPN: {})", remote_id.fmt_short(), String::from_utf8_lossy(conn.alpn()));
     
-    // Parse remote pubkey
-    let remote_pubkey: [u8; 32] = hex::decode(&remote_hex)
-        .map_err(|_| LatticeNetError::Connection("Invalid pubkey hex".into()))?
-        .try_into()
-        .map_err(|_| LatticeNetError::Connection("Invalid pubkey length".into()))?;
+    let remote_pubkey: lattice_core::PubKey = remote_id.to_lattice();
     
     let (send, recv) = conn.accept_bi().await
         .map_err(|e| LatticeNetError::Connection(format!("Accept stream error: {}", e)))?;
@@ -576,14 +571,14 @@ async fn handle_connection(
 /// Handle a join request from an invited peer
 async fn handle_join_request(
     node: &Node,
-    remote_pubkey: &[u8; 32],
+    remote_pubkey: &lattice_core::PubKey,
     req: lattice_core::proto::network::JoinRequest,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
     tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
     
     // Accept the join - verifies invited, sets active, returns store ID
-    let acceptance = node.accept_join(remote_pubkey).await?;
+    let acceptance = node.accept_join(*remote_pubkey).await?;
     
     let resp = PeerMessage {
         message: Some(peer_message::Message::JoinResponse(JoinResponse {
@@ -600,7 +595,7 @@ async fn handle_join_request(
 /// Handle an incoming status request using symmetric SyncSession
 async fn handle_status_request(
     node: &Node,
-    remote_pubkey: &[u8; 32],
+    remote_pubkey: &lattice_core::PubKey,
     req: StatusRequest,
     sink: &mut MessageSink,
     stream: &mut MessageStream,
@@ -611,7 +606,7 @@ async fn handle_status_request(
     tracing::debug!("[Status] Received status request for store {}", store_id);
     
     // Verify peer is active
-    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active]).await?;
+    node.verify_peer_status(*remote_pubkey, &[PeerStatus::Active]).await?;
     
     // Open the store
     let (store, _info) = node.open_store(store_id).await?;
@@ -631,7 +626,7 @@ async fn handle_status_request(
 /// Handle a FetchRequest - streams entries in chunks
 async fn handle_fetch_request(
     node: &Node,
-    remote_pubkey: &[u8; 32],
+    remote_pubkey: &lattice_core::PubKey,
     req: lattice_core::proto::network::FetchRequest,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
@@ -639,7 +634,7 @@ async fn handle_fetch_request(
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
     // Verify peer is active
-    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active]).await?;
+    node.verify_peer_status(*remote_pubkey, &[PeerStatus::Active]).await?;
     
     // Open the store
     let (store, _info) = node.open_store(store_id).await?;
@@ -663,7 +658,8 @@ async fn stream_entries_to_sink(
     let mut chunk: Vec<lattice_core::proto::storage::SignedEntry> = Vec::with_capacity(CHUNK_SIZE);
     
     for range in ranges {
-        if let Ok(author) = <[u8; 32]>::try_from(range.author_id.as_slice()) {
+        if let Ok(author_bytes) = <PubKey>::try_from(range.author_id.as_slice()) {
+            let author = lattice_core::PubKey::from(author_bytes);
             if let Ok(mut rx) = store.stream_entries_in_range(&author, range.from_seq, range.to_seq).await {
                 while let Some(entry) = rx.recv().await {
                     chunk.push(entry.into());

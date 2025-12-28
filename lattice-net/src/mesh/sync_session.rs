@@ -5,7 +5,7 @@
 //! After initial handshake, both run identical exchange logic.
 
 use crate::{MessageSink, MessageStream};
-use lattice_core::{StoreHandle, NodeError, SyncState};
+use lattice_core::{StoreHandle, NodeError, SyncState, PubKey};
 use lattice_core::proto::storage::SignedEntry;
 use lattice_core::proto::network::{PeerMessage, peer_message, AuthorRange, FetchRequest, FetchResponse, StatusRequest, StatusResponse};
 
@@ -21,7 +21,7 @@ pub struct SyncSession<'a> {
     store: &'a StoreHandle,
     sink: &'a mut MessageSink,
     stream: &'a mut MessageStream,
-    peer_id: [u8; 32],
+    peer_id: PubKey,
 }
 
 impl<'a> SyncSession<'a> {
@@ -29,7 +29,7 @@ impl<'a> SyncSession<'a> {
         store: &'a StoreHandle,
         sink: &'a mut MessageSink,
         stream: &'a mut MessageStream,
-        peer_id: [u8; 32],
+        peer_id: PubKey,
     ) -> Self {
         Self { store, sink, stream, peer_id }
     }
@@ -195,7 +195,7 @@ impl<'a> SyncSession<'a> {
         let mut sent: u64 = 0;
         
         for range in &req.ranges {
-            if let Ok(author) = <[u8; 32]>::try_from(range.author_id.as_slice()) {
+            if let Ok(author) = <PubKey>::try_from(range.author_id.as_slice()) {
                 if let Ok(mut rx) = self.store.stream_entries_in_range(&author, range.from_seq, range.to_seq).await {
                     while let Some(entry) = rx.recv().await {
                         chunk.push(entry.into());

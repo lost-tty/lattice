@@ -2,7 +2,7 @@
 
 use crate::commands::{CommandResult, Writer};
 use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
-use lattice_core::{Node, StoreHandle};
+use lattice_core::{Node, StoreHandle, PubKey};
 use lattice_net::LatticeServer;
 use std::time::Instant;
 use std::io::Write;
@@ -337,34 +337,29 @@ pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _server:
     };
 
     // Get author: from arg or default to self
-    let author_bytes: [u8; 32] = if args.is_empty() {
+    let author = if args.is_empty() {
         node.node_id()
     } else {
         let hex_str = args[0].trim_start_matches("0x");
-        match hex::decode(hex_str) {
-            Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
-            Ok(bytes) => {
-                let mut w = writer.clone();
-                let _ = writeln!(w, "Error: author must be 32 bytes, got {}", bytes.len());
-                return CommandResult::Ok;
-            }
+        match PubKey::from_hex(hex_str) {
+            Ok(pk) => pk,
             Err(e) => {
                 let mut w = writer.clone();
-                let _ = writeln!(w, "Error: invalid hex: {}", e);
+                let _ = writeln!(w, "Error: {}", e);
                 return CommandResult::Ok;
             }
         }
     };
 
     let mut w = writer.clone();
-    match store.chain_tip(&author_bytes).await {
+    match store.chain_tip(&author).await {
         Ok(Some(state)) => {
-            let _ = writeln!(w, "Author: {}", hex::encode(&author_bytes));
+            let _ = writeln!(w, "Author: {}", author);
             let _ = writeln!(w, "  seq: {}", state.seq);
             let _ = writeln!(w, "  hash: {}", hex::encode(&state.hash));
         }
         Ok(None) => {
-            let _ = writeln!(w, "No state for author: {}", hex::encode(&author_bytes));
+            let _ = writeln!(w, "No state for author: {}", author);
         }
         Err(e) => { let _ = writeln!(w, "Error: {}", e); }
     }
@@ -386,11 +381,11 @@ fn format_hlc(hlc: &Option<lattice_core::proto::storage::Hlc>) -> String {
 #[derive(Clone)]
 struct HistoryEntry {
     key: Vec<u8>,
-    author: [u8; 32],
+    author: PubKey,
     hlc: u64,
     value: Vec<u8>,
     tombstone: bool,
-    parent_hashes: Vec<[u8; 32]>,
+    parent_hashes: Vec<lattice_core::Hash>,
 }
 
 pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
@@ -414,7 +409,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
     };
     
     // Collect entries (all or filtered by key)
-    let mut entries: std::collections::HashMap<[u8; 32], HistoryEntry> = std::collections::HashMap::new();
+    let mut entries: std::collections::HashMap<lattice_core::Hash, HistoryEntry> = std::collections::HashMap::new();
     
     for (author, _info) in sync_state.authors() {
         // Stream entries for this author
@@ -437,7 +432,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
                 
                 // Include if: no key filter OR key matches
                 if key.is_none() || key == Some(op_key.as_slice()) {
-                    let hash = entry.hash();
+                    let hash = lattice_core::Hash::from(entry.hash());
                     let hlc = (decoded.timestamp.wall_time << 16) | decoded.timestamp.counter as u64;
                     let parent_hashes = decoded.parent_hashes.clone();
                     
@@ -461,7 +456,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
     }
     
     // Convert to RenderEntry format for the grid renderer
-    let render_entries: std::collections::HashMap<[u8; 32], crate::graph_renderer::RenderEntry> = entries
+    let render_entries: std::collections::HashMap<lattice_core::Hash, crate::graph_renderer::RenderEntry> = entries
         .into_iter()
         .map(|(hash, e)| {
             let is_merge = e.parent_hashes.len() > 1;

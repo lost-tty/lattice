@@ -1,17 +1,19 @@
 //! Store Actor - dedicated thread that owns Store and processes commands via channel
 
 use crate::{
-    NodeIdentity, Uuid,
-    proto::storage::{ChainTip, HeadInfo},
+    NodeIdentity, Uuid, PubKey,
+    proto::storage::{ChainTip, HeadInfo, Operation},
     entry::SignedEntry,
 };
 use super::{
     state::{State, StateError, ParentValidationError},
     sigchain::{SigChainError, SigChainManager, SigchainValidation},
-    sync_state::SyncState,
-    orphan_store::GapInfo,
+    sync_state::{SyncState, SyncDiscrepancy, SyncNeeded},
+    orphan_store::{GapInfo, OrphanInfo},
     log,
 };
+use crate::proto::storage::PeerSyncInfo;
+use crate::types::Hash;
 use tokio::sync::{mpsc, oneshot, broadcast};
 use std::collections::HashMap;
 use regex::Regex;
@@ -87,7 +89,7 @@ pub enum StoreCmd {
         resp: oneshot::Sender<Result<u64, StateError>>,
     },
     ChainTip {
-        author: [u8; 32],
+        author: PubKey,
         resp: oneshot::Sender<Result<Option<ChainTip>, StateError>>,
     },
     SyncState {
@@ -104,7 +106,7 @@ pub enum StoreCmd {
         resp: oneshot::Sender<Vec<(String, u64, std::path::PathBuf)>>,
     },
     OrphanList {
-        resp: oneshot::Sender<Vec<super::orphan_store::OrphanInfo>>,
+        resp: oneshot::Sender<Vec<OrphanInfo>>,
     },
     OrphanCleanup {
         resp: oneshot::Sender<usize>,
@@ -118,19 +120,19 @@ pub enum StoreCmd {
         resp: oneshot::Sender<broadcast::Receiver<GapInfo>>,
     },
     SetPeerSyncState {
-        peer: [u8; 32],
-        info: crate::proto::storage::PeerSyncInfo,
-        resp: oneshot::Sender<Result<super::sync_state::SyncDiscrepancy, StateError>>,
+        peer: PubKey,
+        info: PeerSyncInfo,
+        resp: oneshot::Sender<Result<SyncDiscrepancy, StateError>>,
     },
     GetPeerSyncState {
-        peer: [u8; 32],
-        resp: oneshot::Sender<Option<crate::proto::storage::PeerSyncInfo>>,
+        peer: PubKey,
+        resp: oneshot::Sender<Option<PeerSyncInfo>>,
     },
     ListPeerSyncStates {
-        resp: oneshot::Sender<Vec<([u8; 32], crate::proto::storage::PeerSyncInfo)>>,
+        resp: oneshot::Sender<Vec<(PubKey, PeerSyncInfo)>>,
     },
     StreamEntriesInRange {
-        author: [u8; 32],
+        author: PubKey,
         from_seq: u64,
         to_seq: u64,
         resp: oneshot::Sender<Result<mpsc::Receiver<SignedEntry>, StateError>>,
@@ -176,7 +178,7 @@ pub struct StoreActor {
     /// Broadcast sender for emitting entries after they're committed locally
     entry_tx: broadcast::Sender<SignedEntry>,
     /// Broadcast sender for sync-needed events (when we detect we're behind a peer)
-    sync_needed_tx: broadcast::Sender<super::sync_state::SyncNeeded>,
+    sync_needed_tx: broadcast::Sender<SyncNeeded>,
     /// Active key watchers (id -> watcher)
     watchers: HashMap<u64, Watcher>,
     /// Counter for watcher IDs
@@ -192,11 +194,11 @@ impl StoreActor {
         node: NodeIdentity,
         rx: mpsc::Receiver<StoreCmd>,
         entry_tx: broadcast::Sender<SignedEntry>,
-        sync_needed_tx: broadcast::Sender<super::sync_state::SyncNeeded>,
+        sync_needed_tx: broadcast::Sender<SyncNeeded>,
     ) -> Self {
         // Create chain manager - loads all chains and builds hash index
-        let mut chain_manager = SigChainManager::new(&logs_dir, *store_id.as_bytes());
-        let local_author = node.public_key_bytes();
+        let mut chain_manager = SigChainManager::new(&logs_dir, store_id);
+        let local_author = node.public_key();
         chain_manager.get_or_create(local_author);  // Ensure local chain exists
      
         Self {
@@ -237,14 +239,14 @@ impl StoreActor {
                     let _ = resp.send(result);
                 }
                 StoreCmd::LogSeq { resp } => {
-                    let local_author = self.node.public_key_bytes();
+                    let local_author = self.node.public_key();
                     let len = self.chain_manager.get(&local_author)
                         .map(|c| c.len())
                         .unwrap_or(0);
                     let _ = resp.send(len);
                 }
                 StoreCmd::AppliedSeq { resp } => {
-                    let author = self.node.public_key_bytes();
+                    let author = self.node.public_key();
                     let result = self.state.chain_tip(&author)
                         .map(|s| s.map(|a| a.seq).unwrap_or(0));
                     let _ = resp.send(result);
@@ -318,16 +320,16 @@ impl StoreActor {
                 StoreCmd::SetPeerSyncState { peer, info, resp } => {
                     // Compute bidirectional discrepancy
                     let discrepancy = if let Some(ref peer_sync_state) = info.sync_state {
-                        let peer_state = super::sync_state::SyncState::from_proto(peer_sync_state);
+                        let peer_state = SyncState::from_proto(peer_sync_state);
                         let local_state = self.chain_manager.sync_state();
                         local_state.calculate_discrepancy(&peer_state)
                     } else {
-                        super::sync_state::SyncDiscrepancy::default()
+                        SyncDiscrepancy::default()
                     };
                     
                     // Emit SyncNeeded if out of sync (sync is bidirectional)
                     if discrepancy.is_out_of_sync() {
-                        let _ = self.sync_needed_tx.send(super::sync_state::SyncNeeded {
+                        let _ = self.sync_needed_tx.send(SyncNeeded {
                             peer,
                             discrepancy: discrepancy.clone(),
                         });
@@ -340,7 +342,9 @@ impl StoreActor {
                     let _ = resp.send(self.state.get_peer_sync_state(&peer).ok().flatten());
                 }
                 StoreCmd::ListPeerSyncStates { resp } => {
-                    let _ = resp.send(self.state.list_peer_sync_states().unwrap_or_default());
+                    let result = self.state.list_peer_sync_states()
+                        .unwrap_or_default();
+                    let _ = resp.send(result);
                 }
                 StoreCmd::StreamEntriesInRange { author, from_seq, to_seq, resp } => {
                     let result = self.do_stream_entries_in_range(&author, from_seq, to_seq);
@@ -363,7 +367,12 @@ impl StoreActor {
             return Ok(());
         }
         
-        let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
+        let parent_hashes: Vec<Hash> = heads.iter()
+            .filter_map(|h| {
+                let bytes: [u8; 32] = h.hash.as_slice().try_into().ok()?;
+                Some(Hash::from(bytes))
+            })
+            .collect();
         self.create_local_entry(parent_hashes, vec![Operation::put(key, value)])?;
         
         // Emit watch event
@@ -382,7 +391,12 @@ impl StoreActor {
             return Ok(());
         }
         
-        let parent_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
+        let parent_hashes: Vec<Hash> = heads.iter()
+            .filter_map(|h| {
+                let bytes: [u8; 32] = h.hash.as_slice().try_into().ok()?;
+                Some(Hash::from(bytes))
+            })
+            .collect();
         self.create_local_entry(parent_hashes, vec![Operation::delete(key)])?;
         
         // Emit watch event
@@ -440,9 +454,9 @@ impl StoreActor {
     }
 
     /// Create a local entry (for put/delete) and ingest it through unified path
-    fn create_local_entry(&mut self, parent_hashes: Vec<Vec<u8>>, ops: Vec<crate::proto::storage::Operation>) -> Result<(), StoreActorError> {
+    fn create_local_entry(&mut self, parent_hashes: Vec<Hash>, ops: Vec<Operation>) -> Result<(), StoreActorError> {
         // Build the entry (without appending)
-        let local_author = self.node.public_key_bytes();
+        let local_author = self.node.public_key();
         let sigchain = self.chain_manager.get_or_create(local_author);
         let entry = sigchain.build_entry(&self.node, parent_hashes, ops);
         
@@ -466,8 +480,8 @@ impl StoreActor {
         // - Sigchain orphan metadata (author, prev_hash, entry_hash) for deletion after processing
         // Orphans are deleted AFTER successful processing to prevent data loss on crash.
         type OrphanMeta = (
-            Option<(Vec<u8>, [u8; 32], [u8; 32])>,   // DAG orphan: (key, parent_hash, entry_hash)
-            Option<([u8; 32], [u8; 32], [u8; 32])>,  // Sigchain orphan: (author, prev_hash, entry_hash)
+            Option<(Vec<u8>, Hash, Hash)>,   // DAG orphan: (key, parent_hash, entry_hash)
+            Option<(PubKey, Hash, Hash)>,  // Sigchain orphan: (author, prev_hash, entry_hash)
         );
         let mut work_queue: Vec<(SignedEntry, OrphanMeta)> = 
             vec![(entry.clone(), (None, None))];
@@ -547,7 +561,7 @@ impl StoreActor {
                     // Sigchain validation failed (out of order) - buffer as orphan
                     self.chain_manager.buffer_sigchain_orphan(
                         &current, gap.author, prev_hash, gap.to_seq, gap.from_seq, 
-                        gap.last_known_hash.unwrap_or([0u8; 32])
+                        gap.last_known_hash.unwrap_or(Hash::ZERO)
                     )?;
                 }
                 SigchainValidation::Duplicate => {
@@ -590,7 +604,7 @@ impl StoreActor {
     /// Spawn a thread to stream entries in a sequence range via channel.
     fn do_stream_entries_in_range(
         &self,
-        author: &[u8; 32],
+        author: &PubKey,
         from_seq: u64,
         to_seq: u64,
     ) -> Result<mpsc::Receiver<SignedEntry>, StateError> {
@@ -635,12 +649,12 @@ impl StoreActor {
         
         for (peer_bytes, info) in cached_peers {
             if let Some(ref peer_proto) = info.sync_state {
-                let peer_state = super::sync_state::SyncState::from_proto(peer_proto);
+                let peer_state = SyncState::from_proto(peer_proto);
                 let discrepancy = local_state.calculate_discrepancy(&peer_state);
                 
                 if discrepancy.is_out_of_sync() {
-                    let _ = self.sync_needed_tx.send(super::sync_state::SyncNeeded {
-                        peer: peer_bytes,
+                    let _ = self.sync_needed_tx.send(SyncNeeded {
+                        peer: PubKey::from(peer_bytes),
                         discrepancy,
                     });
                 }
@@ -657,8 +671,9 @@ mod tests {
     use crate::node_identity::NodeIdentity;
     use crate::proto::storage::Operation;
     use crate::entry::{Entry, ChainTip};
+    use crate::types::{Hash, PubKey};
 
-    const TEST_STORE: [u8; 16] = [1u8; 16];
+    const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
 
     /// Test that entries with invalid parent_hashes are buffered as DAG orphans
     /// and applied when the parent entry arrives.
@@ -678,7 +693,7 @@ mod tests {
         let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state,
             logs_dir,
             node.clone(),
@@ -694,8 +709,8 @@ mod tests {
         let clock1 = MockClock::new(1000);
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
-            .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .store_id(TEST_STORE)
+            .prev_hash(Hash::ZERO)
             .parent_hashes(vec![])  // No parents - this is fine for new key
             .operation(Operation::put(b"/key", b"value1".to_vec()))
             .sign(&node);
@@ -705,8 +720,8 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
             .timestamp(HLC::now_with_clock(&clock2))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash1.to_vec()])  // Cites entry1
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash1])  // Cites entry1
             .operation(Operation::put(b"/key", b"value2".to_vec()))
             .sign(&node);
         let hash2 = entry2.hash();
@@ -786,7 +801,7 @@ mod tests {
         let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state,
             logs_dir,
             node1.clone(),
@@ -801,7 +816,7 @@ mod tests {
         let clock_a = MockClock::new(1000);
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_a))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/merged", b"value_a".to_vec()))
             .sign(&node1);
@@ -811,7 +826,7 @@ mod tests {
         let clock_b = MockClock::new(2000);
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_b))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/merged", b"value_b".to_vec()))
             .sign(&node2);
@@ -821,8 +836,8 @@ mod tests {
         let clock_c = MockClock::new(3000);
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_c))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash_a.to_vec(), hash_b.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash_a, hash_b])
             .operation(Operation::put(b"/merged", b"merged_value".to_vec()))
             .sign(&node3);
         let hash_c = entry_c.hash();
@@ -865,7 +880,7 @@ mod tests {
         }).unwrap();
         let heads = resp_rx.blocking_recv().unwrap().unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head from B (C still waiting for A)");
-        assert_eq!(&heads[0].hash, &hash_b.to_vec());
+        assert_eq!(heads[0].hash.as_slice(), hash_b.as_ref());
         
         // Step 3: Ingest entry_a LAST
         // A applies, creating second head. C wakes up (was waiting for A).
@@ -886,7 +901,7 @@ mod tests {
         }).unwrap();
         let heads = resp_rx.blocking_recv().unwrap().unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head (merged by C)");
-        assert_eq!(&heads[0].hash, &hash_c.to_vec(), "head should be entry_c's hash");
+        assert_eq!(heads[0].hash.as_slice(), hash_c.as_ref(), "head should be entry_c's hash");
         
         // Verify merged value
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -923,7 +938,7 @@ mod tests {
         let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state,
             logs_dir,
             node1.clone(),
@@ -938,7 +953,7 @@ mod tests {
         let clock_a = MockClock::new(1000);
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_a))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/merged", b"value_a".to_vec()))
             .sign(&node1);
@@ -948,7 +963,7 @@ mod tests {
         let clock_b = MockClock::new(2000);
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_b))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/merged", b"value_b".to_vec()))
             .sign(&node2);
@@ -958,8 +973,8 @@ mod tests {
         let clock_c = MockClock::new(3000);
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_c))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash_a.to_vec(), hash_b.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash_a, hash_b])
             .operation(Operation::put(b"/merged", b"merged_value".to_vec()))
             .sign(&node3);
         let hash_c = entry_c.hash();
@@ -990,7 +1005,7 @@ mod tests {
         cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
         let heads = resp_rx.blocking_recv().unwrap().unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head from A (C re-buffered for B)");
-        assert_eq!(&heads[0].hash, &hash_a.to_vec());
+        assert_eq!(heads[0].hash.as_slice(), hash_a.as_ref());
         
         // Step 3: B arrives -> C wakes, both present -> C applies
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -1005,7 +1020,7 @@ mod tests {
         cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
         let heads = resp_rx.blocking_recv().unwrap().unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head (merged by C)");
-        assert_eq!(&heads[0].hash, &hash_c.to_vec());
+        assert_eq!(heads[0].hash.as_slice(), hash_c.as_ref());
         
         // Verify value
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -1039,7 +1054,7 @@ mod tests {
         let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state,
             logs_dir.clone(),
             node1.clone(),
@@ -1054,7 +1069,7 @@ mod tests {
         let clock_a = MockClock::new(1000);
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_a))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/merged", b"value_a".to_vec()))
             .sign(&node1);
@@ -1064,7 +1079,7 @@ mod tests {
         let clock_b = MockClock::new(2000);
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_b))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/merged", b"value_b".to_vec()))
             .sign(&node2);
@@ -1074,8 +1089,8 @@ mod tests {
         let clock_c = MockClock::new(3000);
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_c))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash_a.to_vec(), hash_b.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash_a, hash_b])
             .operation(Operation::put(b"/merged", b"merged_value".to_vec()))
             .sign(&node3);
         let hash_c = entry_c.hash();
@@ -1100,7 +1115,7 @@ mod tests {
         cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
         let heads = resp_rx.blocking_recv().unwrap().unwrap();
         assert_eq!(heads.len(), 1);
-        assert_eq!(&heads[0].hash, &hash_c.to_vec());
+        assert_eq!(heads[0].hash.as_slice(), hash_c.as_ref());
         
         // Shutdown actor so we can check orphan store directly
         cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
@@ -1129,22 +1144,22 @@ mod tests {
         
         let state = State::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
-        let author = node.public_key_bytes();
+        let author = node.public_key();
         
         // Write 3 entries to sigchain log directly (simulating commits)
         let log_path = logs_dir.join(format!("{}.log", hex::encode(author)));
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, author).unwrap();
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, crate::types::PubKey::from(*author)).unwrap();
         
         let mut entries = Vec::new();
         for i in 1u64..=3 {
             let clock = MockClock::new(i * 1000);
             let prev = sigchain.last_hash();
             let tip = if i == 1 { None } else {
-                Some(ChainTip { seq: i-1, hash: prev, hlc: HLC::default() })
+                Some(ChainTip { seq: i-1, hash: Hash::from(prev), hlc: HLC::default() })
             };
             let entry = Entry::next_after(tip.as_ref())
                 .timestamp(HLC::now_with_clock(&clock))
-                .store_id(TEST_STORE.to_vec())
+                .store_id(TEST_STORE)
                 .parent_hashes(vec![])
                 .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("value{}", i).into_bytes()))
                 .sign(&node);
@@ -1169,7 +1184,7 @@ mod tests {
         // The actor should replay log and recover entries 2 and 3
         let state = State::open(&state_path).unwrap();
         let handle = crate::store::handle::StoreHandle::spawn(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state,
             logs_dir.clone(),
             node.clone(),
@@ -1215,7 +1230,7 @@ mod tests {
         let clock_a = MockClock::new(1000);
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_a))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/key_a", b"value_a".to_vec()))
             .sign(&node);
@@ -1223,7 +1238,7 @@ mod tests {
         let clock_b = MockClock::new(2000);
         let entry_b = Entry::next_after(Some(&ChainTip::from(&entry_a)))
             .timestamp(HLC::now_with_clock(&clock_b))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/key_b", b"value_b".to_vec()))
             .sign(&node);
@@ -1232,7 +1247,7 @@ mod tests {
         let result_b = manager.validate_entry(&entry_b);
         match result_b {
             crate::store::sigchain::SigchainValidation::Orphan { gap, prev_hash } => {
-                manager.buffer_sigchain_orphan(&entry_b, gap.author, prev_hash, gap.to_seq, gap.from_seq, gap.last_known_hash.unwrap_or([0u8; 32])).unwrap();
+                manager.buffer_sigchain_orphan(&entry_b, gap.author, crate::types::Hash::from(prev_hash), gap.to_seq, gap.from_seq, gap.last_known_hash.unwrap_or(crate::types::Hash::ZERO)).unwrap();
             }
             _ => panic!("Expected B to be orphaned"),
         }
@@ -1289,7 +1304,7 @@ mod tests {
         let clock_0 = MockClock::new(1000);
         let entry_h0 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_0))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/key_a", b"initial".to_vec()))
             .sign(&node_a);
@@ -1301,14 +1316,14 @@ mod tests {
         // Verify H0 is the only head
         let heads = state.get_heads(b"/key_a").unwrap();
         assert_eq!(heads.len(), 1);
-        assert_eq!(heads[0].hash, hash_h0.to_vec());
+        assert_eq!(heads[0].hash.as_slice(), hash_h0.as_ref());
         
         // Node A goes offline and writes a=1 → H1 (parents: [H0])
         let clock_a = MockClock::new(2000);
         let entry_h1 = Entry::next_after(Some(&ChainTip::from(&entry_h0)))
             .timestamp(HLC::now_with_clock(&clock_a))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash_h0.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash_h0])
             .operation(Operation::put(b"/key_a", b"val_1".to_vec()))
             .sign(&node_a);
         let hash_h1 = entry_h1.hash();
@@ -1326,8 +1341,8 @@ mod tests {
         let clock_b = MockClock::new(2500);
         let entry_h2 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_b))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash_h0.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash_h0])
             .operation(Operation::put(b"/key_a", b"value_b".to_vec()))
             .sign(&node_b);
         let hash_h2 = entry_h2.hash();
@@ -1398,7 +1413,7 @@ mod tests {
         let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state,
             logs_dir,
             node.clone(),
@@ -1412,7 +1427,7 @@ mod tests {
         let clock_a = MockClock::new(1000);
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_a))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/key", b"value_a".to_vec()))
             .sign(&node);
@@ -1422,8 +1437,8 @@ mod tests {
         let clock_b = MockClock::new(2000);
         let entry_b = Entry::next_after(Some(&ChainTip::from(&entry_a)))
             .timestamp(HLC::now_with_clock(&clock_b))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash_a.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash_a])
             .operation(Operation::put(b"/key", b"value_b".to_vec()))
             .sign(&node);
         
@@ -1494,7 +1509,7 @@ mod tests {
         let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state,
             logs_dir.clone(),
             node.clone(),
@@ -1508,7 +1523,7 @@ mod tests {
         let clock_a = MockClock::new(1000);
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_a))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put(b"/key", b"value_a".to_vec()))
             .sign(&node);
@@ -1517,8 +1532,8 @@ mod tests {
         let clock_b = MockClock::new(2000);
         let entry_b = Entry::next_after(Some(&ChainTip::from(&entry_a)))
             .timestamp(HLC::now_with_clock(&clock_b))
-            .store_id(TEST_STORE.to_vec())
-            .parent_hashes(vec![hash_a.to_vec()])
+            .store_id(TEST_STORE)
+            .parent_hashes(vec![hash_a])
             .operation(Operation::put(b"/key", b"value_b".to_vec()))
             .sign(&node);
         
@@ -1579,7 +1594,7 @@ mod tests {
         let (sync_needed_tx, mut sync_needed_rx) = broadcast::channel(16);
         
         let actor = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state,
             logs_dir,
             node.clone(),
@@ -1591,11 +1606,11 @@ mod tests {
         let actor_handle = std::thread::spawn(move || actor.run());
         
         // Create a peer state that is AHEAD of us
-        let peer_bytes = [99u8; 32];
-        let author = [1u8; 32];
+        let peer_bytes = PubKey::from([99u8; 32]);
+        let author = PubKey::from([1u8; 32]);
         let mut peer_sync_state = SyncState::new();
         // Peer has 50 entries for this author, we have 0
-        peer_sync_state.set(author, 50, [0xAA; 32]);
+        peer_sync_state.set(author, 50, Hash::from([0xAA; 32]));
         
         let peer_info = crate::proto::storage::PeerSyncInfo {
             sync_state: Some(peer_sync_state.to_proto()),
@@ -1605,7 +1620,7 @@ mod tests {
         // Send SetPeerSyncState command
         let (resp_tx, resp_rx) = oneshot::channel();
         cmd_tx.blocking_send(StoreCmd::SetPeerSyncState { 
-            peer: peer_bytes, 
+            peer: PubKey::from(*peer_bytes), 
             info: peer_info,
             resp: resp_tx,
         }).unwrap();
@@ -1618,7 +1633,7 @@ mod tests {
         // Verify SyncNeeded event was broadcast
         std::thread::sleep(Duration::from_millis(10));
         let event = sync_needed_rx.try_recv().expect("Should have received SyncNeeded event");
-        assert_eq!(event.peer, peer_bytes, "Event should contain correct peer");
+        assert_eq!(event.peer, PubKey::from(*peer_bytes), "Event should contain correct peer");
         assert_eq!(event.discrepancy.entries_we_need, 50, "Event should contain correct discrepancy");
         
         // Test NO event when peer has no sync_state (nothing to compare)
@@ -1629,7 +1644,7 @@ mod tests {
         
         let (resp_tx, resp_rx) = oneshot::channel();
         cmd_tx.blocking_send(StoreCmd::SetPeerSyncState { 
-            peer: [88u8; 32], 
+            peer: PubKey::from([88u8; 32]), 
             info: peer_info_empty,
             resp: resp_tx,
         }).unwrap();
@@ -1681,7 +1696,7 @@ mod tests {
         
         // Create actors
         let actor_a = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state_a,
             logs_dir_a,
             node_a.clone(),
@@ -1691,7 +1706,7 @@ mod tests {
         );
         
         let actor_b = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state_b,
             logs_dir_b,
             node_b.clone(),
@@ -1728,7 +1743,7 @@ mod tests {
         // Compute diff: B needs entries from A
         let missing = sync_b.diff(&sync_a);
         assert_eq!(missing.len(), 1, "B needs entries from 1 author");
-        assert_eq!(missing[0].author, node_a.public_key_bytes());
+        assert_eq!(missing[0].author, PubKey::from(node_a.public_key()));
         assert_eq!(missing[0].from_seq, 0, "B has nothing");
         assert_eq!(missing[0].to_seq, 3, "A has 3 entries");
         
@@ -1797,7 +1812,7 @@ mod tests {
         
         // Create actors
         let actor_a = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state_a,
             logs_dir_a,
             node_a.clone(),
@@ -1807,7 +1822,7 @@ mod tests {
         );
         
         let actor_b = StoreActor::new(
-            Uuid::from_bytes(TEST_STORE),
+            TEST_STORE,
             state_b,
             logs_dir_b,
             node_b.clone(),
@@ -1854,12 +1869,12 @@ mod tests {
         // A needs B's entries
         let a_needs = sync_a.diff(&sync_b);
         assert_eq!(a_needs.len(), 1);
-        assert_eq!(a_needs[0].author, node_b.public_key_bytes());
+        assert_eq!(a_needs[0].author, PubKey::from(node_b.public_key()));
         
         // B needs A's entries  
         let b_needs = sync_b.diff(&sync_a);
         assert_eq!(b_needs.len(), 1);
-        assert_eq!(b_needs[0].author, node_a.public_key_bytes());
+        assert_eq!(b_needs[0].author, PubKey::from(node_a.public_key()));
         
         // Drain entry broadcasts from A and apply to B
         while let Ok(entry) = entry_rx_a.try_recv() {
@@ -1948,9 +1963,9 @@ mod tests {
         let (sync_tx_c, _) = broadcast::channel(16);
         
         // Create and start actors
-        let actor_a = StoreActor::new(Uuid::from_bytes(TEST_STORE), state_a, logs_dir_a.clone(), node_a.clone(), cmd_rx_a, entry_tx_a, sync_tx_a);
-        let actor_b = StoreActor::new(Uuid::from_bytes(TEST_STORE), state_b, logs_dir_b, node_b.clone(), cmd_rx_b, entry_tx_b, sync_tx_b);
-        let actor_c = StoreActor::new(Uuid::from_bytes(TEST_STORE), state_c, logs_dir_c, node_c.clone(), cmd_rx_c, entry_tx_c, sync_tx_c);
+        let actor_a = StoreActor::new(TEST_STORE, state_a, logs_dir_a.clone(), node_a.clone(), cmd_rx_a, entry_tx_a, sync_tx_a);
+        let actor_b = StoreActor::new(TEST_STORE, state_b, logs_dir_b, node_b.clone(), cmd_rx_b, entry_tx_b, sync_tx_b);
+        let actor_c = StoreActor::new(TEST_STORE, state_c, logs_dir_c, node_c.clone(), cmd_rx_c, entry_tx_c, sync_tx_c);
         
         let handle_a = std::thread::spawn(move || actor_a.run());
         let handle_b = std::thread::spawn(move || actor_b.run());
@@ -1961,21 +1976,21 @@ mod tests {
         
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/key_a", b"from_a".to_vec()))
             .sign(&node_a);
         
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/key_b", b"from_b".to_vec()))
             .sign(&node_b);
         
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/key_c", b"from_c".to_vec()))
             .sign(&node_c);
@@ -2092,8 +2107,8 @@ mod tests {
         let (sync_tx_d, _) = broadcast::channel(16);
         
         // Create actors
-        let actor_a = StoreActor::new(Uuid::from_bytes(TEST_STORE), state_a, logs_dir_a, node_a.clone(), cmd_rx_a, entry_tx_a, sync_tx_a);
-        let actor_d = StoreActor::new(Uuid::from_bytes(TEST_STORE), state_d, logs_dir_d, node_d.clone(), cmd_rx_d, entry_tx_d, sync_tx_d);
+        let actor_a = StoreActor::new(TEST_STORE, state_a, logs_dir_a, node_a.clone(), cmd_rx_a, entry_tx_a, sync_tx_a);
+        let actor_d = StoreActor::new(TEST_STORE, state_d, logs_dir_d, node_d.clone(), cmd_rx_d, entry_tx_d, sync_tx_d);
         
         let handle_a = std::thread::spawn(move || actor_a.run());
         let handle_d = std::thread::spawn(move || actor_d.run());
@@ -2103,21 +2118,21 @@ mod tests {
         
         let entry_from_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_a".to_vec()))
             .sign(&node_a);
         
         let entry_from_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_b".to_vec()))
             .sign(&node_b);
         
         let entry_from_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .store_id(TEST_STORE.to_vec())
+            .store_id(TEST_STORE)
             .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_c".to_vec()))
             .sign(&node_c);

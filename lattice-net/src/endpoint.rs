@@ -20,10 +20,10 @@ pub struct LatticeEndpoint {
 }
 
 impl LatticeEndpoint {
-    /// Create a new endpoint from Ed25519 secret key bytes (from identity.key)
+    /// Create a new endpoint from Ed25519 signing key (from NodeIdentity)
     /// Enables both DNS discovery (internet) and mDNS discovery (local network)
-    pub async fn new(secret_key_bytes: [u8; 32]) -> Result<Self, BindError> {
-        let secret_key = iroh::SecretKey::from_bytes(&secret_key_bytes);
+    pub async fn new(signing_key: ed25519_dalek::SigningKey) -> Result<Self, BindError> {
+        let secret_key = iroh::SecretKey::from(signing_key.to_bytes());
         
         // mDNS for local network discovery
         let mdns = MdnsDiscovery::builder();

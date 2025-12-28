@@ -4,7 +4,8 @@ use crate::{
     DataDir, MetaStore, NodeIdentity, PeerStatus, Uuid,
     meta_store::MetaStoreError,
     node_identity::NodeError as IdentityError,
-    store::{State, StateError, StoreHandle, LogError},
+    store::{State, StateError, StoreHandle, LogError, Log},
+    types::PubKey,
 };
 use std::path::Path;
 use thiserror::Error;
@@ -71,7 +72,7 @@ pub struct JoinAcceptance {
 /// Information about a peer in the mesh
 #[derive(Clone, Debug)]
 pub struct PeerInfo {
-    pub pubkey: [u8; 32],
+    pub pubkey: PubKey,
     pub name: Option<String>,
     pub added_at: Option<u64>,
     pub added_by: Option<String>,
@@ -165,14 +166,14 @@ pub struct Node {
 impl Node {
     pub fn info(&self) -> NodeInfo {
         NodeInfo {
-            node_id: hex::encode(self.node.public_key_bytes()),
+            node_id: hex::encode(self.node.public_key()),
             data_path: self.data_dir.base().display().to_string(),
             stores: self.meta.list_stores().unwrap_or_default(),
         }
     }
 
-    pub fn node_id(&self) -> [u8; 32] {
-        self.node.public_key_bytes()
+    pub fn node_id(&self) -> PubKey {
+        self.node.public_key()
     }
     
     /// Subscribe to node events (e.g., root store activation)
@@ -180,9 +181,10 @@ impl Node {
         self.event_tx.subscribe()
     }
 
-    /// Get the secret key bytes for Iroh integration (same Ed25519 key)
-    pub fn secret_key_bytes(&self) -> [u8; 32] {
-        self.node.secret_key_bytes()
+    /// Get the signing key for Iroh integration (same Ed25519 key).
+    /// Use `.to_bytes()` when raw bytes are needed.
+    pub fn signing_key(&self) -> &ed25519_dalek::SigningKey {
+        self.node.signing_key()
     }
 
     pub fn data_path(&self) -> &Path {
@@ -207,8 +209,7 @@ impl Node {
         if let Some(name) = self.name() {
             let guard = self.root_store.read().await;
             if let Some(handle) = guard.as_ref() {
-                let pubkey_hex = hex::encode(self.node.public_key_bytes());
-                let name_key = format!("/nodes/{}/name", pubkey_hex);
+                let name_key = format!("/nodes/{:x}/name", self.node.public_key());
                 handle.put(name_key.as_bytes(), name.as_bytes()).await?;
             }
         }
@@ -251,7 +252,7 @@ impl Node {
         
         // Open the store and write our node info as separate keys
         let (handle, _) = self.open_store(store_id).await?;
-        let pubkey_hex = hex::encode(self.node.public_key_bytes());
+        let pubkey_hex = hex::encode(self.node.public_key());
         
         // Store node metadata as separate keys
         if let Some(name) = self.name() {
@@ -300,13 +301,13 @@ impl Node {
     // --- Peer Management ---
     
     /// Invite a peer to the mesh. Writes their info with status = invited.
-    pub async fn invite_peer(&self, pubkey: &[u8; 32]) -> Result<(), NodeError> {
+    pub async fn invite_peer(&self, pubkey: crate::types::PubKey) -> Result<(), NodeError> {
         let guard = self.root_store.read().await;
         let store = guard.as_ref()
             .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
         
-        let pubkey_hex = hex::encode(pubkey);
-        let my_pubkey_hex = hex::encode(self.node.public_key_bytes());
+        let pubkey_hex = format!("{:x}", pubkey);
+        let my_pubkey_hex = format!("{:x}", self.node.public_key());
         
         let added_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -354,10 +355,8 @@ impl Node {
         // Build PeerInfo for each peer
         let mut peers = Vec::new();
         for (pubkey_hex, status) in peers_map {
-            // Parse pubkey hex to bytes
-            let pubkey: [u8; 32] = match hex::decode(&pubkey_hex) {
-                Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
-                _ => continue, // Skip invalid pubkeys
+            let Ok(pubkey) = PubKey::from_hex(&pubkey_hex) else {
+                continue; // Skip invalid pubkeys
             };
             
             let name_key = format!("/nodes/{}/name", pubkey_hex);
@@ -384,9 +383,9 @@ impl Node {
         
         Ok(peers)
     }
-    
+
     /// Remove a peer from the mesh (deletes all their /nodes/{pubkey}/* keys)
-    pub async fn remove_peer(&self, pubkey: &[u8; 32]) -> Result<(), NodeError> {
+    pub async fn remove_peer(&self, pubkey: PubKey) -> Result<(), NodeError> {
         let guard = self.root_store.read().await;
         let store = guard.as_ref()
             .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
@@ -394,7 +393,7 @@ impl Node {
         let pubkey_hex = hex::encode(pubkey);
         
         // Prevent self-removal
-        if pubkey == &self.node.public_key_bytes() {
+        if pubkey == self.node.public_key() {
             return Err(NodeError::Actor("Cannot remove yourself".to_string()));
         }
         
@@ -415,7 +414,7 @@ impl Node {
     }
     
     /// Get a peer's status
-    pub async fn get_peer_status(&self, pubkey: &[u8; 32]) -> Result<Option<PeerStatus>, NodeError> {
+    pub async fn get_peer_status(&self, pubkey: PubKey) -> Result<Option<PeerStatus>, NodeError> {
         let guard = self.root_store.read().await;
         let store = guard.as_ref()
             .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
@@ -433,7 +432,7 @@ impl Node {
     }
     
     /// Set a peer's status
-    pub async fn set_peer_status(&self, pubkey: &[u8; 32], status: PeerStatus) -> Result<(), NodeError> {
+    pub async fn set_peer_status(&self, pubkey: PubKey, status: PeerStatus) -> Result<(), NodeError> {
         let guard = self.root_store.read().await;
         let store = guard.as_ref()
             .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
@@ -445,7 +444,7 @@ impl Node {
     }
     
     /// Verify a peer has one of the expected statuses
-    pub async fn verify_peer_status(&self, pubkey: &[u8; 32], expected: &[PeerStatus]) -> Result<(), NodeError> {
+    pub async fn verify_peer_status(&self, pubkey: PubKey, expected: &[PeerStatus]) -> Result<(), NodeError> {
         match self.get_peer_status(pubkey).await? {
             Some(status) if expected.contains(&status) => Ok(()),
             Some(status) => Err(NodeError::Actor(format!(
@@ -456,7 +455,7 @@ impl Node {
     }
     
     /// Accept a peer's join request - verifies they're invited, sets active, returns join info
-    pub async fn accept_join(&self, pubkey: &[u8; 32]) -> Result<JoinAcceptance, NodeError> {
+    pub async fn accept_join(&self, pubkey: PubKey) -> Result<JoinAcceptance, NodeError> {
         // Verify peer is invited
         self.verify_peer_status(pubkey, &[PeerStatus::Invited]).await?;
         
@@ -512,13 +511,13 @@ impl Node {
         // Not cached, open it fresh
         self.data_dir.ensure_store_dirs(store_id)?;
         
-        let author_id_hex = hex::encode(self.node.public_key_bytes());
+        let author_id_hex = format!("{:x}", self.node.public_key());
         let log_path = self.data_dir.store_log_file(store_id, &author_id_hex);
         let logs_dir = log_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         
         let store = State::open(self.data_dir.store_state_db(store_id))?;
         let entries_replayed = if log_path.exists() {
-            let log = crate::store::Log::open(&log_path)?;
+            let log = Log::open(&log_path)?;
             let iter = log.iter()?;
             store.replay_entries(iter)?
         } else {
@@ -587,6 +586,7 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::PubKey;
 
     #[tokio::test]
     async fn test_create_and_open_store() {
@@ -781,8 +781,8 @@ mod tests {
         node.init().await.expect("init");
         
         // Invite a peer
-        let peer_pubkey = [0u8; 32]; // Dummy pubkey
-        node.invite_peer(&peer_pubkey).await.expect("invite");
+        let peer_pubkey = PubKey::from([0u8; 32]); // Dummy pubkey
+        node.invite_peer(peer_pubkey).await.expect("invite");
         
         // Verify peer is Invited
         let peers = node.list_peers().await.expect("list_peers");
@@ -805,11 +805,11 @@ mod tests {
         let store_id = node.init().await.expect("init");
         
         // Invite a peer
-        let peer_pubkey = [1u8; 32]; // Dummy pubkey
-        node.invite_peer(&peer_pubkey).await.expect("invite");
+        let peer_pubkey = PubKey::from([1u8; 32]); // Dummy pubkey
+        node.invite_peer(peer_pubkey).await.expect("invite");
         
         // Accept the join
-        let acceptance = node.accept_join(&peer_pubkey).await.expect("accept_join");
+        let acceptance = node.accept_join(peer_pubkey).await.expect("accept_join");
         assert_eq!(acceptance.store_id, store_id);
         
         // Peer should now be Active
@@ -842,8 +842,7 @@ mod tests {
         let store_a = store_a.as_ref().expect("A has root store");
         
         // Step 2: A invites B
-        let b_pubkey: [u8; 32] = node_b.node_id().try_into().unwrap();
-        node_a.invite_peer(&b_pubkey).await.expect("invite B");
+        node_a.invite_peer(node_b.node_id()).await.expect("invite B");
         
         // Verify B is invited
         let peers = node_a.list_peers().await.expect("list peers");

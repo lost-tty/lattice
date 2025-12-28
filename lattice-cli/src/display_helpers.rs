@@ -4,11 +4,12 @@
 //! and delta indicators. Used by store and node commands.
 
 use owo_colors::OwoColorize;
+use owo_colors::AnsiColors;
+use lattice_core::PubKey;
 
 /// Get deterministic color for an author (based on first bytes)
 /// Matches graph_renderer ANSI codes: 31-36 = Red, Green, Yellow, Blue, Magenta, Cyan
-pub fn author_color(author: &[u8; 32]) -> owo_colors::AnsiColors {
-    use owo_colors::AnsiColors;
+pub fn author_color(author: &PubKey) -> owo_colors::AnsiColors {
     const COLORS: [AnsiColors; 6] = [
         AnsiColors::Red, AnsiColors::Green, AnsiColors::Yellow,
         AnsiColors::Blue, AnsiColors::Magenta, AnsiColors::Cyan,
@@ -17,8 +18,8 @@ pub fn author_color(author: &[u8; 32]) -> owo_colors::AnsiColors {
 }
 
 /// Format author ID with deterministic color, right-aligned to given width
-pub fn colored_author(author: &[u8; 32], is_self: bool, width: usize) -> String {
-    let short = &hex::encode(author)[..6];
+pub fn colored_author(author: &PubKey, is_self: bool, width: usize) -> String {
+    let short = &hex::encode(&**author)[..6];
     let label = if is_self { format!("{}*", short) } else { short.to_string() };
     let padded = format!("{:>width$}", label, width = width);
     format!("{}", padded.color(author_color(author)))
@@ -51,16 +52,16 @@ pub fn delta_string_len(peer_seq: u64, our_seq: u64) -> usize {
 
 /// Prepared peer data for matrix rendering
 pub struct PeerSyncRow {
-    pub pubkey: [u8; 32],
+    pub pubkey: PubKey,
     pub label: String,
-    pub frontiers: std::collections::HashMap<[u8; 32], u64>,
+    pub frontiers: std::collections::HashMap<PubKey, u64>,
     pub common_hlc: Option<lattice_core::hlc::HLC>,  // Min of max HLCs across all authors
 }
 
 /// Render the peer sync state matrix to a string
 pub fn render_peer_sync_matrix(
-    my_pubkey: [u8; 32],
-    our_authors: &std::collections::HashMap<[u8; 32], u64>,
+    my_pubkey: PubKey,
+    our_authors: &std::collections::HashMap<PubKey, u64>,
     our_common_hlc: Option<lattice_core::hlc::HLC>,
     peers: &[PeerSyncRow],
 ) -> String {
@@ -74,7 +75,7 @@ pub fn render_peer_sync_matrix(
     let _ = writeln!(output, "Known Peer Sync States (cached):");
     
     // Collect all authors across all peers AND self
-    let mut all_authors: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+    let mut all_authors: std::collections::BTreeSet<PubKey> = std::collections::BTreeSet::new();
     for author in our_authors.keys() {
         all_authors.insert(*author);
     }
@@ -84,7 +85,7 @@ pub fn render_peer_sync_matrix(
         }
     }
     
-    let authors: Vec<[u8; 32]> = all_authors.into_iter().collect();
+    let authors: Vec<PubKey> = all_authors.into_iter().collect();
     
     // Calculate peer column width
     let peer_col_width = peers.iter()
@@ -226,13 +227,13 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &StoreHandle
     
     // Get peer names
     let known_peers = node.list_peers().await.unwrap_or_default();
-    let peer_names: std::collections::HashMap<[u8; 32], Option<String>> = known_peers.iter()
+    let peer_names: std::collections::HashMap<PubKey, Option<String>> = known_peers.iter()
         .map(|p| (p.pubkey, p.name.clone()))
         .collect();
     
     // Build our_authors map from our sync state
     let our_state = h.sync_state().await.ok();
-    let our_authors: std::collections::HashMap<[u8; 32], u64> = our_state.as_ref()
+    let our_authors: std::collections::HashMap<PubKey, u64> = our_state.as_ref()
         .map(|s| s.authors().iter().map(|(k, v)| (*k, v.seq)).collect())
         .unwrap_or_default();
     
@@ -246,13 +247,10 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &StoreHandle
             
             let (frontiers, common_hlc) = info.sync_state.as_ref()
                 .map(|ss| {
-                    let frs: std::collections::HashMap<[u8; 32], u64> = ss.authors.iter().filter_map(|sa| {
-                        if sa.author_id.len() == 32 {
-                            let mut author = [0u8; 32];
-                            author.copy_from_slice(&sa.author_id);
-                            let seq = sa.state.as_ref().map(|s| s.seq).unwrap_or(0);
-                            Some((author, seq))
-                        } else { None }
+                    let frs: std::collections::HashMap<PubKey, u64> = ss.authors.iter().filter_map(|sa| {
+                        let author: PubKey = sa.author_id.as_slice().try_into().ok()?;
+                        let seq = sa.state.as_ref().map(|s| s.seq).unwrap_or(0);
+                        Some((author, seq))
                     }).collect();
                     // Use pre-computed common_hlc from proto
                     let hlc = ss.common_hlc.as_ref().map(|h| lattice_core::hlc::HLC::from(h.clone()));

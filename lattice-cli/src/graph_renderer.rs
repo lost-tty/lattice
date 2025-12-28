@@ -4,6 +4,7 @@
 //! Design inspired by git-graph: https://github.com/mlange-42/git-graph (MIT)
 
 use std::fmt::Write;
+use lattice_core::PubKey;
 
 // Character codes for grid cells
 pub const SPACE: u8 = 0;
@@ -263,20 +264,21 @@ impl Grid {
 #[derive(Clone)]
 pub struct RenderEntry {
     pub key: Vec<u8>,
-    pub author: [u8; 32],
+    pub author: PubKey,
     pub hlc: u64,
     pub value: Vec<u8>,
     pub tombstone: bool,
-    pub parent_hashes: Vec<[u8; 32]>,
+    pub parent_hashes: Vec<lattice_core::Hash>,
     pub is_merge: bool,
 }
 
 /// Render a DAG of entries to a grid-based graph
 pub fn render_dag(
-    entries: &std::collections::HashMap<[u8; 32], RenderEntry>,
+    entries: &std::collections::HashMap<lattice_core::Hash, RenderEntry>,
     _key: &[u8],
 ) -> String {
     use std::collections::{HashMap, HashSet};
+    use lattice_core::Hash;
     
     if entries.is_empty() {
         return "(no history found)\n".to_string();
@@ -285,8 +287,8 @@ pub fn render_dag(
     let mut output = String::new();
     
     // Build parent/child relationships
-    let entry_hashes: HashSet<[u8; 32]> = entries.keys().cloned().collect();
-    let mut children: HashMap<[u8; 32], Vec<[u8; 32]>> = HashMap::new();
+    let entry_hashes: HashSet<Hash> = entries.keys().cloned().collect();
+    let mut children: HashMap<Hash, Vec<Hash>> = HashMap::new();
     
     for (hash, entry) in entries {
         for parent in &entry.parent_hashes {
@@ -301,7 +303,7 @@ pub fn render_dag(
     // while respecting causal dependencies (parents before children)
     
     // Count incoming edges (parents in set) for each entry
-    let mut in_degree: HashMap<[u8; 32], usize> = HashMap::new();
+    let mut in_degree: HashMap<Hash, usize> = HashMap::new();
     for hash in entries.keys() {
         let parents_in_set = entries.get(hash).unwrap().parent_hashes.iter()
             .filter(|p| entry_hashes.contains(*p))
@@ -314,7 +316,7 @@ pub fn render_dag(
     use std::cmp::Reverse;
     
     // (Reverse(hlc), hash) - Reverse for min-heap behavior (oldest first)
-    let mut ready: BinaryHeap<(Reverse<u64>, [u8; 32])> = BinaryHeap::new();
+    let mut ready: BinaryHeap<(Reverse<u64>, Hash)> = BinaryHeap::new();
     
     // Start with all entries that have no parents (in_degree = 0)
     for (hash, &degree) in &in_degree {
@@ -324,7 +326,7 @@ pub fn render_dag(
         }
     }
     
-    let mut order: Vec<[u8; 32]> = Vec::new();
+    let mut order: Vec<Hash> = Vec::new();
     
     while let Some((_, hash)) = ready.pop() {
         order.push(hash);
@@ -346,8 +348,8 @@ pub fn render_dag(
     
     // Calculate column assignments with column reuse
     // Track which columns have active vertical lines at each row
-    let mut hash_to_col: HashMap<[u8; 32], usize> = HashMap::new();
-    let mut hash_to_row: HashMap<[u8; 32], usize> = HashMap::new();
+    let mut hash_to_col: HashMap<Hash, usize> = HashMap::new();
+    let mut hash_to_row: HashMap<Hash, usize> = HashMap::new();
     
     // Assign rows (order index)
     for (row, hash) in order.iter().enumerate() {
@@ -360,7 +362,7 @@ pub fn render_dag(
     let mut max_col_used = 0usize;
     
     // For each entry, find the row of its last descendant (to know when column becomes free)
-    let mut last_descendant_row: HashMap<[u8; 32], usize> = HashMap::new();
+    let mut last_descendant_row: HashMap<Hash, usize> = HashMap::new();
     for hash in order.iter() {
         let entry = entries.get(hash).unwrap();
         let my_row = hash_to_row[hash];
@@ -386,7 +388,7 @@ pub fn render_dag(
     // Assign columns with reuse
     for (row, hash) in order.iter().enumerate() {
         let entry = entries.get(hash).unwrap();
-        let parents_in_set: Vec<[u8; 32]> = entry.parent_hashes.iter()
+        let parents_in_set: Vec<Hash> = entry.parent_hashes.iter()
             .filter(|p| entry_hashes.contains(*p))
             .cloned()
             .collect();
@@ -467,7 +469,7 @@ pub fn render_dag(
         let color_code = 31 + (entry.author[0] % 6); // 31-36: red, green, yellow, blue, magenta, cyan
         
         // Count parents in our entry set (not all parents may be in filtered history)
-        let parents_in_set: Vec<[u8; 32]> = entry.parent_hashes.iter()
+        let parents_in_set: Vec<Hash> = entry.parent_hashes.iter()
             .filter(|p| entry_hashes.contains(*p))
             .cloned()
             .collect();

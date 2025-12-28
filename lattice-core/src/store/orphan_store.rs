@@ -14,6 +14,7 @@
 
 use crate::proto::storage::{OrphanedEntry, SignedEntry as ProtoSignedEntry};
 use crate::entry::SignedEntry;
+use crate::types::{Hash, PubKey};
 use prost::Message;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
@@ -26,14 +27,14 @@ const DAG_ORPHANS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("d
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct OrphanKey {
-    pub author: [u8; 32],
-    pub prev_hash: [u8; 32],
-    pub entry_hash: [u8; 32],
+    pub author: PubKey,
+    pub prev_hash: Hash,
+    pub entry_hash: Hash,
 }
 
 impl OrphanKey {
     /// Create a new orphan key
-    pub fn new(author: [u8; 32], prev_hash: [u8; 32], entry_hash: [u8; 32]) -> Self {
+    pub fn new(author: PubKey, prev_hash: Hash, entry_hash: Hash) -> Self {
         Self { author, prev_hash, entry_hash }
     }
 
@@ -56,13 +57,13 @@ impl OrphanKey {
     }
 
     /// Create a range start key for prefix queries (author + prev_hash)
-    pub fn range_start(author: [u8; 32], prev_hash: [u8; 32]) -> Self {
-        Self { author, prev_hash, entry_hash: [0u8; 32] }
+    pub fn range_start(author: PubKey, prev_hash: Hash) -> Self {
+        Self { author, prev_hash, entry_hash: Hash::from([0u8; 32]) }
     }
 
     /// Create a range end key for prefix queries (author + prev_hash)
-    pub fn range_end(author: [u8; 32], prev_hash: [u8; 32]) -> Self {
-        Self { author, prev_hash, entry_hash: [0xFFu8; 32] }
+    pub fn range_end(author: PubKey, prev_hash: Hash) -> Self {
+        Self { author, prev_hash, entry_hash: Hash::from([0xFFu8; 32]) }
     }
 }
 
@@ -71,13 +72,13 @@ impl OrphanKey {
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct DagOrphanKey {
-    pub parent_hash: [u8; 32],   // awaited parent hash (FIRST for efficient range queries)
-    pub key_hash: [u8; 32],      // blake3 hash of the key
-    pub entry_hash: [u8; 32],    // hash of the orphaned entry
+    pub parent_hash: Hash,   // awaited parent hash (FIRST for efficient range queries)
+    pub key_hash: Hash,      // blake3 hash of the key
+    pub entry_hash: Hash,    // hash of the orphaned entry
 }
 
 impl DagOrphanKey {
-    pub fn new(key_hash: [u8; 32], parent_hash: [u8; 32], entry_hash: [u8; 32]) -> Self {
+    pub fn new(key_hash: Hash, parent_hash: Hash, entry_hash: Hash) -> Self {
         Self { parent_hash, key_hash, entry_hash }
     }
 
@@ -97,13 +98,13 @@ impl DagOrphanKey {
     }
     
     /// Create a range start key for prefix queries by parent_hash
-    pub fn range_start_by_parent(parent_hash: [u8; 32]) -> Self {
-        Self { parent_hash, key_hash: [0u8; 32], entry_hash: [0u8; 32] }
+    pub fn range_start_by_parent(parent_hash: Hash) -> Self {
+        Self { parent_hash, key_hash: Hash::from([0u8; 32]), entry_hash: Hash::from([0u8; 32]) }
     }
 
     /// Create a range end key for prefix queries by parent_hash
-    pub fn range_end_by_parent(parent_hash: [u8; 32]) -> Self {
-        Self { parent_hash, key_hash: [0xFFu8; 32], entry_hash: [0xFFu8; 32] }
+    pub fn range_end_by_parent(parent_hash: Hash) -> Self {
+        Self { parent_hash, key_hash: Hash::from([0xFFu8; 32]), entry_hash: Hash::from([0xFFu8; 32]) }
     }
 }
 
@@ -132,26 +133,26 @@ pub enum OrphanStoreError {
 #[derive(Clone, Debug)]
 pub struct GapInfo {
     /// Author whose chain has a gap
-    pub author: [u8; 32],
+    pub author: PubKey,
     /// First missing sequence number (chain's next_seq)
     pub from_seq: u64,
     /// Lowest orphan sequence number (we need entries [from_seq, to_seq))
     pub to_seq: u64,
     /// Last known hash in chain (to help peers locate the gap)
-    pub last_known_hash: Option<[u8; 32]>,
+    pub last_known_hash: Option<Hash>,
 }
 
 /// Information about an orphaned entry
 #[derive(Clone, Debug)]
 pub struct OrphanInfo {
     /// Author of the orphaned entry
-    pub author: [u8; 32],
+    pub author: PubKey,
     /// Sequence number of the orphaned entry
     pub seq: u64,
     /// Hash this entry is waiting for (its prev_hash)
-    pub prev_hash: [u8; 32],
+    pub prev_hash: Hash,
     /// Hash of this orphaned entry
-    pub entry_hash: [u8; 32],
+    pub entry_hash: Hash,
     /// Unix timestamp (seconds) when orphan was received
     pub received_at: u64,
 }
@@ -179,13 +180,13 @@ impl OrphanStore {
     /// Insert an orphan entry. Returns true if new, false if already existed.
     pub fn insert(
         &self,
-        author: &[u8; 32],
-        prev_hash: &[u8; 32],
-        entry_hash: &[u8; 32],
+        author: &PubKey,
+        prev_hash: &Hash,
+        entry_hash: &Hash,
         seq: u64,
         entry: &SignedEntry,
     ) -> Result<bool, OrphanStoreError> {
-        let key = OrphanKey::new(*author, *prev_hash, *entry_hash);
+        let key = OrphanKey::new(PubKey::from(*author), Hash::from(*prev_hash), Hash::from(*entry_hash));
         
         // Get current timestamp
         let received_at = std::time::SystemTime::now()
@@ -217,11 +218,11 @@ impl OrphanStore {
     /// Find all orphans waiting for a specific parent hash (for a specific author)
     pub fn find_by_prev_hash(
         &self,
-        author: &[u8; 32],
-        prev_hash: &[u8; 32],
-    ) -> Result<Vec<(u64, SignedEntry, [u8; 32])>, OrphanStoreError> {
-        let start_key = OrphanKey::range_start(*author, *prev_hash);
-        let end_key = OrphanKey::range_end(*author, *prev_hash);
+        author: &PubKey,
+        prev_hash: &Hash,
+    ) -> Result<Vec<(u64, SignedEntry, Hash)>, OrphanStoreError> {
+        let start_key = OrphanKey::range_start(PubKey::from(*author), Hash::from(*prev_hash));
+        let end_key = OrphanKey::range_end(PubKey::from(*author), Hash::from(*prev_hash));
         
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(ORPHANS_TABLE)?;
@@ -248,9 +249,9 @@ impl OrphanStore {
     /// Delete a specific orphan entry
     pub fn delete(
         &self,
-        author: &[u8; 32],
-        prev_hash: &[u8; 32],
-        entry_hash: &[u8; 32],
+        author: &PubKey,
+        prev_hash: &Hash,
+        entry_hash: &Hash,
     ) -> Result<(), OrphanStoreError> {
         let key = OrphanKey::new(*author, *prev_hash, *entry_hash);
         
@@ -303,12 +304,12 @@ impl OrphanStore {
     pub fn insert_dag_orphan(
         &self,
         key: &[u8],
-        parent_hash: &[u8; 32],
-        entry_hash: &[u8; 32],
+        parent_hash: &Hash,
+        entry_hash: &Hash,
         entry: &SignedEntry,
     ) -> Result<bool, OrphanStoreError> {
-        let key_hash: [u8; 32] = blake3::hash(key).into();
-        let dag_key = DagOrphanKey::new(key_hash, *parent_hash, *entry_hash);
+        let key_hash: Hash = Hash::from(*blake3::hash(key).as_bytes());
+        let dag_key = DagOrphanKey::new(key_hash, Hash::from(*parent_hash), Hash::from(*entry_hash));
         
         let write_txn = self.db.begin_write()?;
         let is_new = {
@@ -334,14 +335,14 @@ impl OrphanStore {
     /// Uses efficient range query since parent_hash is the key prefix.
     pub fn find_dag_orphans_by_parent(
         &self,
-        parent_hash: &[u8; 32],
-    ) -> Result<Vec<(Vec<u8>, SignedEntry, [u8; 32])>, OrphanStoreError> {
+        parent_hash: &Hash,
+    ) -> Result<Vec<(Vec<u8>, SignedEntry, Hash)>, OrphanStoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(DAG_ORPHANS_TABLE)?;
         
         // Efficient range query using parent_hash prefix
-        let start = DagOrphanKey::range_start_by_parent(*parent_hash);
-        let end = DagOrphanKey::range_end_by_parent(*parent_hash);
+        let start = DagOrphanKey::range_start_by_parent(Hash::from(*parent_hash));
+        let end = DagOrphanKey::range_end_by_parent(Hash::from(*parent_hash));
         
         let mut results = Vec::new();
         for row in table.range(start.as_bytes().as_slice()..=end.as_bytes().as_slice())? {
@@ -364,11 +365,11 @@ impl OrphanStore {
     pub fn delete_dag_orphan(
         &self,
         key: &[u8],
-        parent_hash: &[u8; 32],
-        entry_hash: &[u8; 32],
+        parent_hash: &Hash,
+        entry_hash: &Hash,
     ) -> Result<(), OrphanStoreError> {
-        let key_hash: [u8; 32] = blake3::hash(key).into();
-        let dag_key = DagOrphanKey::new(key_hash, *parent_hash, *entry_hash);
+        let key_hash: Hash = Hash::from(*blake3::hash(key).as_bytes());
+        let dag_key = DagOrphanKey::new(key_hash, Hash::from(*parent_hash), Hash::from(*entry_hash));
         
         let write_txn = self.db.begin_write()?;
         {
@@ -393,7 +394,9 @@ pub struct DagOrphanedEntry {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
     use redb::ReadableTableMetadata;
+    use uuid::Uuid;
     
     /// Count total DAG orphan entries in the store (test helper)
     pub fn count_dag_orphans(store: &OrphanStore) -> usize {
@@ -409,7 +412,7 @@ pub(crate) mod tests {
         
         let store = OrphanStore::open(&path).unwrap();
         
-        let prev_hash = [2u8; 32];
+        let prev_hash = Hash::from([2u8; 32]);
         let seq = 5u64;
         
         // Create a minimal SignedEntry for testing
@@ -421,32 +424,32 @@ pub(crate) mod tests {
         
         // Mock node/entry
         let node = NodeIdentity::generate();
-        let author = node.public_key_bytes();
+        let author = PubKey::from(node.public_key());
         // Use fake tip to simulate seq 4 -> seq 5
         let fake_tip = crate::entry::ChainTip { seq: 4, hash: prev_hash, hlc: HLC::default() };
         let entry = Entry::next_after(Some(&fake_tip))
             .timestamp(HLC::default())
-            .store_id([1u8; 16].to_vec())
+            .store_id(Uuid::from_bytes([1u8; 16]))
             .operation(Operation::put(b"key", b"val".to_vec()))
             .sign(&node);
             
         let entry_hash = entry.hash();
         
         // Insert with seq
-        store.insert(&author, &prev_hash, &entry_hash, seq, &entry).unwrap();
+        store.insert(&crate::types::PubKey::from(author), &Hash::from(prev_hash), &entry_hash, seq, &entry).unwrap();
         
         // Find - returns (seq, entry, hash)
-        let found = store.find_by_prev_hash(&author, &prev_hash).unwrap();
+        let found = store.find_by_prev_hash(&crate::types::PubKey::from(author), &Hash::from(prev_hash)).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, seq);  // seq
-        assert_eq!(found[0].1.author_id, author);  // entry
-        assert_eq!(found[0].2, entry_hash);  // hash
+        assert_eq!(found[0].1.author_id, crate::types::PubKey::from(author));  // entry
+        assert_eq!(found[0].2, Hash::from(entry_hash));  // hash
         
         // Delete
-        store.delete(&author, &prev_hash, &entry_hash).unwrap();
+        store.delete(&crate::types::PubKey::from(author), &Hash::from(prev_hash), &entry_hash).unwrap();
         
         // Should be empty now
-        let found = store.find_by_prev_hash(&author, &prev_hash).unwrap();
+        let found = store.find_by_prev_hash(&crate::types::PubKey::from(author), &Hash::from(prev_hash)).unwrap();
         assert_eq!(found.len(), 0);
         
         let _ = std::fs::remove_file(&path);

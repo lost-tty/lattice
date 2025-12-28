@@ -30,7 +30,7 @@ async fn test_targeted_author_sync() {
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
     
-    node_a.invite_peer(&node_b.node_id()).await.expect("invite");
+    node_a.invite_peer(node_b.node_id()).await.expect("invite");
     
     // B joins via A's endpoint (relies on mDNS for local discovery)
     let a_pubkey = server_a.endpoint().public_key();
@@ -55,8 +55,8 @@ async fn test_targeted_author_sync() {
     store_a.put(b"/data", b"test").await.expect("put");
     
     // B syncs specifically for A's author
-    let author = node_a.node_id();
-    let _applied = server_b.sync_author_all(&store_b, author).await.expect("sync author");
+    let author = *node_a.node_id();
+    let _applied = server_b.sync_author_all(&store_b, lattice_core::PubKey::from(author)).await.expect("sync author");
     
     // Verify entry arrived
     let val = store_b.get(b"/data").await.expect("get");
@@ -81,7 +81,7 @@ async fn test_sync_multiple_entries() {
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
     
-    node_a.invite_peer(&node_b.node_id()).await.expect("invite");
+    node_a.invite_peer(node_b.node_id()).await.expect("invite");
     
     let a_pubkey = server_a.endpoint().public_key();
     sleep(Duration::from_millis(200)).await;

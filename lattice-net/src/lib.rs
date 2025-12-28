@@ -23,3 +23,24 @@ pub use mesh::{LatticeServer, SyncResult};
 pub fn parse_node_id(s: &str) -> Result<PublicKey, LatticeNetError> {
     s.parse().map_err(|e| LatticeNetError::ParseNodeId(format!("{}", e)))
 }
+
+// Traits for conversion to avoid orphan rules
+pub trait ToIroh {
+    fn to_iroh(&self) -> Result<PublicKey, LatticeNetError>;
+}
+
+pub trait ToLattice {
+    fn to_lattice(&self) -> lattice_core::PubKey;
+}
+
+impl ToIroh for lattice_core::PubKey {
+    fn to_iroh(&self) -> Result<PublicKey, LatticeNetError> {
+        PublicKey::from_bytes(&**self).map_err(|e| LatticeNetError::Validation(format!("Invalid Iroh key: {}", e)))
+    }
+}
+
+impl ToLattice for PublicKey {
+    fn to_lattice(&self) -> lattice_core::PubKey {
+        lattice_core::PubKey::from(*self.as_bytes())
+    }
+}

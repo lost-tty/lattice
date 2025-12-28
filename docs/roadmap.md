@@ -170,16 +170,16 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 - [x] **Entry::is_successor(tip)**: Add method on Entry to check `entry.prev_hash == tip.hash` instead of inline checks in `core.rs`
 - [x] **ChainTip::encode()**: Add `encode(&self) -> Vec<u8>` method that hides proto conversion, cleaner than `.encode_to_vec().as_slice()`
 - [x] **Rename Store → State**: Renamed `core.rs`→`state.rs` and `Store`→`State` to clarify it's derived materialized view
-- [ ] **Strong types for byte arrays**: `Hash` and `PubKey` for `[u8; 32]`, `Signature` for `[u8; 64]` - with proper Display/Debug
-- [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
-- [ ] **Module reorganization**: Move sigchain-related files into `store/sigchain/` submodule (sigchain.rs, log.rs, orphan_store.rs, sync_state.rs)
-- [ ] Extract `PEER_SYNC_TABLE` from `state.db` for better separation
-- [ ] **Multi-platform traits**: Add `StateBackend` trait to abstract KV storage (redb/sqlite/wasm)
+- [x] **Strong types for byte arrays**: `Hash` and `PubKey` for `[u8; 32]`, `Signature` for `[u8; 64]` - with proper Display/Debug
 - [ ] **HeadInfo.hlc Option cleanup**: Proto `HeadInfo.hlc` is `Option<Hlc>` but always set in practice - make non-optional or add `HLC::default()` fallback
+- [ ] Extract `PEER_SYNC_TABLE` from `state.db` for better separation
+- [ ] **Module reorganization**: Move sigchain-related files into `store/sigchain/` submodule (sigchain.rs, log.rs, orphan_store.rs, sync_state.rs)
+- [ ] **Multi-platform traits**: Add `StateBackend` trait to abstract KV storage (redb/sqlite/wasm)
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] Refactor any `.unwrap` uses
 - [ ] Trait boundaries: `KvStore` (user ops) vs `SyncStore` (network ops)
-- [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip 
+- [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip )
+- [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
 
 ---
 
