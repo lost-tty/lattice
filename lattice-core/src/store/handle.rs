@@ -8,6 +8,7 @@ use crate::{
 };
 use super::actor::{StoreCmd, StoreActor};
 use super::core::Store;
+use super::sync_state::SyncNeeded;
 use tokio::sync::{broadcast, mpsc};
 use std::path::PathBuf;
 use std::thread;
@@ -19,6 +20,7 @@ pub struct StoreHandle {
     tx: mpsc::Sender<StoreCmd>,
     actor_handle: Option<std::thread::JoinHandle<()>>,
     entry_tx: broadcast::Sender<SignedEntry>,
+    sync_needed_tx: broadcast::Sender<SyncNeeded>,
 }
 
 impl Clone for StoreHandle {
@@ -28,6 +30,7 @@ impl Clone for StoreHandle {
             tx: self.tx.clone(),
             actor_handle: None, // Clones don't own the actor thread
             entry_tx: self.entry_tx.clone(),
+            sync_needed_tx: self.sync_needed_tx.clone(),
         }
     }
 }
@@ -64,9 +67,10 @@ impl StoreHandle {
         
         let (tx, rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(64);
-        let actor = StoreActor::new(store_id, store, logs_dir, node, rx, entry_tx.clone());
+        let (sync_needed_tx, _sync_needed_rx) = broadcast::channel(64);
+        let actor = StoreActor::new(store_id, store, logs_dir, node, rx, entry_tx.clone(), sync_needed_tx.clone());
         let handle = thread::spawn(move || actor.run());
-        Self { store_id, tx, actor_handle: Some(handle), entry_tx }
+        Self { store_id, tx, actor_handle: Some(handle), entry_tx, sync_needed_tx }
     }
     
     pub fn id(&self) -> Uuid { self.store_id }
@@ -74,6 +78,11 @@ impl StoreHandle {
     /// Subscribe to receive entries as they're committed locally
     pub fn subscribe_entries(&self) -> broadcast::Receiver<SignedEntry> {
         self.entry_tx.subscribe()
+    }
+    
+    /// Subscribe to receive sync-needed events (emitted when we're behind a peer)
+    pub fn subscribe_sync_needed(&self) -> broadcast::Receiver<SyncNeeded> {
+        self.sync_needed_tx.subscribe()
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, NodeError> {
@@ -267,8 +276,9 @@ impl StoreHandle {
     
     // ==================== Peer Sync State Methods ====================
     
-    /// Store a peer's sync state (received via gossip or status command)
-    pub async fn set_peer_sync_state(&self, peer: &[u8; 32], info: crate::proto::storage::PeerSyncInfo) -> Result<(), NodeError> {
+    /// Store a peer's sync state (received via gossip or status command).
+    /// Returns SyncDiscrepancy showing what each side is missing.
+    pub async fn set_peer_sync_state(&self, peer: &[u8; 32], info: crate::proto::storage::PeerSyncInfo) -> Result<super::sync_state::SyncDiscrepancy, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::SetPeerSyncState { peer: *peer, info, resp: resp_tx }).await

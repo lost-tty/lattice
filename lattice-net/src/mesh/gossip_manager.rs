@@ -152,8 +152,8 @@ impl GossipManager {
                         }
                         
                         // Handle piggybacked sender_state (if present)
+                        // Store broadcasts SyncNeeded event if we're behind - LatticeServer subscribes
                         if let Some(sync_state) = gossip_msg.sender_state {
-                            // Format before moving
                             let formatted = format_sync_state(&sync_state);
                             
                             let info = PeerSyncInfo {
@@ -163,9 +163,11 @@ impl GossipManager {
                                     .unwrap_or_default()
                                     .as_secs(),
                             };
+                            
                             if let Err(e) = store.set_peer_sync_state(&sender_bytes, info).await {
                                 tracing::warn!(store_id = %store_id, error = %e, "Failed to update peer sync state");
                             }
+                            
                             tracing::info!(
                                 store_id = %store_id,
                                 from = %hex::encode(&sender_bytes)[..8],

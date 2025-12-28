@@ -41,6 +41,33 @@ pub struct MissingRange {
     pub to_seq: u64,          // inclusive - peer has up to this
 }
 
+/// Bidirectional result of comparing two sync states.
+/// Captures what both sides are missing relative to each other.
+#[derive(Debug, Clone, Default)]
+pub struct SyncDiscrepancy {
+    /// Entries we need from them
+    pub entries_we_need: u64,
+    /// Entries they need from us
+    pub entries_they_need: u64,
+}
+
+impl SyncDiscrepancy {
+    /// Returns true if either side has missing entries.
+    pub fn is_out_of_sync(&self) -> bool {
+        self.entries_we_need > 0 || self.entries_they_need > 0
+    }
+}
+
+/// Event emitted when sync is needed with a peer.
+/// Broadcast by Store when states are out of sync.
+#[derive(Debug, Clone)]
+pub struct SyncNeeded {
+    /// Peer public key bytes
+    pub peer: [u8; 32],
+    /// Discrepancy between our state and theirs
+    pub discrepancy: SyncDiscrepancy,
+}
+
 impl SyncState {
     /// Create a new empty sync state.
     pub fn new() -> Self {
@@ -137,6 +164,24 @@ impl SyncState {
         }
 
         missing
+    }
+    
+    /// Calculate discrepancy between local and peer state.
+    /// 
+    /// Returns a bidirectional summary of what each side is missing.
+    pub fn calculate_discrepancy(&self, peer: &SyncState) -> SyncDiscrepancy {
+        let we_need = self.diff(peer);
+        let they_need = peer.diff(self);
+        
+        // from_seq is "I have up to X", to_seq is "peer has up to Y"
+        // Missing entries = Y - X
+        let entries_we_need: u64 = we_need.iter().map(|r| r.to_seq - r.from_seq).sum();
+        let entries_they_need: u64 = they_need.iter().map(|r| r.to_seq - r.from_seq).sum();
+        
+        SyncDiscrepancy {
+            entries_we_need,
+            entries_they_need,
+        }
     }
 
     /// Merge another sync state into this one (takes max seq).
@@ -386,5 +431,31 @@ mod tests {
         assert_eq!(missing[0].to_seq, 8);    // Peer has up to 8
         
         // The sync should fill entries 6, 7, 8 and resolve the orphan
+    }
+    
+    /// Test calculate_discrepancy counts entries correctly.
+    /// from_seq = "I have up to X", to_seq = "peer has up to Y"
+    /// Missing entries = Y - X
+    #[test]
+    fn test_calculate_discrepancy() {
+        let mut local = SyncState::new();
+        let author_a = [1u8; 32];
+        // Local has author A: entries 1..=5
+        local.set(author_a, 5, [0xAA; 32]);
+        
+        let mut peer = SyncState::new();
+        // Peer has author A: entries 1..=10 (we're missing 6,7,8,9,10 = 5 entries)
+        peer.set(author_a, 10, [0xBB; 32]);
+        // Peer has author B: entry 1 (we have nothing, missing 1 entry)
+        let author_b = [2u8; 32];
+        peer.set(author_b, 1, [0xCC; 32]);
+        
+        let discrepancy = local.calculate_discrepancy(&peer);
+        
+        // We need: Author A: 10-5=5, Author B: 1-0=1, Total: 6
+        // They need: nothing (they have everything we have and more)
+        assert_eq!(discrepancy.entries_we_need, 6, "Should correctly count entries we need");
+        assert_eq!(discrepancy.entries_they_need, 0, "Peer has everything we have");
+        assert!(discrepancy.is_out_of_sync(), "Should be out of sync");
     }
 }

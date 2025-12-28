@@ -91,11 +91,16 @@ impl LatticeServer {
                 NodeEvent::StoreReady(store) => {
                     tracing::info!(store_id = %store.id(), "Node ready");
                     
+                    // Subscribe BEFORE gossip setup to avoid missing events
+                    // (broadcast channels don't buffer for late subscribers)
+                    let sync_needed_rx = store.subscribe_sync_needed();
+                    
                     if let Err(e) = server.gossip_manager.setup_for_store(server.node.clone(), &store).await {
                         tracing::error!(error = %e, "Gossip setup failed");
                     }
                     
-                    Self::spawn_gap_watcher(server.clone(), store);
+                    Self::spawn_gap_watcher(server.clone(), store.clone());
+                    Self::spawn_sync_coordinator_with_rx(server.clone(), store, sync_needed_rx);
                 }
                 NodeEvent::SyncRequested(store) => {
                     if let Ok(results) = server.sync_all(&store).await {
@@ -147,6 +152,140 @@ impl LatticeServer {
                     Err(RecvError::Closed) => break,
                 }
             }
+        });
+    }
+    
+    /// Sync coordinator - handles auto-sync requests with throttling.
+    /// 
+    /// Deferred sync pattern:
+    /// 1. SyncNeeded event arrives → queue peer with 3s delay
+    /// 2. Timer fires → re-check if still discrepancy (gossip may have resolved it)
+    /// 3. Still out of sync? → trigger sync
+    fn spawn_sync_coordinator_with_rx(
+        server: Arc<Self>, 
+        store: StoreHandle,
+        mut sync_rx: tokio::sync::broadcast::Receiver<lattice_core::SyncNeeded>,
+    ) {
+        const COOLDOWN_SECS: u64 = 30;
+        const DEFER_SECS: u64 = 3;
+        
+        tokio::spawn(async move {
+            use std::collections::{HashMap, HashSet};
+            use std::time::{Duration, Instant};
+            use tokio::sync::broadcast::error::RecvError;
+            use futures_util::stream::{FuturesUnordered, StreamExt};
+            
+            let cooldown = Duration::from_secs(COOLDOWN_SECS);
+            let defer_delay = Duration::from_secs(DEFER_SECS);
+            let mut last_attempt: HashMap<[u8; 32], Instant> = HashMap::new();
+            let mut pending_peers: HashSet<[u8; 32]> = HashSet::new();
+            let mut pending_timers: FuturesUnordered<_> = FuturesUnordered::new();
+            let store_id = store.id();
+            
+            tracing::info!(store_id = %store_id, "Sync coordinator started");
+            
+            loop {
+                tokio::select! {
+                    // Handle incoming SyncNeeded events
+                    result = sync_rx.recv() => {
+                        match result {
+                            Ok(needed) => {
+                                // Skip if already pending or recently attempted
+                                if pending_peers.contains(&needed.peer) {
+                                    continue;
+                                }
+                                if let Some(last) = last_attempt.get(&needed.peer) {
+                                    if last.elapsed() < cooldown {
+                                        continue;
+                                    }
+                                }
+                                
+                                // Queue deferred check
+                                pending_peers.insert(needed.peer);
+                                let peer = needed.peer;
+                                pending_timers.push(async move {
+                                    tokio::time::sleep(defer_delay).await;
+                                    peer
+                                });
+                            }
+                            Err(RecvError::Lagged(n)) => {
+                                tracing::warn!(store_id = %store_id, skipped = n, "Sync coordinator lagged");
+                            }
+                            Err(RecvError::Closed) => break,
+                        }
+                    }
+                    
+                    // Handle deferred timer expiry (only when there are pending timers)
+                    // Without this guard, FuturesUnordered::next() returns None immediately when empty,
+                    // causing a busy loop as select! keeps polling it.
+                    Some(peer_bytes) = pending_timers.next(), if !pending_timers.is_empty() => {
+                        pending_peers.remove(&peer_bytes);
+                        
+                        // Re-check if still out of sync
+                        let still_out_of_sync = match store.get_peer_sync_state(&peer_bytes).await {
+                            Some(info) => {
+                                if let Some(ref peer_proto) = info.sync_state {
+                                    let peer_state = lattice_core::SyncState::from_proto(peer_proto);
+                                    match store.sync_state().await {
+                                        Ok(local) => local.calculate_discrepancy(&peer_state).is_out_of_sync(),
+                                        Err(_) => false,
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+                            None => false,
+                        };
+                        
+                        if still_out_of_sync {
+                            // Now trigger sync
+                            if let Some(last) = last_attempt.get(&peer_bytes) {
+                                if last.elapsed() < cooldown {
+                                    continue;
+                                }
+                            }
+                            
+                            let Ok(peer_pk) = iroh::PublicKey::try_from(peer_bytes.as_slice()) else {
+                                continue;
+                            };
+                            
+                            last_attempt.insert(peer_bytes, Instant::now());
+                            
+                            tracing::info!(
+                                store_id = %store_id,
+                                peer = %peer_pk.fmt_short(),
+                                "Deferred auto-sync triggered"
+                            );
+                            
+                            let server = server.clone();
+                            let store = store.clone();
+                            
+                            tokio::spawn(async move {
+                                match server.sync_with_peer(&store, peer_pk, &[]).await {
+                                    Ok(result) => {
+                                        tracing::info!(
+                                            store_id = %store_id,
+                                            peer = %peer_pk.fmt_short(),
+                                            entries = result.entries_applied,
+                                            "Auto-sync complete"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            store_id = %store_id,
+                                            peer = %peer_pk.fmt_short(),
+                                            error = %e,
+                                            "Auto-sync failed"
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+            
+            tracing::warn!(store_id = %store_id, "Sync coordinator ended");
         });
     }
 }

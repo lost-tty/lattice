@@ -20,7 +20,7 @@ mod orphan_store;
 pub use core::{Store, StoreError, ParentValidationError};
 pub use handle::StoreHandle;
 pub use actor::{WatchEvent, WatchEventKind, WatchError};
-pub use sync_state::{SyncState, MissingRange};
+pub use sync_state::{SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
 pub use log::{Log, LogError};
 pub use signed_entry::hash_signed_entry;
 pub use orphan_store::{GapInfo, OrphanInfo};

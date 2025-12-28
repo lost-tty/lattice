@@ -121,7 +121,7 @@ pub enum StoreCmd {
     SetPeerSyncState {
         peer: [u8; 32],
         info: crate::proto::storage::PeerSyncInfo,
-        resp: oneshot::Sender<Result<(), StoreError>>,
+        resp: oneshot::Sender<Result<super::sync_state::SyncDiscrepancy, StoreError>>,
     },
     GetPeerSyncState {
         peer: [u8; 32],
@@ -176,6 +176,8 @@ pub struct StoreActor {
     rx: mpsc::Receiver<StoreCmd>,
     /// Broadcast sender for emitting entries after they're committed locally
     entry_tx: broadcast::Sender<SignedEntry>,
+    /// Broadcast sender for sync-needed events (when we detect we're behind a peer)
+    sync_needed_tx: broadcast::Sender<super::sync_state::SyncNeeded>,
     /// Active key watchers (id -> watcher)
     watchers: HashMap<u64, Watcher>,
     /// Counter for watcher IDs
@@ -191,6 +193,7 @@ impl StoreActor {
         node: NodeIdentity,
         rx: mpsc::Receiver<StoreCmd>,
         entry_tx: broadcast::Sender<SignedEntry>,
+        sync_needed_tx: broadcast::Sender<super::sync_state::SyncNeeded>,
     ) -> Self {
         // Create chain manager - loads all chains and builds hash index
         let mut chain_manager = SigChainManager::new(&logs_dir, *store_id.as_bytes());
@@ -206,6 +209,7 @@ impl StoreActor {
             node,
             rx,
             entry_tx,
+            sync_needed_tx,
             watchers: HashMap::new(),
             next_watcher_id: 0,
         }
@@ -314,7 +318,27 @@ impl StoreActor {
                     let _ = resp.send(self.chain_manager.subscribe_gaps());
                 }
                 StoreCmd::SetPeerSyncState { peer, info, resp } => {
-                    let _ = resp.send(self.store.set_peer_sync_state(&peer, &info));
+                    // Compute bidirectional discrepancy
+                    let discrepancy = if let Some(ref peer_sync_state) = info.sync_state {
+                        let peer_state = super::sync_state::SyncState::from_proto(peer_sync_state);
+                        match self.store.sync_state() {
+                            Ok(local_state) => local_state.calculate_discrepancy(&peer_state),
+                            Err(_) => super::sync_state::SyncDiscrepancy::default()
+                        }
+                    } else {
+                        super::sync_state::SyncDiscrepancy::default()
+                    };
+                    
+                    // Emit SyncNeeded if out of sync (sync is bidirectional)
+                    if discrepancy.is_out_of_sync() {
+                        let _ = self.sync_needed_tx.send(super::sync_state::SyncNeeded {
+                            peer,
+                            discrepancy: discrepancy.clone(),
+                        });
+                    }
+                    
+                    let result = self.store.set_peer_sync_state(&peer, &info).map(|_| discrepancy);
+                    let _ = resp.send(result);
                 }
                 StoreCmd::GetPeerSyncState { peer, resp } => {
                     let _ = resp.send(self.store.get_peer_sync_state(&peer).ok().flatten());
@@ -480,6 +504,9 @@ impl StoreActor {
                             // Broadcast to listeners (Unified Feed: Local + Remote + Orphans)
                             let _ = self.entry_tx.send(current.clone());
                             
+                            // Check cached peers and emit SyncNeeded for stale ones
+                            self.emit_sync_for_stale_peers();
+                            
                             // Add any sigchain orphans that became ready (with metadata for deferred deletion)
                             for (orphan, author, prev_hash, orphan_hash) in ready_orphans {
                                 work_queue.push((orphan, (None, Some((author, prev_hash, orphan_hash)))));
@@ -604,6 +631,31 @@ impl StoreActor {
         
         Ok(rx)
     }
+    
+    /// Check cached peer states against local state and emit SyncNeeded for any discrepancies.
+    /// Called after local state changes (entry applied) to trigger sync with stale peers.
+    fn emit_sync_for_stale_peers(&self) {
+        let local_state = match self.store.sync_state() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        
+        let cached_peers = self.store.list_peer_sync_states().unwrap_or_default();
+        
+        for (peer_bytes, info) in cached_peers {
+            if let Some(ref peer_proto) = info.sync_state {
+                let peer_state = super::sync_state::SyncState::from_proto(peer_proto);
+                let discrepancy = local_state.calculate_discrepancy(&peer_state);
+                
+                if discrepancy.is_out_of_sync() {
+                    let _ = self.sync_needed_tx.send(super::sync_state::SyncNeeded {
+                        peer: peer_bytes,
+                        discrepancy,
+                    });
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -632,6 +684,7 @@ mod tests {
         let node = NodeIdentity::generate();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(32);
+        let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
@@ -640,6 +693,7 @@ mod tests {
             node.clone(),
             cmd_rx,
             entry_tx,
+            sync_needed_tx,
         );
         
         // Run actor in background thread
@@ -737,6 +791,7 @@ mod tests {
         let node3 = NodeIdentity::generate(); // Author 3: creates C (merge)
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(32);
+        let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
@@ -745,6 +800,7 @@ mod tests {
             node1.clone(),
             cmd_rx,
             entry_tx,
+            sync_needed_tx,
         );
         
         let actor_handle = std::thread::spawn(move || actor.run());
@@ -872,6 +928,7 @@ mod tests {
         let node3 = NodeIdentity::generate();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(32);
+        let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
@@ -880,6 +937,7 @@ mod tests {
             node1.clone(),
             cmd_rx,
             entry_tx,
+            sync_needed_tx,
         );
         
         let actor_handle = std::thread::spawn(move || actor.run());
@@ -986,6 +1044,7 @@ mod tests {
         let node3 = NodeIdentity::generate();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(32);
+        let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
@@ -994,6 +1053,7 @@ mod tests {
             node1.clone(),
             cmd_rx,
             entry_tx,
+            sync_needed_tx,
         );
         
         let actor_handle = std::thread::spawn(move || actor.run());
@@ -1341,6 +1401,7 @@ mod tests {
         // Spawn actor
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(16);
+        let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
@@ -1349,6 +1410,7 @@ mod tests {
             node.clone(),
             cmd_rx, 
             entry_tx,
+            sync_needed_tx,
         );
         let actor_handle = std::thread::spawn(move || actor.run());
         
@@ -1435,6 +1497,7 @@ mod tests {
         // Spawn actor
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(16);
+        let (sync_needed_tx, _) = broadcast::channel(16);
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
@@ -1443,6 +1506,7 @@ mod tests {
             node.clone(),
             cmd_rx, 
             entry_tx,
+            sync_needed_tx,
         );
         let actor_handle = std::thread::spawn(move || actor.run());
         
@@ -1495,6 +1559,94 @@ mod tests {
         cmd_tx.blocking_send(StoreCmd::OrphanList { resp: resp_tx }).unwrap();
         let orphans = resp_rx.blocking_recv().unwrap();
         assert!(orphans.is_empty(), "Orphan store should be empty");
+        
+        // Shutdown
+        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
+        actor_handle.join().unwrap();
+    }
+    
+    /// Test that StoreActor emits SyncNeeded event when a peer is ahead of us.
+    /// This verifies the plumbing: SetPeerSyncState → SyncNeeded broadcast.
+    #[test]
+    fn test_sync_needed_event_emission() {
+        use std::time::Duration;
+        use crate::store::sync_state::SyncState;
+        
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let state_path = dir.join("state.db");
+        let logs_dir = dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        
+        let store = Store::open(&state_path).unwrap();
+        let node = NodeIdentity::generate();
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let (entry_tx, _) = broadcast::channel(16);
+        // CRITICAL: Keep the receiver to verify event emission
+        let (sync_needed_tx, mut sync_needed_rx) = broadcast::channel(16);
+        
+        let actor = StoreActor::new(
+            Uuid::from_bytes(TEST_STORE),
+            store,
+            logs_dir,
+            node.clone(),
+            cmd_rx,
+            entry_tx,
+            sync_needed_tx,
+        );
+        
+        let actor_handle = std::thread::spawn(move || actor.run());
+        
+        // Create a peer state that is AHEAD of us
+        let peer_bytes = [99u8; 32];
+        let author = [1u8; 32];
+        let mut peer_sync_state = SyncState::new();
+        // Peer has 50 entries for this author, we have 0
+        peer_sync_state.set(author, 50, [0xAA; 32]);
+        
+        let peer_info = crate::proto::storage::PeerSyncInfo {
+            sync_state: Some(peer_sync_state.to_proto()),
+            updated_at: 0,
+        };
+        
+        // Send SetPeerSyncState command
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::SetPeerSyncState { 
+            peer: peer_bytes, 
+            info: peer_info,
+            resp: resp_tx,
+        }).unwrap();
+        
+        // Verify command response contains correct discrepancy
+        let discrepancy = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(discrepancy.entries_we_need, 50, "Should report 50 entries we need");
+        assert_eq!(discrepancy.entries_they_need, 0, "Peer has everything we have");
+        
+        // Verify SyncNeeded event was broadcast
+        std::thread::sleep(Duration::from_millis(10));
+        let event = sync_needed_rx.try_recv().expect("Should have received SyncNeeded event");
+        assert_eq!(event.peer, peer_bytes, "Event should contain correct peer");
+        assert_eq!(event.discrepancy.entries_we_need, 50, "Event should contain correct discrepancy");
+        
+        // Test NO event when peer has no sync_state (nothing to compare)
+        let peer_info_empty = crate::proto::storage::PeerSyncInfo {
+            sync_state: None,  // No sync state = nothing to compare
+            updated_at: 0,
+        };
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx.blocking_send(StoreCmd::SetPeerSyncState { 
+            peer: [88u8; 32], 
+            info: peer_info_empty,
+            resp: resp_tx,
+        }).unwrap();
+        
+        let discrepancy = resp_rx.blocking_recv().unwrap().unwrap();
+        assert!(!discrepancy.is_out_of_sync(), "Should be in sync when no sync_state");
+        
+        // Should NOT have emitted a SyncNeeded event
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(sync_needed_rx.try_recv().is_err(), "Should NOT emit event when in sync");
         
         // Shutdown
         cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();

@@ -39,7 +39,7 @@ Iroh integration (mDNS + DNS discovery), peer management via `/nodes/` keys, joi
 
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may need iroh fix)
 - [x] Add highest HLC common to all local logs to SyncState and show it in `store status` for each node
-- [ ] Auto-trigger direct sync with peer when sync state discrepancy detected (with throttling)
+- [x] Auto-trigger direct sync with peer when sync state discrepancy detected (with throttling)
 
 ---
 

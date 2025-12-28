@@ -28,7 +28,7 @@ pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, NodeError, NodeEvent, Pee
 
 // Store exports (re-exported from store submodule)
 pub use store::{Store, StoreError, StoreHandle, WatchEvent, WatchEventKind, WatchError};
-pub use store::{LogError, SyncState, MissingRange};
+pub use store::{LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
 
 // Proto exports
 pub use proto::storage::HeadInfo;
