@@ -6,117 +6,61 @@
 //! - meta: String → Vec<u8> (system metadata: last_seq, last_hash, etc.)
 //! - author: PubKey → AuthorState (per-author replay tracking)
 
+use crate::store::interfaces::{StateBackend, KvPatch, Store};
+use crate::store::impls::redb::RedbBackend;
+use crate::store::error::{StateError, ParentValidationError};
 use crate::store::LogError;
-use crate::store::sigchain::SigChainError;
 use crate::entry::{SignedEntry, ChainTip};
-use crate::proto::storage::{operation, HeadInfo as ProtoHeadInfo, HeadList};
+use crate::proto::storage::{HeadInfo as ProtoHeadInfo, HeadList};
+use super::{operation, KvPayload};
 use crate::types::{Hash, PubKey};
 use crate::hlc::HLC;
 use crate::head::Head;
 use prost::Message;
-use redb::{Database, ReadableTable, TableDefinition};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::path::Path;
-use thiserror::Error;
 
-// Table definitions
-const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
-const CHAIN_TIPS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chain_tips");
-
-/// Errors that can occur during state operations
-#[derive(Error, Debug)]
-pub enum StateError {
-    #[error("Database error: {0}")]
-    Database(#[from] redb::DatabaseError),
-    
-    #[error("Table error: {0}")]
-    Table(#[from] redb::TableError),
-    
-    #[error("Transaction error: {0}")]
-    Transaction(#[from] redb::TransactionError),
-    
-    #[error("Commit error: {0}")]
-    Commit(#[from] redb::CommitError),
-    
-    #[error("Storage error: {0}")]
-    Storage(#[from] redb::StorageError),
-    
-    #[error("Log error: {0}")]
-    Log(#[from] LogError),
-    
-    #[error("Decode error: {0}")]
-    Decode(#[from] prost::DecodeError),
-    
-    #[error("Sigchain error: {0}")]
-    SigChain(#[from] SigChainError),
-
-    #[error("Entry not successor of tip (seq {entry_seq}, prev_hash {prev_hash}, tip_hash {tip_hash})")]
-    NotSuccessor { entry_seq: u64, prev_hash: String, tip_hash: String },
-    
-    #[error("Conversion error: {0}")]
-    Conversion(String),
-}
-
-/// Errors that occur when validating parent_hashes against current state
-#[derive(Error, Debug, Clone)]
-pub enum ParentValidationError {
-    #[error("Missing parent hash for key")]
-    MissingParent {
-        key: Vec<u8>,
-        awaited_hash: Vec<u8>,
-    },
-    
-    #[error("Decode error: {0}")]
-    Decode(String),
-    
-    #[error("State error: {0}")]
-    State(String),
-}
+// Internal prefixes for multiplexing data types in the backend
+const PREFIX_KV: u8 = b'k';
+const PREFIX_TIP: u8 = b't';
 
 /// Persistent state for KV with DAG conflict resolution
 /// This is a derived materialized view from the log (SigChain)
-pub struct State {
-    db: Database,
+pub struct KvStore {
+    backend: Box<dyn StateBackend<KvPatch>>,
 }
 
-impl State {
+impl KvStore {
     /// Open or create a state at the given path
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StateError> {
-        let db = Database::create(path)?;
-        
-        // Ensure tables exist
-        let write_txn = db.begin_write()?;
-        {
-            let _ = write_txn.open_table(KV_TABLE)?;
-            let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
-        }
-        write_txn.commit()?;
-        
-        Ok(Self { db })
+        let backend = RedbBackend::new(path)?;
+        Ok(Self { backend: Box::new(backend) })
     }
     
+    /// Replay entries from an iterator and apply them to the store (batched)
+    /// Returns the number of newly applied entries (skipped entries not counted)
     /// Replay entries from an iterator and apply them to the store (batched)
     /// Returns the number of newly applied entries (skipped entries not counted)
     pub fn replay_entries<I>(&self, entries: I) -> Result<u64, StateError>
     where
         I: Iterator<Item = Result<SignedEntry, LogError>>,
     {
-        let write_txn = self.db.begin_write()?;
+        let mut patch = KvPatch::default();
+        let mut overlay = HashMap::new();
         let mut applied = 0u64;
-        {
-            let mut kv_table = write_txn.open_table(KV_TABLE)?;
-            let mut chain_tips_table = write_txn.open_table(CHAIN_TIPS_TABLE)?;
-            
-            for result in entries {
-                let signed_entry = result?;
-                match Self::apply_ops_to_tables(&signed_entry, &mut kv_table, &mut chain_tips_table) {
-                    Ok(()) => applied += 1,
-                    Err(StateError::NotSuccessor { .. }) => {} // already applied, skip
-                    Err(e) => return Err(e),
-                }
+        
+        for result in entries {
+            let signed_entry = result?;
+            match self.apply_ops_to_patch(&signed_entry, None, &mut patch, &mut overlay) {
+                Ok(()) => applied += 1,
+                Err(StateError::NotSuccessor { .. }) => {} // already applied, skip
+                Err(e) => return Err(e),
             }
         }
-        write_txn.commit()?;
+        
+        if applied > 0 {
+            self.backend.apply_patch(patch)?;
+        }
         
         Ok(applied)
     }
@@ -124,13 +68,11 @@ impl State {
     /// Apply a single signed entry to the store
     /// Returns Err(NotSuccessor) if entry doesn't chain properly (duplicate, gap, or fork)
     pub fn apply_entry(&self, signed_entry: &SignedEntry) -> Result<(), StateError> {
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut kv_table = write_txn.open_table(KV_TABLE)?;
-            let mut chain_tips_table = write_txn.open_table(CHAIN_TIPS_TABLE)?;
-            Self::apply_ops_to_tables(signed_entry, &mut kv_table, &mut chain_tips_table)?;
-        }
-        write_txn.commit()?;
+        let mut patch = KvPatch::default();
+        let mut overlay = HashMap::new();
+        
+        self.apply_ops_to_patch(signed_entry, None, &mut patch, &mut overlay)?;
+        self.backend.apply_patch(patch)?;
         Ok(())
     }
     
@@ -159,13 +101,17 @@ impl State {
             // Internal type already has [u8; 32], no need to try_into
             if !hash_exists(parent) {
                 // Get the key for the error message (from first op)
-                let key = entry.ops.first()
-                    .and_then(|op| match &op.op_type {
-                        Some(operation::OpType::Put(p)) => Some(p.key.clone()),
-                        Some(operation::OpType::Delete(d)) => Some(d.key.clone()),
-                        None => None,
-                    })
-                    .unwrap_or_default();
+                let key = if let Ok(payload) = KvPayload::decode(entry.payload.as_slice()) {
+                     payload.ops.first()
+                        .and_then(|op| match &op.op_type {
+                            Some(operation::OpType::Put(p)) => Some(p.key.clone()),
+                            Some(operation::OpType::Delete(d)) => Some(d.key.clone()),
+                            None => None,
+                        })
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                };
                 
                 return Err(ParentValidationError::MissingParent {
                     key,
@@ -190,8 +136,12 @@ impl State {
         // Convert parent_hashes to HashSet for O(1) lookup
         let parent_set: HashSet<Hash> = entry.parent_hashes.iter().cloned().collect();
         
+        // Decode KV payload
+        let kv_payload = KvPayload::decode(entry.payload.as_slice())
+            .map_err(|e| ParentValidationError::Decode(e.to_string()))?;
+
         // For each operation, check that ALL parent_hashes are in current heads for that key
-        for op in &entry.ops {
+        for op in &kv_payload.ops {
             let key = match &op.op_type {
                 Some(operation::OpType::Put(p)) => &p.key,
                 Some(operation::OpType::Delete(d)) => &d.key,
@@ -218,33 +168,53 @@ impl State {
         
         Ok(())
     }
-    
-    /// Internal: apply operations from a signed entry to tables
-    /// Returns Ok(()) if applied, Err(NotSuccessor) if already applied or out of order
-    fn apply_ops_to_tables(
+
+    /// Internal: helper to read from overlay or backend
+    fn get_from_overlay_or_backend(&self, key: &[u8], overlay: &HashMap<Vec<u8>, Option<Vec<u8>>>) -> Result<Option<Vec<u8>>, StateError> {
+        if let Some(val) = overlay.get(key) {
+            return Ok(val.clone());
+        }
+        self.backend.get(key)
+    }
+
+    /// Internal: apply operations from a signed entry to patch/overlay
+    fn apply_ops_to_patch(
+        &self,
         signed_entry: &SignedEntry,
-        kv_table: &mut redb::Table<&[u8], &[u8]>,
-        chain_tips_table: &mut redb::Table<&[u8], &[u8]>,
+        provided_payload: Option<&KvPayload>,
+        patch: &mut KvPatch,
+        overlay: &mut HashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> Result<(), StateError> {
         let entry = &signed_entry.entry;
         let entry_hash = signed_entry.hash();
         let entry_hlc: HLC = entry.timestamp;
         let author = signed_entry.author_id;
         
+        // Form the Tip Key (t + author)
+        let tip_key = [&[PREFIX_TIP], author.as_slice()].concat();
+
         // Check if entry properly chains to the previous one
-        if let Some(tip_bytes) = chain_tips_table.get(&author[..])? {
-            if let Ok(tip) = ChainTip::decode(tip_bytes.value()) {
-                if !entry.is_successor_of(&tip) {
-                    return Err(StateError::NotSuccessor {
-                        entry_seq: entry.seq,
-                        prev_hash: hex::encode(&entry.prev_hash[..8]),
-                        tip_hash: hex::encode(&tip.hash[..8]),
-                    });
-                }
-            }
+        let tip = match self.get_from_overlay_or_backend(&tip_key, overlay)? {
+            Some(tip_bytes) => ChainTip::decode(tip_bytes.as_slice())?,
+            None => ChainTip::genesis(),
+        };
+
+        if !entry.is_successor_of(&tip) {
+            return Err(StateError::NotSuccessor {
+                entry_seq: entry.seq,
+                prev_hash: hex::encode(&entry.prev_hash[..8]),
+                tip_hash: hex::encode(&tip.hash[..8]),
+            });
         }
                 
-        for op in &entry.ops {
+        // Decode KV payload
+        use std::borrow::Cow;
+        let kv_payload = match provided_payload {
+            Some(p) => Cow::Borrowed(p),
+            None => Cow::Owned(KvPayload::decode(entry.payload.as_slice())?)
+        };
+
+        for op in &kv_payload.ops {
             if let Some(op_type) = &op.op_type {
                 match op_type {
                     operation::OpType::Put(put) => {
@@ -255,7 +225,7 @@ impl State {
                             hash: entry_hash,
                             tombstone: false,
                         };
-                        Self::apply_head(kv_table, &put.key, new_head, &entry.parent_hashes)?;
+                        self.apply_head(&put.key, new_head, &entry.parent_hashes, patch, overlay)?;
                     }
                     operation::OpType::Delete(del) => {
                         let tombstone = Head {
@@ -265,28 +235,34 @@ impl State {
                             hash: entry_hash,
                             tombstone: true,
                         };
-                        Self::apply_head(kv_table, &del.key, tombstone, &entry.parent_hashes)?;
+                        self.apply_head(&del.key, tombstone, &entry.parent_hashes, patch, overlay)?;
                     }
                 }
             }
         }
 
         let tip = ChainTip::from(signed_entry);
-        chain_tips_table.insert(&author[..], tip.encode().as_slice())?;
+        let tip_bytes = tip.encode();
+        patch.puts.push((tip_key.clone(), tip_bytes.clone()));
+        overlay.insert(tip_key, Some(tip_bytes));
         
         Ok(())
     }
     
     /// Apply a new head to a key, removing ancestor heads (idempotent)
     fn apply_head(
-        kv_table: &mut redb::Table<&[u8], &[u8]>,
+        &self,
         key: &[u8],
         new_head: Head,
         parent_hashes: &[Hash],
+        patch: &mut KvPatch,
+        overlay: &mut HashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> Result<(), StateError> {
-        let mut heads: Vec<Head> = match kv_table.get(key)? {
+        let kv_key = [&[PREFIX_KV], key].concat();
+        
+        let mut heads: Vec<Head> = match self.get_from_overlay_or_backend(&kv_key, overlay)? {
             Some(v) => {
-                let list = HeadList::decode(v.value())?;
+                let list = HeadList::decode(v.as_slice())?;
                 list.heads.into_iter()
                     .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
                     .collect::<Result<Vec<_>, StateError>>()?
@@ -298,9 +274,11 @@ impl State {
         if heads.iter().any(|h| h.hash == new_head.hash) {
             return Ok(());
         }
-        
-        // Remove any heads that are ancestors
-        heads.retain(|h| !parent_hashes.contains(&h.hash));
+
+        // Filter out ancestors (heads that are in parent_hashes)
+        // If a head is in parent_hashes, it is an ancestor of the new head and should be removed.
+        let parent_set: HashSet<Hash> = parent_hashes.iter().cloned().collect();
+        heads.retain(|h| !parent_set.contains(&h.hash));
         
         // Add new head
         heads.push(new_head);
@@ -308,28 +286,18 @@ impl State {
         // Encode back to proto for storage
         let proto_heads: Vec<ProtoHeadInfo> = heads.into_iter().map(Into::into).collect();
         let encoded = HeadList { heads: proto_heads }.encode_to_vec();
-        kv_table.insert(key, encoded.as_slice())?;
+        
+        patch.puts.push((kv_key.clone(), encoded.clone()));
+        overlay.insert(kv_key, Some(encoded));
         Ok(())
     }
     
     /// Get a value by key (returns deterministic winner from heads, None if tombstone)
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(KV_TABLE)?;
-        
-        match table.get(key)? {
-            Some(v) => {
-                let proto_heads = HeadList::decode(v.value())?.heads;
-                let heads: Vec<Head> = proto_heads.into_iter()
-                    .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
-                    .collect::<Result<Vec<_>, StateError>>()?;
-                    
-                match Self::pick_winner(&heads) {
-                    Some(winner) if winner.tombstone => Ok(None),
-                    Some(winner) => Ok(Some(winner.value.clone())),
-                    None => Ok(None),
-                }
-            }
+        let heads = self.get_heads(key)?;
+        match Self::pick_winner(&heads) {
+            Some(winner) if winner.tombstone => Ok(None),
+            Some(winner) => Ok(Some(winner.value.clone())),
             None => Ok(None),
         }
     }
@@ -337,12 +305,12 @@ impl State {
     /// Get all heads for a key (for conflict inspection).
     /// Heads are sorted deterministically: highest HLC first, ties broken by author.
     pub fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, StateError> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(KV_TABLE)?;
+        let kv_key = [&[PREFIX_KV], key].concat();
+        let val = self.backend.get(&kv_key)?;
         
-        match table.get(key)? {
+        match val {
             Some(v) => {
-                let proto_heads = HeadList::decode(v.value())?.heads;
+                let proto_heads = HeadList::decode(v.as_slice())?.heads;
                 let mut heads: Vec<Head> = proto_heads.into_iter()
                     .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
                     .collect::<Result<Vec<_>, StateError>>()?;
@@ -373,45 +341,7 @@ impl State {
             })
         }
     }
-    
-    /// List all key-value pairs (winner values only)
-    /// If include_deleted is true, includes tombstoned entries
-    pub fn list_all(&self, include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
-        self.list_by_prefix(&[], include_deleted)
-    }
-    
-    /// List all key-value pairs matching a prefix (winner values only)
-    /// Uses efficient range query on redb's sorted B-tree
-    /// If include_deleted is true, includes tombstoned entries
-    pub fn list_by_prefix(&self, prefix: &[u8], include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(KV_TABLE)?;
-        
-        let mut result = Vec::new();
-        
-        // Use range query: from prefix to first key that doesn't match
-        for entry in table.range(prefix..)? {
-            let (key, value) = entry?;
-            let key_bytes = key.value();
-            
-            // Stop when we've passed the prefix
-            if !key_bytes.starts_with(prefix) {
-                break;
-            }
-            
-            let proto_heads = HeadList::decode(value.value())?.heads;
-            let heads: Vec<Head> = proto_heads.into_iter()
-                    .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
-                    .collect::<Result<Vec<_>, StateError>>()?;
-            if let Some(winner) = Self::pick_winner(&heads) {
-                // Skip tombstones unless include_deleted is true
-                if include_deleted || !winner.tombstone {
-                    result.push((key_bytes.to_vec(), winner.value.clone()));
-                }
-            }
-        }
-        Ok(result)
-    }
+
     /// Check if a put operation is needed given current heads
     /// Returns false if the winning head has the same value (idempotent)
     pub fn needs_put(heads: &[Head], value: &[u8]) -> bool {
@@ -432,13 +362,56 @@ impl State {
     
     /// Get author state for a specific author
     pub fn chain_tip(&self, author: &PubKey) -> Result<Option<ChainTip>, StateError> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(CHAIN_TIPS_TABLE)?;
-        
-        match table.get(&author[..])? {
-            Some(v) => Ok(ChainTip::decode(v.value()).ok()),
+        let tip_key = [&[PREFIX_TIP], author.as_slice()].concat();
+        let val = self.backend.get(&tip_key)?;
+        match val {
+            Some(v) => Ok(ChainTip::decode(v.as_slice()).ok()),
             None => Ok(None),
         }
+    }
+    /// List all key-value pairs (winner values only)
+    /// If include_deleted is true, includes tombstoned entries
+    pub fn list_all(&self, include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
+        self.list_by_prefix(&[], include_deleted)
+    }
+    
+    /// List all key-value pairs matching a prefix (winner values only)
+    /// If include_deleted is true, includes tombstoned entries
+    pub fn list_by_prefix(&self, prefix: &[u8], include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
+        let scan_prefix = [&[PREFIX_KV], prefix].concat();
+        let entries = self.backend.scan(&scan_prefix)?;
+        let mut result = Vec::new();
+        
+        for (full_key, value) in entries {
+            if full_key.is_empty() { continue; }
+            let key_bytes = full_key[1..].to_vec(); // Strip prefix
+            
+            let proto_heads = HeadList::decode(value.as_slice())?.heads;
+            let heads: Vec<Head> = proto_heads.into_iter()
+                    .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
+                    .collect::<Result<Vec<_>, StateError>>()?;
+            if let Some(winner) = Self::pick_winner(&heads) {
+                // Skip tombstones unless include_deleted is true
+                if include_deleted || !winner.tombstone {
+                    result.push((key_bytes, winner.value.clone()));
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
+impl Store for KvStore {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
+        KvStore::get(self, key)
+    }
+
+    fn list(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
+        self.list_by_prefix(prefix, false)
+    }
+
+    fn chain_tip(&self, author: &PubKey) -> Result<Option<ChainTip>, StateError> {
+        KvStore::chain_tip(self, author)
     }
 }
 
@@ -449,22 +422,21 @@ mod tests {
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::entry::{Entry, SignedEntry, ChainTip};
-    use crate::proto::storage::{Operation, Entry as ProtoEntry, SignedEntry as ProtoSignedEntry};
+    use crate::proto::storage::{Entry as ProtoEntry, SignedEntry as ProtoSignedEntry};
+    use crate::store::kv::{Operation, KvPayload};
     use crate::store::Log;
-
-    use crate::types::PubKey;
+    use prost::Message;
     use uuid::Uuid;
-
-    const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
     
-    /// Test helper - read all entries
+    const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
+
+    /// Helper to create payload from operations
+    fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+        KvPayload { ops }.encode_to_vec()
+    }
+
     fn read_entries(path: impl AsRef<std::path::Path>) -> Vec<SignedEntry> {
-        Log::open(&path)
-            .unwrap()
-            .iter()
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
+        Log::open(&path).unwrap().iter().unwrap().map(|r| r.unwrap()).collect()
     }
 
     #[test]
@@ -472,14 +444,14 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
         let entry = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"value".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"value".to_vec())]))
             .sign(&node);
         
         state.apply_entry(&entry).unwrap();
@@ -511,7 +483,7 @@ mod tests {
             },
         ];
         
-        let winner = State::pick_winner(&heads).unwrap();
+        let winner = KvStore::pick_winner(&heads).unwrap();
         assert_eq!(winner.value, b"newer"); // Higher HLC wins
     }
 
@@ -520,7 +492,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
@@ -528,7 +500,7 @@ mod tests {
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"v1".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v1".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry1).unwrap();
         
@@ -538,7 +510,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE)
             .parent_hashes(vec![]) // Also no parent (doesn't know about entry1)
-            .operation(Operation::put("/key", b"v2".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v2".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry2).unwrap();
         
@@ -554,7 +526,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let node = NodeIdentity::generate();
         
         // Create two heads
@@ -563,7 +535,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/key", b"v1".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v1".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry1).unwrap();
         
@@ -572,7 +544,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/key", b"v2".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v2".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry2).unwrap();
         
@@ -586,7 +558,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash1, hash2])
-            .operation(Operation::put("/key", b"merged".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"merged".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry3).unwrap();
         
@@ -603,7 +575,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let node = NodeIdentity::generate();
         let node2 = NodeIdentity::generate();
         
@@ -612,7 +584,7 @@ mod tests {
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"v1".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v1".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry1).unwrap();
         
@@ -620,7 +592,7 @@ mod tests {
         let entry2 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"v2".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v2".to_vec())]))
             .sign(&node2);
         state.apply_entry(&entry2).unwrap();
         
@@ -636,7 +608,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash1]) // Only cites entry1
-            .operation(Operation::delete("/key"))
+            .payload(make_payload(vec![Operation::delete("/key")]))
             .sign(&node);
         state.apply_entry(&entry3).unwrap();
         
@@ -658,7 +630,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let node = NodeIdentity::generate();
         
         // Create a single head
@@ -666,7 +638,7 @@ mod tests {
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"value".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"value".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry1).unwrap();
         
@@ -679,7 +651,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash1])
-            .operation(Operation::delete("/key"))
+            .payload(make_payload(vec![Operation::delete("/key")]))
             .sign(&node);
         state.apply_entry(&entry2).unwrap();
         
@@ -706,7 +678,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let alice = NodeIdentity::generate();
         let bob = NodeIdentity::generate();
         
@@ -715,7 +687,7 @@ mod tests {
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE)
-            .operation(Operation::put(b"/key", b"v1".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"v1".to_vec())]))
             .sign(&alice);
         state.apply_entry(&entry1).unwrap();
         let h1 = entry1.hash();
@@ -725,7 +697,7 @@ mod tests {
         let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
             .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE)
-            .operation(Operation::delete(b"/key"))
+            .payload(make_payload(vec![Operation::delete(b"/key")]))
             .sign(&alice);
         state.apply_entry(&entry2).unwrap();
         
@@ -735,7 +707,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE)
             .parent_hashes(vec![h1])  // Cites H1 as parent
-            .operation(Operation::put(b"/key", b"v2".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"v2".to_vec())]))
             .sign(&bob);
         state.apply_entry(&entry3).unwrap();
         
@@ -764,7 +736,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let alice = NodeIdentity::generate();
         let bob = NodeIdentity::generate();
         let charlie = NodeIdentity::generate();
@@ -774,7 +746,7 @@ mod tests {
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE)
-            .operation(Operation::put(b"/key", b"alice_v1".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"alice_v1".to_vec())]))
             .sign(&alice);
         state.apply_entry(&entry1).unwrap();
         let h1 = entry1.hash();
@@ -785,7 +757,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE)
             // No parent_hashes = concurrent/diverged
-            .operation(Operation::put(b"/key", b"bob_v2".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"bob_v2".to_vec())]))
             .sign(&bob);
         state.apply_entry(&entry2).unwrap();
         let h2 = entry2.hash();
@@ -804,7 +776,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE)
             .parent_hashes(vec![h1, h2])
-            .operation(Operation::put(b"/key", b"charlie_merged".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"charlie_merged".to_vec())]))
             .sign(&charlie);
         state.apply_entry(&entry3).unwrap();
         
@@ -824,7 +796,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let node = NodeIdentity::generate();
         
         let clock1 = MockClock::new(1000);
@@ -832,7 +804,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/key", b"value".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"value".to_vec())]))
             .sign(&node);
         
         // Apply once
@@ -864,7 +836,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let node = NodeIdentity::generate();
         
         // First write: a = 1
@@ -873,7 +845,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/key", b"1".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"1".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry1).unwrap();
         let h1 = entry1.hash();
@@ -886,7 +858,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE)
             .parent_hashes(vec![h1])
-            .operation(Operation::put(b"/key", b"2".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"2".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry2).unwrap();
         
@@ -895,7 +867,7 @@ mod tests {
         // Now simulate log replay: clear state and re-apply both entries
         drop(state);
         let _ = std::fs::remove_file(&path);
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         
         // Check what parent_hashes entry2 actually has
         let proto: ProtoSignedEntry = entry2.clone().into();
@@ -928,7 +900,7 @@ mod tests {
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let mut sigchain = SigChain::new(&log_path, TEST_STORE, PubKey::from(*node.public_key())).unwrap();
         
@@ -938,7 +910,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/key", b"1".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"1".to_vec())]))
             .sign(&node);
         sigchain.append(&entry1).unwrap();
         state.apply_entry(&entry1).unwrap();
@@ -950,7 +922,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE)
             .parent_hashes(vec![h1])
-            .operation(Operation::put(b"/key", b"2".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"2".to_vec())]))
             .sign(&node);
         sigchain.append(&entry2).unwrap();
         state.apply_entry(&entry2).unwrap();
@@ -963,7 +935,7 @@ mod tests {
         drop(state);
         drop(sigchain);
         
-        let state = State::open(&state_path).unwrap();  // Reopen existing state
+        let state = KvStore::open(&state_path).unwrap();  // Reopen existing state
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 2, "author seq persisted");
         
         // Replay log - entries already applied, skip all
@@ -990,7 +962,7 @@ mod tests {
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let author = node.public_key();
         let mut sigchain = SigChain::new(&log_path, TEST_STORE, PubKey::from(*node.public_key())).unwrap();
@@ -1002,7 +974,7 @@ mod tests {
                 .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE)
                 .parent_hashes(vec![])
-                .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
+                .payload(make_payload(vec![Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes())]))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             state.apply_entry(&entry).unwrap();
@@ -1015,7 +987,7 @@ mod tests {
         drop(state);
         drop(sigchain);
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let replayed = Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         
         // All 3 entries were read but skipped (already applied)
@@ -1038,7 +1010,7 @@ mod tests {
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let author = node.public_key();
         let mut sigchain = SigChain::new(&log_path, TEST_STORE, PubKey::from(*node.public_key())).unwrap();
@@ -1050,7 +1022,7 @@ mod tests {
                 .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE)
                 .parent_hashes(vec![])
-                .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
+                .payload(make_payload(vec![Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes())]))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             
@@ -1067,7 +1039,7 @@ mod tests {
         drop(state);
         drop(sigchain);
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let replayed = Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         
         assert_eq!(replayed, 2, "Only 2 new entries applied (3 skipped)");
@@ -1097,7 +1069,7 @@ mod tests {
         let _ = std::fs::remove_file(&backup_path);
         let _ = std::fs::remove_file(&log_path);
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let author = node.public_key();
         let mut sigchain = SigChain::new(&log_path, TEST_STORE, PubKey::from(*node.public_key())).unwrap();
@@ -1109,7 +1081,7 @@ mod tests {
                 .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE)
                 .parent_hashes(vec![])
-                .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
+                .payload(make_payload(vec![Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes())]))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             state.apply_entry(&entry).unwrap();
@@ -1122,14 +1094,14 @@ mod tests {
         std::fs::copy(&state_path, &backup_path).unwrap();
         
         // Reopen and apply entries 4-5
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         for i in 4u64..=5 {
             let clock = MockClock::new(i * 1000);
             let entry = Entry::next_after(sigchain.tip())
                 .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE)
                 .parent_hashes(vec![])
-                .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
+                .payload(make_payload(vec![Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes())]))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             state.apply_entry(&entry).unwrap();
@@ -1144,7 +1116,7 @@ mod tests {
         std::fs::copy(&backup_path, &state_path).unwrap();
         
         // Restart and replay
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         
         // State should be at seq 3 (restored from backup)
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 3, "Restored to seq 3");
@@ -1168,7 +1140,7 @@ mod tests {
     fn test_needs_put_empty_heads() {
         // No heads = need put
         let heads: Vec<Head> = vec![];
-        assert!(State::needs_put(&heads, b"value"));
+        assert!(KvStore::needs_put(&heads, b"value"));
     }
 
     #[test]
@@ -1181,7 +1153,7 @@ mod tests {
             hash: Hash::from([2u8; 32]),
             tombstone: false,
         }];
-        assert!(!State::needs_put(&heads, b"hello"));
+        assert!(!KvStore::needs_put(&heads, b"hello"));
     }
 
     #[test]
@@ -1194,7 +1166,7 @@ mod tests {
             hash: Hash::from([2u8; 32]),
             tombstone: false,
         }];
-        assert!(State::needs_put(&heads, b"world"));
+        assert!(KvStore::needs_put(&heads, b"world"));
     }
 
     #[test]
@@ -1217,15 +1189,15 @@ mod tests {
                 tombstone: false,
             },
         ];
-        assert!(!State::needs_put(&heads, b"v2"));  // Winner has value = skip
-        assert!(State::needs_put(&heads, b"v1"));   // Winner doesn't have value = put
+        assert!(!KvStore::needs_put(&heads, b"v2"));  // Winner has value = skip
+        assert!(KvStore::needs_put(&heads, b"v1"));   // Winner doesn't have value = put
     }
 
     #[test]
     fn test_needs_delete_empty_heads() {
         // No heads = idempotent, no delete needed
         let heads: Vec<Head> = vec![];
-        assert!(!State::needs_delete(&heads));
+        assert!(!KvStore::needs_delete(&heads));
     }
 
     #[test]
@@ -1238,7 +1210,7 @@ mod tests {
             hash: Hash::from([2u8; 32]),
             tombstone: false,
         }];
-        assert!(State::needs_delete(&heads));
+        assert!(KvStore::needs_delete(&heads));
     }
 
     #[test]
@@ -1251,7 +1223,7 @@ mod tests {
             hash: Hash::from([2u8; 32]),
             tombstone: true,
         }];
-        assert!(!State::needs_delete(&heads));
+        assert!(!KvStore::needs_delete(&heads));
     }
 
 
@@ -1266,8 +1238,8 @@ mod tests {
             let _ = std::fs::remove_file(p);
         }
         
-        let store_a = State::open(&path_a).unwrap();
-        let store_b = State::open(&path_b).unwrap();
+        let store_a = KvStore::open(&path_a).unwrap();
+        let store_b = KvStore::open(&path_b).unwrap();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         
@@ -1277,7 +1249,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&MockClock::new(1000)))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/shared_key", b"value_from_a".to_vec()))
+            .payload(make_payload(vec![Operation::put("/shared_key", b"value_from_a".to_vec())]))
             .sign(&node_a);
         store_a.apply_entry(&entry_a).unwrap();
         Log::open_or_create(&log_path_a).unwrap().append(&entry_a).unwrap();
@@ -1286,7 +1258,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&MockClock::new(1000)))  // Same HLC!
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/shared_key", b"value_from_b".to_vec()))
+            .payload(make_payload(vec![Operation::put("/shared_key", b"value_from_b".to_vec())]))
             .sign(&node_b);
         store_b.apply_entry(&entry_b).unwrap();
         Log::open_or_create(&log_path_b).unwrap().append(&entry_b).unwrap();
@@ -1335,7 +1307,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let node_low = NodeIdentity::generate();
         let node_high = NodeIdentity::generate();
         
@@ -1353,7 +1325,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/tiebreak_key", b"from_low".to_vec()))
+            .payload(make_payload(vec![Operation::put("/tiebreak_key", b"from_low".to_vec())]))
             .sign(low_node);
         state.apply_entry(&entry_low).unwrap();
         
@@ -1361,7 +1333,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/tiebreak_key", b"from_high".to_vec()))
+            .payload(make_payload(vec![Operation::put("/tiebreak_key", b"from_high".to_vec())]))
             .sign(high_node);
         state.apply_entry(&entry_high).unwrap();
         
@@ -1389,7 +1361,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         
         // Create 3 nodes
         let node_a = NodeIdentity::generate();
@@ -1403,21 +1375,21 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/a", b"from_a".to_vec()))
+            .payload(make_payload(vec![Operation::put("/a", b"from_a".to_vec())]))
             .sign(&node_a);
         
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/a", b"from_b".to_vec()))
+            .payload(make_payload(vec![Operation::put("/a", b"from_b".to_vec())]))
             .sign(&node_b);
         
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/a", b"from_c".to_vec()))
+            .payload(make_payload(vec![Operation::put("/a", b"from_c".to_vec())]))
             .sign(&node_c);
         
         // We need the hashes for parent_hashes - compute them
@@ -1429,7 +1401,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash_a, hash_b, hash_c])
-            .operation(Operation::put("/a", b"merged".to_vec()))
+            .payload(make_payload(vec![Operation::put("/a", b"merged".to_vec())]))
             .sign(&node_a);
         
         // Apply in WRONG order: A's chain first (entry_a + merge), then B, then C
@@ -1464,7 +1436,7 @@ mod tests {
         let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
         let _ = std::fs::remove_file(&path);
         
-        let state = State::open(&path).unwrap();
+        let state = KvStore::open(&path).unwrap();
         let node = NodeIdentity::generate();
         
         // Create a key under /test/ prefix
@@ -1473,7 +1445,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/test/key1", b"value1".to_vec()))
+            .payload(make_payload(vec![Operation::put("/test/key1", b"value1".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry1).unwrap();
         
@@ -1483,7 +1455,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/test/key2", b"value2".to_vec()))
+            .payload(make_payload(vec![Operation::put("/test/key2", b"value2".to_vec())]))
             .sign(&node);
         state.apply_entry(&entry2).unwrap();
         
@@ -1493,7 +1465,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE)
             .parent_hashes(vec![entry2.hash()])
-            .operation(Operation::delete(b"/test/key1"))
+            .payload(make_payload(vec![Operation::delete(b"/test/key1")]))
             .sign(&node);
         state.apply_entry(&entry3).unwrap();
         

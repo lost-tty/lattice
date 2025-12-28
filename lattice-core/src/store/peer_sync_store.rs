@@ -1,7 +1,8 @@
-use redb::{Database, TableDefinition, ReadableTable};
+use redb::{Database, ReadableTable, TableDefinition};
 use crate::types::PubKey;
 use crate::proto::storage::PeerSyncInfo;
-use crate::store::state::StateError;
+use crate::store::StateError;
+
 use prost::Message;
 use std::path::Path;
 

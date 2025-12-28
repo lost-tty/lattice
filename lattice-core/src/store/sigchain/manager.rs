@@ -9,7 +9,7 @@ use super::orphan_store::{GapInfo, OrphanStore, OrphanInfo};
 use super::sync_state::SyncState;
 use crate::types::{Hash, PubKey};
 use crate::node_identity::NodeIdentity;
-use crate::proto::storage::Operation;
+
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -259,17 +259,13 @@ impl SigChain {
         &self,
         node: &NodeIdentity,
         parent_hashes: Vec<Hash>,
-        ops: Vec<Operation>,
+        payload: Vec<u8>,
     ) -> SignedEntry { 
-        let mut builder = Entry::next_after(self.tip.as_ref())
+        Entry::next_after(self.tip.as_ref())
             .store_id(self.store_id)
-            .parent_hashes(parent_hashes);
-        
-        for op in ops {
-            builder = builder.operation(op);
-        }
-        
-        builder.sign(node)
+            .parent_hashes(parent_hashes)
+            .payload(payload)
+            .sign(node)
     }
 }
 
@@ -603,10 +599,15 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::proto::storage::Operation;
+    use crate::store::kv::{Operation, KvPayload};
     use crate::entry::{Entry, ChainTip};
+    use prost::Message;
 
     const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
+
+    fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+        KvPayload { ops }.encode_to_vec()
+    }
 
     #[test]
     fn test_new_sigchain() {
@@ -635,7 +636,7 @@ mod tests {
         let entry = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"value".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"value".to_vec())]))
             .sign(&node);
         
         chain.append(&entry).unwrap();
@@ -661,7 +662,7 @@ mod tests {
             let entry = Entry::next_after(chain.tip())
                 .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE)
-                .operation(Operation::put(format!("/key/{}", i), format!("value{}", i).into_bytes()))
+                .payload(make_payload(vec![Operation::put(format!("/key/{}", i), format!("value{}", i).into_bytes())]))
                 .sign(&node);
             chain.append(&entry).unwrap();
         }
@@ -688,7 +689,7 @@ mod tests {
                 let entry = Entry::next_after(chain.tip())
                     .timestamp(HLC::now_with_clock(&clock))
                     .store_id(TEST_STORE)
-                    .operation(Operation::put("/key", b"val".to_vec()))
+                    .payload(make_payload(vec![Operation::put("/key", b"val".to_vec())]))
                     .sign(&node);
                 chain.append(&entry).unwrap();
             }
@@ -720,7 +721,7 @@ mod tests {
         let entry = Entry::next_after(Some(&fake_tip))
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"val".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"val".to_vec())]))
             .sign(&node);
         
         let result = chain.append(&entry);
@@ -745,7 +746,7 @@ mod tests {
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"v1".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v1".to_vec())]))
             .sign(&node);
         chain.append(&entry1).unwrap();
         
@@ -756,7 +757,7 @@ mod tests {
         let entry2 = Entry::next_after(Some(&fake_tip))
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"v2".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v2".to_vec())]))
             .sign(&node);
         
         let result = chain.append(&entry2);
@@ -781,7 +782,7 @@ mod tests {
         let entry = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"val".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"val".to_vec())]))
             .sign(&node);
         
         let result = chain.append(&entry);
@@ -801,9 +802,10 @@ mod tests {
         let mut chain = SigChain::new(&path, TEST_STORE, PubKey::from(*author)).unwrap();
         
         let ops = vec![Operation::put(b"/test", b"hello")];
+        let payload = make_payload(ops);
         
         // Build entry (doesn't append)
-        let signed = chain.build_entry(&node, vec![], ops);
+        let signed = chain.build_entry(&node, vec![], payload);
         
         // Manually append
         chain.append(&signed).unwrap();
@@ -841,7 +843,7 @@ mod tests {
         let entry = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(store_a)
-            .operation(Operation::put("/key", b"val".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"val".to_vec())]))
             .sign(&node);
         chain_a.append(&entry).unwrap();
         
@@ -873,7 +875,7 @@ mod tests {
         let entry_1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"value1".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"value1".to_vec())]))
             .sign(&node);
         let hash_1 = entry_1.hash();
         
@@ -881,7 +883,7 @@ mod tests {
         let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"value2".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"value2".to_vec())]))
             .sign(&node);
         
         // Create entry_3 (child of entry_2)
@@ -889,7 +891,7 @@ mod tests {
         let entry_3 = Entry::next_after(Some(&ChainTip::from(&entry_2)))
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"value3".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"value3".to_vec())]))
             .sign(&node);
         let hash_3 = entry_3.hash();
         
@@ -958,13 +960,13 @@ mod tests {
         let entry_1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"v1".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v1".to_vec())]))
             .sign(&node);
         
         let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"v2".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v2".to_vec())]))
             .sign(&node);
         
         // Ingest entry_2 first (orphan - entry_1 missing)
@@ -1019,19 +1021,19 @@ mod tests {
         let entry_1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"v1".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v1".to_vec())]))
             .sign(&node);
         
         let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"v2".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v2".to_vec())]))
             .sign(&node);
         
         let entry_3 = Entry::next_after(Some(&ChainTip::from(&entry_2)))
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
-            .operation(Operation::put("/key", b"v3".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"v3".to_vec())]))
             .sign(&node);
         let hash_3 = entry_3.hash();
         

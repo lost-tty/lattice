@@ -136,8 +136,12 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server:
             let hlc = format!("{}.{}", e.timestamp.wall_time, e.timestamp.counter);
             
             // Format ops
-            let ops_str: Vec<String> = e.ops.iter().filter_map(|op| {
-                use lattice_core::proto::storage::operation::OpType;
+            // Format ops
+            use prost::Message;
+            use lattice_core::store::kv::KvPayload;
+            let kv_payload = KvPayload::decode(&e.payload[..]).unwrap_or_default();
+            let ops_str: Vec<String> = kv_payload.ops.iter().filter_map(|op| {
+                use lattice_core::store::kv::operation::OpType;
                 match &op.op_type {
                     Some(OpType::Put(p)) => {
                         let key = String::from_utf8_lossy(&p.key);
@@ -415,8 +419,11 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
             let decoded = &entry.entry;
             
             // Check if this entry should be included
-            for op in &decoded.ops {
-                use lattice_core::proto::storage::operation::OpType;
+            use prost::Message;
+            use lattice_core::store::kv::KvPayload;
+            let kv_payload = KvPayload::decode(&decoded.payload[..]).unwrap_or_default();
+            for op in &kv_payload.ops {
+                use lattice_core::store::kv::operation::OpType;
                 let (op_key, value, tombstone) = match &op.op_type {
                     Some(OpType::Put(p)) => (&p.key, &p.value, false),
                     Some(OpType::Delete(d)) => (&d.key, &vec![], true),

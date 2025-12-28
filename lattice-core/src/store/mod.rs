@@ -7,14 +7,23 @@
 //! - SyncState: sync protocol state tracking
 
 // Private submodules
-mod state;
 mod actor;
 mod handle;
-pub mod sigchain;
 mod peer_sync_store;
+mod error;
+
+// Public submodules
+pub mod sigchain;
+pub mod interfaces;
+pub mod impls;
+pub mod kv;
+
+// Re-export interface types for convenience
+pub use interfaces::{Patch, ReadContext, StateBackend, KvPatch, Store, SyncStore};
 
 // Public API - types needed by Node and LatticeServer
-pub use state::{State, StateError, ParentValidationError};
+pub use error::{StateError, ParentValidationError};
+pub use kv::KvStore;
 pub use handle::StoreHandle;
 pub use actor::{WatchEvent, WatchEventKind, WatchError};
 pub use peer_sync_store::PeerSyncStore;

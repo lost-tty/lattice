@@ -23,25 +23,7 @@ message Entry {
   uint64 seq = 3;                 // Monotonic sequence number
   HLC timestamp = 4;              // Hybrid Logical Clock
   repeated bytes parent_hashes = 7;  // DAG ancestry: hashes of entries this supersedes
-  repeated Operation ops = 5;     // Batch of operations
-}
-
-// 3. Operations
-message Operation {
-  oneof op_type {
-    PutOp put = 1;
-    DeleteOp delete = 2;
-    // Future: MergeOp merge = 3;
-  }
-}
-
-message PutOp {
-  bytes key = 1;
-  bytes value = 2;
-}
-
-message DeleteOp {
-  bytes key = 1;
+  bytes payload = 5;              // Opaque payload (Store implementation determines format)
 }
 
 // 4. Multi-head DAG storage (state.db)

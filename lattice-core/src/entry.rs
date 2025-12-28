@@ -1,7 +1,8 @@
 //! Log entries (atomic operations) with strong typing
 
 use crate::hlc::HLC;
-use crate::proto::storage::{Operation, Entry as ProtoEntry, SignedEntry as ProtoSignedEntry, ChainTip as ProtoChainTip};
+use crate::proto::storage::{Entry as ProtoEntry, SignedEntry as ProtoSignedEntry, ChainTip as ProtoChainTip};
+
 use crate::node_identity::{NodeIdentity, NodeError};
 use crate::types::{Hash, PubKey, Signature as Sig};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -44,7 +45,7 @@ pub struct Entry {
     pub parent_hashes: Vec<Hash>,
     pub seq: u64,
     pub timestamp: HLC,
-    pub ops: Vec<Operation>,
+    pub payload: Vec<u8>,
 }
 
 /// Represents the tip of a sigchain (last committed entry's metadata).
@@ -70,6 +71,15 @@ impl ChainTip {
     pub fn encode(&self) -> Vec<u8> {
         let proto: ProtoChainTip = self.clone().into();
         proto.encode_to_vec()
+    }
+
+    /// Create a genesis tip (zero hash, seq 0)
+    pub fn genesis() -> Self {
+        Self {
+            seq: 0,
+            hash: Hash::ZERO,
+            hlc: HLC::default(),
+        }
     }
 }
 
@@ -203,7 +213,7 @@ impl From<Entry> for ProtoEntry {
             parent_hashes: e.parent_hashes.iter().map(|h| h.to_vec()).collect(),
             seq: e.seq,
             timestamp: Some(e.timestamp.into()),
-            ops: e.ops,
+            payload: e.payload,
         }
     }
 }
@@ -234,7 +244,7 @@ impl TryFrom<ProtoEntry> for Entry {
             parent_hashes,
             seq: p.seq,
             timestamp: p.timestamp.map(Into::into).ok_or(EntryError::MissingTimestamp)?,
-            ops: p.ops,
+            payload: p.payload,
         })
     }
 }
@@ -304,7 +314,7 @@ impl EntryBuilder {
                 parent_hashes: Vec::new(),
                 seq,
                 timestamp,
-                ops: Vec::new(),
+                payload: Vec::new(),
             }
         }
     }
@@ -324,8 +334,8 @@ impl EntryBuilder {
         self
     }
     
-    pub fn operation(mut self, op: Operation) -> Self {
-        self.entry.ops.push(op);
+    pub fn payload(mut self, payload: Vec<u8>) -> Self {
+        self.entry.payload = payload;
         self
     }
 

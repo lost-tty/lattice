@@ -2,11 +2,12 @@
 
 use crate::{
     NodeIdentity, Uuid, PubKey, Head,
-    proto::storage::{ChainTip, Operation},
+    proto::storage::ChainTip,
+    store::kv::Operation,
     entry::SignedEntry,
 };
-use super::{
-    state::{State, StateError, ParentValidationError},
+use crate::store::{
+    KvStore, StateError, ParentValidationError,
     sigchain::{
         SigChainError, SigChainManager, SigchainValidation,
         SyncState, SyncDiscrepancy, SyncNeeded,
@@ -174,7 +175,7 @@ impl std::error::Error for StoreActorError {}
 
 /// The store actor - runs in its own thread, owns Store and SigChainManager
 pub struct StoreActor {
-    state: State,
+    state: KvStore,
     chain_manager: SigChainManager,
     peer_store: PeerSyncStore,
     node: NodeIdentity,
@@ -193,7 +194,7 @@ impl StoreActor {
     /// Create a new store actor (but don't start the thread yet)
     pub fn new(
         store_id: Uuid,
-        state: State,
+        state: KvStore,
         logs_dir: std::path::PathBuf,
         node: NodeIdentity,
         rx: mpsc::Receiver<StoreCmd>,
@@ -368,12 +369,12 @@ impl StoreActor {
     }
 
     fn do_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), StoreActorError> {
-        use crate::proto::storage::Operation;
+        use crate::store::kv::Operation;
         
         let heads = self.state.get_heads(key)?;
         
         // Idempotency check (pure function)
-        if !State::needs_put(&heads, value) {
+        if !KvStore::needs_put(&heads, value) {
             return Ok(());
         }
         
@@ -392,12 +393,12 @@ impl StoreActor {
     }
 
     fn do_delete(&mut self, key: &[u8]) -> Result<(), StoreActorError> {
-        use crate::proto::storage::Operation;
+        use crate::store::kv::Operation;
         
         let heads = self.state.get_heads(key)?;
         
         // Idempotency check (pure function)
-        if !State::needs_delete(&heads) {
+        if !KvStore::needs_delete(&heads) {
             return Ok(());
         }
         
@@ -468,7 +469,10 @@ impl StoreActor {
         // Build the entry (without appending)
         let local_author = self.node.public_key();
         let sigchain = self.chain_manager.get_or_create(local_author);
-        let entry = sigchain.build_entry(&self.node, parent_hashes, ops);
+        use prost::Message;
+        use crate::store::kv::KvPayload;
+        let payload = KvPayload { ops }.encode_to_vec();
+        let entry = sigchain.build_entry(&self.node, parent_hashes, payload);
         
         // Use unified apply path
         self.apply_ingested_entry(&entry)?;
@@ -596,18 +600,24 @@ impl StoreActor {
     
     /// Emit watch events for all operations in an entry
     fn emit_watch_events_for_entry(&mut self, entry: &SignedEntry) {
-        for op in &entry.entry.ops {
-            use crate::proto::storage::operation::OpType;
-            match &op.op_type {
-                Some(OpType::Put(put_op)) => {
-                    self.emit_watch_event(&put_op.key, WatchEventKind::Put { 
-                        value: put_op.value.clone() 
-                    });
+        use crate::store::kv::KvPayload;
+        use prost::Message;
+        
+        // Try decoding as KV payload (ignore if not KV - different store type?)
+        if let Ok(kv_payload) = KvPayload::decode(entry.entry.payload.as_slice()) {
+            for op in &kv_payload.ops {
+                use crate::store::kv::operation::OpType;
+                match &op.op_type {
+                    Some(OpType::Put(put_op)) => {
+                        self.emit_watch_event(&put_op.key, WatchEventKind::Put { 
+                            value: put_op.value.clone() 
+                        });
+                    }
+                    Some(OpType::Delete(delete_op)) => {
+                        self.emit_watch_event(&delete_op.key, WatchEventKind::Delete);
+                    }
+                    None => {}
                 }
-                Some(OpType::Delete(delete_op)) => {
-                    self.emit_watch_event(&delete_op.key, WatchEventKind::Delete);
-                }
-                None => {}
             }
         }
     }
@@ -679,9 +689,15 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::proto::storage::Operation;
+    use crate::store::kv::Operation;
     use crate::entry::{Entry, ChainTip};
     use crate::types::{Hash, PubKey};
+    use prost::Message;
+    use crate::store::kv::KvPayload;
+    
+    fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+        KvPayload { ops }.encode_to_vec()
+    }
 
     const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
 
@@ -696,7 +712,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(32);
@@ -722,7 +738,7 @@ mod tests {
             .store_id(TEST_STORE)
             .prev_hash(Hash::ZERO)
             .parent_hashes(vec![])  // No parents - this is fine for new key
-            .operation(Operation::put(b"/key", b"value1".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"value1".to_vec())]))
             .sign(&node);
         let hash1 = entry1.hash();
         
@@ -732,7 +748,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash1])  // Cites entry1
-            .operation(Operation::put(b"/key", b"value2".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"value2".to_vec())]))
             .sign(&node);
         let hash2 = entry2.hash();
         
@@ -802,7 +818,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node1 = NodeIdentity::generate(); // Author 1: creates A
         let node2 = NodeIdentity::generate(); // Author 2: creates B
         let node3 = NodeIdentity::generate(); // Author 3: creates C (merge)
@@ -828,7 +844,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_a))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/merged", b"value_a".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/merged", b"value_a".to_vec())]))
             .sign(&node1);
         let hash_a = entry_a.hash();
         
@@ -838,7 +854,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_b))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/merged", b"value_b".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/merged", b"value_b".to_vec())]))
             .sign(&node2);
         let hash_b = entry_b.hash();
         
@@ -848,7 +864,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_c))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash_a, hash_b])
-            .operation(Operation::put(b"/merged", b"merged_value".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/merged", b"merged_value".to_vec())]))
             .sign(&node3);
         let hash_c = entry_c.hash();
         
@@ -939,7 +955,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node1 = NodeIdentity::generate();
         let node2 = NodeIdentity::generate();
         let node3 = NodeIdentity::generate();
@@ -965,7 +981,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_a))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/merged", b"value_a".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/merged", b"value_a".to_vec())]))
             .sign(&node1);
         let hash_a = entry_a.hash();
         
@@ -975,7 +991,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_b))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/merged", b"value_b".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/merged", b"value_b".to_vec())]))
             .sign(&node2);
         let hash_b = entry_b.hash();
         
@@ -985,7 +1001,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_c))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash_a, hash_b])
-            .operation(Operation::put(b"/merged", b"merged_value".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/merged", b"merged_value".to_vec())]))
             .sign(&node3);
         let hash_c = entry_c.hash();
         
@@ -1055,7 +1071,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node1 = NodeIdentity::generate();
         let node2 = NodeIdentity::generate();
         let node3 = NodeIdentity::generate();
@@ -1081,7 +1097,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_a))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/merged", b"value_a".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/merged", b"value_a".to_vec())]))
             .sign(&node1);
         let hash_a = entry_a.hash();
         
@@ -1091,7 +1107,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_b))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/merged", b"value_b".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/merged", b"value_b".to_vec())]))
             .sign(&node2);
         let hash_b = entry_b.hash();
         
@@ -1101,7 +1117,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_c))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash_a, hash_b])
-            .operation(Operation::put(b"/merged", b"merged_value".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/merged", b"merged_value".to_vec())]))
             .sign(&node3);
         let hash_c = entry_c.hash();
         
@@ -1152,9 +1168,14 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let author = node.public_key();
+        
+        use crate::store::kv::KvPayload;
+        fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+             KvPayload { ops }.encode_to_vec()
+        }
         
         // Write 3 entries to sigchain log directly (simulating commits)
         let log_path = logs_dir.join(format!("{}.log", hex::encode(author)));
@@ -1171,7 +1192,7 @@ mod tests {
                 .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE)
                 .parent_hashes(vec![])
-                .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("value{}", i).into_bytes()))
+                .payload(make_payload(vec![Operation::put(format!("/key{}", i).as_bytes(), format!("value{}", i).into_bytes())]))
                 .sign(&node);
             sigchain.append_unchecked(&entry).unwrap();
             entries.push(entry);
@@ -1192,7 +1213,7 @@ mod tests {
         // === RESTART ===
         // Reopen store and spawn actor with StoreHandle
         // The actor should replay log and recover entries 2 and 3
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let handle = crate::store::handle::StoreHandle::spawn(
             TEST_STORE,
             state,
@@ -1225,6 +1246,10 @@ mod tests {
     #[test]
     fn test_sigchain_orphan_not_lost_on_crash() {
         use crate::store::sigchain::SigChainManager;
+        use crate::store::kv::KvPayload;
+        fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+             KvPayload { ops }.encode_to_vec()
+        }
         
         let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1242,7 +1267,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_a))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/key_a", b"value_a".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key_a", b"value_a".to_vec())]))
             .sign(&node);
         
         let clock_b = MockClock::new(2000);
@@ -1250,7 +1275,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_b))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/key_b", b"value_b".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key_b", b"value_b".to_vec())]))
             .sign(&node);
         
         // Ingest B first -> becomes orphan waiting for A
@@ -1297,13 +1322,18 @@ mod tests {
     /// Bug: H2 becomes DAG orphan because H0 is no longer a current head
     #[test]
     fn test_concurrent_offline_writes_create_conflict() {
+         use crate::store::kv::KvPayload;
+        fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+             KvPayload { ops }.encode_to_vec()
+        }
+
         let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         
         // Two different nodes
         let node_a = NodeIdentity::generate();
@@ -1316,7 +1346,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_0))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/key_a", b"initial".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key_a", b"initial".to_vec())]))
             .sign(&node_a);
         let hash_h0 = entry_h0.hash();
         
@@ -1334,7 +1364,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_a))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash_h0])
-            .operation(Operation::put(b"/key_a", b"val_1".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key_a", b"val_1".to_vec())]))
             .sign(&node_a);
         let hash_h1 = entry_h1.hash();
         
@@ -1353,7 +1383,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_b))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash_h0])
-            .operation(Operation::put(b"/key_a", b"value_b".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key_a", b"value_b".to_vec())]))
             .sign(&node_b);
         let hash_h2 = entry_h2.hash();
         
@@ -1408,13 +1438,18 @@ mod tests {
     /// This reproduces a bug where re-syncing already-orphaned entries leaves stale orphans.
     #[test]
     fn test_orphan_cleanup_on_duplicate_ingest() {
+        use crate::store::kv::KvPayload;
+        fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+             KvPayload { ops }.encode_to_vec()
+        }
+
         let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         
         // Spawn actor
@@ -1439,7 +1474,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_a))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/key", b"value_a".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"value_a".to_vec())]))
             .sign(&node);
         let hash_a = entry_a.hash();
         
@@ -1449,7 +1484,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_b))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash_a])
-            .operation(Operation::put(b"/key", b"value_b".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"value_b".to_vec())]))
             .sign(&node);
         
         // Step 1: Send B first -> becomes orphan
@@ -1504,13 +1539,18 @@ mod tests {
     /// Simulates a stale orphan (seq < next_seq) and verifies cleanup removes it.
     #[test]
     fn test_orphan_cleanup_command() {
+         use crate::store::kv::KvPayload;
+        fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+             KvPayload { ops }.encode_to_vec()
+        }
+
         let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let state_path = dir.join("state.db");
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         
         // Spawn actor
@@ -1535,7 +1575,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_a))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put(b"/key", b"value_a".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"value_a".to_vec())]))
             .sign(&node);
         let hash_a = entry_a.hash();
         
@@ -1544,7 +1584,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock_b))
             .store_id(TEST_STORE)
             .parent_hashes(vec![hash_a])
-            .operation(Operation::put(b"/key", b"value_b".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"/key", b"value_b".to_vec())]))
             .sign(&node);
         
         // Step 1: Send B first -> becomes orphan
@@ -1596,7 +1636,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let state = State::open(&state_path).unwrap();
+        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (entry_tx, _) = broadcast::channel(16);
@@ -1689,8 +1729,8 @@ mod tests {
         let logs_dir_b = dir_b.join("logs");
         std::fs::create_dir_all(&logs_dir_b).unwrap();
         
-        let state_a = State::open(&state_path_a).unwrap();
-        let state_b = State::open(&state_path_b).unwrap();
+        let state_a = KvStore::open(&state_path_a).unwrap();
+        let state_b = KvStore::open(&state_path_b).unwrap();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         
@@ -1805,8 +1845,8 @@ mod tests {
         let logs_dir_b = dir_b.join("logs");
         std::fs::create_dir_all(&logs_dir_b).unwrap();
         
-        let state_a = State::open(&state_path_a).unwrap();
-        let state_b = State::open(&state_path_b).unwrap();
+        let state_a = KvStore::open(&state_path_a).unwrap();
+        let state_b = KvStore::open(&state_path_b).unwrap();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         
@@ -1933,6 +1973,11 @@ mod tests {
     /// Test that three stores can all sync with each other.
     #[test]
     fn test_three_way_sync() {
+         use crate::store::kv::KvPayload;
+        fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+             KvPayload { ops }.encode_to_vec()
+        }
+
         // Create three actors
         let tmp_a = tempfile::tempdir().unwrap();
         let dir_a = tmp_a.path().to_path_buf();
@@ -1952,9 +1997,9 @@ mod tests {
         let logs_dir_c = dir_c.join("logs");
         std::fs::create_dir_all(&logs_dir_c).unwrap();
         
-        let state_a = State::open(&state_path_a).unwrap();
-        let state_b = State::open(&state_path_b).unwrap();
-        let state_c = State::open(&state_path_c).unwrap();
+        let state_a = KvStore::open(&state_path_a).unwrap();
+        let state_b = KvStore::open(&state_path_b).unwrap();
+        let state_c = KvStore::open(&state_path_c).unwrap();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let node_c = NodeIdentity::generate();
@@ -1988,21 +2033,21 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/key_a", b"from_a".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key_a", b"from_a".to_vec())]))
             .sign(&node_a);
         
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/key_b", b"from_b".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key_b", b"from_b".to_vec())]))
             .sign(&node_b);
         
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/key_c", b"from_c".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key_c", b"from_c".to_vec())]))
             .sign(&node_c);
         
         // Ingest each entry to its respective actor
@@ -2086,6 +2131,11 @@ mod tests {
     /// Test multi-node sync after merge: 3 nodes create multi-heads, then merge, then sync to new node.
     #[test]
     fn test_multinode_sync_after_merge() {
+         use crate::store::kv::KvPayload;
+        fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+             KvPayload { ops }.encode_to_vec()
+        }
+
         // Create two actors (A merges, D syncs from A)
         let tmp_a = tempfile::tempdir().unwrap();
         let dir_a = tmp_a.path().to_path_buf();
@@ -2099,8 +2149,8 @@ mod tests {
         let logs_dir_d = dir_d.join("logs");
         std::fs::create_dir_all(&logs_dir_d).unwrap();
         
-        let state_a = State::open(&state_path_a).unwrap();
-        let state_d = State::open(&state_path_d).unwrap();
+        let state_a = KvStore::open(&state_path_a).unwrap();
+        let state_d = KvStore::open(&state_path_d).unwrap();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let node_c = NodeIdentity::generate();
@@ -2130,21 +2180,21 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/a", b"from_a".to_vec()))
+            .payload(make_payload(vec![Operation::put("/a", b"from_a".to_vec())]))
             .sign(&node_a);
         
         let entry_from_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/a", b"from_b".to_vec()))
+            .payload(make_payload(vec![Operation::put("/a", b"from_b".to_vec())]))
             .sign(&node_b);
         
         let entry_from_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE)
             .parent_hashes(vec![])
-            .operation(Operation::put("/a", b"from_c".to_vec()))
+            .payload(make_payload(vec![Operation::put("/a", b"from_c".to_vec())]))
             .sign(&node_c);
         
         // Ingest all 3 entries to A (creates 3 heads)

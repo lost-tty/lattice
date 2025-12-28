@@ -7,7 +7,7 @@ use crate::{
 };
 use crate::entry::SignedEntry;
 use super::actor::{StoreCmd, StoreActor};
-use super::state::State;
+use super::kv::KvStore;
 use super::SyncNeeded;
 use tokio::sync::{broadcast, mpsc};
 use std::path::PathBuf;
@@ -43,7 +43,7 @@ impl StoreHandle {
     /// This recovers any entries that were committed to sigchain but not applied to state.
     pub fn spawn(
         store_id: Uuid,
-        state: State,
+        state: KvStore,
         logs_dir: PathBuf,
         node: NodeIdentity,
     ) -> Self {

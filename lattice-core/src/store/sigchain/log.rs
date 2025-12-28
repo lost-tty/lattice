@@ -284,9 +284,14 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::proto::storage::Operation;
+    use crate::store::kv::{Operation, KvPayload};
     use crate::entry::EntryBuilder;
+    use prost::Message;
     
+    fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+        KvPayload { ops }.encode_to_vec()
+    }
+
     fn read_entries(path: impl AsRef<std::path::Path>) -> Result<Vec<SignedEntry>, LogError> {
         Log::open(&path)?.iter()?.collect()
     }
@@ -301,7 +306,7 @@ mod tests {
         let hlc = HLC::now_with_clock(&clock);
         
         let entry = EntryBuilder::new(1, hlc)
-            .operation(Operation::put("/test/key", b"value".to_vec()))
+            .payload(make_payload(vec![Operation::put("/test/key", b"value".to_vec())]))
             .sign(&node);
         
         Log::open_or_create(&path).unwrap().append(&entry).unwrap();
@@ -323,7 +328,7 @@ mod tests {
         
         for i in 1..=5 {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
-                .operation(Operation::put(format!("/key/{}", i), format!("value{}", i).into_bytes()))
+                .payload(make_payload(vec![Operation::put(format!("/key/{}", i), format!("value{}", i).into_bytes())]))
                 .sign(&node);
             Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         }
@@ -343,7 +348,7 @@ mod tests {
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .operation(Operation::put("/key", b"value".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"value".to_vec())]))
             .sign(&node);
         let expected_hash = entry.hash();
         let log = Log::open_or_create(&path).unwrap();
@@ -399,7 +404,7 @@ mod tests {
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .operation(Operation::put("/key", b"original".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"original".to_vec())]))
             .sign(&node);
         Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         
@@ -430,7 +435,7 @@ mod tests {
         let clock = MockClock::new(1000);
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .operation(Operation::put("/key", b"data".to_vec()))
+            .payload(make_payload(vec![Operation::put("/key", b"data".to_vec())]))
             .sign(&node);
         Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         
@@ -464,7 +469,7 @@ mod tests {
         let huge_payload = vec![0u8; crate::MAX_ENTRY_SIZE + 100];
         
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .operation(Operation::put("/huge", huge_payload))
+            .payload(huge_payload)
             .sign(&node);
         
         let result = Log::open_or_create(&path).unwrap().append(&entry);
@@ -514,7 +519,7 @@ mod tests {
         // Write 3 entries
         for i in 0..3 {
             let entry = EntryBuilder::new(i + 1, HLC::now_with_clock(&clock))
-                .operation(Operation::put(format!("/key/{}", i), b"val"))
+                .payload(make_payload(vec![Operation::put(format!("/key/{}", i), b"val".to_vec())]))
                 .sign(&node);
             Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         }

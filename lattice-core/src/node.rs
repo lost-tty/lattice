@@ -4,7 +4,7 @@ use crate::{
     DataDir, MetaStore, NodeIdentity, PeerStatus, Uuid,
     meta_store::MetaStoreError,
     node_identity::NodeError as IdentityError,
-    store::{State, StateError, StoreHandle, LogError, Log},
+    store::{KvStore, StateError, StoreHandle, LogError, Log},
     types::PubKey,
 };
 use std::path::Path;
@@ -491,7 +491,7 @@ impl Node {
     
     fn create_store_internal(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
         self.data_dir.ensure_store_dirs(store_id)?;
-        let _ = State::open(self.data_dir.store_state_db(store_id))?;
+        let _ = KvStore::open(self.data_dir.store_state_db(store_id))?;
         self.meta.add_store(store_id)?;
         Ok(store_id)
     }
@@ -515,7 +515,7 @@ impl Node {
         let log_path = self.data_dir.store_log_file(store_id, &author_id_hex);
         let logs_dir = log_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         
-        let store = State::open(self.data_dir.store_state_db(store_id))?;
+        let store = KvStore::open(self.data_dir.store_state_db(store_id))?;
         let entries_replayed = if log_path.exists() {
             let log = Log::open(&log_path)?;
             let iter = log.iter()?;

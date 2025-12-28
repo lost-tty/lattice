@@ -9,41 +9,61 @@
 - **Stability**: Gossip join reliability, bidirectional sync fix, diagnostics, orphan timestamps
 - **Sync Reliability**: Common HLC in SyncState, auto-sync on discrepancy with deferred check
 
-## Milestone 3: Extract `lattice-store` Crate
+## Milestone 3: Functional Core & Store Extraction
 
-**Goal:** Clean crate boundaries as foundation for Multi-Store and CAS.
+**Goal:** Clean crate boundaries and logic/storage separation for Multi-Store/CAS.
 
-**Files to extract** (~270KB):
-- `actor.rs`, `core.rs`, `handle.rs`, `log.rs`, `mod.rs`
-- `sigchain.rs`, `signed_entry.rs`, `sync_state.rs`, `orphan_store.rs`
+### 3A: Functional Core (Traits & Abstraction)
 
-**Steps:**
-- [ ] Create `lattice-store` crate with `Cargo.toml`
-- [ ] Move store files, update internal imports
-- [ ] Export `StoreHandle`, `Store`, `SyncState`, `SyncNeeded`, etc.
-- [ ] `lattice-core` depends on `lattice-store`, re-exports types
-- [ ] Update `lattice-net` imports
-- [ ] Run tests, fix any breakage
+Adopt "Functional Core, Imperative Shell" pattern. Separate logic (Planning) from storage (Commit).
 
-### 3B: Apply Trait (Logic Encapsulation)
+**Files:** `store/ops.rs`, `store/backend.rs`, `store/traits.rs`
 
-Move operation logic from `Store` into `Operation` types. Store becomes a dumb transaction provider.
-
+**New Types:**
 ```rust
-pub trait StateContext {
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
-    fn put(&mut self, key: &[u8], value: &[u8]);
+// The Plan
+pub struct WriteBatch {
+    pub puts: Vec<(Vec<u8>, Vec<u8>)>,
+    pub deletes: Vec<Vec<u8>>,
 }
 
+pub trait ReadContext {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError>;
+}
+
+// Low-level atomic storage abstraction
+pub trait StateBackend: Send + Sync {
+    fn write_batch(&self, batch: WriteBatch) -> Result<(), StateError>;
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError>;
+}
+
+// Pure Logic
 pub trait Applyable {
-    fn apply(&self, ctx: &mut dyn StateContext, meta: &OpMetadata) -> Result<(), OpError>;
+    fn plan(&self, ctx: &dyn ReadContext) -> Result<WriteBatch, OpError>;
 }
 ```
 
-- [ ] Define `StateContext` and `Applyable` traits in `ops.rs`
-- [ ] Implement `Applyable` for `Operation` proto type
-- [ ] Refactor `Store` to use trait dispatch instead of match statement
-- [ ] Add `MockContext` for unit testing operations in isolation
+**Steps:**
+- [ ] Define `WriteBatch`, `ReadContext`, `Applyable` traits
+- [ ] Implement `StateBackend` trait (Redb wrapper)
+- [ ] Refactor `State` to use `StateBackend` + `WriteBatch`
+- [ ] Refactor `StoreActor` to use `plan()` -> `write_batch()` flow
+
+### 3B: Extract `lattice-store` Crate
+
+Move decoupled store logic into separate crate.
+
+**Files to extract** (~270KB):
+- `actor.rs`, `state.rs`, `handle.rs`, `mod.rs`
+- `sigchain/` submodule
+- `backend.rs`, `ops.rs`, `traits.rs`
+
+**Steps:**
+- [ ] Create `lattice-store` crate
+- [ ] Move files, update imports
+- [ ] Export public API (`StoreHandle`, traits)
+- [ ] Update `lattice-core` to depend on `lattice-store`
+- [ ] Verify `lattice-net` integration
 
 ---
 
@@ -175,11 +195,13 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 - [x] Extract `PEER_SYNC_TABLE` from `state.db` for better separation
 - [x] **Module reorganization**: Move sigchain-related files into `store/sigchain/` submodule (sigchain.rs, log.rs, orphan_store.rs, sync_state.rs)
 - [ ] **Multi-platform traits**: Add `StateBackend` trait to abstract KV storage (redb/sqlite/wasm)
+- [ ] Trait boundaries: `KvStore` (user ops) vs `SyncStore` (network ops)
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] Refactor any `.unwrap` uses
-- [ ] Trait boundaries: `KvStore` (user ops) vs `SyncStore` (network ops)
 - [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip )
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
+- [ ] **Zero-Knowledge of Peer Authorization (ACLs)**: Implement ACL layer in `SigChainManager`/`StoreActor` to reject entries from unknown authors (fixes store UUID attack vector).
+- [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 
 ---
 

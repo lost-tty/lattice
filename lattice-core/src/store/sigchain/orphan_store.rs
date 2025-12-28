@@ -420,7 +420,11 @@ pub(crate) mod tests {
         use crate::entry::Entry;
         use crate::hlc::HLC;
         use crate::node_identity::NodeIdentity;
-        use crate::proto::storage::Operation;
+        use crate::store::kv::{Operation, KvPayload};
+
+        fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
+            KvPayload { ops }.encode_to_vec()
+        }
         
         // Mock node/entry
         let node = NodeIdentity::generate();
@@ -430,7 +434,7 @@ pub(crate) mod tests {
         let entry = Entry::next_after(Some(&fake_tip))
             .timestamp(HLC::default())
             .store_id(Uuid::from_bytes([1u8; 16]))
-            .operation(Operation::put(b"key", b"val".to_vec()))
+            .payload(make_payload(vec![Operation::put(b"key", b"val".to_vec())]))
             .sign(&node);
             
         let entry_hash = entry.hash();

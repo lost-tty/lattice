@@ -13,6 +13,14 @@
 - DAG Conflict Resolution: Entries track ancestry. Forks merge on next write. Tips only in state.db.
 - KV Snapshots: Point-in-time snapshots for log pruning, fast bootstrap, time travel.
 
+**Action-Based Mutation (Monoid Action):**
+- **State Space (S):** The persistent store (KV, Graph, etc.).
+- **Patch Monoid (P):** A description of changes (deltas) that can be combined (`p1 + p2`). Identity = empty patch.
+- **Action (⋅):** Application of patch to state (`S × P → S`).
+- **Plan Phase (Functional):** Logic reads `S`, calculates `P`. Pure, functional, parallelizable.
+- **Commit Phase (Imperative):** `StateBackend` performs the action `S' = S ⋅ P` atomically.
+- **Benefit:** Decouples logical intent (Patch) from storage mechanics (Backend). Enables complex CRDT merges vs simple KV puts.
+
 **Operations:**
 - Atomic Batch Writes: Multiple key updates as single entry.
 - Conditional Updates (CAS): Update only if current value matches expected hash.
@@ -467,6 +475,22 @@ Practical model:
 
 Future:
 - Capability-based permissions: Explore finer-grained write access (e.g., per-key or per-prefix permissions) via capabilities. Exact mechanism TBD.
+
+### Zero-Knowledge of Peer Authorization (ACLs)
+
+**The Issue:** The code verifies who signed an entry, but not if they are allowed to write to that specific store.
+
+**Attack Vector:** If I know your store UUID, I can connect to you, generate a random Ed25519 keypair, and start syncing validly signed entries into your store. Your node will accept them because the signature matches the public key provided in the entry.
+
+**Remediation:** You need an Access Control List (ACL) layer in `SigChainManager` or `StoreActor` that rejects entries signed by unknown authors unless they are explicitly invited.
+
+### Denial of Service (DoS) via Gossip
+
+**The Issue:** GossipManager accepts messages from any active peer.
+
+**Attack Vector:** A malicious peer can flood the gossip network with SyncState updates or junk entries. While lattice-core limits entry size (MAX_ENTRY_SIZE = 16MB), high-frequency small messages can still exhaust CPU (signature verification) or bandwidth.
+
+**Remediation:** Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 
 ### Peer Authorization During Replay
 
