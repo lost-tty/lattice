@@ -214,10 +214,10 @@ pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _server: Option<
                     let hash_short = if head.hash.len() >= 8 { hex::encode(&head.hash[..8]) } else { "????????".to_string() };
                     if head.tombstone {
                         let _ = writeln!(w, "{} {} (deleted) (hlc:{}, author:{}, hash:{})", 
-                            winner, tombstone, format_hlc(&head.hlc), author_short, hash_short);
+                            winner, tombstone, head.hlc, author_short, hash_short);
                     } else {
                         let _ = writeln!(w, "{} {} (hlc:{}, author:{}, hash:{})", 
-                            winner, format_value(&head.value), format_hlc(&head.hlc), author_short, hash_short);
+                            winner, format_value(&head.value), head.hlc, author_short, hash_short);
                     }
                 }
                 if heads.len() > 1 {
@@ -301,10 +301,10 @@ pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _server: Option
                             let hash_short = if head.hash.len() >= 8 { hex::encode(&head.hash[..8]) } else { "????????".to_string() };
                             if head.tombstone {
                                 let _ = writeln!(w, "  {} ⊗ (deleted) (hlc:{}, author:{}, hash:{})", 
-                                    winner, format_hlc(&head.hlc), author_short, hash_short);
+                                    winner, head.hlc, author_short, hash_short);
                             } else {
                                 let _ = writeln!(w, "  {} {} (hlc:{}, author:{}, hash:{})", 
-                                    winner, format_value(&head.value), format_hlc(&head.hlc), author_short, hash_short);
+                                    winner, format_value(&head.value), head.hlc, author_short, hash_short);
                             }
                         }
                     } else {
@@ -368,13 +368,6 @@ pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _server:
 
 fn format_value(v: &[u8]) -> String {
     std::str::from_utf8(v).map(String::from).unwrap_or_else(|_| format!("0x{}", hex::encode(v)))
-}
-
-/// Format HLC as "walltime.counter". Treats None as "0.0" (should never happen).
-fn format_hlc(hlc: &Option<lattice_core::proto::storage::Hlc>) -> String {
-    hlc.as_ref()
-        .map(|h| format!("{}.{}", h.wall_time, h.counter))
-        .unwrap_or_else(|| "0.0".to_string())
 }
 
 /// Entry info for history display

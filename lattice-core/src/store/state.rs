@@ -9,8 +9,10 @@
 use crate::store::log::LogError;
 use crate::store::sigchain::SigChainError;
 use crate::entry::{SignedEntry, ChainTip};
-use crate::proto::storage::{operation, HeadInfo, HeadList, Hlc, PeerSyncInfo};
+use crate::proto::storage::{operation, HeadInfo as ProtoHeadInfo, HeadList, PeerSyncInfo};
 use crate::types::{Hash, PubKey};
+use crate::hlc::HLC;
+use crate::head::Head;
 use prost::Message;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::collections::HashSet;
@@ -51,6 +53,9 @@ pub enum StateError {
 
     #[error("Entry not successor of tip (seq {entry_seq}, prev_hash {prev_hash}, tip_hash {tip_hash})")]
     NotSuccessor { entry_seq: u64, prev_hash: String, tip_hash: String },
+    
+    #[error("Conversion error: {0}")]
+    Conversion(String),
 }
 
 /// Errors that occur when validating parent_hashes against current state
@@ -198,13 +203,13 @@ impl State {
             let current_heads = self.get_heads(key)
                 .map_err(|e| ParentValidationError::State(e.to_string()))?;
             
-            let current_hashes: HashSet<Vec<u8>> = current_heads.iter()
-                .map(|h| h.hash.clone())
+            let current_hashes: HashSet<Hash> = current_heads.iter()
+                .map(|h| h.hash)
                 .collect();
             
             // All parent_hashes must exist in current_heads for this key
             for parent in &parent_set {
-                if !current_hashes.contains(parent.as_slice()) {
+                if !current_hashes.contains(parent) {
                     return Err(ParentValidationError::MissingParent {
                         key: key.clone(),
                         awaited_hash: parent.to_vec(),
@@ -225,7 +230,7 @@ impl State {
     ) -> Result<(), StateError> {
         let entry = &signed_entry.entry;
         let entry_hash = signed_entry.hash();
-        let entry_hlc: Hlc = entry.timestamp.clone().into();
+        let entry_hlc: HLC = entry.timestamp;
         let author = signed_entry.author_id;
         
         // Check if entry properly chains to the previous one
@@ -245,21 +250,21 @@ impl State {
             if let Some(op_type) = &op.op_type {
                 match op_type {
                     operation::OpType::Put(put) => {
-                        let new_head = HeadInfo {
+                        let new_head = Head {
                             value: put.value.clone(),
-                            hlc: Some(entry_hlc),
-                            author: author.to_vec(),
-                            hash: entry_hash.to_vec(),
+                            hlc: entry_hlc,
+                            author: author,
+                            hash: entry_hash,
                             tombstone: false,
                         };
                         Self::apply_head(kv_table, &put.key, new_head, &entry.parent_hashes)?;
                     }
                     operation::OpType::Delete(del) => {
-                        let tombstone = HeadInfo {
+                        let tombstone = Head {
                             value: vec![],
-                            hlc: Some(entry_hlc),
-                            author: author.to_vec(),
-                            hash: entry_hash.to_vec(),
+                            hlc: entry_hlc,
+                            author: author,
+                            hash: entry_hash,
                             tombstone: true,
                         };
                         Self::apply_head(kv_table, &del.key, tombstone, &entry.parent_hashes)?;
@@ -278,11 +283,16 @@ impl State {
     fn apply_head(
         kv_table: &mut redb::Table<&[u8], &[u8]>,
         key: &[u8],
-        new_head: HeadInfo,
+        new_head: Head,
         parent_hashes: &[Hash],
     ) -> Result<(), StateError> {
-        let mut heads = match kv_table.get(key)? {
-            Some(v) => HeadList::decode(v.value()).map(|h| h.heads).unwrap_or_default(),
+        let mut heads: Vec<Head> = match kv_table.get(key)? {
+            Some(v) => {
+                let list = HeadList::decode(v.value())?;
+                list.heads.into_iter()
+                    .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
+                    .collect::<Result<Vec<_>, StateError>>()?
+            }
             None => Vec::new(),
         };
         
@@ -291,13 +301,15 @@ impl State {
             return Ok(());
         }
         
-        // Remove any heads that are ancestors (their hash is in parent_hashes)
-        heads.retain(|h| !parent_hashes.iter().any(|p| p.as_slice() == h.hash.as_slice()));
+        // Remove any heads that are ancestors
+        heads.retain(|h| !parent_hashes.contains(&h.hash));
         
         // Add new head
         heads.push(new_head);
         
-        let encoded = HeadList { heads }.encode_to_vec();
+        // Encode back to proto for storage
+        let proto_heads: Vec<ProtoHeadInfo> = heads.into_iter().map(Into::into).collect();
+        let encoded = HeadList { heads: proto_heads }.encode_to_vec();
         kv_table.insert(key, encoded.as_slice())?;
         Ok(())
     }
@@ -309,7 +321,11 @@ impl State {
         
         match table.get(key)? {
             Some(v) => {
-                let heads = HeadList::decode(v.value())?.heads;
+                let proto_heads = HeadList::decode(v.value())?.heads;
+                let heads: Vec<Head> = proto_heads.into_iter()
+                    .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
+                    .collect::<Result<Vec<_>, StateError>>()?;
+                    
                 match Self::pick_winner(&heads) {
                     Some(winner) if winner.tombstone => Ok(None),
                     Some(winner) => Ok(Some(winner.value.clone())),
@@ -322,16 +338,20 @@ impl State {
     
     /// Get all heads for a key (for conflict inspection).
     /// Heads are sorted deterministically: highest HLC first, ties broken by author.
-    pub fn get_heads(&self, key: &[u8]) -> Result<Vec<HeadInfo>, StateError> {
+    pub fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, StateError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(KV_TABLE)?;
         
         match table.get(key)? {
             Some(v) => {
-                let mut heads = HeadList::decode(v.value())?.heads;
+                let proto_heads = HeadList::decode(v.value())?.heads;
+                let mut heads: Vec<Head> = proto_heads.into_iter()
+                    .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
+                    .collect::<Result<Vec<_>, StateError>>()?;
+                    
                 // Sort by winner criteria: highest HLC first, then highest author (deterministic)
                 heads.sort_by(|a, b| {
-                    compare_hlc(&b.hlc, &a.hlc)
+                    b.hlc.cmp(&a.hlc)
                         .then_with(|| b.author.cmp(&a.author))
                 });
                 Ok(heads)
@@ -342,7 +362,7 @@ impl State {
     
     /// Pick deterministic winner from heads: highest HLC, then highest author bytes.
     /// Heads should already be sorted by get_heads(), so winner is first.
-    fn pick_winner(heads: &[HeadInfo]) -> Option<&HeadInfo> {
+    fn pick_winner(heads: &[Head]) -> Option<&Head> {
         // If heads are already sorted (via get_heads), first is winner
         // If not sorted, compute winner via max
         if heads.is_empty() {
@@ -350,7 +370,7 @@ impl State {
         } else {
             // Use max_by for correctness even on unsorted input
             heads.iter().max_by(|a, b| {
-                    compare_hlc(&a.hlc, &b.hlc)
+                    a.hlc.cmp(&b.hlc)
                     .then_with(|| a.author.cmp(&b.author))
             })
         }
@@ -381,7 +401,10 @@ impl State {
                 break;
             }
             
-            let heads = HeadList::decode(value.value())?.heads;
+            let proto_heads = HeadList::decode(value.value())?.heads;
+            let heads: Vec<Head> = proto_heads.into_iter()
+                    .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
+                    .collect::<Result<Vec<_>, StateError>>()?;
             if let Some(winner) = Self::pick_winner(&heads) {
                 // Skip tombstones unless include_deleted is true
                 if include_deleted || !winner.tombstone {
@@ -393,7 +416,7 @@ impl State {
     }
     /// Check if a put operation is needed given current heads
     /// Returns false if the winning head has the same value (idempotent)
-    pub fn needs_put(heads: &[HeadInfo], value: &[u8]) -> bool {
+    pub fn needs_put(heads: &[Head], value: &[u8]) -> bool {
         match Self::pick_winner(heads) {
             Some(winner) => winner.value != value,  // Skip if winner already has value
             None => true,  // No heads = need put
@@ -402,7 +425,7 @@ impl State {
     
     /// Check if a delete operation is needed given current heads
     /// Returns false if no heads or winning head is already a tombstone (idempotent)
-    pub fn needs_delete(heads: &[HeadInfo]) -> bool {
+    pub fn needs_delete(heads: &[Head]) -> bool {
         match Self::pick_winner(heads) {
             Some(winner) => !winner.tombstone,  // Skip if winner is already tombstone
             None => false,  // No heads = nothing to delete
@@ -464,12 +487,6 @@ impl State {
     }
 }
 
-fn compare_hlc(a: &Option<Hlc>, b: &Option<Hlc>) -> std::cmp::Ordering {
-    let a = a.as_ref().map(|h| (h.wall_time, h.counter)).unwrap_or((0, 0));
-    let b = b.as_ref().map(|h| (h.wall_time, h.counter)).unwrap_or((0, 0));
-    a.cmp(&b)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,7 +494,7 @@ mod tests {
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::entry::{Entry, SignedEntry, ChainTip};
-    use crate::proto::storage::{Hlc, Operation, Entry as ProtoEntry, SignedEntry as ProtoSignedEntry};
+    use crate::proto::storage::{Operation, Entry as ProtoEntry, SignedEntry as ProtoSignedEntry};
     use crate::store::log::Log;    
 
     use crate::types::PubKey;
@@ -522,26 +539,24 @@ mod tests {
     #[test]
     fn test_deterministic_winner() {
         // Test pick_winner logic directly (no store needed)
-        let heads = HeadList {
-            heads: vec![
-                HeadInfo {
-                    value: b"older".to_vec(),
-                    hlc: Some(Hlc { wall_time: 100, counter: 0 }),
-                    author: [1u8; 32].to_vec(),
-                    hash: [1u8; 32].to_vec(),
-                    tombstone: false,
-                },
-                HeadInfo {
-                    value: b"newer".to_vec(),
-                    hlc: Some(Hlc { wall_time: 200, counter: 0 }),
-                    author: [2u8; 32].to_vec(),
-                    hash: [2u8; 32].to_vec(),
-                    tombstone: false,
-                },
-            ],
-        };
+        let heads = vec![
+            Head {
+                value: b"older".to_vec(),
+                hlc: HLC { wall_time: 100, counter: 0 },
+                author: PubKey::from([1u8; 32]),
+                hash: Hash::from([1u8; 32]),
+                tombstone: false,
+            },
+            Head {
+                value: b"newer".to_vec(),
+                hlc: HLC { wall_time: 200, counter: 0 },
+                author: PubKey::from([2u8; 32]),
+                hash: Hash::from([2u8; 32]),
+                tombstone: false,
+            },
+        ];
         
-        let winner = State::pick_winner(&heads.heads).unwrap();
+        let winner = State::pick_winner(&heads).unwrap();
         assert_eq!(winner.value, b"newer"); // Higher HLC wins
     }
 
@@ -1197,18 +1212,18 @@ mod tests {
     #[test]
     fn test_needs_put_empty_heads() {
         // No heads = need put
-        let heads: Vec<HeadInfo> = vec![];
+        let heads: Vec<Head> = vec![];
         assert!(State::needs_put(&heads, b"value"));
     }
 
     #[test]
     fn test_needs_put_same_value() {
         // Single head with same value = idempotent, no put needed
-        let heads = vec![HeadInfo {
+        let heads = vec![Head {
             value: b"hello".to_vec(),
-            hlc: Some(Hlc { wall_time: 1000, counter: 0 }),
-            author: [1u8; 32].to_vec(),
-            hash: [2u8; 32].to_vec(),
+            hlc: HLC { wall_time: 1000, counter: 0 },
+            author: PubKey::from([1u8; 32]),
+            hash: Hash::from([2u8; 32]),
             tombstone: false,
         }];
         assert!(!State::needs_put(&heads, b"hello"));
@@ -1217,11 +1232,11 @@ mod tests {
     #[test]
     fn test_needs_put_different_value() {
         // Single head with different value = need put
-        let heads = vec![HeadInfo {
+        let heads = vec![Head {
             value: b"hello".to_vec(),
-            hlc: Some(Hlc { wall_time: 1000, counter: 0 }),
-            author: [1u8; 32].to_vec(),
-            hash: [2u8; 32].to_vec(),
+            hlc: HLC { wall_time: 1000, counter: 0 },
+            author: PubKey::from([1u8; 32]),
+            hash: Hash::from([2u8; 32]),
             tombstone: false,
         }];
         assert!(State::needs_put(&heads, b"world"));
@@ -1232,18 +1247,18 @@ mod tests {
         // Multiple heads where WINNER has our value = idempotent
         // Winner is highest HLC (1001), value "v2"
         let heads = vec![
-            HeadInfo {
+            Head {
                 value: b"v1".to_vec(),
-                hlc: Some(Hlc { wall_time: 1000, counter: 0 }),
-                author: [1u8; 32].to_vec(),
-                hash: [2u8; 32].to_vec(),
+                hlc: HLC { wall_time: 1000, counter: 0 },
+                author: PubKey::from([1u8; 32]),
+                hash: Hash::from([2u8; 32]),
                 tombstone: false,
             },
-            HeadInfo {
+            Head {
                 value: b"v2".to_vec(),
-                hlc: Some(Hlc { wall_time: 1001, counter: 0 }),  // Winner (highest HLC)
-                author: [3u8; 32].to_vec(),
-                hash: [4u8; 32].to_vec(),
+                hlc: HLC { wall_time: 1001, counter: 0 },  // Winner (highest HLC)
+                author: PubKey::from([3u8; 32]),
+                hash: Hash::from([4u8; 32]),
                 tombstone: false,
             },
         ];
@@ -1254,18 +1269,18 @@ mod tests {
     #[test]
     fn test_needs_delete_empty_heads() {
         // No heads = idempotent, no delete needed
-        let heads: Vec<HeadInfo> = vec![];
+        let heads: Vec<Head> = vec![];
         assert!(!State::needs_delete(&heads));
     }
 
     #[test]
     fn test_needs_delete_with_heads() {
         // Has non-tombstone heads = need delete
-        let heads = vec![HeadInfo {
+        let heads = vec![Head {
             value: b"data".to_vec(),
-            hlc: Some(Hlc { wall_time: 1000, counter: 0 }),
-            author: [1u8; 32].to_vec(),
-            hash: [2u8; 32].to_vec(),
+            hlc: HLC { wall_time: 1000, counter: 0 },
+            author: PubKey::from([1u8; 32]),
+            hash: Hash::from([2u8; 32]),
             tombstone: false,
         }];
         assert!(State::needs_delete(&heads));
@@ -1274,11 +1289,11 @@ mod tests {
     #[test]
     fn test_needs_delete_tombstone_is_winner() {
         // Winning head is already tombstone = no delete needed
-        let heads = vec![HeadInfo {
+        let heads = vec![Head {
             value: vec![],
-            hlc: Some(Hlc { wall_time: 1000, counter: 0 }),
-            author: [1u8; 32].to_vec(),
-            hash: [2u8; 32].to_vec(),
+            hlc: HLC { wall_time: 1000, counter: 0 },
+            author: PubKey::from([1u8; 32]),
+            hash: Hash::from([2u8; 32]),
             tombstone: true,
         }];
         assert!(!State::needs_delete(&heads));
@@ -1402,7 +1417,7 @@ mod tests {
         let heads = state.get_heads(b"/tiebreak_key").unwrap();
         assert_eq!(heads.len(), 2);
         assert_eq!(heads[0].value, b"from_high".to_vec(), "heads[0] should be winner");
-        assert_eq!(heads[0].author, high_node.public_key().to_vec());
+        assert_eq!(heads[0].author, high_node.public_key());
         
         let _ = std::fs::remove_file(path);
     }

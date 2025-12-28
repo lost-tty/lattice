@@ -18,6 +18,7 @@ pub mod data_dir;
 pub mod meta_store;
 pub mod store;
 pub mod types;
+pub mod head;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (16 MB)
@@ -45,3 +46,4 @@ pub use clock::{Clock, SystemClock, MockClock};
 pub use data_dir::DataDir;
 pub use meta_store::MetaStore;
 pub use uuid::Uuid;
+pub use head::Head;

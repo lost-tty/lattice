@@ -1,8 +1,8 @@
 //! Store Actor - dedicated thread that owns Store and processes commands via channel
 
 use crate::{
-    NodeIdentity, Uuid, PubKey,
-    proto::storage::{ChainTip, HeadInfo, Operation},
+    NodeIdentity, Uuid, PubKey, Head,
+    proto::storage::{ChainTip, Operation},
     entry::SignedEntry,
 };
 use super::{
@@ -62,7 +62,7 @@ pub enum StoreCmd {
     },
     GetHeads {
         key: Vec<u8>,
-        resp: oneshot::Sender<Result<Vec<HeadInfo>, StateError>>,
+        resp: oneshot::Sender<Result<Vec<Head>, StateError>>,
     },
     List {
         include_deleted: bool,
@@ -762,7 +762,7 @@ mod tests {
         }).unwrap();
         let heads = resp_rx.blocking_recv().unwrap().unwrap();
         assert_eq!(heads.len(), 1, "/key should have exactly 1 head");
-        assert_eq!(&heads[0].hash, &hash2.to_vec(), "head should be entry2's hash");
+        assert_eq!(heads[0].hash, hash2, "head should be entry2's hash");
         
         // Verify the value is from entry2
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -1334,7 +1334,7 @@ mod tests {
         // Verify H1 is now the only head (H0 was superseded)
         let heads = state.get_heads(b"/key_a").unwrap();
         assert_eq!(heads.len(), 1, "H1 should be the only head");
-        assert_eq!(heads[0].hash, hash_h1.to_vec());
+        assert_eq!(heads[0].hash, hash_h1);
         
         // Node B goes offline and writes a=2 → H2 (parents: [H0])
         // Note: H2 references H0, not H1, because B was offline
@@ -1383,7 +1383,7 @@ mod tests {
             heads.iter().map(|h| hex::encode(&h.hash[..8])).collect::<Vec<_>>());
         
         // Verify both H1 and H2 are present
-        let head_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.clone()).collect();
+        let head_hashes: Vec<Vec<u8>> = heads.iter().map(|h| h.hash.to_vec()).collect();
         assert!(head_hashes.contains(&hash_h1.to_vec()), "H1 should be a head");
         assert!(head_hashes.contains(&hash_h2.to_vec()), "H2 should be a head");
     }

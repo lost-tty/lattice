@@ -95,7 +95,7 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    pub async fn get_heads(&self, key: &[u8]) -> Result<Vec<crate::proto::storage::HeadInfo>, NodeError> {
+    pub async fn get_heads(&self, key: &[u8]) -> Result<Vec<crate::Head>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::GetHeads { key: key.to_vec(), resp: resp_tx }).await
