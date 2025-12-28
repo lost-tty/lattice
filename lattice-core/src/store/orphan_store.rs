@@ -12,7 +12,7 @@
 //! Key:   DagOrphanKey (key_hash[32] + parent_hash[32] + entry_hash[32] = 96 bytes)
 //! Value: DagOrphanedEntry protobuf
 
-use crate::proto::{OrphanedEntry, SignedEntry};
+use crate::proto::storage::{OrphanedEntry, SignedEntry};
 use prost::Message;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
@@ -277,7 +277,7 @@ impl OrphanStore {
             let key = OrphanKey::from_bytes(key_bytes.value())
                 .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
             
-            let orphaned = crate::proto::OrphanedEntry::decode(value.value())?;
+            let orphaned = crate::proto::storage::OrphanedEntry::decode(value.value())?;
             orphans.push(OrphanInfo {
                 author: key.author,
                 seq: orphaned.seq,

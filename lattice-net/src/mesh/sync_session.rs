@@ -6,7 +6,8 @@
 
 use crate::{MessageSink, MessageStream};
 use lattice_core::{StoreHandle, NodeError, SyncState};
-use lattice_core::proto::{PeerMessage, peer_message, SignedEntry, AuthorRange, FetchRequest, FetchResponse, StatusRequest, StatusResponse};
+use lattice_core::proto::storage::SignedEntry;
+use lattice_core::proto::network::{PeerMessage, peer_message, AuthorRange, FetchRequest, FetchResponse, StatusRequest, StatusResponse};
 
 /// Result of a sync session
 #[derive(Debug, Default)]
@@ -108,7 +109,7 @@ impl<'a> SyncSession<'a> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let info = lattice_core::proto::PeerSyncInfo {
+        let info = lattice_core::proto::storage::PeerSyncInfo {
             sync_state: Some(state.to_proto()),
             updated_at: now,
         };

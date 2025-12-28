@@ -9,7 +9,7 @@
 use crate::store::log::LogError;
 use crate::store::sigchain::SigChainError;
 use crate::store::signed_entry::hash_signed_entry;
-use crate::proto::{operation, AuthorState, Entry, HeadInfo, HeadList, Hlc, SignedEntry};
+use crate::proto::storage::{operation, AuthorState, Entry, HeadInfo, HeadList, Hlc, SignedEntry};
 use prost::Message;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::collections::HashSet;
@@ -467,7 +467,7 @@ impl Store {
     // ==================== Peer Sync State Methods ====================
     
     /// Store a peer's sync state (received via gossip or status command)
-    pub fn set_peer_sync_state(&self, peer: &[u8; 32], info: &crate::proto::PeerSyncInfo) -> Result<(), StoreError> {
+    pub fn set_peer_sync_state(&self, peer: &[u8; 32], info: &crate::proto::storage::PeerSyncInfo) -> Result<(), StoreError> {
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(PEER_SYNC_TABLE)?;
@@ -478,18 +478,18 @@ impl Store {
     }
     
     /// Get a peer's last known sync state
-    pub fn get_peer_sync_state(&self, peer: &[u8; 32]) -> Result<Option<crate::proto::PeerSyncInfo>, StoreError> {
+    pub fn get_peer_sync_state(&self, peer: &[u8; 32]) -> Result<Option<crate::proto::storage::PeerSyncInfo>, StoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(PEER_SYNC_TABLE)?;
         
         match table.get(&peer[..])? {
-            Some(v) => Ok(crate::proto::PeerSyncInfo::decode(v.value()).ok()),
+            Some(v) => Ok(crate::proto::storage::PeerSyncInfo::decode(v.value()).ok()),
             None => Ok(None),
         }
     }
     
     /// List all known peer sync states
-    pub fn list_peer_sync_states(&self) -> Result<Vec<([u8; 32], crate::proto::PeerSyncInfo)>, StoreError> {
+    pub fn list_peer_sync_states(&self) -> Result<Vec<([u8; 32], crate::proto::storage::PeerSyncInfo)>, StoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(PEER_SYNC_TABLE)?;
         
@@ -497,7 +497,7 @@ impl Store {
         for entry in table.iter()? {
             let (key, value) = entry?;
             if key.value().len() == 32 {
-                if let Ok(info) = crate::proto::PeerSyncInfo::decode(value.value()) {
+                if let Ok(info) = crate::proto::storage::PeerSyncInfo::decode(value.value()) {
                     let mut peer = [0u8; 32];
                     peer.copy_from_slice(key.value());
                     peers.push((peer, info));
@@ -521,7 +521,7 @@ mod tests {
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::store::signed_entry::EntryBuilder;
-    use crate::proto::Operation;
+    use crate::proto::storage::Operation;
 
     const TEST_STORE: [u8; 16] = [1u8; 16];
     

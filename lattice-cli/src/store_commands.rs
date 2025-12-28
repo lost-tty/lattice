@@ -133,7 +133,7 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server:
             
             match prost::Message::decode(&entry.entry_bytes[..]) {
                 Ok(decoded) => {
-                    let e: lattice_core::proto::Entry = decoded;
+                    let e: lattice_core::proto::storage::Entry = decoded;
                     let prev_hash_short = if e.prev_hash.len() >= 8 {
                         hex::encode(&e.prev_hash[..8])
                     } else {
@@ -145,7 +145,7 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server:
                     
                     // Format ops as PUT:key=value or DEL:key
                     let ops_str: Vec<String> = e.ops.iter().filter_map(|op| {
-                        use lattice_core::proto::operation::OpType;
+                        use lattice_core::proto::storage::operation::OpType;
                         match &op.op_type {
                             Some(OpType::Put(p)) => {
                                 let key = String::from_utf8_lossy(&p.key);
@@ -389,14 +389,14 @@ fn format_value(v: &[u8]) -> String {
 }
 
 /// Format HLC as "walltime.counter". Treats None as "0.0" (should never happen).
-fn format_hlc(hlc: &Option<lattice_core::proto::Hlc>) -> String {
+fn format_hlc(hlc: &Option<lattice_core::proto::storage::Hlc>) -> String {
     hlc.as_ref()
         .map(|h| format!("{}.{}", h.wall_time, h.counter))
         .unwrap_or_else(|| "0.0".to_string())
 }
 
 /// Format HLC proto message as "walltime.counter"
-fn format_hlc_proto(hlc: &lattice_core::proto::Hlc) -> String {
+fn format_hlc_proto(hlc: &lattice_core::proto::storage::Hlc) -> String {
     format!("{}.{}", hlc.wall_time, hlc.counter)
 }
 
@@ -443,13 +443,13 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
         
         while let Some(entry) = rx.recv().await {
             // Decode entry
-            let Ok(decoded) = <lattice_core::proto::Entry as prost::Message>::decode(&entry.entry_bytes[..]) else {
+            let Ok(decoded) = <lattice_core::proto::storage::Entry as prost::Message>::decode(&entry.entry_bytes[..]) else {
                 continue;
             };
             
             // Check if this entry should be included
             for op in &decoded.ops {
-                use lattice_core::proto::operation::OpType;
+                use lattice_core::proto::storage::operation::OpType;
                 let (op_key, value, tombstone) = match &op.op_type {
                     Some(OpType::Put(p)) => (&p.key, &p.value, false),
                     Some(OpType::Delete(d)) => (&d.key, &vec![], true),

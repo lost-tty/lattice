@@ -3,7 +3,7 @@
 //! Each author has a log file containing length-delimited LogRecord messages.
 //! LogRecord = { hash: [u8; 32], entry_bytes: SignedEntry }
 
-use crate::proto::{LogRecord, SignedEntry};
+use crate::proto::storage::{LogRecord, SignedEntry};
 use crate::MAX_ENTRY_SIZE;
 use prost::Message;
 use std::fs::{File, OpenOptions};
@@ -63,7 +63,7 @@ impl Iterator for EntryIter {
                     
                     // Decode Entry to get sequence
                     use prost::Message;
-                    let seq = crate::proto::Entry::decode(&signed_entry.entry_bytes[..])
+                    let seq = crate::proto::storage::Entry::decode(&signed_entry.entry_bytes[..])
                         .map(|e| e.seq)
                         .unwrap_or(0);
                     
@@ -281,7 +281,7 @@ mod tests {
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::store::signed_entry::EntryBuilder;
-    use crate::proto::Operation;
+    use crate::proto::storage::Operation;
     
     /// Compute hash the same way append_entry does
     fn compute_entry_hash(entry: &SignedEntry) -> [u8; 32] {

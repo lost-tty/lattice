@@ -31,7 +31,7 @@ pub use store::{Store, StoreError, StoreHandle, WatchEvent, WatchEventKind, Watc
 pub use store::{LogError, SyncState, MissingRange};
 
 // Proto exports
-pub use proto::HeadInfo;
+pub use proto::storage::HeadInfo;
 
 // Other exports
 pub use entry::Entry;

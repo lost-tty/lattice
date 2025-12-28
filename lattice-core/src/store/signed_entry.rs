@@ -8,7 +8,7 @@
 
 use crate::hlc::HLC;
 use crate::node_identity::{NodeIdentity, NodeError};
-use crate::proto::{Entry, Hlc, Operation, SignedEntry};
+use crate::proto::storage::{Entry, Hlc, Operation, SignedEntry};
 use ed25519_dalek::{Signature, VerifyingKey};
 use prost::Message;
 use thiserror::Error;

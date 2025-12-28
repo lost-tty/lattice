@@ -3,7 +3,8 @@
 use crate::{parse_node_id, LatticeEndpoint};
 use super::error::GossipError;
 use lattice_core::{Uuid, Node, StoreHandle, PeerStatus, PeerWatchEvent, PeerWatchEventKind};
-use lattice_core::proto::{SignedEntry, GossipMessage, PeerSyncInfo};
+use lattice_core::proto::storage::{SignedEntry, PeerSyncInfo};
+use lattice_core::proto::network::GossipMessage;
 use iroh_gossip::Gossip;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -304,7 +305,7 @@ impl GossipManager {
 }
 
 /// Helper to format SyncState for logging (hex authors/hashes/hlc)
-fn format_sync_state(state: &lattice_core::proto::SyncState) -> String {
+fn format_sync_state(state: &lattice_core::proto::storage::SyncState) -> String {
     let mut parts = Vec::new();
     for sync_author in &state.authors {
         let author = hex::encode(&sync_author.author_id).chars().take(8).collect::<String>();

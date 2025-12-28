@@ -156,23 +156,23 @@ impl SyncState {
     }
 
     /// Convert to proto message for network transmission
-    pub fn to_proto(&self) -> crate::proto::SyncState {
+    pub fn to_proto(&self) -> crate::proto::storage::SyncState {
         let authors = self.authors.iter().map(|(author, info)| {
-            crate::proto::SyncAuthor {
+            crate::proto::storage::SyncAuthor {
                 author_id: author.to_vec(),
-                state: Some(crate::proto::AuthorState {
+                state: Some(crate::proto::storage::AuthorState {
                     seq: info.seq,
                     hash: info.hash.to_vec(),
-                    hlc: info.hlc.map(|(wall_time, counter)| crate::proto::Hlc { wall_time, counter }),
+                    hlc: info.hlc.map(|(wall_time, counter)| crate::proto::storage::Hlc { wall_time, counter }),
                 }),
             }
         }).collect();
         
         // Compute common HLC (min of max HLCs across all authors)
         let common_hlc = self.common_hlc()
-            .map(|(wall_time, counter)| crate::proto::Hlc { wall_time, counter });
+            .map(|(wall_time, counter)| crate::proto::storage::Hlc { wall_time, counter });
         
-        crate::proto::SyncState {
+        crate::proto::storage::SyncState {
             authors,
             sender_hlc: None,
             common_hlc,
@@ -180,7 +180,7 @@ impl SyncState {
     }
 
     /// Create from proto message
-    pub fn from_proto(proto: &crate::proto::SyncState) -> Self {
+    pub fn from_proto(proto: &crate::proto::storage::SyncState) -> Self {
         let mut state = Self::new();
         
         for sync_author in &proto.authors {

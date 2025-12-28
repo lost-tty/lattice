@@ -5,7 +5,7 @@ use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle};
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
-use lattice_core::proto::{PeerMessage, peer_message, JoinRequest, JoinResponse, StatusRequest};
+use lattice_core::proto::network::{PeerMessage, peer_message, JoinRequest, JoinResponse, StatusRequest};
 
 /// Result of a sync operation with a peer
 pub struct SyncResult {
@@ -173,8 +173,8 @@ impl LatticeServer {
     }
     
     /// Request status from a single peer, returns their sync state
-    pub async fn status_peer(&self, peer_id: iroh::PublicKey, store_id: Uuid, our_sync_state: Option<lattice_core::proto::SyncState>) 
-        -> Result<(u64, Option<lattice_core::proto::SyncState>), LatticeNetError> 
+    pub async fn status_peer(&self, peer_id: iroh::PublicKey, store_id: Uuid, our_sync_state: Option<lattice_core::proto::storage::SyncState>) 
+        -> Result<(u64, Option<lattice_core::proto::storage::SyncState>), LatticeNetError> 
     {
         let start = std::time::Instant::now();
         
@@ -214,8 +214,8 @@ impl LatticeServer {
     }
     
     /// Request status from all known active peers
-    pub async fn status_all(&self, store_id: Uuid, our_sync_state: Option<lattice_core::proto::SyncState>) 
-        -> std::collections::HashMap<iroh::PublicKey, Result<(u64, Option<lattice_core::proto::SyncState>), String>> 
+    pub async fn status_all(&self, store_id: Uuid, our_sync_state: Option<lattice_core::proto::storage::SyncState>) 
+        -> std::collections::HashMap<iroh::PublicKey, Result<(u64, Option<lattice_core::proto::storage::SyncState>), String>> 
     {
         let peers = match self.node.list_peers().await {
             Ok(p) => p,
@@ -438,7 +438,7 @@ async fn handle_connection(
 async fn handle_join_request(
     node: &Node,
     remote_pubkey: &[u8; 32],
-    req: lattice_core::proto::JoinRequest,
+    req: lattice_core::proto::network::JoinRequest,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
     tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
@@ -493,7 +493,7 @@ async fn handle_status_request(
 async fn handle_fetch_request(
     node: &Node,
     remote_pubkey: &[u8; 32],
-    req: lattice_core::proto::FetchRequest,
+    req: lattice_core::proto::network::FetchRequest,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
     let store_id = Uuid::from_slice(&req.store_id)
@@ -519,9 +519,9 @@ async fn stream_entries_to_sink(
     sink: &mut MessageSink,
     store: &StoreHandle,
     store_id: &[u8],
-    ranges: &[lattice_core::proto::AuthorRange],
+    ranges: &[lattice_core::proto::network::AuthorRange],
 ) -> Result<(), LatticeNetError> {
-    let mut chunk: Vec<lattice_core::proto::SignedEntry> = Vec::with_capacity(CHUNK_SIZE);
+    let mut chunk: Vec<lattice_core::proto::storage::SignedEntry> = Vec::with_capacity(CHUNK_SIZE);
     
     for range in ranges {
         if let Ok(author) = <[u8; 32]>::try_from(range.author_id.as_slice()) {
@@ -532,7 +532,7 @@ async fn stream_entries_to_sink(
                     // Send chunk when full
                     if chunk.len() >= CHUNK_SIZE {
                         let resp = PeerMessage {
-                            message: Some(peer_message::Message::FetchResponse(lattice_core::proto::FetchResponse {
+                            message: Some(peer_message::Message::FetchResponse(lattice_core::proto::network::FetchResponse {
                                 store_id: store_id.to_vec(),
                                 status: 200,
                                 done: false,
@@ -548,7 +548,7 @@ async fn stream_entries_to_sink(
     
     // Send final chunk (may be empty) with done=true
     let resp = PeerMessage {
-        message: Some(peer_message::Message::FetchResponse(lattice_core::proto::FetchResponse {
+        message: Some(peer_message::Message::FetchResponse(lattice_core::proto::network::FetchResponse {
             store_id: store_id.to_vec(),
             status: 200,
             done: true,

@@ -4,7 +4,7 @@
 //! before appending (correct seq, prev_hash, valid signature) and persists to disk.
 
 use crate::store::log::{Log, LogError};
-use crate::proto::{Entry, SignedEntry};
+use crate::proto::storage::{Entry, SignedEntry};
 use crate::store::signed_entry::{hash_signed_entry, verify_signed_entry};
 use crate::store::orphan_store::GapInfo;
 use prost::Message;
@@ -72,7 +72,7 @@ pub struct SigChain {
     last_hash: [u8; 32],
     
     /// HLC timestamp of the last entry (None if empty)
-    last_hlc: Option<crate::proto::Hlc>,
+    last_hlc: Option<crate::proto::storage::Hlc>,
 }
 
 impl SigChain {
@@ -184,8 +184,8 @@ impl SigChain {
     }
     
     /// Get author state as proto message
-    pub fn author_state(&self) -> crate::proto::AuthorState {
-        crate::proto::AuthorState {
+    pub fn author_state(&self) -> crate::proto::storage::AuthorState {
+        crate::proto::storage::AuthorState {
             seq: self.len(),
             hash: self.last_hash.to_vec(),
             hlc: self.last_hlc.clone(),
@@ -280,7 +280,7 @@ impl SigChain {
         &self,
         node: &crate::node_identity::NodeIdentity,
         parent_hashes: Vec<Vec<u8>>,
-        ops: Vec<crate::proto::Operation>,
+        ops: Vec<crate::proto::storage::Operation>,
     ) -> SignedEntry {
         use crate::hlc::HLC;
         use crate::store::signed_entry::EntryBuilder;
@@ -422,7 +422,7 @@ impl SigChainManager {
     }
     
     /// Get AuthorState for all loaded chains
-    pub fn get_author_states(&self) -> std::collections::HashMap<[u8; 32], crate::proto::AuthorState> {
+    pub fn get_author_states(&self) -> std::collections::HashMap<[u8; 32], crate::proto::storage::AuthorState> {
         self.chains.iter()
             .map(|(author, chain)| (*author, chain.author_state()))
             .collect()
@@ -624,7 +624,7 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::proto::Operation;
+    use crate::proto::storage::Operation;
     use crate::store::signed_entry::EntryBuilder;
 
     const TEST_STORE: [u8; 16] = [1u8; 16];

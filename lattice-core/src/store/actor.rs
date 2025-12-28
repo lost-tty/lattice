@@ -2,7 +2,7 @@
 
 use crate::{
     NodeIdentity, Uuid,
-    proto::{AuthorState, SignedEntry, HeadInfo},
+    proto::storage::{AuthorState, SignedEntry, HeadInfo},
 };
 use super::{
     core::{Store, StoreError, ParentValidationError},
@@ -120,15 +120,15 @@ pub enum StoreCmd {
     },
     SetPeerSyncState {
         peer: [u8; 32],
-        info: crate::proto::PeerSyncInfo,
+        info: crate::proto::storage::PeerSyncInfo,
         resp: oneshot::Sender<Result<(), StoreError>>,
     },
     GetPeerSyncState {
         peer: [u8; 32],
-        resp: oneshot::Sender<Option<crate::proto::PeerSyncInfo>>,
+        resp: oneshot::Sender<Option<crate::proto::storage::PeerSyncInfo>>,
     },
     ListPeerSyncStates {
-        resp: oneshot::Sender<Vec<([u8; 32], crate::proto::PeerSyncInfo)>>,
+        resp: oneshot::Sender<Vec<([u8; 32], crate::proto::storage::PeerSyncInfo)>>,
     },
     StreamEntriesInRange {
         author: [u8; 32],
@@ -334,7 +334,7 @@ impl StoreActor {
     }
 
     fn do_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), StoreActorError> {
-        use crate::proto::Operation;
+        use crate::proto::storage::Operation;
         
         let heads = self.store.get_heads(key)?;
         
@@ -353,7 +353,7 @@ impl StoreActor {
     }
 
     fn do_delete(&mut self, key: &[u8]) -> Result<(), StoreActorError> {
-        use crate::proto::Operation;
+        use crate::proto::storage::Operation;
         
         let heads = self.store.get_heads(key)?;
         
@@ -420,7 +420,7 @@ impl StoreActor {
     }
 
     /// Create a local entry (for put/delete) and ingest it through unified path
-    fn create_local_entry(&mut self, parent_hashes: Vec<Vec<u8>>, ops: Vec<crate::proto::Operation>) -> Result<(), StoreActorError> {
+    fn create_local_entry(&mut self, parent_hashes: Vec<Vec<u8>>, ops: Vec<crate::proto::storage::Operation>) -> Result<(), StoreActorError> {
         // Build the entry (without appending)
         let local_author = self.node.public_key_bytes();
         let sigchain = self.chain_manager.get_or_create(local_author);
@@ -549,9 +549,9 @@ impl StoreActor {
     
     /// Emit watch events for all operations in an entry
     fn emit_watch_events_for_entry(&mut self, entry: &SignedEntry) {
-        if let Ok(inner) = crate::proto::Entry::decode(&entry.entry_bytes[..]) {
+        if let Ok(inner) = crate::proto::storage::Entry::decode(&entry.entry_bytes[..]) {
             for op in &inner.ops {
-                use crate::proto::operation::OpType;
+                use crate::proto::storage::operation::OpType;
                 match &op.op_type {
                     Some(OpType::Put(put_op)) => {
                         self.emit_watch_event(&put_op.key, WatchEventKind::Put { 
@@ -612,7 +612,7 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::proto::Operation;
+    use crate::proto::storage::Operation;
     use crate::store::signed_entry::{EntryBuilder, hash_signed_entry};
     
     const TEST_STORE: [u8; 16] = [1u8; 16];

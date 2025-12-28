@@ -114,10 +114,11 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 - [x] rename `peer sync` to `store sync`, drop single peer sync functionality
 - [x] `peer invite` should output the node's id for easy joining
 - [x] Async streaming in `do_stream_entries_in_range` (currently re-opens Log in sync thread)
-- [ ] split `lattice.proto` into network protocol and storage messages
+- [x] split `lattice.proto` into network protocol and storage messages
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] Refactor any `.unwrap` uses
 - [ ] Remove redundant `AUTHOR_TABLE` from DB - SigChainManager already loads all chains on startup
+- [ ] Move operation apply logic into `Operation::apply()` method (decouple from Store)
 
 ---
 

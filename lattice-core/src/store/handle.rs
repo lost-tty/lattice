@@ -4,7 +4,7 @@ use crate::{
     Uuid,
     node::NodeError,
     node_identity::NodeIdentity,
-    proto::SignedEntry,
+    proto::storage::SignedEntry,
 };
 use super::actor::{StoreCmd, StoreActor};
 use super::core::Store;
@@ -86,7 +86,7 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    pub async fn get_heads(&self, key: &[u8]) -> Result<Vec<crate::proto::HeadInfo>, NodeError> {
+    pub async fn get_heads(&self, key: &[u8]) -> Result<Vec<crate::proto::storage::HeadInfo>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::GetHeads { key: key.to_vec(), resp: resp_tx }).await
@@ -133,7 +133,7 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    pub async fn author_state(&self, author: &[u8; 32]) -> Result<Option<crate::proto::AuthorState>, NodeError> {
+    pub async fn author_state(&self, author: &[u8; 32]) -> Result<Option<crate::proto::storage::AuthorState>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::AuthorState { author: *author, resp: resp_tx }).await
@@ -198,7 +198,7 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    pub async fn ingest_entry(&self, entry: crate::proto::SignedEntry) -> Result<(), NodeError> {
+    pub async fn ingest_entry(&self, entry: crate::proto::storage::SignedEntry) -> Result<(), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::IngestEntry { entry, resp: resp_tx }).await
@@ -268,7 +268,7 @@ impl StoreHandle {
     // ==================== Peer Sync State Methods ====================
     
     /// Store a peer's sync state (received via gossip or status command)
-    pub async fn set_peer_sync_state(&self, peer: &[u8; 32], info: crate::proto::PeerSyncInfo) -> Result<(), NodeError> {
+    pub async fn set_peer_sync_state(&self, peer: &[u8; 32], info: crate::proto::storage::PeerSyncInfo) -> Result<(), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::SetPeerSyncState { peer: *peer, info, resp: resp_tx }).await
@@ -279,7 +279,7 @@ impl StoreHandle {
     }
     
     /// Get a peer's last known sync state
-    pub async fn get_peer_sync_state(&self, peer: &[u8; 32]) -> Option<crate::proto::PeerSyncInfo> {
+    pub async fn get_peer_sync_state(&self, peer: &[u8; 32]) -> Option<crate::proto::storage::PeerSyncInfo> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self.tx.send(StoreCmd::GetPeerSyncState { peer: *peer, resp: resp_tx }).await;
@@ -287,7 +287,7 @@ impl StoreHandle {
     }
     
     /// List all known peer sync states
-    pub async fn list_peer_sync_states(&self) -> Vec<([u8; 32], crate::proto::PeerSyncInfo)> {
+    pub async fn list_peer_sync_states(&self) -> Vec<([u8; 32], crate::proto::storage::PeerSyncInfo)> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self.tx.send(StoreCmd::ListPeerSyncStates { resp: resp_tx }).await;
@@ -301,7 +301,7 @@ impl StoreHandle {
         author: &[u8; 32],
         from_seq: u64,
         to_seq: u64,
-    ) -> Result<tokio::sync::mpsc::Receiver<crate::proto::SignedEntry>, NodeError> {
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::proto::storage::SignedEntry>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::StreamEntriesInRange { 
