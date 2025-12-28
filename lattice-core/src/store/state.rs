@@ -9,7 +9,7 @@
 use crate::store::log::LogError;
 use crate::store::sigchain::SigChainError;
 use crate::entry::{SignedEntry, ChainTip};
-use crate::proto::storage::{operation, HeadInfo as ProtoHeadInfo, HeadList, PeerSyncInfo};
+use crate::proto::storage::{operation, HeadInfo as ProtoHeadInfo, HeadList};
 use crate::types::{Hash, PubKey};
 use crate::hlc::HLC;
 use crate::head::Head;
@@ -22,7 +22,6 @@ use thiserror::Error;
 // Table definitions
 const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
 const CHAIN_TIPS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chain_tips");
-const PEER_SYNC_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("peer_sync");
 
 /// Errors that can occur during state operations
 #[derive(Error, Debug)]
@@ -90,7 +89,6 @@ impl State {
         {
             let _ = write_txn.open_table(KV_TABLE)?;
             let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
-            let _ = write_txn.open_table(PEER_SYNC_TABLE)?;
         }
         write_txn.commit()?;
         
@@ -441,49 +439,6 @@ impl State {
             Some(v) => Ok(ChainTip::decode(v.value()).ok()),
             None => Ok(None),
         }
-    }
-    
-    // ==================== Peer Sync State Methods ====================
-    
-    /// State a peer's sync state (received via gossip or status command)
-    pub fn set_peer_sync_state(&self, peer: &PubKey, info: &PeerSyncInfo) -> Result<(), StateError> {
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut table = write_txn.open_table(PEER_SYNC_TABLE)?;
-            table.insert(&peer.0[..], info.encode_to_vec().as_slice())?;
-        }
-        write_txn.commit()?;
-        Ok(())
-    }
-    
-    /// Get a peer's last known sync state
-    pub fn get_peer_sync_state(&self, peer: &PubKey) -> Result<Option<PeerSyncInfo>, StateError> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(PEER_SYNC_TABLE)?;
-        
-        match table.get(&peer.0[..])? {
-            Some(v) => Ok(PeerSyncInfo::decode(v.value()).ok()),
-            None => Ok(None),
-        }
-    }
-    
-    /// List all known peer sync states
-    pub fn list_peer_sync_states(&self) -> Result<Vec<(PubKey, PeerSyncInfo)>, StateError> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(PEER_SYNC_TABLE)?;
-        
-        let mut peers = Vec::new();
-        for entry in table.iter()? {
-            let (key, value) = entry?;
-            if key.value().len() == 32 {
-                if let Ok(info) = PeerSyncInfo::decode(value.value()) {
-                    let mut peer = PubKey::default();
-                    peer.0.copy_from_slice(key.value());
-                    peers.push((peer, info));
-                }
-            }
-        }
-        Ok(peers)
     }
 }
 

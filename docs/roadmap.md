@@ -172,7 +172,7 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 - [x] **Rename Store → State**: Renamed `core.rs`→`state.rs` and `Store`→`State` to clarify it's derived materialized view
 - [x] **Strong types for byte arrays**: `Hash` and `PubKey` for `[u8; 32]`, `Signature` for `[u8; 64]` - with proper Display/Debug
 - [x] **HeadInfo.hlc Option cleanup**: Proto `HeadInfo.hlc` is `Option<Hlc>` but always set in practice - make non-optional or add `HLC::default()` fallback
-- [ ] Extract `PEER_SYNC_TABLE` from `state.db` for better separation
+- [x] Extract `PEER_SYNC_TABLE` from `state.db` for better separation
 - [ ] **Module reorganization**: Move sigchain-related files into `store/sigchain/` submodule (sigchain.rs, log.rs, orphan_store.rs, sync_state.rs)
 - [ ] **Multi-platform traits**: Add `StateBackend` trait to abstract KV storage (redb/sqlite/wasm)
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics

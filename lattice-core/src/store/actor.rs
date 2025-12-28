@@ -10,6 +10,7 @@ use super::{
     sigchain::{SigChainError, SigChainManager, SigchainValidation},
     sync_state::{SyncState, SyncDiscrepancy, SyncNeeded},
     orphan_store::{GapInfo, OrphanInfo},
+    peer_sync_store::PeerSyncStore,
     log,
 };
 use crate::proto::storage::PeerSyncInfo;
@@ -173,6 +174,7 @@ impl std::error::Error for StoreActorError {}
 pub struct StoreActor {
     state: State,
     chain_manager: SigChainManager,
+    peer_store: PeerSyncStore,
     node: NodeIdentity,
     rx: mpsc::Receiver<StoreCmd>,
     /// Broadcast sender for emitting entries after they're committed locally
@@ -201,9 +203,15 @@ impl StoreActor {
         let local_author = node.public_key();
         chain_manager.get_or_create(local_author);  // Ensure local chain exists
      
+        // Initialize peer store in separate DB file for better separation
+        let store_root = logs_dir.parent().unwrap_or(&logs_dir);
+        let peer_db_path = store_root.join("peer_sync.db");
+        let peer_store = PeerSyncStore::open(&peer_db_path).expect("Failed to open peer_sync.db");
+
         Self {
             state,
             chain_manager,
+            peer_store,
             node,
             rx,
             entry_tx,
@@ -335,16 +343,16 @@ impl StoreActor {
                         });
                     }
                     
-                    let result = self.state.set_peer_sync_state(&peer, &info).map(|_| discrepancy);
+                    let result = self.peer_store.set_peer_sync_state(&peer, &info).map(|_| discrepancy);
                     let _ = resp.send(result);
                 }
                 StoreCmd::GetPeerSyncState { peer, resp } => {
-                    let _ = resp.send(self.state.get_peer_sync_state(&peer).ok().flatten());
+                    let _ = resp.send(self.peer_store.get_peer_sync_state(&peer).ok().flatten());
                 }
                 StoreCmd::ListPeerSyncStates { resp } => {
-                    let result = self.state.list_peer_sync_states()
+                    let result = self.peer_store.list_peer_sync_states()
                         .unwrap_or_default();
-                    let _ = resp.send(result);
+                     let _ = resp.send(result);
                 }
                 StoreCmd::StreamEntriesInRange { author, from_seq, to_seq, resp } => {
                     let result = self.do_stream_entries_in_range(&author, from_seq, to_seq);
@@ -645,7 +653,7 @@ impl StoreActor {
     fn emit_sync_for_stale_peers(&self) {
         let local_state = self.chain_manager.sync_state();
         
-        let cached_peers = self.state.list_peer_sync_states().unwrap_or_default();
+        let cached_peers = self.peer_store.list_peer_sync_states().unwrap_or_default();
         
         for (peer_bytes, info) in cached_peers {
             if let Some(ref peer_proto) = info.sync_state {

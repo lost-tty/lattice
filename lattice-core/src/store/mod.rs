@@ -14,6 +14,7 @@ mod sigchain;
 mod log;
 mod sync_state;
 mod orphan_store;
+mod peer_sync_store;
 
 // Public API - types needed by Node and LatticeServer
 pub use state::{State, StateError, ParentValidationError};
@@ -22,3 +23,4 @@ pub use actor::{WatchEvent, WatchEventKind, WatchError};
 pub use sync_state::{SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
 pub use log::{Log, LogError};
 pub use orphan_store::{GapInfo, OrphanInfo};
+pub use peer_sync_store::PeerSyncStore;
