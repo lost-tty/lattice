@@ -178,11 +178,6 @@ impl SigChain {
         &self.last_hash
     }
     
-    /// Get the HLC timestamp of the last entry
-    pub fn last_hlc(&self) -> Option<&crate::proto::Hlc> {
-        self.last_hlc.as_ref()
-    }
-    
     /// Get the current length of the chain
     pub fn len(&self) -> u64 {
         self.next_seq - 1
