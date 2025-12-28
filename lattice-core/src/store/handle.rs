@@ -4,8 +4,8 @@ use crate::{
     Uuid,
     node::NodeError,
     node_identity::NodeIdentity,
-    proto::storage::SignedEntry,
 };
+use crate::entry::SignedEntry;
 use super::actor::{StoreCmd, StoreActor};
 use super::core::Store;
 use super::sync_state::SyncNeeded;
@@ -142,10 +142,10 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    pub async fn author_state(&self, author: &[u8; 32]) -> Result<Option<crate::proto::storage::AuthorState>, NodeError> {
+    pub async fn chain_tip(&self, author: &[u8; 32]) -> Result<Option<crate::proto::storage::ChainTip>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::AuthorState { author: *author, resp: resp_tx }).await
+        self.tx.send(StoreCmd::ChainTip { author: *author, resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
         resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
@@ -207,10 +207,10 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    pub async fn ingest_entry(&self, entry: crate::proto::storage::SignedEntry) -> Result<(), NodeError> {
+    pub async fn ingest_entry(&self, entry: SignedEntry) -> Result<(), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::IngestEntry { entry, resp: resp_tx }).await
+        self.tx.send(StoreCmd::IngestEntry { entry: entry, resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
         resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
@@ -311,7 +311,7 @@ impl StoreHandle {
         author: &[u8; 32],
         from_seq: u64,
         to_seq: u64,
-    ) -> Result<tokio::sync::mpsc::Receiver<crate::proto::storage::SignedEntry>, NodeError> {
+    ) -> Result<tokio::sync::mpsc::Receiver<SignedEntry>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::StreamEntriesInRange { 

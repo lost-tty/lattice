@@ -666,7 +666,7 @@ async fn stream_entries_to_sink(
         if let Ok(author) = <[u8; 32]>::try_from(range.author_id.as_slice()) {
             if let Ok(mut rx) = store.stream_entries_in_range(&author, range.from_seq, range.to_seq).await {
                 while let Some(entry) = rx.recv().await {
-                    chunk.push(entry);
+                    chunk.push(entry.into());
                     
                     // Send chunk when full
                     if chunk.len() >= CHUNK_SIZE {

@@ -3,7 +3,8 @@
 //! Each author has a log file containing length-delimited LogRecord messages.
 //! LogRecord = { hash: [u8; 32], entry_bytes: SignedEntry }
 
-use crate::proto::storage::{LogRecord, SignedEntry};
+use crate::proto::storage::{LogRecord, SignedEntry as ProtoSignedEntry};
+use crate::entry::{SignedEntry, EntryError};
 use crate::MAX_ENTRY_SIZE;
 use prost::Message;
 use std::fs::{File, OpenOptions};
@@ -19,6 +20,9 @@ pub enum LogError {
     
     #[error("Proto decode error: {0}")]
     Decode(#[from] prost::DecodeError),
+    
+    #[error("Entry error: {0}")]
+    Entry(#[from] EntryError),
     
     #[error("Entry too large: {0} bytes (max {MAX_ENTRY_SIZE})")]
     EntryTooLarge(usize),
@@ -60,12 +64,9 @@ impl Iterator for EntryIter {
                     if self.from_seq == 0 {
                         return Some(Ok(signed_entry));
                     }
-                    
-                    // Decode Entry to get sequence
-                    use prost::Message;
-                    let seq = crate::proto::storage::Entry::decode(&signed_entry.entry_bytes[..])
-                        .map(|e| e.seq)
-                        .unwrap_or(0);
+                           
+                    // Decode Entry to get sequence (no decode needed for internal type)
+                    let seq = signed_entry.entry.seq;
                     
                     if seq < self.from_seq {
                         continue; // Skip entries before range
@@ -150,14 +151,15 @@ impl Log {
     
     /// Append a SignedEntry to this log.
     pub fn append(&mut self, entry: &SignedEntry) -> Result<(), LogError> {
-        let entry_bytes = entry.encode_to_vec();
+        let proto: ProtoSignedEntry = entry.clone().into();
+        let entry_bytes = proto.encode_to_vec();
         
         if entry_bytes.len() > MAX_ENTRY_SIZE {
             return Err(LogError::EntryTooLarge(entry_bytes.len()));
         }
         
         // Compute hash
-        let hash: [u8; 32] = blake3::hash(&entry_bytes).into();
+        let hash = entry.hash();
         
         // Create LogRecord
         let record = LogRecord {
@@ -227,7 +229,8 @@ fn read_one_record<R: Read>(reader: &mut R) -> Result<Option<([u8; 32], SignedEn
     }
     
     // Decode SignedEntry
-    let entry = SignedEntry::decode(&record.entry_bytes[..])?;
+    let proto_entry = ProtoSignedEntry::decode(&record.entry_bytes[..])?;
+    let entry = SignedEntry::try_from(proto_entry)?;
     Ok(Some((stored_hash, entry)))
 }
 
@@ -280,16 +283,9 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::store::signed_entry::EntryBuilder;
     use crate::proto::storage::Operation;
+    use crate::entry::EntryBuilder;
     
-    /// Compute hash the same way append_entry does
-    fn compute_entry_hash(entry: &SignedEntry) -> [u8; 32] {
-        let entry_bytes = entry.encode_to_vec();
-        blake3::hash(&entry_bytes).into()
-    }
-    
-    /// Test helper - read all entries from log
     fn read_entries(path: impl AsRef<std::path::Path>) -> Result<Vec<SignedEntry>, LogError> {
         Log::open(&path)?.iter()?.collect()
     }
@@ -311,7 +307,7 @@ mod tests {
         
         let entries = read_entries(&path).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].entry_bytes, entry.entry_bytes);
+        assert_eq!(entries[0].entry.seq, 1);
         
         std::fs::remove_file(&path).ok();
     }
@@ -348,7 +344,7 @@ mod tests {
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
             .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
-        let expected_hash = compute_entry_hash(&entry);
+        let expected_hash = entry.hash();
         let log = Log::open_or_create(&path).unwrap();
         let mut log = log;
         log.append(&entry).unwrap();

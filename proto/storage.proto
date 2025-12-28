@@ -58,7 +58,7 @@ message HeadList {
 }
 
 // 5. Per-author state (DB and wire)
-message AuthorState {
+message ChainTip {
   uint64 seq = 1;   // Highest sequence number from this author
   bytes hash = 2;   // Hash of last entry (tip of sigchain)
   HLC hlc = 4;      // Highest HLC seen from this author
@@ -92,5 +92,5 @@ message SyncState {
 
 message SyncAuthor {
   bytes author_id = 1;    // Ed25519 public key (32 bytes)
-  AuthorState state = 2;  // The author's sync state
+  ChainTip state = 2;  // The author's sync state
 }

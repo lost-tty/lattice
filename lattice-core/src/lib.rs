@@ -34,7 +34,7 @@ pub use store::{LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
 pub use proto::storage::HeadInfo;
 
 // Other exports
-pub use entry::Entry;
+pub use entry::{Entry, SignedEntry};
 pub use hlc::HLC;
 pub use clock::{Clock, SystemClock, MockClock};
 pub use data_dir::DataDir;

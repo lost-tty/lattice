@@ -127,56 +127,43 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server:
         };
         
         while let Some(entry) = rx.recv().await {
-            // Decode entry to show details
-            let hash = lattice_core::store::hash_signed_entry(&entry);
+            let hash = entry.hash();
             let hash_short = hex::encode(&hash[..8]);
             
-            match prost::Message::decode(&entry.entry_bytes[..]) {
-                Ok(decoded) => {
-                    let e: lattice_core::proto::storage::Entry = decoded;
-                    let prev_hash_short = if e.prev_hash.len() >= 8 {
-                        hex::encode(&e.prev_hash[..8])
-                    } else {
-                        "00000000".to_string()
-                    };
-                    let hlc = e.timestamp.as_ref()
-                        .map(|t| format_hlc_proto(t))
-                        .unwrap_or_else(|| "0.0".to_string());
-                    
-                    // Format ops as PUT:key=value or DEL:key
-                    let ops_str: Vec<String> = e.ops.iter().filter_map(|op| {
-                        use lattice_core::proto::storage::operation::OpType;
-                        match &op.op_type {
-                            Some(OpType::Put(p)) => {
-                                let key = String::from_utf8_lossy(&p.key);
-                                let val = String::from_utf8_lossy(&p.value);
-                                let val_short = if val.len() > 20 { format!("{}...", &val[..20]) } else { val.to_string() };
-                                Some(format!("PUT:{}={}", key, val_short))
-                            }
-                            Some(OpType::Delete(d)) => {
-                                let key = String::from_utf8_lossy(&d.key);
-                                Some(format!("DEL:{}", key))
-                            }
-                            None => None,
-                        }
-                    }).collect();
-                    
-                    // Format parent_hashes
-                    let parents_str = if e.parent_hashes.is_empty() {
-                        String::new()
-                    } else {
-                        let ps: Vec<String> = e.parent_hashes.iter()
-                            .map(|h| if h.len() >= 8 { hex::encode(&h[..8]) } else { "????????".to_string() })
-                            .collect();
-                        format!(" parents:[{}]", ps.join(","))
-                    };
-                    
-                    let _ = writeln!(w, "  seq:{:<4} prev:{}  hash:{}  hlc:{}  {}{}", e.seq, prev_hash_short, hash_short, hlc, ops_str.join(" "), parents_str);
+            let e = &entry.entry;
+            let prev_hash_short = hex::encode(&e.prev_hash[..8]);
+            
+            let hlc = format!("{}.{}", e.timestamp.wall_time, e.timestamp.counter);
+            
+            // Format ops
+            let ops_str: Vec<String> = e.ops.iter().filter_map(|op| {
+                use lattice_core::proto::storage::operation::OpType;
+                match &op.op_type {
+                    Some(OpType::Put(p)) => {
+                        let key = String::from_utf8_lossy(&p.key);
+                        let val = String::from_utf8_lossy(&p.value);
+                        let val_short = if val.len() > 20 { format!("{}...", &val[..20]) } else { val.to_string() };
+                        Some(format!("PUT:{}={}", key, val_short))
+                    }
+                    Some(OpType::Delete(d)) => {
+                        let key = String::from_utf8_lossy(&d.key);
+                        Some(format!("DEL:{}", key))
+                    }
+                    None => None,
                 }
-                Err(e) => {
-                    let _ = writeln!(w, "  [CORRUPT ENTRY] hash:{}  error: {}", hash_short, e);
-                }
-            }
+            }).collect();
+            
+            // Format parent_hashes
+            let parents_str = if e.parent_hashes.is_empty() {
+                String::new()
+            } else {
+                let ps: Vec<String> = e.parent_hashes.iter()
+                    .map(|h| hex::encode(&h[..8]))
+                    .collect();
+                format!(" parents:[{}]", ps.join(","))
+            };
+            
+            let _ = writeln!(w, "  seq:{:<4} prev:{}  hash:{}  hlc:{}  {}{}", e.seq, prev_hash_short, hash_short, hlc, ops_str.join(" "), parents_str);
         }
         let _ = writeln!(w);
     }
@@ -370,7 +357,7 @@ pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _server:
     };
 
     let mut w = writer.clone();
-    match store.author_state(&author_bytes).await {
+    match store.chain_tip(&author_bytes).await {
         Ok(Some(state)) => {
             let _ = writeln!(w, "Author: {}", hex::encode(&author_bytes));
             let _ = writeln!(w, "  seq: {}", state.seq);
@@ -442,10 +429,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
         };
         
         while let Some(entry) = rx.recv().await {
-            // Decode entry
-            let Ok(decoded) = <lattice_core::proto::storage::Entry as prost::Message>::decode(&entry.entry_bytes[..]) else {
-                continue;
-            };
+            let decoded = &entry.entry;
             
             // Check if this entry should be included
             for op in &decoded.ops {
@@ -458,13 +442,9 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server:
                 
                 // Include if: no key filter OR key matches
                 if key.is_none() || key == Some(op_key.as_slice()) {
-                    let hash = lattice_core::store::hash_signed_entry(&entry);
-                    let hlc = decoded.timestamp.as_ref()
-                        .map(|t| (t.wall_time << 16) | t.counter as u64)
-                        .unwrap_or(0);
-                    let parent_hashes: Vec<[u8; 32]> = decoded.parent_hashes.iter()
-                        .filter_map(|h| h.clone().try_into().ok())
-                        .collect();
+                    let hash = entry.hash();
+                    let hlc = (decoded.timestamp.wall_time << 16) | decoded.timestamp.counter as u64;
+                    let parent_hashes = decoded.parent_hashes.clone();
                     
                     entries.insert(hash, HistoryEntry {
                         key: op_key.clone(),

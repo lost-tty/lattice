@@ -1,27 +1,12 @@
 //! Sync state for causality tracking and reconciliation
 
 use std::collections::HashMap;
+use crate::entry::ChainTip;
+use crate::hlc::HLC;
+use crate::proto::storage::{SyncState as ProtoSyncState, SyncAuthor as ProtoSyncAuthor, ChainTip as ProtoChainTip};
 
 /// Author ID type (32-byte Ed25519 public key)
 pub type Author = [u8; 32];
-
-/// Per-author sync information: seq, head hash, max HLC.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthorInfo {
-    pub seq: u64,
-    pub hash: [u8; 32],             // Head hash (tip of sigchain)
-    pub hlc: Option<(u64, u32)>,    // (wall_time, counter) - max HLC from this author
-}
-
-impl AuthorInfo {
-    pub fn new(seq: u64, hash: [u8; 32]) -> Self {
-        Self { seq, hash, hlc: None }
-    }
-    
-    pub fn with_hlc(seq: u64, hash: [u8; 32], hlc: Option<(u64, u32)>) -> Self {
-        Self { seq, hash, hlc }
-    }
-}
 
 /// Sync state tracking per-author sequence numbers and head hashes.
 ///
@@ -29,7 +14,7 @@ impl AuthorInfo {
 /// Each author has exactly one head (tip of their sigchain).
 #[derive(Debug, Clone, Default)]
 pub struct SyncState {
-    authors: HashMap<Author, AuthorInfo>,
+    authors: HashMap<Author, ChainTip>,
 }
 
 /// Describes entries needed from a peer for a specific author.
@@ -76,58 +61,52 @@ impl SyncState {
         }
     }
 
-    /// Get the info for an author (returns None if not present).
-    pub fn get(&self, author: &Author) -> Option<&AuthorInfo> {
+    /// Get the tip for an author (returns None if not present).
+    pub fn get(&self, author: &Author) -> Option<&ChainTip> {
         self.authors.get(author)
     }
 
     /// Get the sequence number for an author (returns 0 if not present).
     pub fn seq(&self, author: &Author) -> u64 {
-        self.authors.get(author).map(|i| i.seq).unwrap_or(0)
+        self.authors.get(author).map(|t| t.seq).unwrap_or(0)
     }
     
     /// Get head hash for an author (returns zero hash if not present).
     pub fn hash(&self, author: &Author) -> [u8; 32] {
-        self.authors.get(author).map(|i| i.hash).unwrap_or([0u8; 32])
+        self.authors.get(author).map(|t| t.hash).unwrap_or([0u8; 32])
     }
 
-    /// Set the info for an author.
-    pub fn set(&mut self, author: Author, seq: u64, hash: [u8; 32]) {
-        self.authors.insert(author, AuthorInfo::new(seq, hash));
+    /// Set the tip for an author directly.
+    pub fn set_tip(&mut self, author: Author, tip: ChainTip) {
+        self.authors.insert(author, tip);
     }
     
-    /// Set the info for an author with HLC.
+    /// Set the info for an author (convenience method).
+    pub fn set(&mut self, author: Author, seq: u64, hash: [u8; 32]) {
+        self.authors.insert(author, ChainTip { seq, hash, hlc: HLC::default() });
+    }
+    
+    /// Set the info for an author with HLC (convenience method).
     pub fn set_with_hlc(&mut self, author: Author, seq: u64, hash: [u8; 32], hlc: Option<(u64, u32)>) {
-        self.authors.insert(author, AuthorInfo::with_hlc(seq, hash, hlc));
+        let hlc = hlc.map(HLC::from).unwrap_or_default();
+        self.authors.insert(author, ChainTip { seq, hash, hlc });
     }
 
-    /// Get all authors and their info.
-    pub fn authors(&self) -> &HashMap<Author, AuthorInfo> {
+    /// Get all authors and their tips.
+    pub fn authors(&self) -> &HashMap<Author, ChainTip> {
         &self.authors
     }
     
     /// Compute the "common HLC" - the minimum of max HLCs across all authors.
     /// This represents the point at which all logs are synchronized.
-    /// Returns None if any author has no HLC or there are no authors.
-    pub fn common_hlc(&self) -> Option<(u64, u32)> {
+    /// Returns None if there are no authors.
+    pub fn common_hlc(&self) -> Option<HLC> {
         if self.authors.is_empty() {
             return None;
         }
         
-        let mut min_hlc: Option<(u64, u32)> = None;
-        for info in self.authors.values() {
-            match (min_hlc, info.hlc) {
-                (None, Some(hlc)) => min_hlc = Some(hlc),
-                (Some(current), Some(hlc)) => {
-                    // Compare: first by wall_time, then by counter
-                    if hlc.0 < current.0 || (hlc.0 == current.0 && hlc.1 < current.1) {
-                        min_hlc = Some(hlc);
-                    }
-                }
-                (_, None) => return None, // Author without HLC = no common HLC
-            }
-        }
-        min_hlc
+        // Use HLC's Ord implementation for min
+        self.authors.values().map(|tip| tip.hlc).min()
     }
 
     /// Compute what entries we're missing compared to a peer's state.
@@ -186,38 +165,35 @@ impl SyncState {
 
     /// Merge another sync state into this one (takes max seq).
     pub fn merge(&mut self, other: &SyncState) {
-        for (author, info) in other.authors() {
-            if let Some(my_info) = self.authors.get_mut(author) {
-                // Take max seq and associated hash
-                if info.seq > my_info.seq {
-                    my_info.seq = info.seq;
-                    my_info.hash = info.hash;
-                    my_info.hlc = info.hlc;
+        for (author, tip) in other.authors() {
+            if let Some(my_tip) = self.authors.get_mut(author) {
+                // Take max seq and associated data
+                if tip.seq > my_tip.seq {
+                    *my_tip = *tip;
                 }
             } else {
-                self.authors.insert(*author, info.clone());
+                self.authors.insert(*author, *tip);
             }
         }
     }
 
     /// Convert to proto message for network transmission
-    pub fn to_proto(&self) -> crate::proto::storage::SyncState {
-        let authors = self.authors.iter().map(|(author, info)| {
-            crate::proto::storage::SyncAuthor {
+    pub fn to_proto(&self) -> ProtoSyncState {
+        let authors = self.authors.iter().map(|(author, tip)| {
+            ProtoSyncAuthor {
                 author_id: author.to_vec(),
-                state: Some(crate::proto::storage::AuthorState {
-                    seq: info.seq,
-                    hash: info.hash.to_vec(),
-                    hlc: info.hlc.map(|(wall_time, counter)| crate::proto::storage::Hlc { wall_time, counter }),
+                state: Some(ProtoChainTip {
+                    seq: tip.seq,
+                    hash: tip.hash.to_vec(),
+                    hlc: Some(tip.hlc.into()),
                 }),
             }
         }).collect();
         
         // Compute common HLC (min of max HLCs across all authors)
-        let common_hlc = self.common_hlc()
-            .map(|(wall_time, counter)| crate::proto::storage::Hlc { wall_time, counter });
+        let common_hlc = self.common_hlc().map(|h| h.into());
         
-        crate::proto::storage::SyncState {
+        ProtoSyncState {
             authors,
             sender_hlc: None,
             common_hlc,

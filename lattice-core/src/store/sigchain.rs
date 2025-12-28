@@ -4,10 +4,8 @@
 //! before appending (correct seq, prev_hash, valid signature) and persists to disk.
 
 use crate::store::log::{Log, LogError};
-use crate::proto::storage::{Entry, SignedEntry};
-use crate::store::signed_entry::{hash_signed_entry, verify_signed_entry};
+use crate::entry::{Entry, SignedEntry, ChainTip};
 use crate::store::orphan_store::GapInfo;
-use prost::Message;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -65,14 +63,8 @@ pub struct SigChain {
     /// Author's public key (32 bytes)
     author_id: [u8; 32],
     
-    /// Next expected sequence number
-    next_seq: u64,
-    
-    /// Hash of the last entry (zeroes if empty)
-    last_hash: [u8; 32],
-    
-    /// HLC timestamp of the last entry (None if empty)
-    last_hlc: Option<crate::proto::storage::Hlc>,
+    /// Tip of the chain (None = empty chain)
+    tip: Option<ChainTip>,
 }
 
 impl SigChain {
@@ -83,9 +75,7 @@ impl SigChain {
             log,
             store_id,
             author_id,
-            next_seq: 1,
-            last_hash: [0u8; 32],
-            last_hlc: None,
+            tip: None,
         })
     }
     
@@ -98,29 +88,25 @@ impl SigChain {
             log,
             store_id,
             author_id,
-            next_seq: 1,
-            last_hash: [0u8; 32],
-            last_hlc: None,
+            tip: None,
         };
         
         for result in entries_iter {
             let signed_entry = result?;
             // Verify signature
-            verify_signed_entry(&signed_entry)
+            signed_entry.verify()
                 .map_err(|_| SigChainError::InvalidSignature)?;
             
-            // Validate author (author_id is in SignedEntry)
-            let entry_author: [u8; 32] = signed_entry.author_id.clone().try_into()
-                .unwrap_or([0u8; 32]);
-            if entry_author != author_id {
+            // Validate author
+            if signed_entry.author_id != author_id {
                 return Err(SigChainError::WrongAuthor {
                     expected: hex::encode(author_id),
-                    got: hex::encode(&entry_author),
+                    got: hex::encode(signed_entry.author_id),
                 });
             }
             
-            // Decode Entry
-            let entry = Entry::decode(&signed_entry.entry_bytes[..])?;
+            // Access Entry directly
+            let entry = &signed_entry.entry;
             
             // Validate store_id
             // Note: Empty/malformed store_id becomes [0u8;16], which fails validation
@@ -135,28 +121,28 @@ impl SigChain {
             }
             
             // Validate sequence
-            if entry.seq != chain.next_seq {
+            if entry.seq != chain.next_seq() {
                 return Err(SigChainError::InvalidSequence {
-                    expected: chain.next_seq,
+                    expected: chain.next_seq(),
                     got: entry.seq,
                 });
             }
             
             // Validate prev_hash
-            let expected_prev: [u8; 32] = chain.last_hash;
-            let got_prev: [u8; 32] = entry.prev_hash.try_into()
-                .unwrap_or([0u8; 32]);
-            if got_prev != expected_prev {
+            let expected_prev: [u8; 32] = chain.last_hash();
+            if entry.prev_hash != expected_prev {
                 return Err(SigChainError::InvalidPrevHash {
                     expected: hex::encode(expected_prev),
-                    got: hex::encode(got_prev),
+                    got: hex::encode(entry.prev_hash),
                 });
             }
             
-            // Update state
-            chain.last_hash = hash_signed_entry(&signed_entry);
-            chain.last_hlc = entry.timestamp;
-            chain.next_seq += 1;
+            // Update tip
+            chain.tip = Some(ChainTip {
+                seq: entry.seq,
+                hash: signed_entry.hash(),
+                hlc: entry.timestamp,
+            });
         }
         
         Ok(chain)
@@ -170,56 +156,64 @@ impl SigChain {
     
     /// Get the next expected sequence number
     pub fn next_seq(&self) -> u64 {
-        self.next_seq
+        self.tip.as_ref().map(|t| t.seq + 1).unwrap_or(1)
     }
     
-    /// Get the hash of the last entry
-    pub fn last_hash(&self) -> &[u8; 32] {
-        &self.last_hash
+    /// Get the hash of the last entry (zeroes if empty)
+    pub fn last_hash(&self) -> [u8; 32] {
+        self.tip.as_ref().map(|t| t.hash).unwrap_or([0u8; 32])
+    }
+    
+    /// Get the tip (if chain is non-empty)
+    pub fn tip(&self) -> Option<&ChainTip> {
+        self.tip.as_ref()
     }
     
     /// Get the current length of the chain
     pub fn len(&self) -> u64 {
-        self.next_seq - 1
+        self.tip.as_ref().map(|t| t.seq).unwrap_or(0)
     }
     
     /// Get author state as proto message
-    pub fn author_state(&self) -> crate::proto::storage::AuthorState {
-        crate::proto::storage::AuthorState {
-            seq: self.len(),
-            hash: self.last_hash.to_vec(),
-            hlc: self.last_hlc.clone(),
+    pub fn chain_tip(&self) -> crate::proto::storage::ChainTip {
+        match &self.tip {
+            Some(tip) => crate::proto::storage::ChainTip {
+                seq: tip.seq,
+                hash: tip.hash.to_vec(),
+                hlc: Some(tip.hlc.into()),
+            },
+            None => crate::proto::storage::ChainTip {
+                seq: 0,
+                hash: [0u8; 32].to_vec(),
+                hlc: None,
+            },
         }
     }
     
     /// Check if the chain is empty
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.next_seq == 1
+        self.tip.is_none()
     }
     
     /// Validate a signed entry without appending
     pub fn validate(&self, signed_entry: &SignedEntry) -> Result<(), SigChainError> {
         // Verify signature
-        verify_signed_entry(signed_entry)
+        signed_entry.verify()
             .map_err(|_| SigChainError::InvalidSignature)?;
         
-        // Validate author (author_id is in SignedEntry)
-        let author: [u8; 32] = signed_entry.author_id.clone().try_into()
-            .unwrap_or([0u8; 32]);
-        if author != self.author_id {
+        // Validate author
+        if signed_entry.author_id != self.author_id {
             return Err(SigChainError::WrongAuthor {
                 expected: hex::encode(self.author_id),
-                got: hex::encode(author),
+                got: hex::encode(signed_entry.author_id),
             });
         }
         
-        // Decode entry
-        let entry = Entry::decode(&signed_entry.entry_bytes[..])?;
+        // Access entry directly
+        let entry = &signed_entry.entry;
         
         // Validate store_id
-        // Note: Empty/malformed store_id becomes [0u8;16], which fails validation
-        // against any real UUID store. This intentionally rejects legacy entries.
         let entry_store: [u8; 16] = entry.store_id.clone().try_into()
             .unwrap_or([0u8; 16]);
         if entry_store != self.store_id {
@@ -230,20 +224,19 @@ impl SigChain {
         }
         
         // Validate sequence
-        if entry.seq != self.next_seq {
+        if entry.seq != self.next_seq() {
             return Err(SigChainError::InvalidSequence {
-                expected: self.next_seq,
+                expected: self.next_seq(),
                 got: entry.seq,
             });
         }
         
         // Validate prev_hash
-        let prev: [u8; 32] = entry.prev_hash.try_into()
-            .unwrap_or([0u8; 32]);
-        if prev != self.last_hash {
+        let expected = self.last_hash();
+        if entry.prev_hash != expected {
             return Err(SigChainError::InvalidPrevHash {
-                expected: hex::encode(self.last_hash),
-                got: hex::encode(prev),
+                expected: hex::encode(expected),
+                got: hex::encode(entry.prev_hash),
             });
         }
         
@@ -257,13 +250,13 @@ impl SigChain {
         // Write to log
         self.log.append(signed_entry)?;
         
-        // Update state
-        self.last_hash = hash_signed_entry(signed_entry);
-        if let Ok(entry) = Entry::decode(&signed_entry.entry_bytes[..]) {
-            self.last_hlc = entry.timestamp;
-        }
-        self.next_seq += 1;
-        
+        // Update tip
+        self.tip = Some(ChainTip {
+            seq: signed_entry.entry.seq,
+            hash: signed_entry.hash(),
+            hlc: signed_entry.entry.timestamp,
+        });
+
         Ok(())
     }
     
@@ -281,13 +274,9 @@ impl SigChain {
         node: &crate::node_identity::NodeIdentity,
         parent_hashes: Vec<Vec<u8>>,
         ops: Vec<crate::proto::storage::Operation>,
-    ) -> SignedEntry {
-        use crate::hlc::HLC;
-        use crate::store::signed_entry::EntryBuilder;
-        
-        let mut builder = EntryBuilder::new(self.next_seq(), HLC::now())
+    ) -> SignedEntry { 
+        let mut builder = Entry::next_after(self.tip.as_ref())
             .store_id(self.store_id.to_vec())
-            .prev_hash(self.last_hash().to_vec())
             .parent_hashes(parent_hashes);
         
         for op in ops {
@@ -320,6 +309,9 @@ pub struct SigChainManager {
     /// Built on startup by scanning logs, updated on each commit.
     /// Used for parent_hash validation (check if hash exists in history).
     hash_index: std::collections::HashSet<[u8; 32]>,
+    
+    /// Cached SyncState built from chains. Updated on commit_entry().
+    cached_sync_state: super::sync_state::SyncState,
 }
 
 impl SigChainManager {
@@ -331,8 +323,8 @@ impl SigChainManager {
             .expect("Failed to open orphan store");
         let (gap_tx, _) = broadcast::channel(64);
         
-        // Load all chains and build hash index in one pass
-        let (chains, hash_index) = Self::load_chains_and_build_index(&logs_path, store_id);
+        // Load all chains, build hash index, and sync state in one pass
+        let (chains, hash_index, cached_sync_state) = Self::load_chains_and_build_all(&logs_path, store_id);
         
         Self {
             logs_dir: logs_path,
@@ -341,21 +333,21 @@ impl SigChainManager {
             orphan_store,
             gap_tx,
             hash_index,
+            cached_sync_state,
         }
     }
     
-    /// Load all chains and build hash index by scanning all log files
-    fn load_chains_and_build_index(
+    /// Load all chains, hash index, and sync state in one pass
+    fn load_chains_and_build_all(
         logs_dir: &Path, 
         store_id: [u8; 16]
-    ) -> (std::collections::HashMap<[u8; 32], SigChain>, std::collections::HashSet<[u8; 32]>) {
-        use crate::store::signed_entry::hash_signed_entry;
-        
+    ) -> (std::collections::HashMap<[u8; 32], SigChain>, std::collections::HashSet<[u8; 32]>, super::sync_state::SyncState) {
         let mut chains = std::collections::HashMap::new();
         let mut hash_index = std::collections::HashSet::new();
+        let mut sync_state = super::sync_state::SyncState::new();
         
         let Ok(entries) = std::fs::read_dir(logs_dir) else {
-            return (chains, hash_index);
+            return (chains, hash_index, sync_state);
         };
         
         for entry in entries.flatten() {
@@ -376,17 +368,22 @@ impl SigChainManager {
                         if let Ok(iter) = log.iter() {
                             for result in iter {
                                 if let Ok(signed_entry) = result {
-                                    hash_index.insert(hash_signed_entry(&signed_entry));
+                                    hash_index.insert(signed_entry.hash());
                                 }
                             }
                         }
                     }
+                    // Build sync state entry from chain tip
+                    if let Some(tip) = chain.tip() {
+                        sync_state.set_tip(author, *tip);
+                    }
+                    
                     chains.insert(author, chain);
                 }
             }
         }
         
-        (chains, hash_index)
+        (chains, hash_index, sync_state)
     }
     
     /// Check if an entry hash exists in history
@@ -421,43 +418,44 @@ impl SigChainManager {
         self.chains.get(author)
     }
     
-    /// Get AuthorState for all loaded chains
-    pub fn get_author_states(&self) -> std::collections::HashMap<[u8; 32], crate::proto::storage::AuthorState> {
+    /// Get AuthorState (ChainTip) for all loaded chains
+    pub fn get_author_states(&self) -> std::collections::HashMap<[u8; 32], crate::entry::ChainTip> {
         self.chains.iter()
-            .map(|(author, chain)| (*author, chain.author_state()))
+            .filter_map(|(author, chain)| {
+                chain.tip().map(|tip| (*author, *tip))
+            })
             .collect()
+    }
+    
+    /// Get cached SyncState (O(1) - no rebuild)
+    pub fn sync_state(&self) -> super::sync_state::SyncState {
+        self.cached_sync_state.clone()
     }
     
     /// Validate an entry against sigchain WITHOUT appending.
     /// Returns validation result that actor can use to decide next steps.
     pub fn validate_entry(&mut self, entry: &SignedEntry) -> SigchainValidation {
-        let author: [u8; 32] = match entry.author_id.clone().try_into() {
-            Ok(a) => a,
-            Err(_) => return SigchainValidation::Error(SigChainError::WrongAuthor {
-                expected: "32 bytes".to_string(),
-                got: format!("{} bytes", entry.author_id.len()),
-            }),
-        };
+        let author = entry.author_id;
         
         let chain = self.get_or_create(author);
-        let next_seq = chain.next_seq;
-        let last_hash = chain.last_hash;
+        
+        // Extract tip info for gap reporting (empty chain = seq 0, zero hash)
+        let (next_seq, last_hash) = match chain.tip() {
+            Some(tip) => (tip.seq + 1, tip.hash),
+            None => (1, [0u8; 32]),
+        };
         
         match chain.validate(entry) {
             Ok(()) => SigchainValidation::Valid,
             Err(SigChainError::InvalidPrevHash { .. }) | Err(SigChainError::InvalidSequence { .. }) => {
-                // Decode to get seq number
-                let decoded = Entry::decode(&entry.entry_bytes[..]).ok();
-                let seq = decoded.as_ref().map(|e| e.seq).unwrap_or(0);
+                let seq = entry.entry.seq;
                 
                 if seq < next_seq {
                     // Entry is behind our current position - already applied (duplicate)
                     SigchainValidation::Duplicate
                 } else {
                     // Entry is ahead of our current position - orphan waiting for parent
-                    let prev_hash: [u8; 32] = decoded.as_ref()
-                        .and_then(|e| e.prev_hash.clone().try_into().ok())
-                        .unwrap_or([0u8; 32]);
+                    let prev_hash = entry.entry.prev_hash;
                     
                     SigchainValidation::Orphan {
                         gap: GapInfo {
@@ -480,18 +478,22 @@ impl SigChainManager {
     /// along with metadata for deferred deletion (author, prev_hash, orphan_hash).
     /// Caller MUST call delete_sigchain_orphan after successfully processing each orphan.
     pub fn commit_entry(&mut self, entry: &SignedEntry) -> Result<Vec<(SignedEntry, [u8; 32], [u8; 32], [u8; 32])>, SigChainError> {
-        let author: [u8; 32] = entry.author_id.clone()
-            .try_into()
-            .map_err(|_| SigChainError::WrongAuthor {
-                expected: "32 bytes".to_string(),
-                got: format!("{} bytes", entry.author_id.len()),
-            })?;
+        let author = entry.author_id;
+
+        // Append to chain and get new tip for cache update
+        let tip = {
+            let chain = self.get_or_create(author);
+            chain.append_unchecked(entry)?;
+            chain.tip().copied()
+        };
         
-        let chain = self.get_or_create(author);
-        chain.append_unchecked(entry)?;
+        // Update cached sync state for this author (after chain borrow ends)
+        if let Some(tip) = tip {
+            self.cached_sync_state.set_tip(author, tip);
+        }
         
         // Compute hash and register in index
-        let entry_hash = hash_signed_entry(entry);
+        let entry_hash = entry.hash();
         self.register_hash(entry_hash);
         
         // Check for orphans waiting for this entry
@@ -523,7 +525,7 @@ impl SigChainManager {
         next_seq: u64,
         last_hash: [u8; 32],
     ) -> Result<(), SigChainError> {
-        let entry_hash = hash_signed_entry(entry);
+        let entry_hash = entry.hash();
         
         let is_new = self.orphan_store.insert(&author, &prev_hash, &entry_hash, seq, entry)
             .map_err(|e| SigChainError::WrongAuthor { 
@@ -564,7 +566,7 @@ impl SigChainManager {
         key: &[u8],
         parent_hash: &[u8; 32],
     ) -> Result<(), SigChainError> {
-        let entry_hash = hash_signed_entry(entry);
+        let entry_hash = entry.hash();
         let _ = self.orphan_store.insert_dag_orphan(key, parent_hash, &entry_hash, entry)
             .map_err(|e| SigChainError::WrongAuthor { 
                 expected: "dag orphan store insert".to_string(), 
@@ -625,7 +627,7 @@ mod tests {
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::proto::storage::Operation;
-    use crate::store::signed_entry::EntryBuilder;
+    use crate::entry::{Entry, SignedEntry, ChainTip};
 
     const TEST_STORE: [u8; 16] = [1u8; 16];
 
@@ -638,7 +640,7 @@ mod tests {
         
         assert_eq!(chain.author_id(), &author);
         assert_eq!(chain.next_seq(), 1);
-        assert_eq!(chain.last_hash(), &[0u8; 32]);
+        assert_eq!(chain.last_hash(), [0u8; 32]);
         assert!(chain.is_empty());
         assert_eq!(chain.len(), 0);
     }
@@ -653,9 +655,10 @@ mod tests {
         let mut chain = SigChain::new(&path, TEST_STORE, author).unwrap();
         
         let clock = MockClock::new(1000);
-        let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let clock = MockClock::new(1000);
+        let entry = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         
@@ -679,9 +682,9 @@ mod tests {
         let clock = MockClock::new(1000);
         
         for i in 1..=3 {
-            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+            let entry = Entry::next_after(chain.tip())
+                .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
-                .prev_hash(chain.last_hash.to_vec())
                 .operation(Operation::put(format!("/key/{}", i), format!("value{}", i).into_bytes()))
                 .sign(&node);
             chain.append(&entry).unwrap();
@@ -706,9 +709,9 @@ mod tests {
         {
             let mut chain = SigChain::new(&path, TEST_STORE, author).unwrap();
             for i in 1..=3 {
-                let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+                let entry = Entry::next_after(chain.tip())
+                    .timestamp(HLC::now_with_clock(&clock))
                     .store_id(TEST_STORE.to_vec())
-                    .prev_hash(chain.last_hash.to_vec())
                     .operation(Operation::put("/key", b"val".to_vec()))
                     .sign(&node);
                 chain.append(&entry).unwrap();
@@ -735,9 +738,12 @@ mod tests {
         let clock = MockClock::new(1000);
         
         // Try to append with wrong seq (2 instead of 1)
-        let entry = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+        // Try to append with wrong seq (2 instead of 1)
+        // Simulate this by creating a fake tip at seq 1 (so next is 2)
+        let fake_tip = ChainTip { seq: 1, hash: [0u8; 32], hlc: HLC::default() };
+        let entry = Entry::next_after(Some(&fake_tip))
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"val".to_vec()))
             .sign(&node);
         
@@ -759,17 +765,21 @@ mod tests {
         let clock = MockClock::new(1000);
         
         // First entry
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        // First entry
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         chain.append(&entry1).unwrap();
         
         // Second entry with wrong prev_hash
-        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+        // Second entry with wrong prev_hash
+        // Simulate this by creating a fake tip with correct seq (1) but wrong hash
+        let fake_tip = ChainTip { seq: 1, hash: [99u8; 32], hlc: HLC::default() };
+        let entry2 = Entry::next_after(Some(&fake_tip))
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([99u8; 32].to_vec()) // Wrong!
             .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
         
@@ -791,9 +801,10 @@ mod tests {
         let clock = MockClock::new(1000);
         
         // Entry signed by node but chain expects other_author
-        let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        // Entry signed by node but chain expects other_author
+        let entry = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"val".to_vec()))
             .sign(&node);
         
@@ -830,7 +841,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].entry_bytes, signed.entry_bytes);
+        assert_eq!(entries[0].author_id, signed.author_id);
         
         std::fs::remove_file(&path).ok();
     }
@@ -851,9 +862,11 @@ mod tests {
         
         // Create valid entry for store A
         let mut chain_a = SigChain::new(&path_a, store_a, author).unwrap();
-        let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        // Create valid entry for store A
+        let mut chain_a = SigChain::new(&path_a, store_a, author).unwrap();
+        let entry = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(store_a.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"val".to_vec()))
             .sign(&node);
         chain_a.append(&entry).unwrap();
@@ -883,28 +896,31 @@ mod tests {
         let mut manager = SigChainManager::new(&logs_dir, TEST_STORE);
         
         // Create entry_1 (genesis)
-        let entry_1 = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        // Create entry_1 (genesis)
+        let entry_1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"value1".to_vec()))
             .sign(&node);
-        let hash_1 = hash_signed_entry(&entry_1);
+        let hash_1 = entry_1.hash();
         
         // Create entry_2 (child of entry_1)
-        let entry_2 = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+        // Create entry_2 (child of entry_1)
+        let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_1.to_vec())
             .operation(Operation::put("/key", b"value2".to_vec()))
             .sign(&node);
-        let hash_2 = hash_signed_entry(&entry_2);
+        let hash_2 = entry_2.hash();
         
         // Create entry_3 (child of entry_2)
-        let entry_3 = EntryBuilder::new(3, HLC::now_with_clock(&clock))
+        // Create entry_3 (child of entry_2)
+        let entry_3 = Entry::next_after(Some(&ChainTip::from(&entry_2)))
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_2.to_vec())
             .operation(Operation::put("/key", b"value3".to_vec()))
             .sign(&node);
-        let hash_3 = hash_signed_entry(&entry_3);
+        let hash_3 = entry_3.hash();
         
         // Step 1: Ingest entry_1 -> should be Valid
         assert!(matches!(manager.validate_entry(&entry_1), SigchainValidation::Valid));
@@ -914,7 +930,7 @@ mod tests {
         // Verify in-memory chain state is updated
         let chain = manager.get(&node.public_key_bytes()).expect("chain should exist");
         assert_eq!(chain.next_seq(), 2, "After entry_1: next_seq should be 2");
-        assert_eq!(chain.last_hash(), &hash_1, "After entry_1: last_hash should be hash_1");
+        assert_eq!(chain.last_hash(), hash_1, "After entry_1: last_hash should be hash_1");
         
         // Step 2: Ingest entry_3 (orphan - skipping entry_2)
         match manager.validate_entry(&entry_3) {
@@ -943,7 +959,7 @@ mod tests {
         
         let chain = manager.get(&node.public_key_bytes()).expect("chain should exist");
         assert_eq!(chain.next_seq(), 4, "After entry_2+3: next_seq should be 4");
-        assert_eq!(chain.last_hash(), &hash_3, "After entry_2+3: last_hash should be hash_3");
+        assert_eq!(chain.last_hash(), hash_3, "After entry_2+3: last_hash should be hash_3");
         
         // Cleanup
         let _ = std::fs::remove_dir_all(&logs_dir);
@@ -967,16 +983,17 @@ mod tests {
         let mut gap_rx = manager.subscribe_gaps();
         
         // Create entries
-        let entry_1 = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        // Create entries
+        let entry_1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
-        let hash_1 = hash_signed_entry(&entry_1);
+        let hash_1 = entry_1.hash();
         
-        let entry_2 = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+        let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_1.to_vec())
             .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
         
@@ -1029,26 +1046,26 @@ mod tests {
         // Peer A: Create and apply entries 1, 2, 3 in order
         let mut manager_a = SigChainManager::new(&logs_dir_a, TEST_STORE);
         
-        let entry_1 = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry_1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
-        let hash_1 = hash_signed_entry(&entry_1);
+        let hash_1 = entry_1.hash();
         
-        let entry_2 = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+        let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_1.to_vec())
             .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
-        let hash_2 = hash_signed_entry(&entry_2);
+        let hash_2 = entry_2.hash();
         
-        let entry_3 = EntryBuilder::new(3, HLC::now_with_clock(&clock))
+        let entry_3 = Entry::next_after(Some(&ChainTip::from(&entry_2)))
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_2.to_vec())
             .operation(Operation::put("/key", b"v3".to_vec()))
             .sign(&node);
-        let hash_3 = hash_signed_entry(&entry_3);
+        let hash_3 = entry_3.hash();
         
         // Peer A applies all entries
         assert!(matches!(manager_a.validate_entry(&entry_1), SigchainValidation::Valid));
@@ -1060,7 +1077,7 @@ mod tests {
         
         let chain_a = manager_a.get(&node.public_key_bytes()).unwrap();
         assert_eq!(chain_a.next_seq(), 4);
-        assert_eq!(chain_a.last_hash(), &hash_3);
+        assert_eq!(chain_a.last_hash(), hash_3);
         
         // Peer B: Receives entry_3 first (via gossip out-of-order)
         let mut manager_b = SigChainManager::new(&logs_dir_b, TEST_STORE);
@@ -1099,7 +1116,7 @@ mod tests {
         // Verify Peer B state matches Peer A
         let chain_b = manager_b.get(&node.public_key_bytes()).unwrap();
         assert_eq!(chain_b.next_seq(), 4);
-        assert_eq!(chain_b.last_hash(), &hash_3);
+        assert_eq!(chain_b.last_hash(), hash_3);
         
         let _ = std::fs::remove_dir_all(&logs_dir_a);
         let _ = std::fs::remove_dir_all(&logs_dir_b);

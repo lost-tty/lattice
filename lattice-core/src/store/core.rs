@@ -8,8 +8,8 @@
 
 use crate::store::log::LogError;
 use crate::store::sigchain::SigChainError;
-use crate::store::signed_entry::hash_signed_entry;
-use crate::proto::storage::{operation, AuthorState, Entry, HeadInfo, HeadList, Hlc, SignedEntry};
+use crate::entry::{SignedEntry, ChainTip};
+use crate::proto::storage::{operation, ChainTip as ProtoChainTip, HeadInfo, HeadList, Hlc};
 use prost::Message;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::collections::HashSet;
@@ -18,7 +18,7 @@ use thiserror::Error;
 
 // Table definitions
 const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
-const AUTHOR_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("author");
+const CHAIN_TIPS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chain_tips");
 const PEER_SYNC_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("peer_sync");
 
 /// Errors that can occur during store operations
@@ -47,6 +47,9 @@ pub enum StoreError {
     
     #[error("Sigchain error: {0}")]
     SigChain(#[from] SigChainError),
+
+    #[error("Entry not successor of tip (seq {entry_seq}, prev_hash {prev_hash}, tip_hash {tip_hash})")]
+    NotSuccessor { entry_seq: u64, prev_hash: String, tip_hash: String },
 }
 
 /// Errors that occur when validating parent_hashes against current state
@@ -79,7 +82,7 @@ impl Store {
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(KV_TABLE)?;
-            let _ = write_txn.open_table(AUTHOR_TABLE)?;
+            let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
             let _ = write_txn.open_table(PEER_SYNC_TABLE)?;
         }
         write_txn.commit()?;
@@ -97,12 +100,14 @@ impl Store {
         let mut applied = 0u64;
         {
             let mut kv_table = write_txn.open_table(KV_TABLE)?;
-            let mut author_table = write_txn.open_table(AUTHOR_TABLE)?;
+            let mut chain_tips_table = write_txn.open_table(CHAIN_TIPS_TABLE)?;
             
             for result in entries {
                 let signed_entry = result?;
-                if Self::apply_ops_to_tables(&signed_entry, &mut kv_table, &mut author_table)? {
-                    applied += 1;
+                match Self::apply_ops_to_tables(&signed_entry, &mut kv_table, &mut chain_tips_table) {
+                    Ok(()) => applied += 1,
+                    Err(StoreError::NotSuccessor { .. }) => {} // already applied, skip
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -112,12 +117,13 @@ impl Store {
     }
     
     /// Apply a single signed entry to the store
+    /// Returns Err(NotSuccessor) if entry doesn't chain properly (duplicate, gap, or fork)
     pub fn apply_entry(&self, signed_entry: &SignedEntry) -> Result<(), StoreError> {
         let write_txn = self.db.begin_write()?;
         {
             let mut kv_table = write_txn.open_table(KV_TABLE)?;
-            let mut author_table = write_txn.open_table(AUTHOR_TABLE)?;
-            Self::apply_ops_to_tables(signed_entry, &mut kv_table, &mut author_table)?;
+            let mut chain_tips_table = write_txn.open_table(CHAIN_TIPS_TABLE)?;
+            Self::apply_ops_to_tables(signed_entry, &mut kv_table, &mut chain_tips_table)?;
         }
         write_txn.commit()?;
         Ok(())
@@ -136,8 +142,7 @@ impl Store {
     ) -> Result<(), ParentValidationError> 
     where F: Fn(&[u8; 32]) -> bool
     {
-        let entry = Entry::decode(&signed_entry.entry_bytes[..])
-            .map_err(|e| ParentValidationError::Decode(e.to_string()))?;
+        let entry = &signed_entry.entry;
         
         // If no parent_hashes, this is a "new head" operation - always valid
         if entry.parent_hashes.is_empty() {
@@ -146,10 +151,8 @@ impl Store {
         
         // For each parent hash, check it exists in history
         for parent in &entry.parent_hashes {
-            let parent_hash: [u8; 32] = parent.clone().try_into()
-                .map_err(|_| ParentValidationError::Decode("Invalid parent hash length".to_string()))?;
-            
-            if !hash_exists(&parent_hash) {
+            // Internal type already has [u8; 32], no need to try_into
+            if !hash_exists(parent) {
                 // Get the key for the error message (from first op)
                 let key = entry.ops.first()
                     .and_then(|op| match &op.op_type {
@@ -161,7 +164,7 @@ impl Store {
                 
                 return Err(ParentValidationError::MissingParent {
                     key,
-                    awaited_hash: parent.clone(),
+                    awaited_hash: parent.to_vec(),
                 });
             }
         }
@@ -172,8 +175,7 @@ impl Store {
     /// Legacy validation - checks parent_hashes are current heads.
     /// Use validate_parent_hashes_with_index for proper CRDT behavior.
     pub fn validate_parent_hashes(&self, signed_entry: &SignedEntry) -> Result<(), ParentValidationError> {
-        let entry = Entry::decode(&signed_entry.entry_bytes[..])
-            .map_err(|e| ParentValidationError::Decode(e.to_string()))?;
+        let entry = &signed_entry.entry;
         
         // If no parent_hashes, this is a "new head" operation - always valid
         if entry.parent_hashes.is_empty() {
@@ -181,7 +183,7 @@ impl Store {
         }
         
         // Convert parent_hashes to HashSet for O(1) lookup
-        let parent_set: HashSet<Vec<u8>> = entry.parent_hashes.iter().cloned().collect();
+        let parent_set: HashSet<[u8; 32]> = entry.parent_hashes.iter().cloned().collect();
         
         // For each operation, check that ALL parent_hashes are in current heads for that key
         for op in &entry.ops {
@@ -200,10 +202,10 @@ impl Store {
             
             // All parent_hashes must exist in current_heads for this key
             for parent in &parent_set {
-                if !current_hashes.contains(parent) {
+                if !current_hashes.contains(parent.as_slice()) {
                     return Err(ParentValidationError::MissingParent {
                         key: key.clone(),
-                        awaited_hash: parent.clone(),
+                        awaited_hash: parent.to_vec(),
                     });
                 }
             }
@@ -213,33 +215,37 @@ impl Store {
     }
     
     /// Internal: apply operations from a signed entry to tables
-    /// Returns true if applied, false if skipped (already applied)
+    /// Returns Ok(()) if applied, Err(NotSuccessor) if already applied or out of order
     fn apply_ops_to_tables(
         signed_entry: &SignedEntry,
         kv_table: &mut redb::Table<&[u8], &[u8]>,
-        author_table: &mut redb::Table<&[u8], &[u8]>,
-    ) -> Result<bool, StoreError> {
-        let entry = Entry::decode(&signed_entry.entry_bytes[..])?;
-        let entry_hash = hash_signed_entry(signed_entry);
-        let entry_hlc = entry.timestamp.clone();
-        let author: [u8; 32] = signed_entry.author_id.clone().try_into().unwrap_or([0u8; 32]);
+        chain_tips_table: &mut redb::Table<&[u8], &[u8]>,
+    ) -> Result<(), StoreError> {
+        let entry = &signed_entry.entry;
+        let entry_hash = signed_entry.hash();
+        let entry_hlc: Hlc = entry.timestamp.clone().into();
+        let author = signed_entry.author_id;
         
-        // Check if entry was already applied (per-author seq check)
-        if let Some(author_state_bytes) = author_table.get(&author[..])? {
-            if let Ok(author_state) = AuthorState::decode(author_state_bytes.value()) {
-                if entry.seq <= author_state.seq {
-                    return Ok(false);  // Already applied, skip
+        // Check if entry properly chains to the previous one
+        if let Some(tip_bytes) = chain_tips_table.get(&author[..])? {
+            if let Ok(tip) = ChainTip::decode(tip_bytes.value()) {
+                if !entry.is_successor_of(&tip) {
+                    return Err(StoreError::NotSuccessor {
+                        entry_seq: entry.seq,
+                        prev_hash: hex::encode(&entry.prev_hash[..8]),
+                        tip_hash: hex::encode(&tip.hash[..8]),
+                    });
                 }
             }
         }
-        
-        for op in entry.ops {
-            if let Some(op_type) = op.op_type {
+                
+        for op in &entry.ops {
+            if let Some(op_type) = &op.op_type {
                 match op_type {
                     operation::OpType::Put(put) => {
                         let new_head = HeadInfo {
-                            value: put.value,
-                            hlc: entry_hlc,
+                            value: put.value.clone(),
+                            hlc: Some(entry_hlc),
                             author: author.to_vec(),
                             hash: entry_hash.to_vec(),
                             tombstone: false,
@@ -249,7 +255,7 @@ impl Store {
                     operation::OpType::Delete(del) => {
                         let tombstone = HeadInfo {
                             value: vec![],
-                            hlc: entry_hlc,
+                            hlc: Some(entry_hlc),
                             author: author.to_vec(),
                             hash: entry_hash.to_vec(),
                             tombstone: true,
@@ -259,16 +265,11 @@ impl Store {
                 }
             }
         }
+
+        let tip = ChainTip::from(signed_entry);
+        chain_tips_table.insert(&author[..], tip.encode().as_slice())?;
         
-        // Update per-author state
-        let author_state = AuthorState {
-            seq: entry.seq,
-            hash: entry_hash.to_vec(),
-            hlc: entry_hlc.clone(),
-        };
-        author_table.insert(&author[..], author_state.encode_to_vec().as_slice())?;
-        
-        Ok(true)
+        Ok(())
     }
     
     /// Apply a new head to a key, removing ancestor heads (idempotent)
@@ -276,7 +277,7 @@ impl Store {
         kv_table: &mut redb::Table<&[u8], &[u8]>,
         key: &[u8],
         new_head: HeadInfo,
-        parent_hashes: &[Vec<u8>],
+        parent_hashes: &[[u8; 32]],
     ) -> Result<(), StoreError> {
         let mut heads = match kv_table.get(key)? {
             Some(v) => HeadList::decode(v.value()).map(|h| h.heads).unwrap_or_default(),
@@ -289,7 +290,7 @@ impl Store {
         }
         
         // Remove any heads that are ancestors (their hash is in parent_hashes)
-        heads.retain(|h| !parent_hashes.iter().any(|p| p == &h.hash));
+        heads.retain(|h| !parent_hashes.iter().any(|p| p.as_slice() == h.hash.as_slice()));
         
         // Add new head
         heads.push(new_head);
@@ -407,31 +408,14 @@ impl Store {
     }
     
     /// Get author state for a specific author
-    pub fn author_state(&self, author: &[u8; 32]) -> Result<Option<AuthorState>, StoreError> {
+    pub fn chain_tip(&self, author: &[u8; 32]) -> Result<Option<ChainTip>, StoreError> {
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(AUTHOR_TABLE)?;
+        let table = read_txn.open_table(CHAIN_TIPS_TABLE)?;
         
         match table.get(&author[..])? {
-            Some(v) => Ok(AuthorState::decode(v.value()).ok()),
+            Some(v) => Ok(ChainTip::decode(v.value()).ok()),
             None => Ok(None),
         }
-    }
-
-    /// Set author states from sigchain data
-    pub fn set_author_states(&self, chain_states: &std::collections::HashMap<[u8; 32], AuthorState>) -> Result<u64, StoreError> {
-        let write_txn = self.db.begin_write()?;
-        let mut count = 0u64;
-        {
-            let mut table = write_txn.open_table(AUTHOR_TABLE)?;
-            for (author, state) in chain_states {
-                if state.seq > 0 {
-                    table.insert(&author[..], state.encode_to_vec().as_slice())?;
-                    count += 1;
-                }
-            }
-        }
-        write_txn.commit()?;
-        Ok(count)
     }
 
     /// Get sync state for all authors (for reconciliation).
@@ -441,22 +425,16 @@ impl Store {
         use super::sync_state::SyncState;
         
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(AUTHOR_TABLE)?;
+        let table = read_txn.open_table(CHAIN_TIPS_TABLE)?;
         
         let mut state = SyncState::new();
         for entry in table.iter()? {
             let (key, value) = entry?;
             if key.value().len() == 32 {
-                if let Ok(author_state) = AuthorState::decode(value.value()) {
+                if let Ok(tip) = ChainTip::decode(value.value()) {
                     let mut author = [0u8; 32];
                     author.copy_from_slice(key.value());
-                    let mut hash = [0u8; 32];
-                    if author_state.hash.len() == 32 {
-                        hash.copy_from_slice(&author_state.hash);
-                    }
-                    // Extract HLC if present
-                    let hlc = author_state.hlc.map(|h| (h.wall_time, h.counter));
-                    state.set_with_hlc(author, author_state.seq, hash, hlc);
+                    state.set_with_hlc(author, tip.seq, tip.hash, Some((tip.hlc.wall_time, tip.hlc.counter)));
                 }
             }
         }
@@ -520,8 +498,8 @@ mod tests {
     use crate::clock::MockClock;
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
-    use crate::store::signed_entry::EntryBuilder;
-    use crate::proto::storage::Operation;
+    use crate::entry::{Entry, SignedEntry, ChainTip};
+    use crate::proto::storage::{Hlc, Operation};
 
     const TEST_STORE: [u8; 16] = [1u8; 16];
     
@@ -544,9 +522,9 @@ mod tests {
         let node = NodeIdentity::generate();
         let clock = MockClock::new(1000);
         
-        let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         
@@ -595,19 +573,18 @@ mod tests {
         let clock = MockClock::new(1000);
         
         // First write
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
-            .parent_hashes(vec![]) // No parent
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
         
         // Second write with SAME parent (simulates concurrent/offline write)
         let clock2 = MockClock::new(2000);
-        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
+        let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
+            .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_signed_entry(&entry1).to_vec())
             .parent_hashes(vec![]) // Also no parent (doesn't know about entry1)
             .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
@@ -630,17 +607,19 @@ mod tests {
         
         // Create two heads
         let clock1 = MockClock::new(1000);
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
         
         let clock2 = MockClock::new(2000);
-        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
+        let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
+            .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_signed_entry(&entry1).to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
         store.apply_entry(&entry2).unwrap();
@@ -648,12 +627,12 @@ mod tests {
         assert_eq!(store.get_heads(b"/key").unwrap().len(), 2);
         
         // Merge write citing BOTH heads as parents
-        let hash1 = hash_signed_entry(&entry1);
-        let hash2 = hash_signed_entry(&entry2);
+        let hash1 = entry1.hash();
+        let hash2 = entry2.hash();
         let clock3 = MockClock::new(3000);
-        let entry3 = EntryBuilder::new(3, HLC::now_with_clock(&clock3))
+        let entry3 = Entry::next_after(Some(&ChainTip::from(&entry2)))
+            .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash2.to_vec())
             .parent_hashes(vec![hash1.to_vec(), hash2.to_vec()])
             .operation(Operation::put("/key", b"merged".to_vec()))
             .sign(&node);
@@ -674,33 +653,36 @@ mod tests {
         
         let store = Store::open(&path).unwrap();
         let node = NodeIdentity::generate();
+        let node2 = NodeIdentity::generate();
         
         // Create two concurrent heads
         let clock1 = MockClock::new(1000);
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
         
         let clock2 = MockClock::new(2000);
-        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
+        let entry2 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_signed_entry(&entry1).to_vec())
-            // No parent_hashes = concurrent write
             .operation(Operation::put("/key", b"v2".to_vec()))
-            .sign(&node);
+            .sign(&node2);
         store.apply_entry(&entry2).unwrap();
         
         assert_eq!(store.get_heads(b"/key").unwrap().len(), 2);
         
         // Delete citing only entry1 as parent
-        let hash1 = hash_signed_entry(&entry1);
+        // NOTE: Test used seq 3 manually, but citing entry1 (seq 1). 
+        // We replicate this by fabricating a tip at seq 2.
+        let hash1 = entry1.hash();
         let clock3 = MockClock::new(3000);
-        let entry3 = EntryBuilder::new(3, HLC::now_with_clock(&clock3))
+        let fake_tip = ChainTip { seq: 2, hash: hash1, hlc: entry1.entry.timestamp };
+        let entry3 = Entry::next_after(Some(&fake_tip))
+            .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash1.to_vec())
             .parent_hashes(vec![hash1.to_vec()]) // Only cites entry1
             .operation(Operation::delete("/key"))
             .sign(&node);
@@ -729,9 +711,9 @@ mod tests {
         
         // Create a single head
         let clock1 = MockClock::new(1000);
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put("/key", b"value".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
@@ -739,11 +721,11 @@ mod tests {
         assert!(store.get(b"/key").unwrap().is_some());
         
         // Delete citing the only head
-        let hash1 = hash_signed_entry(&entry1);
+        let hash1 = entry1.hash();
         let clock2 = MockClock::new(2000);
-        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
+        let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
+            .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash1.to_vec())
             .parent_hashes(vec![hash1.to_vec()])
             .operation(Operation::delete("/key"))
             .sign(&node);
@@ -778,29 +760,28 @@ mod tests {
         
         // Initial state: K = v1
         let clock1 = MockClock::new(1000);
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put(b"/key", b"v1".to_vec()))
             .sign(&alice);
         store.apply_entry(&entry1).unwrap();
-        let h1 = hash_signed_entry(&entry1);
+        let h1 = entry1.hash();
         
         // Alice deletes K citing H1
         let clock2 = MockClock::new(2000);
-        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
+        let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
+            .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(h1.to_vec())
-            .parent_hashes(vec![h1.to_vec()])
             .operation(Operation::delete(b"/key"))
             .sign(&alice);
         store.apply_entry(&entry2).unwrap();
         
         // Bob (concurrently) puts K = v2 citing H1 (doesn't know about Alice's delete)
         let clock3 = MockClock::new(2500);
-        let entry3 = EntryBuilder::new(1, HLC::now_with_clock(&clock3))
+        let entry3 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())  // Bob's own chain
             .parent_hashes(vec![h1.to_vec()])  // Cites H1 as parent
             .operation(Operation::put(b"/key", b"v2".to_vec()))
             .sign(&bob);
@@ -838,24 +819,24 @@ mod tests {
         
         // Alice creates K = v1
         let clock1 = MockClock::new(1000);
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .operation(Operation::put(b"/key", b"alice_v1".to_vec()))
             .sign(&alice);
         store.apply_entry(&entry1).unwrap();
-        let h1 = hash_signed_entry(&entry1);
+        let h1 = entry1.hash();
         
         // Bob (offline, no parent_hashes) creates K = v2
         let clock2 = MockClock::new(2000);
-        let entry2 = EntryBuilder::new(1, HLC::now_with_clock(&clock2))
+        let entry2 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             // No parent_hashes = concurrent/diverged
             .operation(Operation::put(b"/key", b"bob_v2".to_vec()))
             .sign(&bob);
         store.apply_entry(&entry2).unwrap();
-        let h2 = hash_signed_entry(&entry2);
+        let h2 = entry2.hash();
         
         // Should have 2 heads now
         let heads = store.get_heads(b"/key").unwrap();
@@ -867,9 +848,9 @@ mod tests {
         
         // Charlie merges by citing both H1 and H2
         let clock3 = MockClock::new(3000);
-        let entry3 = EntryBuilder::new(1, HLC::now_with_clock(&clock3))
+        let entry3 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .parent_hashes(vec![h1.to_vec(), h2.to_vec()])
             .operation(Operation::put(b"/key", b"charlie_merged".to_vec()))
             .sign(&charlie);
@@ -895,9 +876,10 @@ mod tests {
         let node = NodeIdentity::generate();
         
         let clock1 = MockClock::new(1000);
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put(b"/key", b"value".to_vec()))
             .sign(&node);
         
@@ -905,12 +887,18 @@ mod tests {
         store.apply_entry(&entry1).unwrap();
         assert_eq!(store.get_heads(b"/key").unwrap().len(), 1);
         
-        // Apply again (e.g., log replay or duplicate message)
-        store.apply_entry(&entry1).unwrap();
+        // Apply again - should get NotSuccessor error
+        assert!(matches!(
+            store.apply_entry(&entry1),
+            Err(StoreError::NotSuccessor { .. })
+        ));
         assert_eq!(store.get_heads(b"/key").unwrap().len(), 1, "Duplicate entry should not create duplicate head");
         
-        // Apply a third time for good measure
-        store.apply_entry(&entry1).unwrap();
+        // Apply a third time - also NotSuccessor
+        assert!(matches!(
+            store.apply_entry(&entry1),
+            Err(StoreError::NotSuccessor { .. })
+        ));
         assert_eq!(store.get_heads(b"/key").unwrap().len(), 1);
         
         let _ = std::fs::remove_file(&path);
@@ -929,23 +917,23 @@ mod tests {
         
         // First write: a = 1
         let clock1 = MockClock::new(1000);
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
-            .parent_hashes(vec![])  // No parents for first write
+            .parent_hashes(vec![])
             .operation(Operation::put(b"/key", b"1".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
-        let h1 = hash_signed_entry(&entry1);
+        let h1 = entry1.hash();
         
         assert_eq!(store.get_heads(b"/key").unwrap().len(), 1);
         
         // Second write: a = 2, citing h1 as parent
         let clock2 = MockClock::new(2000);
-        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
+        let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
+            .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(h1.to_vec())
-            .parent_hashes(vec![h1.to_vec()])  // Cites h1
+            .parent_hashes(vec![h1.to_vec()])
             .operation(Operation::put(b"/key", b"2".to_vec()))
             .sign(&node);
         store.apply_entry(&entry2).unwrap();
@@ -958,7 +946,8 @@ mod tests {
         let store = Store::open(&path).unwrap();
         
         // Check what parent_hashes entry2 actually has
-        let decoded_entry2 = Entry::decode(&entry2.entry_bytes[..]).unwrap();
+        let proto: crate::proto::storage::SignedEntry = entry2.clone().into();
+        let decoded_entry2: Entry = crate::proto::storage::Entry::decode(&proto.entry_bytes[..]).unwrap().try_into().unwrap();
         eprintln!("Entry2 parent_hashes: {:?}", decoded_entry2.parent_hashes);
         eprintln!("H1: {:?}", h1);
         
@@ -993,21 +982,21 @@ mod tests {
         
         // First write: a = 1
         let clock1 = MockClock::new(1000);
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
             .parent_hashes(vec![])
             .operation(Operation::put(b"/key", b"1".to_vec()))
             .sign(&node);
         sigchain.append(&entry1).unwrap();
         store.apply_entry(&entry1).unwrap();
-        let h1 = hash_signed_entry(&entry1);
+        let h1 = entry1.hash();
         
         // Second write: a = 2, citing h1 as parent
         let clock2 = MockClock::new(2000);
-        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
+        let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
+            .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(h1.to_vec())
             .parent_hashes(vec![h1.to_vec()])
             .operation(Operation::put(b"/key", b"2".to_vec()))
             .sign(&node);
@@ -1016,14 +1005,14 @@ mod tests {
         
         assert_eq!(store.get_heads(b"/key").unwrap().len(), 1, "Before restart");
         let author = node.public_key_bytes();
-        assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 2, "author seq should be 2");
+        assert_eq!(store.chain_tip(&author).unwrap().unwrap().seq, 2, "author seq should be 2");
         
         // Simulate restart: reopen state.db (persisted) and replay log
         drop(store);
         drop(sigchain);
         
         let store = Store::open(&state_path).unwrap();  // Reopen existing state
-        assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 2, "author seq persisted");
+        assert_eq!(store.chain_tip(&author).unwrap().unwrap().seq, 2, "author seq persisted");
         
         // Replay log - entries already applied, skip all
         let replayed = crate::store::log::Log::open(&log_path).and_then(|l| l.iter()).map(|iter| store.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
@@ -1058,16 +1047,17 @@ mod tests {
         for i in 1u64..=3 {
             let clock = MockClock::new(i * 1000);
             let prev = sigchain.last_hash().to_vec();
-            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+            let entry = Entry::next_after(sigchain.tip())
+                .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
-                .prev_hash(prev)
+                .parent_hashes(vec![])
                 .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             store.apply_entry(&entry).unwrap();
         }
         
-        assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 3);
+        assert_eq!(store.chain_tip(&author).unwrap().unwrap().seq, 3);
         assert_eq!(store.get_heads(b"/key3").unwrap().len(), 1);
         
         // Restart and replay - should skip all entries
@@ -1079,7 +1069,7 @@ mod tests {
         
         // All 3 entries were read but skipped (already applied)
         assert_eq!(replayed, 0, "0 new entries (all skipped)");
-        assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 3, "seq unchanged");
+        assert_eq!(store.chain_tip(&author).unwrap().unwrap().seq, 3, "seq unchanged");
         assert_eq!(store.get_heads(b"/key3").unwrap().len(), 1, "heads unchanged");
         
         let _ = std::fs::remove_file(&state_path);
@@ -1106,9 +1096,10 @@ mod tests {
         for i in 1u64..=5 {
             let clock = MockClock::new(i * 1000);
             let prev = sigchain.last_hash().to_vec();
-            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+            let entry = Entry::next_after(sigchain.tip())
+                .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
-                .prev_hash(prev)
+                .parent_hashes(vec![])
                 .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
@@ -1119,7 +1110,7 @@ mod tests {
             }
         }
         
-        assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 3);
+        assert_eq!(store.chain_tip(&author).unwrap().unwrap().seq, 3);
         assert!(store.get_heads(b"/key4").unwrap().is_empty(), "key4 not applied yet");
         
         // Simulate restart and replay
@@ -1130,7 +1121,7 @@ mod tests {
         let replayed = crate::store::log::Log::open(&log_path).and_then(|l| l.iter()).map(|iter| store.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         
         assert_eq!(replayed, 2, "Only 2 new entries applied (3 skipped)");
-        assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 5, "seq updated to 5");
+        assert_eq!(store.chain_tip(&author).unwrap().unwrap().seq, 5, "seq updated to 5");
         assert_eq!(store.get_heads(b"/key4").unwrap().len(), 1, "key4 now applied");
         assert_eq!(store.get_heads(b"/key5").unwrap().len(), 1, "key5 now applied");
         
@@ -1165,16 +1156,17 @@ mod tests {
         for i in 1u64..=3 {
             let clock = MockClock::new(i * 1000);
             let prev = sigchain.last_hash().to_vec();
-            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+            let entry = Entry::next_after(sigchain.tip())
+                .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
-                .prev_hash(prev)
+                .parent_hashes(vec![])
                 .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             store.apply_entry(&entry).unwrap();
         }
         
-        assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 3);
+        assert_eq!(store.chain_tip(&author).unwrap().unwrap().seq, 3);
         
         // Close and backup state.db
         drop(store);
@@ -1185,16 +1177,17 @@ mod tests {
         for i in 4u64..=5 {
             let clock = MockClock::new(i * 1000);
             let prev = sigchain.last_hash().to_vec();
-            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+            let entry = Entry::next_after(sigchain.tip())
+                .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
-                .prev_hash(prev)
+                .parent_hashes(vec![])
                 .operation(Operation::put(format!("/key{}", i).as_bytes(), format!("v{}", i).into_bytes()))
                 .sign(&node);
             sigchain.append(&entry).unwrap();
             store.apply_entry(&entry).unwrap();
         }
         
-        assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 5);
+        assert_eq!(store.chain_tip(&author).unwrap().unwrap().seq, 5);
         assert_eq!(store.get_heads(b"/key5").unwrap().len(), 1);
         
         // Now restore state.db from backup (simulating crash/rollback)
@@ -1206,7 +1199,7 @@ mod tests {
         let store = Store::open(&state_path).unwrap();
         
         // State should be at seq 3 (restored from backup)
-        assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 3, "Restored to seq 3");
+        assert_eq!(store.chain_tip(&author).unwrap().unwrap().seq, 3, "Restored to seq 3");
         assert!(store.get_heads(b"/key4").unwrap().is_empty(), "key4 not in restored state");
         
         // Replay log - should apply entries 4 and 5 (skip 1-3)
@@ -1214,7 +1207,7 @@ mod tests {
         assert_eq!(replayed, 2, "Only 2 new entries applied (3 skipped)");
         
         // Now seq should be 5 and keys 4-5 should exist
-        assert_eq!(store.author_state(&author).unwrap().unwrap().seq, 5, "seq updated to 5");
+        assert_eq!(store.chain_tip(&author).unwrap().unwrap().seq, 5, "seq updated to 5");
         assert_eq!(store.get_heads(b"/key4").unwrap().len(), 1, "key4 now applied");
         assert_eq!(store.get_heads(b"/key5").unwrap().len(), 1, "key5 now applied");
         
@@ -1327,16 +1320,18 @@ mod tests {
         let store_a = Store::open(&path_a).unwrap();
         let node_a = NodeIdentity::generate();
         
-        // Write 3 entries on node A
+        let mut prev_tip: Option<ChainTip> = None;
         for i in 1u64..=3 {
             let clock = MockClock::new(1000 + i * 100);
-            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+            let entry = Entry::next_after(prev_tip.as_ref())
+                .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
-                .prev_hash([0u8; 32].to_vec())
+                .parent_hashes(vec![])
                 .operation(Operation::put(format!("/key{}", i), format!("value{}", i).into_bytes()))
                 .sign(&node_a);
             store_a.apply_entry(&entry).unwrap();
             crate::store::log::Log::open_or_create(&log_path_a).unwrap().append(&entry).unwrap();
+            prev_tip = Some(ChainTip::from(&entry));
         }
         
         // Node B is empty
@@ -1396,28 +1391,32 @@ mod tests {
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         
-        // Node A writes entries
+        let mut prev_tip_a: Option<ChainTip> = None;
         for i in 1u64..=2 {
             let clock = MockClock::new(1000 + i * 100);
-            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+            let entry = Entry::next_after(prev_tip_a.as_ref())
+                .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
-                .prev_hash([0u8; 32].to_vec())
+                .parent_hashes(vec![])
                 .operation(Operation::put(format!("/a{}", i), format!("from_a{}", i).into_bytes()))
                 .sign(&node_a);
             store_a.apply_entry(&entry).unwrap();
             crate::store::log::Log::open_or_create(&log_path_a).unwrap().append(&entry).unwrap();
+            prev_tip_a = Some(ChainTip::from(&entry));
         }
         
-        // Node B writes different entries
+        let mut prev_tip_b: Option<ChainTip> = None;
         for i in 1u64..=2 {
             let clock = MockClock::new(2000 + i * 100);
-            let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
+            let entry = Entry::next_after(prev_tip_b.as_ref())
+                .timestamp(HLC::now_with_clock(&clock))
                 .store_id(TEST_STORE.to_vec())
-                .prev_hash([0u8; 32].to_vec())
+                .parent_hashes(vec![])
                 .operation(Operation::put(format!("/b{}", i), format!("from_b{}", i).into_bytes()))
                 .sign(&node_b);
             store_b.apply_entry(&entry).unwrap();
             crate::store::log::Log::open_or_create(&log_path_b).unwrap().append(&entry).unwrap();
+            prev_tip_b = Some(ChainTip::from(&entry));
         }
         
         // Get sync states
@@ -1485,25 +1484,28 @@ mod tests {
         let node_c = NodeIdentity::generate();
         
         // Each node writes one entry
-        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))
+        let entry_a = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&MockClock::new(1000)))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/key_a", b"from_a".to_vec()))
             .sign(&node_a);
         store_a.apply_entry(&entry_a).unwrap();
         crate::store::log::Log::open_or_create(&log_path_a).unwrap().append(&entry_a).unwrap();
         
-        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(2000)))
+        let entry_b = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&MockClock::new(2000)))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/key_b", b"from_b".to_vec()))
             .sign(&node_b);
         store_b.apply_entry(&entry_b).unwrap();
         crate::store::log::Log::open_or_create(&log_path_b).unwrap().append(&entry_b).unwrap();
         
-        let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(3000)))
+        let entry_c = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&MockClock::new(3000)))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/key_c", b"from_c".to_vec()))
             .sign(&node_c);
         store_c.apply_entry(&entry_c).unwrap();
@@ -1571,17 +1573,19 @@ mod tests {
         
         // Both nodes write to the SAME key with different values
         // Use same HLC to force conflict (tie-break on author)
-        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))
+        let entry_a = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&MockClock::new(1000)))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/shared_key", b"value_from_a".to_vec()))
             .sign(&node_a);
         store_a.apply_entry(&entry_a).unwrap();
         crate::store::log::Log::open_or_create(&log_path_a).unwrap().append(&entry_a).unwrap();
         
-        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&MockClock::new(1000)))  // Same HLC!
+        let entry_b = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&MockClock::new(1000)))  // Same HLC!
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/shared_key", b"value_from_b".to_vec()))
             .sign(&node_b);
         store_b.apply_entry(&entry_b).unwrap();
@@ -1645,16 +1649,18 @@ mod tests {
         // Both entries have SAME HLC
         let clock = MockClock::new(5000);
         
-        let entry_low = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry_low = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/tiebreak_key", b"from_low".to_vec()))
             .sign(low_node);
         store.apply_entry(&entry_low).unwrap();
         
-        let entry_high = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry_high = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/tiebreak_key", b"from_high".to_vec()))
             .sign(high_node);
         store.apply_entry(&entry_high).unwrap();
@@ -1699,25 +1705,28 @@ mod tests {
         
         // 1. Each node writes to "/a" independently (simulating offline concurrent writes)
         // Node A: seq 1
-        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry_a = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_a".to_vec()))
             .sign(&node_a);
         store_a.apply_entry(&entry_a).unwrap();
         
         // Node B: seq 1 (different author, same key - creates fork)
-        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry_b = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_b".to_vec()))
             .sign(&node_b);
         store_a.apply_entry(&entry_b).unwrap();
         
         // Node C: seq 1 (third author, same key - creates third fork)
-        let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry_c = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_c".to_vec()))
             .sign(&node_c);
         store_a.apply_entry(&entry_c).unwrap();
@@ -1732,9 +1741,9 @@ mod tests {
             .map(|h| h.hash.clone())
             .collect();
         
-        let merge_entry = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+        let merge_entry = Entry::next_after(Some(&ChainTip::from(&entry_a)))
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_signed_entry(&entry_a).to_vec())  // Continues A's chain
             .parent_hashes(parent_hashes)  // References all heads
             .operation(Operation::put("/a", b"merged".to_vec()))
             .sign(&node_a);
@@ -1813,32 +1822,35 @@ mod tests {
         let clock = MockClock::new(1000);
         
         // Create entries (same as before)
-        let entry_a = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry_a = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_a".to_vec()))
             .sign(&node_a);
         
-        let entry_b = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry_b = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_b".to_vec()))
             .sign(&node_b);
         
-        let entry_c = EntryBuilder::new(1, HLC::now_with_clock(&clock))
+        let entry_c = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/a", b"from_c".to_vec()))
             .sign(&node_c);
         
         // We need the hashes for parent_hashes - compute them
-        let hash_a = hash_signed_entry(&entry_a);
-        let hash_b = hash_signed_entry(&entry_b);
-        let hash_c = hash_signed_entry(&entry_c);
+        let hash_a = entry_a.hash();
+        let hash_b = entry_b.hash();
+        let hash_c = entry_c.hash();
         
-        let merge_entry = EntryBuilder::new(2, HLC::now_with_clock(&clock))
+        let merge_entry = Entry::next_after(Some(&ChainTip::from(&entry_a)))
+            .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_a.to_vec())
             .parent_hashes(vec![hash_a.to_vec(), hash_b.to_vec(), hash_c.to_vec()])
             .operation(Operation::put("/a", b"merged".to_vec()))
             .sign(&node_a);
@@ -1880,28 +1892,30 @@ mod tests {
         
         // Create a key under /test/ prefix
         let clock1 = MockClock::new(1000);
-        let entry1 = EntryBuilder::new(1, HLC::now_with_clock(&clock1))
+        let entry1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock1))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash([0u8; 32].to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/test/key1", b"value1".to_vec()))
             .sign(&node);
         store.apply_entry(&entry1).unwrap();
         
         // Create another key
         let clock2 = MockClock::new(2000);
-        let entry2 = EntryBuilder::new(2, HLC::now_with_clock(&clock2))
+        let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
+            .timestamp(HLC::now_with_clock(&clock2))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_signed_entry(&entry1).to_vec())
+            .parent_hashes(vec![])
             .operation(Operation::put("/test/key2", b"value2".to_vec()))
             .sign(&node);
         store.apply_entry(&entry2).unwrap();
         
         // Delete key1
         let clock3 = MockClock::new(3000);
-        let entry3 = EntryBuilder::new(3, HLC::now_with_clock(&clock3))
+        let entry3 = Entry::next_after(Some(&ChainTip::from(&entry2)))
+            .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE.to_vec())
-            .prev_hash(hash_signed_entry(&entry2).to_vec())
-            .parent_hashes(vec![hash_signed_entry(&entry1).to_vec()])
+            .parent_hashes(vec![entry2.hash().to_vec()])
             .operation(Operation::delete(b"/test/key1"))
             .sign(&node);
         store.apply_entry(&entry3).unwrap();

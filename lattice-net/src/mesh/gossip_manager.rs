@@ -3,7 +3,7 @@
 use crate::{parse_node_id, LatticeEndpoint};
 use super::error::GossipError;
 use lattice_core::{Uuid, Node, StoreHandle, PeerStatus, PeerWatchEvent, PeerWatchEventKind};
-use lattice_core::proto::storage::{SignedEntry, PeerSyncInfo};
+use lattice_core::proto::storage::PeerSyncInfo;
 use lattice_core::proto::network::GossipMessage;
 use iroh_gossip::Gossip;
 use std::sync::Arc;
@@ -146,7 +146,10 @@ impl GossipManager {
                         // Handle entry (if present)
                         if let Some(entry) = gossip_msg.entry {
                             tracing::debug!(store_id = %store_id, from = %msg.delivered_from.fmt_short(), "Gossip entry received");
-                            let _ = store.ingest_entry(entry).await;
+                            let internal: Result<lattice_core::entry::SignedEntry, _> = entry.try_into();
+                            if let Ok(internal_entry) = internal {
+                                let _ = store.ingest_entry(internal_entry).await;
+                            }
                             // Mark pending for SyncState piggybacking on next outbound
                             pending_syncstate.store(true, Ordering::SeqCst);
                         }
@@ -199,7 +202,7 @@ impl GossipManager {
     fn spawn_forwarder(
         &self,
         store: StoreHandle,
-        mut entry_rx: tokio::sync::broadcast::Receiver<SignedEntry>,
+        mut entry_rx: tokio::sync::broadcast::Receiver<lattice_core::entry::SignedEntry>,
         pending_syncstate: Arc<AtomicBool>,
     ) {
         let senders = self.senders.clone();
@@ -210,15 +213,16 @@ impl GossipManager {
             tracing::debug!(store_id = %store_id, "Entry forwarder started");
             while let Ok(entry) = entry_rx.recv().await {
                 // Unified Entry Feed: filtering required
-                if entry.author_id == my_pubkey_bytes {
+                if my_pubkey_bytes == entry.author_id {
                     tracing::debug!(store_id = %store_id, "Broadcasting local entry via gossip");
                     if let Some(sender) = senders.read().await.get(&store_id) {
                         // Always piggyback SyncState on local writes
                         let sender_state = store.sync_state().await.ok().map(|s| s.to_proto());
-                        let msg = GossipMessage {
-                            entry: Some(entry),
-                            sender_state,
-                        };
+                            let proto_entry: lattice_core::proto::storage::SignedEntry = entry.into();
+                            let msg = GossipMessage {
+                                entry: Some(proto_entry),
+                                sender_state,
+                            };
                         
                         if let Err(e) = sender.broadcast(msg.encode_to_vec().into()).await {
                             tracing::warn!(error = %e, "Gossip broadcast failed");

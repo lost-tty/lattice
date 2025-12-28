@@ -54,14 +54,14 @@ pub struct PeerSyncRow {
     pub pubkey: [u8; 32],
     pub label: String,
     pub frontiers: std::collections::HashMap<[u8; 32], u64>,
-    pub common_hlc: Option<(u64, u32)>,  // Min of max HLCs across all authors
+    pub common_hlc: Option<lattice_core::hlc::HLC>,  // Min of max HLCs across all authors
 }
 
 /// Render the peer sync state matrix to a string
 pub fn render_peer_sync_matrix(
     my_pubkey: [u8; 32],
     our_authors: &std::collections::HashMap<[u8; 32], u64>,
-    our_common_hlc: Option<(u64, u32)>,
+    our_common_hlc: Option<lattice_core::hlc::HLC>,
     peers: &[PeerSyncRow],
 ) -> String {
     use std::fmt::Write;
@@ -126,7 +126,7 @@ pub fn render_peer_sync_matrix(
         }
         // Add Self's HLC
         let hlc_str = our_common_hlc
-            .map(|(w, c)| format!("{}.{}", w, c))
+            .map(|h| format!("{}", h))
             .unwrap_or_else(|| "-".to_string());
         row.push_str(&format!("  {}", hlc_str));
         let _ = writeln!(output, "{}", row);
@@ -145,7 +145,7 @@ pub fn render_peer_sync_matrix(
         }
         // Add HLC column
         let hlc_str = peer.common_hlc
-            .map(|(w, c)| format!("{}.{}", w, c))
+            .map(|h| format!("{}", h))
             .unwrap_or_else(|| "-".to_string());
         row.push_str(&format!("  {}", hlc_str));
         let _ = writeln!(output, "{}", row);
@@ -171,8 +171,8 @@ pub async fn write_store_summary(w: &mut Writer, h: &StoreHandle) {
     
     // Display common HLC (min of max HLCs across all authors)
     if let Ok(sync_state) = h.sync_state().await {
-        if let Some((wall_time, counter)) = sync_state.common_hlc() {
-            let _ = writeln!(w, "HLC:      {}.{}", wall_time, counter);
+        if let Some(hlc) = sync_state.common_hlc() {
+            let _ = writeln!(w, "HLC:      {}", hlc);
         }
     }
     
@@ -255,7 +255,7 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &StoreHandle
                         } else { None }
                     }).collect();
                     // Use pre-computed common_hlc from proto
-                    let hlc = ss.common_hlc.as_ref().map(|h| (h.wall_time, h.counter));
+                    let hlc = ss.common_hlc.as_ref().map(|h| lattice_core::hlc::HLC::from(h.clone()));
                     (frs, hlc)
                 })
                 .unwrap_or_default();

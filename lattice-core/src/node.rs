@@ -47,6 +47,9 @@ pub enum NodeError {
     
     #[error("Actor error: {0}")]
     Actor(String),
+
+    #[error("Validation error: {0}")]
+    Validation(String),
 }
 
 pub struct NodeInfo {

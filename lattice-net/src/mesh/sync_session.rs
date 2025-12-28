@@ -160,7 +160,11 @@ impl<'a> SyncSession<'a> {
                 }
                 Some(peer_message::Message::FetchResponse(resp)) => {
                     for entry in resp.entries {
-                        if self.store.ingest_entry(entry).await.is_ok() {
+                        let internal: lattice_core::entry::SignedEntry = match entry.try_into() {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        };
+                        if self.store.ingest_entry(internal).await.is_ok() {
                             entries_received += 1;
                         }
                     }
@@ -194,7 +198,7 @@ impl<'a> SyncSession<'a> {
             if let Ok(author) = <[u8; 32]>::try_from(range.author_id.as_slice()) {
                 if let Ok(mut rx) = self.store.stream_entries_in_range(&author, range.from_seq, range.to_seq).await {
                     while let Some(entry) = rx.recv().await {
-                        chunk.push(entry);
+                        chunk.push(entry.into());
                         sent += 1;
                         if chunk.len() >= CHUNK_SIZE {
                             self.send_fetch_response(&req.store_id, std::mem::take(&mut chunk), false).await?;

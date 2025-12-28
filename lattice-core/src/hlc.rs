@@ -109,6 +109,12 @@ impl Ord for HLC {
     }
 }
 
+impl std::fmt::Display for HLC {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.wall_time, self.counter)
+    }
+}
+
 impl PartialOrd for HLC {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -118,6 +124,34 @@ impl PartialOrd for HLC {
 impl Default for HLC {
     fn default() -> Self {
         Self::now()
+    }
+}
+
+// Proto conversions
+impl From<crate::proto::storage::Hlc> for HLC {
+    fn from(proto: crate::proto::storage::Hlc) -> Self {
+        HLC::new(proto.wall_time, proto.counter)
+    }
+}
+
+impl From<HLC> for crate::proto::storage::Hlc {
+    fn from(hlc: HLC) -> Self {
+        crate::proto::storage::Hlc {
+            wall_time: hlc.wall_time,
+            counter: hlc.counter,
+        }
+    }
+}
+
+impl From<(u64, u32)> for HLC {
+    fn from((wall_time, counter): (u64, u32)) -> Self {
+        HLC::new(wall_time, counter)
+    }
+}
+
+impl From<HLC> for (u64, u32) {
+    fn from(hlc: HLC) -> Self {
+        (hlc.wall_time, hlc.counter)
     }
 }
 

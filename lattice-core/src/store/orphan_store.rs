@@ -12,7 +12,8 @@
 //! Key:   DagOrphanKey (key_hash[32] + parent_hash[32] + entry_hash[32] = 96 bytes)
 //! Value: DagOrphanedEntry protobuf
 
-use crate::proto::storage::{OrphanedEntry, SignedEntry};
+use crate::proto::storage::{OrphanedEntry, SignedEntry as ProtoSignedEntry};
+use crate::entry::SignedEntry;
 use prost::Message;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
@@ -199,9 +200,10 @@ impl OrphanStore {
             if table.get(key.as_bytes().as_slice())?.is_some() {
                 false
             } else {
+                let proto_entry: ProtoSignedEntry = entry.clone().into();
                 let value = OrphanedEntry { 
                     seq, 
-                    entry: Some(entry.clone()),
+                    entry: Some(proto_entry),
                     received_at,
                 }.encode_to_vec();
                 table.insert(key.as_bytes().as_slice(), value.as_slice())?;
@@ -228,9 +230,11 @@ impl OrphanStore {
         for row in table.range(start_key.as_bytes().as_slice()..=end_key.as_bytes().as_slice())? {
             let (key_bytes, value) = row?;
             let orphaned = OrphanedEntry::decode(value.value())?;
-            let signed = orphaned.entry.ok_or_else(|| {
+            let proto_signed = orphaned.entry.ok_or_else(|| {
                 OrphanStoreError::Decode(prost::DecodeError::new("Missing entry"))
             })?;
+            let signed = SignedEntry::try_from(proto_signed)
+                .map_err(|e| OrphanStoreError::Decode(prost::DecodeError::new(e.to_string())))?;
             
             let key = OrphanKey::from_bytes(key_bytes.value())
                 .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
@@ -313,9 +317,10 @@ impl OrphanStore {
                 false
             } else {
                 // Store: key bytes + entry (we need the original key for retry)
+                let proto_entry: ProtoSignedEntry = entry.clone().into();
                 let value = DagOrphanedEntry { 
                     key: key.to_vec(), 
-                    entry: Some(entry.clone()),
+                    entry: Some(proto_entry),
                 }.encode_to_vec();
                 table.insert(dag_key.as_bytes().as_slice(), value.as_slice())?;
                 true
@@ -345,9 +350,11 @@ impl OrphanStore {
                 .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
             
             let orphaned = DagOrphanedEntry::decode(value.value())?;
-            let signed = orphaned.entry.ok_or_else(|| {
+            let proto_signed = orphaned.entry.ok_or_else(|| {
                 OrphanStoreError::Decode(prost::DecodeError::new("Missing entry"))
             })?;
+            let signed = SignedEntry::try_from(proto_signed)
+                .map_err(|e| OrphanStoreError::Decode(prost::DecodeError::new(e.to_string())))?;
             results.push((orphaned.key, signed, dag_key.entry_hash));
         }
         Ok(results)
@@ -380,7 +387,7 @@ pub struct DagOrphanedEntry {
     pub key: Vec<u8>,
     
     #[prost(message, optional, tag = "2")]
-    pub entry: Option<SignedEntry>,
+    pub entry: Option<ProtoSignedEntry>,
 }
 
 #[cfg(test)]
@@ -402,17 +409,28 @@ pub(crate) mod tests {
         
         let store = OrphanStore::open(&path).unwrap();
         
-        let author = [1u8; 32];
         let prev_hash = [2u8; 32];
-        let entry_hash = [3u8; 32];
         let seq = 5u64;
         
         // Create a minimal SignedEntry for testing
-        let entry = SignedEntry {
-            author_id: author.to_vec(),
-            entry_bytes: b"test".to_vec(),
-            signature: vec![],
-        };
+        // We need a valid signed entry structure now (internal type)
+        use crate::entry::Entry;
+        use crate::hlc::HLC;
+        use crate::node_identity::NodeIdentity;
+        use crate::proto::storage::Operation;
+        
+        // Mock node/entry
+        let node = NodeIdentity::generate();
+        let author = node.public_key_bytes();
+        // Use fake tip to simulate seq 4 -> seq 5
+        let fake_tip = crate::entry::ChainTip { seq: 4, hash: prev_hash, hlc: HLC::default() };
+        let entry = Entry::next_after(Some(&fake_tip))
+            .timestamp(HLC::default())
+            .store_id([1u8; 16].to_vec())
+            .operation(Operation::put(b"key", b"val".to_vec()))
+            .sign(&node);
+            
+        let entry_hash = entry.hash();
         
         // Insert with seq
         store.insert(&author, &prev_hash, &entry_hash, seq, &entry).unwrap();
@@ -421,7 +439,7 @@ pub(crate) mod tests {
         let found = store.find_by_prev_hash(&author, &prev_hash).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, seq);  // seq
-        assert_eq!(found[0].1.author_id, author.to_vec());  // entry
+        assert_eq!(found[0].1.author_id, author);  // entry
         assert_eq!(found[0].2, entry_hash);  // hash
         
         // Delete
