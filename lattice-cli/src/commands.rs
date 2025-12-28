@@ -190,8 +190,8 @@ pub enum PeerSubcommand {
     Invite {
         pubkey: String,
     },
-    /// Remove a peer
-    Remove {
+    /// Revoke a peer
+    Revoke {
         pubkey: String,
     },
 }
@@ -240,7 +240,7 @@ pub async fn handle_command(
         LatticeCommand::Peer { subcommand } => match subcommand {
             PeerSubcommand::List => crate::node_commands::cmd_peers(node, store, server.as_deref(), &[], writer).await,
             PeerSubcommand::Invite { pubkey } => crate::node_commands::cmd_invite(node, store, server.as_deref(), &[pubkey], writer).await,
-            PeerSubcommand::Remove { pubkey } => crate::node_commands::cmd_remove(node, store, server.as_deref(), &[pubkey], writer).await,
+            PeerSubcommand::Revoke { pubkey } => crate::node_commands::cmd_revoke(node, store, server.as_deref(), &[pubkey], writer).await,
         },
         LatticeCommand::Put { key, value } => crate::store_commands::cmd_put(node, store, server.as_deref(), &[key, value], writer).await,
         LatticeCommand::Get { key, verbose } => {

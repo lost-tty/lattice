@@ -384,33 +384,25 @@ impl Node {
         Ok(peers)
     }
 
-    /// Remove a peer from the mesh (deletes all their /nodes/{pubkey}/* keys)
-    pub async fn remove_peer(&self, pubkey: PubKey) -> Result<(), NodeError> {
+    /// Revoke a peer (sets status to Revoked)
+    pub async fn revoke_peer(&self, pubkey: PubKey) -> Result<(), NodeError> {
         let guard = self.root_store.read().await;
-        let store = guard.as_ref()
-            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        if guard.is_none() {
+            return Err(NodeError::Actor("No root store open".to_string()));
+        }
         
-        let pubkey_hex = hex::encode(pubkey);
-        
-        // Prevent self-removal
+        // Prevent self-revocation
         if pubkey == self.node.public_key() {
-            return Err(NodeError::Actor("Cannot remove yourself".to_string()));
+            return Err(NodeError::Actor("Cannot revoke yourself".to_string()));
         }
         
-        // Find all keys for this peer using prefix search
-        let prefix = format!("/nodes/{}/", pubkey_hex);
-        let keys = store.list_by_prefix(prefix.as_bytes(), false).await?;
-        
-        if keys.is_empty() {
-            return Err(NodeError::Actor("Peer not found".to_string()));
+        // Verify peer exists (by checking if we can get its status or finding keys)
+        // Simple check: get_peer_status returns Ok(None) if not found
+        if self.get_peer_status(pubkey).await?.is_none() {
+             return Err(NodeError::Actor("Peer not found".to_string()));
         }
-        
-        // Delete all found keys
-        for (key, _) in keys {
-            store.delete(&key).await?;
-        }
-        
-        Ok(())
+
+        self.set_peer_status(pubkey, PeerStatus::Revoked).await
     }
     
     /// Get a peer's status

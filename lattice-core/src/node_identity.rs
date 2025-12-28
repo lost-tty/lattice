@@ -139,6 +139,8 @@ pub enum PeerStatus {
     Active,
     /// Peer is temporarily inactive
     Dormant,
+    /// Peer has been revoked (banned)
+    Revoked,
 }
 
 impl PeerStatus {
@@ -147,14 +149,16 @@ impl PeerStatus {
             PeerStatus::Invited => "invited",
             PeerStatus::Active => "active",
             PeerStatus::Dormant => "dormant",
+            PeerStatus::Revoked => "revoked",
         }
     }
     
-    pub fn from_str(s: &str) -> Option<PeerStatus> {
+    pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "invited" => Some(PeerStatus::Invited),
             "active" => Some(PeerStatus::Active),
             "dormant" => Some(PeerStatus::Dormant),
+            "revoked" => Some(PeerStatus::Revoked),
             _ => None,
         }
     }

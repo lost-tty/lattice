@@ -247,7 +247,7 @@ pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, server: Option
     CommandResult::Ok
 }
 
-pub async fn cmd_remove(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_revoke(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
     let pubkey = match PubKey::from_hex(&args[0]) {
         Ok(pk) => pk,
         Err(e) => {
@@ -257,10 +257,10 @@ pub async fn cmd_remove(node: &Node, _store: Option<&StoreHandle>, _server: Opti
         }
     };
     
-    match node.remove_peer(pubkey).await {
+    match node.revoke_peer(pubkey).await {
         Ok(()) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "Removed peer: {}", pubkey);
+            let _ = writeln!(w, "Revoked peer: {}", pubkey);
         }
         Err(e) => {
             let mut w = writer.clone();
