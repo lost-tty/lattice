@@ -1,13 +1,13 @@
 //! Store module - KV store with sigchain validation
 //!
 //! This module encapsulates:
-//! - Store: redb-backed KV with DAG conflict resolution
-//! - StoreHandle: async API for consumers
-//! - SigChain: entry validation and signing
+//! - State: redb-backed KV with DAG conflict resolution (derived view)
+//! - StoreHandle: async API for consumers (combines State + SigChain)
+//! - SigChain: entry validation and signing (source of truth)
 //! - SyncState: sync protocol state tracking
 
 // Private submodules
-mod core;
+mod state;
 mod actor;
 mod handle;
 mod sigchain;
@@ -16,7 +16,7 @@ mod sync_state;
 mod orphan_store;
 
 // Public API - types needed by Node and LatticeServer
-pub use core::{Store, StoreError, ParentValidationError};
+pub use state::{State, StateError, ParentValidationError};
 pub use handle::StoreHandle;
 pub use actor::{WatchEvent, WatchEventKind, WatchError};
 pub use sync_state::{SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};

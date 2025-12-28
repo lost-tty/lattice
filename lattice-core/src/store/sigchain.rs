@@ -174,22 +174,6 @@ impl SigChain {
         self.tip.as_ref().map(|t| t.seq).unwrap_or(0)
     }
     
-    /// Get author state as proto message
-    pub fn chain_tip(&self) -> crate::proto::storage::ChainTip {
-        match &self.tip {
-            Some(tip) => crate::proto::storage::ChainTip {
-                seq: tip.seq,
-                hash: tip.hash.to_vec(),
-                hlc: Some(tip.hlc.into()),
-            },
-            None => crate::proto::storage::ChainTip {
-                seq: 0,
-                hash: [0u8; 32].to_vec(),
-                hlc: None,
-            },
-        }
-    }
-    
     /// Check if the chain is empty
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
@@ -418,15 +402,6 @@ impl SigChainManager {
         self.chains.get(author)
     }
     
-    /// Get AuthorState (ChainTip) for all loaded chains
-    pub fn get_author_states(&self) -> std::collections::HashMap<[u8; 32], crate::entry::ChainTip> {
-        self.chains.iter()
-            .filter_map(|(author, chain)| {
-                chain.tip().map(|tip| (*author, *tip))
-            })
-            .collect()
-    }
-    
     /// Get cached SyncState (O(1) - no rebuild)
     pub fn sync_state(&self) -> super::sync_state::SyncState {
         self.cached_sync_state.clone()
@@ -576,7 +551,7 @@ impl SigChainManager {
     }
     
     /// Find DAG orphans waiting for a specific hash to become a head
-    pub fn find_dag_orphans(&self, parent_hash: &[u8; 32]) -> Vec<(Vec<u8>, SignedEntry, [u8; 32])> {
+    pub fn find_dag_orphans(&self, parent_hash: &[u8; 32]) -> Vec<(Vec<u8>, crate::entry::SignedEntry, [u8; 32])> {
         self.orphan_store.find_dag_orphans_by_parent(parent_hash).unwrap_or_default()
     }
     
@@ -627,7 +602,7 @@ mod tests {
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::proto::storage::Operation;
-    use crate::entry::{Entry, SignedEntry, ChainTip};
+    use crate::entry::{Entry, ChainTip};
 
     const TEST_STORE: [u8; 16] = [1u8; 16];
 
@@ -654,7 +629,6 @@ mod tests {
         let author = node.public_key_bytes();
         let mut chain = SigChain::new(&path, TEST_STORE, author).unwrap();
         
-        let clock = MockClock::new(1000);
         let clock = MockClock::new(1000);
         let entry = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
@@ -708,7 +682,7 @@ mod tests {
         // Write some entries
         {
             let mut chain = SigChain::new(&path, TEST_STORE, author).unwrap();
-            for i in 1..=3 {
+            for _ in 0..3 {
                 let entry = Entry::next_after(chain.tip())
                     .timestamp(HLC::now_with_clock(&clock))
                     .store_id(TEST_STORE.to_vec())
@@ -862,8 +836,6 @@ mod tests {
         
         // Create valid entry for store A
         let mut chain_a = SigChain::new(&path_a, store_a, author).unwrap();
-        // Create valid entry for store A
-        let mut chain_a = SigChain::new(&path_a, store_a, author).unwrap();
         let entry = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(store_a.to_vec())
@@ -896,7 +868,6 @@ mod tests {
         let mut manager = SigChainManager::new(&logs_dir, TEST_STORE);
         
         // Create entry_1 (genesis)
-        // Create entry_1 (genesis)
         let entry_1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
@@ -905,13 +876,11 @@ mod tests {
         let hash_1 = entry_1.hash();
         
         // Create entry_2 (child of entry_1)
-        // Create entry_2 (child of entry_1)
         let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .operation(Operation::put("/key", b"value2".to_vec()))
             .sign(&node);
-        let hash_2 = entry_2.hash();
         
         // Create entry_3 (child of entry_2)
         // Create entry_3 (child of entry_2)
@@ -989,7 +958,6 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
-        let hash_1 = entry_1.hash();
         
         let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
             .timestamp(HLC::now_with_clock(&clock))
@@ -1051,14 +1019,12 @@ mod tests {
             .store_id(TEST_STORE.to_vec())
             .operation(Operation::put("/key", b"v1".to_vec()))
             .sign(&node);
-        let hash_1 = entry_1.hash();
         
         let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
             .timestamp(HLC::now_with_clock(&clock))
             .store_id(TEST_STORE.to_vec())
             .operation(Operation::put("/key", b"v2".to_vec()))
             .sign(&node);
-        let hash_2 = entry_2.hash();
         
         let entry_3 = Entry::next_after(Some(&ChainTip::from(&entry_2)))
             .timestamp(HLC::now_with_clock(&clock))

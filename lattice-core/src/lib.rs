@@ -27,7 +27,7 @@ pub use node_identity::{NodeIdentity, PeerStatus};
 pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, PeerWatchEvent, PeerWatchEventKind, parse_peer_status_key, PEER_STATUS_PATTERN};
 
 // Store exports (re-exported from store submodule)
-pub use store::{Store, StoreError, StoreHandle, WatchEvent, WatchEventKind, WatchError};
+pub use store::{State, StateError, StoreHandle, WatchEvent, WatchEventKind, WatchError};
 pub use store::{LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
 
 // Proto exports

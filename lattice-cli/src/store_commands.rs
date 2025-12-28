@@ -382,11 +382,6 @@ fn format_hlc(hlc: &Option<lattice_core::proto::storage::Hlc>) -> String {
         .unwrap_or_else(|| "0.0".to_string())
 }
 
-/// Format HLC proto message as "walltime.counter"
-fn format_hlc_proto(hlc: &lattice_core::proto::storage::Hlc) -> String {
-    format!("{}.{}", hlc.wall_time, hlc.counter)
-}
-
 /// Entry info for history display
 #[derive(Clone)]
 struct HistoryEntry {

@@ -6,7 +6,7 @@ use crate::{
     entry::SignedEntry,
 };
 use super::{
-    core::{Store, StoreError, ParentValidationError},
+    state::{State, StateError, ParentValidationError},
     sigchain::{SigChainError, SigChainManager, SigchainValidation},
     sync_state::SyncState,
     orphan_store::GapInfo,
@@ -56,20 +56,20 @@ impl std::error::Error for WatchError {}
 pub enum StoreCmd {
     Get {
         key: Vec<u8>,
-        resp: oneshot::Sender<Result<Option<Vec<u8>>, StoreError>>,
+        resp: oneshot::Sender<Result<Option<Vec<u8>>, StateError>>,
     },
     GetHeads {
         key: Vec<u8>,
-        resp: oneshot::Sender<Result<Vec<HeadInfo>, StoreError>>,
+        resp: oneshot::Sender<Result<Vec<HeadInfo>, StateError>>,
     },
     List {
         include_deleted: bool,
-        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError>>,
+        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StateError>>,
     },
     ListByPrefix {
         prefix: Vec<u8>,
         include_deleted: bool,
-        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError>>,
+        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StateError>>,
     },
     Put {
         key: Vec<u8>,
@@ -84,18 +84,18 @@ pub enum StoreCmd {
         resp: oneshot::Sender<u64>,
     },
     AppliedSeq {
-        resp: oneshot::Sender<Result<u64, StoreError>>,
+        resp: oneshot::Sender<Result<u64, StateError>>,
     },
     ChainTip {
         author: [u8; 32],
-        resp: oneshot::Sender<Result<Option<ChainTip>, StoreError>>,
+        resp: oneshot::Sender<Result<Option<ChainTip>, StateError>>,
     },
     SyncState {
-        resp: oneshot::Sender<Result<SyncState, StoreError>>,
+        resp: oneshot::Sender<Result<SyncState, StateError>>,
     },
     IngestEntry {
         entry: SignedEntry,
-        resp: oneshot::Sender<Result<(), StoreError>>,
+        resp: oneshot::Sender<Result<(), StateError>>,
     },
     LogStats {
         resp: oneshot::Sender<(usize, u64, usize)>,
@@ -120,7 +120,7 @@ pub enum StoreCmd {
     SetPeerSyncState {
         peer: [u8; 32],
         info: crate::proto::storage::PeerSyncInfo,
-        resp: oneshot::Sender<Result<super::sync_state::SyncDiscrepancy, StoreError>>,
+        resp: oneshot::Sender<Result<super::sync_state::SyncDiscrepancy, StateError>>,
     },
     GetPeerSyncState {
         peer: [u8; 32],
@@ -133,20 +133,20 @@ pub enum StoreCmd {
         author: [u8; 32],
         from_seq: u64,
         to_seq: u64,
-        resp: oneshot::Sender<Result<mpsc::Receiver<SignedEntry>, StoreError>>,
+        resp: oneshot::Sender<Result<mpsc::Receiver<SignedEntry>, StateError>>,
     },
     Shutdown,
 }
 
 #[derive(Debug)]
 pub enum StoreActorError {
-    Store(StoreError),
+    State(StateError),
     SigChain(SigChainError),
 }
 
-impl From<StoreError> for StoreActorError {
-    fn from(e: StoreError) -> Self {
-        StoreActorError::Store(e)
+impl From<StateError> for StoreActorError {
+    fn from(e: StateError) -> Self {
+        StoreActorError::State(e)
     }
 }
 
@@ -159,7 +159,7 @@ impl From<SigChainError> for StoreActorError {
 impl std::fmt::Display for StoreActorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StoreActorError::Store(e) => write!(f, "Store error: {}", e),
+            StoreActorError::State(e) => write!(f, "State error: {}", e),
             StoreActorError::SigChain(e) => write!(f, "SigChain error: {}", e),
         }
     }
@@ -169,7 +169,7 @@ impl std::error::Error for StoreActorError {}
 
 /// The store actor - runs in its own thread, owns Store and SigChainManager
 pub struct StoreActor {
-    store: Store,
+    state: State,
     chain_manager: SigChainManager,
     node: NodeIdentity,
     rx: mpsc::Receiver<StoreCmd>,
@@ -187,7 +187,7 @@ impl StoreActor {
     /// Create a new store actor (but don't start the thread yet)
     pub fn new(
         store_id: Uuid,
-        store: Store,
+        state: State,
         logs_dir: std::path::PathBuf,
         node: NodeIdentity,
         rx: mpsc::Receiver<StoreCmd>,
@@ -200,7 +200,7 @@ impl StoreActor {
         chain_manager.get_or_create(local_author);  // Ensure local chain exists
      
         Self {
-            store,
+            state,
             chain_manager,
             node,
             rx,
@@ -217,16 +217,16 @@ impl StoreActor {
         while let Some(cmd) = self.rx.blocking_recv() {
             match cmd {
                 StoreCmd::Get { key, resp } => {
-                    let _ = resp.send(self.store.get(&key));
+                    let _ = resp.send(self.state.get(&key));
                 }
                 StoreCmd::GetHeads { key, resp } => {
-                    let _ = resp.send(self.store.get_heads(&key));
+                    let _ = resp.send(self.state.get_heads(&key));
                 }
                 StoreCmd::List { include_deleted, resp } => {
-                    let _ = resp.send(self.store.list_all(include_deleted));
+                    let _ = resp.send(self.state.list_all(include_deleted));
                 }
                 StoreCmd::ListByPrefix { prefix, include_deleted, resp } => {
-                    let _ = resp.send(self.store.list_by_prefix(&prefix, include_deleted));
+                    let _ = resp.send(self.state.list_by_prefix(&prefix, include_deleted));
                 }
                 StoreCmd::Put { key, value, resp } => {
                     let result = self.do_put(&key, &value);
@@ -245,12 +245,12 @@ impl StoreActor {
                 }
                 StoreCmd::AppliedSeq { resp } => {
                     let author = self.node.public_key_bytes();
-                    let result = self.store.chain_tip(&author)
+                    let result = self.state.chain_tip(&author)
                         .map(|s| s.map(|a| a.seq).unwrap_or(0));
                     let _ = resp.send(result);
                 }
                 StoreCmd::ChainTip { author, resp } => {
-                    let result = self.store.chain_tip(&author)
+                    let result = self.state.chain_tip(&author)
                         .map(|opt| opt.map(Into::into));
                     let _ = resp.send(result);
                 }
@@ -260,8 +260,8 @@ impl StoreActor {
                 StoreCmd::IngestEntry { entry, resp } => {
                     let result = self.apply_ingested_entry(&entry)
                         .map_err(|e| match e {
-                            StoreActorError::SigChain(e) => StoreError::from(e),
-                            StoreActorError::Store(e) => e,
+                            StoreActorError::SigChain(e) => StateError::from(e),
+                            StoreActorError::State(e) => e,
                         });
                     let _ = resp.send(result);
                 }
@@ -282,7 +282,7 @@ impl StoreActor {
                     match Regex::new(&pattern) {
                         Ok(regex) => {
                             // Get initial snapshot of matching entries
-                            let all_entries = match self.store.list_all(include_deleted) {
+                            let all_entries = match self.state.list_all(include_deleted) {
                                 Ok(entries) => entries,
                                 Err(e) => {
                                     let _ = resp.send(Err(WatchError::InvalidRegex(format!("Store error: {}", e))));
@@ -333,14 +333,14 @@ impl StoreActor {
                         });
                     }
                     
-                    let result = self.store.set_peer_sync_state(&peer, &info).map(|_| discrepancy);
+                    let result = self.state.set_peer_sync_state(&peer, &info).map(|_| discrepancy);
                     let _ = resp.send(result);
                 }
                 StoreCmd::GetPeerSyncState { peer, resp } => {
-                    let _ = resp.send(self.store.get_peer_sync_state(&peer).ok().flatten());
+                    let _ = resp.send(self.state.get_peer_sync_state(&peer).ok().flatten());
                 }
                 StoreCmd::ListPeerSyncStates { resp } => {
-                    let _ = resp.send(self.store.list_peer_sync_states().unwrap_or_default());
+                    let _ = resp.send(self.state.list_peer_sync_states().unwrap_or_default());
                 }
                 StoreCmd::StreamEntriesInRange { author, from_seq, to_seq, resp } => {
                     let result = self.do_stream_entries_in_range(&author, from_seq, to_seq);
@@ -356,10 +356,10 @@ impl StoreActor {
     fn do_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), StoreActorError> {
         use crate::proto::storage::Operation;
         
-        let heads = self.store.get_heads(key)?;
+        let heads = self.state.get_heads(key)?;
         
         // Idempotency check (pure function)
-        if !Store::needs_put(&heads, value) {
+        if !State::needs_put(&heads, value) {
             return Ok(());
         }
         
@@ -375,10 +375,10 @@ impl StoreActor {
     fn do_delete(&mut self, key: &[u8]) -> Result<(), StoreActorError> {
         use crate::proto::storage::Operation;
         
-        let heads = self.store.get_heads(key)?;
+        let heads = self.state.get_heads(key)?;
         
         // Idempotency check (pure function)
-        if !Store::needs_delete(&heads) {
+        if !State::needs_delete(&heads) {
             return Ok(());
         }
         
@@ -478,11 +478,11 @@ impl StoreActor {
             match self.chain_manager.validate_entry(&current) {
                 SigchainValidation::Valid => {
                     // Step 2: Validate state (parent_hashes exist in history)
-                    match self.store.validate_parent_hashes_with_index(&current, |hash| self.chain_manager.hash_exists(hash)) {
+                    match self.state.validate_parent_hashes_with_index(&current, |hash| self.chain_manager.hash_exists(hash)) {
                         Ok(()) => {
                             // Both valid - commit to sigchain and apply to state
                             let ready_orphans = self.chain_manager.commit_entry(&current)?;
-                            self.store.apply_entry(&current)?;
+                            self.state.apply_entry(&current)?;
                             
                             // Now safe to delete the DAG orphan entry (if this was one)
                             if let Some((key, parent_hash, entry_hash)) = dag_orphan_meta {
@@ -593,7 +593,7 @@ impl StoreActor {
         author: &[u8; 32],
         from_seq: u64,
         to_seq: u64,
-    ) -> Result<mpsc::Receiver<SignedEntry>, StoreError> {
+    ) -> Result<mpsc::Receiver<SignedEntry>, StateError> {
         let author_hex = hex::encode(author);
         let log_path = self.chain_manager.logs_dir().join(format!("{}.log", author_hex));
         
@@ -631,7 +631,7 @@ impl StoreActor {
     fn emit_sync_for_stale_peers(&self) {
         let local_state = self.chain_manager.sync_state();
         
-        let cached_peers = self.store.list_peer_sync_states().unwrap_or_default();
+        let cached_peers = self.state.list_peer_sync_states().unwrap_or_default();
         
         for (peer_bytes, info) in cached_peers {
             if let Some(ref peer_proto) = info.sync_state {
@@ -656,7 +656,7 @@ mod tests {
     use crate::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::proto::storage::Operation;
-    use crate::entry::{Entry, SignedEntry, ChainTip};
+    use crate::entry::{Entry, ChainTip};
 
     const TEST_STORE: [u8; 16] = [1u8; 16];
 
@@ -671,7 +671,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let store = Store::open(&state_path).unwrap();
+        let state = State::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(32);
@@ -679,7 +679,7 @@ mod tests {
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
-            store,
+            state,
             logs_dir,
             node.clone(),
             cmd_rx,
@@ -777,7 +777,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let store = Store::open(&state_path).unwrap();
+        let state = State::open(&state_path).unwrap();
         let node1 = NodeIdentity::generate(); // Author 1: creates A
         let node2 = NodeIdentity::generate(); // Author 2: creates B
         let node3 = NodeIdentity::generate(); // Author 3: creates C (merge)
@@ -787,7 +787,7 @@ mod tests {
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
-            store,
+            state,
             logs_dir,
             node1.clone(),
             cmd_rx,
@@ -914,7 +914,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let store = Store::open(&state_path).unwrap();
+        let state = State::open(&state_path).unwrap();
         let node1 = NodeIdentity::generate();
         let node2 = NodeIdentity::generate();
         let node3 = NodeIdentity::generate();
@@ -924,7 +924,7 @@ mod tests {
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
-            store,
+            state,
             logs_dir,
             node1.clone(),
             cmd_rx,
@@ -1030,7 +1030,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let store = Store::open(&state_path).unwrap();
+        let state = State::open(&state_path).unwrap();
         let node1 = NodeIdentity::generate();
         let node2 = NodeIdentity::generate();
         let node3 = NodeIdentity::generate();
@@ -1040,7 +1040,7 @@ mod tests {
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
-            store,
+            state,
             logs_dir.clone(),
             node1.clone(),
             cmd_rx,
@@ -1127,7 +1127,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let store = Store::open(&state_path).unwrap();
+        let state = State::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let author = node.public_key_bytes();
         
@@ -1153,24 +1153,24 @@ mod tests {
         }
         
         // Only apply first entry to state (simulating crash after entry 1)
-        store.apply_entry(&entries[0]).unwrap();
+        state.apply_entry(&entries[0]).unwrap();
         
         // Verify state only has entry 1
-        assert!(store.get(b"/key1").unwrap().is_some(), "key1 should exist");
-        assert!(store.get(b"/key2").unwrap().is_none(), "key2 should NOT exist (crash before apply)");
-        assert!(store.get(b"/key3").unwrap().is_none(), "key3 should NOT exist (crash before apply)");
+        assert!(state.get(b"/key1").unwrap().is_some(), "key1 should exist");
+        assert!(state.get(b"/key2").unwrap().is_none(), "key2 should NOT exist (crash before apply)");
+        assert!(state.get(b"/key3").unwrap().is_none(), "key3 should NOT exist (crash before apply)");
         
         // Drop everything to simulate crash
-        drop(store);
+        drop(state);
         drop(sigchain);
         
         // === RESTART ===
         // Reopen store and spawn actor with StoreHandle
         // The actor should replay log and recover entries 2 and 3
-        let store = Store::open(&state_path).unwrap();
+        let state = State::open(&state_path).unwrap();
         let handle = crate::store::handle::StoreHandle::spawn(
             Uuid::from_bytes(TEST_STORE),
-            store,
+            state,
             logs_dir.clone(),
             node.clone(),
         );
@@ -1219,7 +1219,6 @@ mod tests {
             .parent_hashes(vec![])
             .operation(Operation::put(b"/key_a", b"value_a".to_vec()))
             .sign(&node);
-        let hash_a = entry_a.hash();
         
         let clock_b = MockClock::new(2000);
         let entry_b = Entry::next_after(Some(&ChainTip::from(&entry_a)))
@@ -1279,7 +1278,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let store = Store::open(&state_path).unwrap();
+        let state = State::open(&state_path).unwrap();
         
         // Two different nodes
         let node_a = NodeIdentity::generate();
@@ -1297,10 +1296,10 @@ mod tests {
         let hash_h0 = entry_h0.hash();
         
         // Apply H0 to the store
-        store.apply_entry(&entry_h0).unwrap();
+        state.apply_entry(&entry_h0).unwrap();
         
         // Verify H0 is the only head
-        let heads = store.get_heads(b"/key_a").unwrap();
+        let heads = state.get_heads(b"/key_a").unwrap();
         assert_eq!(heads.len(), 1);
         assert_eq!(heads[0].hash, hash_h0.to_vec());
         
@@ -1315,10 +1314,10 @@ mod tests {
         let hash_h1 = entry_h1.hash();
         
         // Apply H1 - this supersedes H0
-        store.apply_entry(&entry_h1).unwrap();
+        state.apply_entry(&entry_h1).unwrap();
         
         // Verify H1 is now the only head (H0 was superseded)
-        let heads = store.get_heads(b"/key_a").unwrap();
+        let heads = state.get_heads(b"/key_a").unwrap();
         assert_eq!(heads.len(), 1, "H1 should be the only head");
         assert_eq!(heads[0].hash, hash_h1.to_vec());
         
@@ -1346,7 +1345,7 @@ mod tests {
         // CURRENT BUG (with old method): validate_parent_hashes will fail because H0 is not a current head
         // FIX (with new method): validate_parent_hashes_with_index should succeed (H0 exists in history)
         
-        let validation_result = store.validate_parent_hashes_with_index(
+        let validation_result = state.validate_parent_hashes_with_index(
             &entry_h2,
             |hash| manager.hash_exists(hash)
         );
@@ -1358,10 +1357,10 @@ mod tests {
              Got: {:?}", validation_result);
         
         // Apply H2
-        store.apply_entry(&entry_h2).unwrap();
+        state.apply_entry(&entry_h2).unwrap();
         
         // Verify we now have TWO heads (conflict state)
-        let heads = store.get_heads(b"/key_a").unwrap();
+        let heads = state.get_heads(b"/key_a").unwrap();
         assert_eq!(heads.len(), 2, 
             "Should have 2 heads (conflict) after concurrent offline writes. \
              Got {} heads: {:?}", 
@@ -1390,7 +1389,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let store = Store::open(&state_path).unwrap();
+        let state = State::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         
         // Spawn actor
@@ -1400,7 +1399,7 @@ mod tests {
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
-            store,
+            state,
             logs_dir,
             node.clone(),
             cmd_rx, 
@@ -1486,7 +1485,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let store = Store::open(&state_path).unwrap();
+        let state = State::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         
         // Spawn actor
@@ -1496,7 +1495,7 @@ mod tests {
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
-            store,
+            state,
             logs_dir.clone(),
             node.clone(),
             cmd_rx, 
@@ -1565,7 +1564,6 @@ mod tests {
     #[test]
     fn test_sync_needed_event_emission() {
         use std::time::Duration;
-        use crate::store::sync_state::SyncState;
         
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
@@ -1573,7 +1571,7 @@ mod tests {
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
-        let store = Store::open(&state_path).unwrap();
+        let state = State::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (entry_tx, _) = broadcast::channel(16);
@@ -1582,7 +1580,7 @@ mod tests {
         
         let actor = StoreActor::new(
             Uuid::from_bytes(TEST_STORE),
-            store,
+            state,
             logs_dir,
             node.clone(),
             cmd_rx,
@@ -1646,6 +1644,541 @@ mod tests {
         // Shutdown
         cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
         actor_handle.join().unwrap();
+}
+
+    /// Test sync state diffing: Node A has entries, Node B is empty.
+    /// Compute diff via SyncState and apply entries to sync.
+    #[test]
+    fn test_sync_state_diff_and_apply() {
+        
+        // Create two actors (A and B)
+        let tmp_a = tempfile::tempdir().unwrap();
+        let dir_a = tmp_a.path().to_path_buf();
+        let state_path_a = dir_a.join("state.db");
+        let logs_dir_a = dir_a.join("logs");
+        std::fs::create_dir_all(&logs_dir_a).unwrap();
+        
+        let tmp_b = tempfile::tempdir().unwrap();
+        let dir_b = tmp_b.path().to_path_buf();
+        let state_path_b = dir_b.join("state.db");
+        let logs_dir_b = dir_b.join("logs");
+        std::fs::create_dir_all(&logs_dir_b).unwrap();
+        
+        let state_a = State::open(&state_path_a).unwrap();
+        let state_b = State::open(&state_path_b).unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        
+        // Setup channels for A
+        let (cmd_tx_a, cmd_rx_a) = mpsc::channel(32);
+        let (entry_tx_a, _) = broadcast::channel(16);
+        let (sync_tx_a, _) = broadcast::channel(16);
+        
+        // Setup channels for B
+        let (cmd_tx_b, cmd_rx_b) = mpsc::channel(32);
+        let (entry_tx_b, _) = broadcast::channel(16);
+        let (sync_tx_b, _) = broadcast::channel(16);
+        
+        // Create actors
+        let actor_a = StoreActor::new(
+            Uuid::from_bytes(TEST_STORE),
+            state_a,
+            logs_dir_a,
+            node_a.clone(),
+            cmd_rx_a,
+            entry_tx_a,
+            sync_tx_a,
+        );
+        
+        let actor_b = StoreActor::new(
+            Uuid::from_bytes(TEST_STORE),
+            state_b,
+            logs_dir_b,
+            node_b.clone(),
+            cmd_rx_b,
+            entry_tx_b,
+            sync_tx_b,
+        );
+        
+        // Start actor threads
+        let handle_a = std::thread::spawn(move || actor_a.run());
+        let handle_b = std::thread::spawn(move || actor_b.run());
+        
+        // Node A writes 3 entries via Put command
+        for i in 1u64..=3 {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_a.blocking_send(StoreCmd::Put {
+                key: format!("/key{}", i).into_bytes(),
+                value: format!("value{}", i).into_bytes(),
+                resp: resp_tx,
+            }).unwrap();
+            resp_rx.blocking_recv().unwrap().unwrap();
+        }
+        
+        // Get sync state from A
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_a = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        // Get sync state from B (empty)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_b.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_b = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        // Compute diff: B needs entries from A
+        let missing = sync_b.diff(&sync_a);
+        assert_eq!(missing.len(), 1, "B needs entries from 1 author");
+        assert_eq!(missing[0].author, node_a.public_key_bytes());
+        assert_eq!(missing[0].from_seq, 0, "B has nothing");
+        assert_eq!(missing[0].to_seq, 3, "A has 3 entries");
+        
+        // Get entries from A's log and apply to B
+        // (In real sync, we'd stream via StoreCmd::StreamEntriesInRange)
+        // For simplicity, we'll just do direct Put commands to B for the same keys
+        for i in 1u64..=3 {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_b.blocking_send(StoreCmd::Put {
+                key: format!("/key{}", i).into_bytes(),
+                value: format!("value{}", i).into_bytes(),
+                resp: resp_tx,
+            }).unwrap();
+            resp_rx.blocking_recv().unwrap().unwrap();
+        }
+        
+        // Verify B has same KV state
+        for i in 1u64..=3 {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_b.blocking_send(StoreCmd::Get {
+                key: format!("/key{}", i).into_bytes(),
+                resp: resp_tx,
+            }).unwrap();
+            let value = resp_rx.blocking_recv().unwrap().unwrap();
+            assert_eq!(value, Some(format!("value{}", i).into_bytes()));
+        }
+        
+        // Shutdown
+        cmd_tx_a.blocking_send(StoreCmd::Shutdown).unwrap();
+        cmd_tx_b.blocking_send(StoreCmd::Shutdown).unwrap();
+        handle_a.join().unwrap();
+        handle_b.join().unwrap();
+    }
+
+    /// Test that two stores can sync in both directions.
+    /// Each node writes entries, then they exchange via sync state diff.
+    #[test]
+    fn test_bidirectional_sync() {
+        // Create two actors (A and B)
+        let tmp_a = tempfile::tempdir().unwrap();
+        let dir_a = tmp_a.path().to_path_buf();
+        let state_path_a = dir_a.join("state.db");
+        let logs_dir_a = dir_a.join("logs");
+        std::fs::create_dir_all(&logs_dir_a).unwrap();
+        
+        let tmp_b = tempfile::tempdir().unwrap();
+        let dir_b = tmp_b.path().to_path_buf();
+        let state_path_b = dir_b.join("state.db");
+        let logs_dir_b = dir_b.join("logs");
+        std::fs::create_dir_all(&logs_dir_b).unwrap();
+        
+        let state_a = State::open(&state_path_a).unwrap();
+        let state_b = State::open(&state_path_b).unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        
+        // Setup channels for A
+        let (cmd_tx_a, cmd_rx_a) = mpsc::channel(32);
+        let (entry_tx_a, mut entry_rx_a) = broadcast::channel(16);
+        let (sync_tx_a, _) = broadcast::channel(16);
+        
+        // Setup channels for B
+        let (cmd_tx_b, cmd_rx_b) = mpsc::channel(32);
+        let (entry_tx_b, mut entry_rx_b) = broadcast::channel(16);
+        let (sync_tx_b, _) = broadcast::channel(16);
+        
+        // Create actors
+        let actor_a = StoreActor::new(
+            Uuid::from_bytes(TEST_STORE),
+            state_a,
+            logs_dir_a,
+            node_a.clone(),
+            cmd_rx_a,
+            entry_tx_a,
+            sync_tx_a,
+        );
+        
+        let actor_b = StoreActor::new(
+            Uuid::from_bytes(TEST_STORE),
+            state_b,
+            logs_dir_b,
+            node_b.clone(),
+            cmd_rx_b,
+            entry_tx_b,
+            sync_tx_b,
+        );
+        
+        // Start actor threads
+        let handle_a = std::thread::spawn(move || actor_a.run());
+        let handle_b = std::thread::spawn(move || actor_b.run());
+        
+        // Node A writes 2 entries
+        for i in 1u64..=2 {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_a.blocking_send(StoreCmd::Put {
+                key: format!("/a{}", i).into_bytes(),
+                value: format!("from_a{}", i).into_bytes(),
+                resp: resp_tx,
+            }).unwrap();
+            resp_rx.blocking_recv().unwrap().unwrap();
+        }
+        
+        // Node B writes 2 entries
+        for i in 1u64..=2 {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_b.blocking_send(StoreCmd::Put {
+                key: format!("/b{}", i).into_bytes(),
+                value: format!("from_b{}", i).into_bytes(),
+                resp: resp_tx,
+            }).unwrap();
+            resp_rx.blocking_recv().unwrap().unwrap();
+        }
+        
+        // Get sync states
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_a = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_b.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_b = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        // A needs B's entries
+        let a_needs = sync_a.diff(&sync_b);
+        assert_eq!(a_needs.len(), 1);
+        assert_eq!(a_needs[0].author, node_b.public_key_bytes());
+        
+        // B needs A's entries  
+        let b_needs = sync_b.diff(&sync_a);
+        assert_eq!(b_needs.len(), 1);
+        assert_eq!(b_needs[0].author, node_a.public_key_bytes());
+        
+        // Drain entry broadcasts from A and apply to B
+        while let Ok(entry) = entry_rx_a.try_recv() {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_b.blocking_send(StoreCmd::IngestEntry { entry, resp: resp_tx }).unwrap();
+            resp_rx.blocking_recv().unwrap().unwrap();
+        }
+        
+        // Drain entry broadcasts from B and apply to A
+        while let Ok(entry) = entry_rx_b.try_recv() {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_a.blocking_send(StoreCmd::IngestEntry { entry, resp: resp_tx }).unwrap();
+            resp_rx.blocking_recv().unwrap().unwrap();
+        }
+        
+        // Both should now have all 4 keys
+        for key in ["/a1", "/a2", "/b1", "/b2"] {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_a.blocking_send(StoreCmd::Get { key: key.as_bytes().to_vec(), resp: resp_tx }).unwrap();
+            assert!(resp_rx.blocking_recv().unwrap().unwrap().is_some(), "A missing {}", key);
+            
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_b.blocking_send(StoreCmd::Get { key: key.as_bytes().to_vec(), resp: resp_tx }).unwrap();
+            assert!(resp_rx.blocking_recv().unwrap().unwrap().is_some(), "B missing {}", key);
+        }
+        
+        // Sync states should match
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_a_after = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_b.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_b_after = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        assert!(sync_a_after.diff(&sync_b_after).is_empty());
+        assert!(sync_b_after.diff(&sync_a_after).is_empty());
+        
+        // Shutdown
+        cmd_tx_a.blocking_send(StoreCmd::Shutdown).unwrap();
+        cmd_tx_b.blocking_send(StoreCmd::Shutdown).unwrap();
+        handle_a.join().unwrap();
+        handle_b.join().unwrap();
+    }
+
+    /// Test that three stores can all sync with each other.
+    #[test]
+    fn test_three_way_sync() {
+        // Create three actors
+        let tmp_a = tempfile::tempdir().unwrap();
+        let dir_a = tmp_a.path().to_path_buf();
+        let state_path_a = dir_a.join("state.db");
+        let logs_dir_a = dir_a.join("logs");
+        std::fs::create_dir_all(&logs_dir_a).unwrap();
+        
+        let tmp_b = tempfile::tempdir().unwrap();
+        let dir_b = tmp_b.path().to_path_buf();
+        let state_path_b = dir_b.join("state.db");
+        let logs_dir_b = dir_b.join("logs");
+        std::fs::create_dir_all(&logs_dir_b).unwrap();
+        
+        let tmp_c = tempfile::tempdir().unwrap();
+        let dir_c = tmp_c.path().to_path_buf();
+        let state_path_c = dir_c.join("state.db");
+        let logs_dir_c = dir_c.join("logs");
+        std::fs::create_dir_all(&logs_dir_c).unwrap();
+        
+        let state_a = State::open(&state_path_a).unwrap();
+        let state_b = State::open(&state_path_b).unwrap();
+        let state_c = State::open(&state_path_c).unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let node_c = NodeIdentity::generate();
+        
+        // Setup channels
+        let (cmd_tx_a, cmd_rx_a) = mpsc::channel(32);
+        let (entry_tx_a, _) = broadcast::channel(16);
+        let (sync_tx_a, _) = broadcast::channel(16);
+        
+        let (cmd_tx_b, cmd_rx_b) = mpsc::channel(32);
+        let (entry_tx_b, _) = broadcast::channel(16);
+        let (sync_tx_b, _) = broadcast::channel(16);
+        
+        let (cmd_tx_c, cmd_rx_c) = mpsc::channel(32);
+        let (entry_tx_c, _) = broadcast::channel(16);
+        let (sync_tx_c, _) = broadcast::channel(16);
+        
+        // Create and start actors
+        let actor_a = StoreActor::new(Uuid::from_bytes(TEST_STORE), state_a, logs_dir_a.clone(), node_a.clone(), cmd_rx_a, entry_tx_a, sync_tx_a);
+        let actor_b = StoreActor::new(Uuid::from_bytes(TEST_STORE), state_b, logs_dir_b, node_b.clone(), cmd_rx_b, entry_tx_b, sync_tx_b);
+        let actor_c = StoreActor::new(Uuid::from_bytes(TEST_STORE), state_c, logs_dir_c, node_c.clone(), cmd_rx_c, entry_tx_c, sync_tx_c);
+        
+        let handle_a = std::thread::spawn(move || actor_a.run());
+        let handle_b = std::thread::spawn(move || actor_b.run());
+        let handle_c = std::thread::spawn(move || actor_c.run());
+        
+        // Each node writes one entry using manual Entry creation (so we control the author)
+        let clock = MockClock::new(1000);
+        
+        let entry_a = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put("/key_a", b"from_a".to_vec()))
+            .sign(&node_a);
+        
+        let entry_b = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put("/key_b", b"from_b".to_vec()))
+            .sign(&node_b);
+        
+        let entry_c = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put("/key_c", b"from_c".to_vec()))
+            .sign(&node_c);
+        
+        // Ingest each entry to its respective actor
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
+        resp_rx.blocking_recv().unwrap().unwrap();
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_b.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
+        resp_rx.blocking_recv().unwrap().unwrap();
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_c.blocking_send(StoreCmd::IngestEntry { entry: entry_c.clone(), resp: resp_tx }).unwrap();
+        resp_rx.blocking_recv().unwrap().unwrap();
+        
+        // Now sync all entries to all nodes by ingesting the original signed entries
+        // This properly preserves the original author signatures
+        
+        // Ingest A's entry to B and C
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_b.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
+        let _ = resp_rx.blocking_recv();
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_c.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
+        let _ = resp_rx.blocking_recv();
+        
+        // Ingest B's entry to A and C
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
+        let _ = resp_rx.blocking_recv();
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_c.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
+        let _ = resp_rx.blocking_recv();
+        
+        // Ingest C's entry to A and B
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::IngestEntry { entry: entry_c.clone(), resp: resp_tx }).unwrap();
+        let _ = resp_rx.blocking_recv();
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_b.blocking_send(StoreCmd::IngestEntry { entry: entry_c.clone(), resp: resp_tx }).unwrap();
+        let _ = resp_rx.blocking_recv();
+        
+        // All three stores should have all three keys
+        for cmd_tx in [&cmd_tx_a, &cmd_tx_b, &cmd_tx_c] {
+            for key in ["/key_a", "/key_b", "/key_c"] {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                cmd_tx.blocking_send(StoreCmd::Get { key: key.as_bytes().to_vec(), resp: resp_tx }).unwrap();
+                assert!(resp_rx.blocking_recv().unwrap().unwrap().is_some(), "missing {}", key);
+            }
+        }
+        
+        // All sync states should match
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_a = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_b.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_b = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_c.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_c = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        assert!(sync_a.diff(&sync_b).is_empty(), "A and B should be in sync");
+        assert!(sync_b.diff(&sync_c).is_empty(), "B and C should be in sync");
+        assert!(sync_c.diff(&sync_a).is_empty(), "C and A should be in sync");
+        
+        // Shutdown
+        cmd_tx_a.blocking_send(StoreCmd::Shutdown).unwrap();
+        cmd_tx_b.blocking_send(StoreCmd::Shutdown).unwrap();
+        cmd_tx_c.blocking_send(StoreCmd::Shutdown).unwrap();
+        handle_a.join().unwrap();
+        handle_b.join().unwrap();
+        handle_c.join().unwrap();
+    }
+
+    /// Test multi-node sync after merge: 3 nodes create multi-heads, then merge, then sync to new node.
+    #[test]
+    fn test_multinode_sync_after_merge() {
+        // Create two actors (A merges, D syncs from A)
+        let tmp_a = tempfile::tempdir().unwrap();
+        let dir_a = tmp_a.path().to_path_buf();
+        let state_path_a = dir_a.join("state.db");
+        let logs_dir_a = dir_a.join("logs");
+        std::fs::create_dir_all(&logs_dir_a).unwrap();
+        
+        let tmp_d = tempfile::tempdir().unwrap();
+        let dir_d = tmp_d.path().to_path_buf();
+        let state_path_d = dir_d.join("state.db");
+        let logs_dir_d = dir_d.join("logs");
+        std::fs::create_dir_all(&logs_dir_d).unwrap();
+        
+        let state_a = State::open(&state_path_a).unwrap();
+        let state_d = State::open(&state_path_d).unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let node_c = NodeIdentity::generate();
+        let node_d = NodeIdentity::generate();
+        
+        // Setup channels for A
+        let (cmd_tx_a, cmd_rx_a) = mpsc::channel(32);
+        let (entry_tx_a, mut entry_rx_a) = broadcast::channel(32);
+        let (sync_tx_a, _) = broadcast::channel(16);
+        
+        // Setup channels for D
+        let (cmd_tx_d, cmd_rx_d) = mpsc::channel(32);
+        let (entry_tx_d, _) = broadcast::channel(16);
+        let (sync_tx_d, _) = broadcast::channel(16);
+        
+        // Create actors
+        let actor_a = StoreActor::new(Uuid::from_bytes(TEST_STORE), state_a, logs_dir_a, node_a.clone(), cmd_rx_a, entry_tx_a, sync_tx_a);
+        let actor_d = StoreActor::new(Uuid::from_bytes(TEST_STORE), state_d, logs_dir_d, node_d.clone(), cmd_rx_d, entry_tx_d, sync_tx_d);
+        
+        let handle_a = std::thread::spawn(move || actor_a.run());
+        let handle_d = std::thread::spawn(move || actor_d.run());
+        
+        // Create entries from 3 different authors (simulating offline writes)
+        let clock = MockClock::new(1000);
+        
+        let entry_from_a = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put("/a", b"from_a".to_vec()))
+            .sign(&node_a);
+        
+        let entry_from_b = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put("/a", b"from_b".to_vec()))
+            .sign(&node_b);
+        
+        let entry_from_c = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
+            .store_id(TEST_STORE.to_vec())
+            .parent_hashes(vec![])
+            .operation(Operation::put("/a", b"from_c".to_vec()))
+            .sign(&node_c);
+        
+        // Ingest all 3 entries to A (creates 3 heads)
+        for entry in [&entry_from_a, &entry_from_b, &entry_from_c] {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_a.blocking_send(StoreCmd::IngestEntry { entry: entry.clone(), resp: resp_tx }).unwrap();
+            resp_rx.blocking_recv().unwrap().unwrap();
+        }
+        
+        // Verify A has 3 heads
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::GetHeads { key: b"/a".to_vec(), resp: resp_tx }).unwrap();
+        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads.len(), 3, "Should have 3 heads before merge");
+        
+        // Node A merges by doing a Put (which references all current heads)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::Put { key: b"/a".to_vec(), value: b"merged".to_vec(), resp: resp_tx }).unwrap();
+        resp_rx.blocking_recv().unwrap().unwrap();
+        
+        // Verify A now has 1 head
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::GetHeads { key: b"/a".to_vec(), resp: resp_tx }).unwrap();
+        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads.len(), 1, "Should have 1 head after merge");
+        assert_eq!(heads[0].value, b"merged");
+        
+        // Get sync states
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_a.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_a = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_d.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
+        let sync_d = resp_rx.blocking_recv().unwrap().unwrap();
+        
+        // D should need entries from multiple authors
+        let missing = sync_d.diff(&sync_a);
+        assert!(!missing.is_empty(), "D should need entries to sync");
+        
+        // Sync all entries from A to D via broadcast channel
+        while let Ok(entry) = entry_rx_a.try_recv() {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            cmd_tx_d.blocking_send(StoreCmd::IngestEntry { entry, resp: resp_tx }).unwrap();
+            let _ = resp_rx.blocking_recv();
+        }
+        
+        // D should have same state as A (1 head, merged)
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmd_tx_d.blocking_send(StoreCmd::GetHeads { key: b"/a".to_vec(), resp: resp_tx }).unwrap();
+        let heads_d = resp_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(heads_d.len(), 1, "D should have 1 head after sync");
+        assert_eq!(heads_d[0].value, b"merged");
+        
+        // Shutdown
+        cmd_tx_a.blocking_send(StoreCmd::Shutdown).unwrap();
+        cmd_tx_d.blocking_send(StoreCmd::Shutdown).unwrap();
+        handle_a.join().unwrap();
+        handle_d.join().unwrap();
     }
 }
 

@@ -157,8 +157,6 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 
 ## Technical Debt
 
-- [ ] Trait boundaries: `KvStore` (user ops) vs `SyncStore` (network ops)
-- [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip regression)
 - [x] Proto: Change `HeadInfo.hlc` to proper `HLC` message type
 - [x] Proto: Change `HLC.counter` from `uint32` to `uint16`
 - [x] rename `history` command to `store history`
@@ -166,10 +164,22 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 - [x] `peer invite` should output the node's id for easy joining
 - [x] Async streaming in `do_stream_entries_in_range` (currently re-opens Log in sync thread)
 - [x] split `lattice.proto` into network protocol and storage messages
+- [x] Remove redundant `AUTHOR_TABLE` from DB - SigChainManager already loads all chains on startup
+- [x] Strong Types: separate internal types (`Entry`, `SignedEntry`) from proto types with explicit conversion layer
+- [x] **ChainTip ownership separation**: (1) `SigChainManager` owns in-memory ChainTips loaded from logs on startup, updated on append - used for sync state exchange in network protocol via `SigChainManager::sync_state()`. (2) `State::chain_tips_table` validates incoming entries against last applied tips - internal only, not exposed for sync.
+- [x] **Entry::is_successor(tip)**: Add method on Entry to check `entry.prev_hash == tip.hash` instead of inline checks in `core.rs`
+- [x] **ChainTip::encode()**: Add `encode(&self) -> Vec<u8>` method that hides proto conversion, cleaner than `.encode_to_vec().as_slice()`
+- [x] **Rename Store → State**: Renamed `core.rs`→`state.rs` and `Store`→`State` to clarify it's derived materialized view
+- [ ] **Strong types for byte arrays**: `Hash` and `PubKey` for `[u8; 32]`, `Signature` for `[u8; 64]` - with proper Display/Debug
+- [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
+- [ ] **Module reorganization**: Move sigchain-related files into `store/sigchain/` submodule (sigchain.rs, log.rs, orphan_store.rs, sync_state.rs)
+- [ ] Extract `PEER_SYNC_TABLE` from `state.db` for better separation
+- [ ] **Multi-platform traits**: Add `StateBackend` trait to abstract KV storage (redb/sqlite/wasm)
+- [ ] **HeadInfo.hlc Option cleanup**: Proto `HeadInfo.hlc` is `Option<Hlc>` but always set in practice - make non-optional or add `HLC::default()` fallback
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] Refactor any `.unwrap` uses
-- [ ] Remove redundant `AUTHOR_TABLE` from DB - SigChainManager already loads all chains on startup
-- [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may need iroh fix)
+- [ ] Trait boundaries: `KvStore` (user ops) vs `SyncStore` (network ops)
+- [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip 
 
 ---
 
@@ -184,7 +194,7 @@ Range-based set reconciliation for efficient diff calculation. Replaces O(n) vec
 
 ### Data Pruning: Willow Protocol
 3D key space (Author, Path, Time) with authenticated deletion. Newer timestamps deterministically overwrite older, enabling partial replication and actual byte deletion without breaking hash chains.
-- **Apply to:** `store/core.rs` for pruning, `sigchain.rs` for subspace capabilities
+- **Apply to:** `store/state.rs` for pruning, `sigchain.rs` for subspace capabilities
 - **Ref:** [Willow Protocol](https://willowprotocol.org/)
 
 ### Byzantine Fork Detection

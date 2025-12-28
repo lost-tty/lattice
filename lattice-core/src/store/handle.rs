@@ -7,7 +7,7 @@ use crate::{
 };
 use crate::entry::SignedEntry;
 use super::actor::{StoreCmd, StoreActor};
-use super::core::Store;
+use super::state::State;
 use super::sync_state::SyncNeeded;
 use tokio::sync::{broadcast, mpsc};
 use std::path::PathBuf;
@@ -43,7 +43,7 @@ impl StoreHandle {
     /// This recovers any entries that were committed to sigchain but not applied to state.
     pub fn spawn(
         store_id: Uuid,
-        store: Store,
+        state: State,
         logs_dir: PathBuf,
         node: NodeIdentity,
     ) -> Self {
@@ -55,7 +55,7 @@ impl StoreHandle {
                 if path.extension().map_or(false, |ext| ext == "log") {
                     if let Ok(log) = super::log::Log::open(&path) {
                         if let Ok(iter) = log.iter() {
-                            let replayed = store.replay_entries(iter).unwrap_or(0);
+                            let replayed = state.replay_entries(iter).unwrap_or(0);
                             if replayed > 0 {
                                 eprintln!("[info] Crash recovery: replayed {} entries from {:?}", replayed, path.file_name());
                             }
@@ -68,7 +68,7 @@ impl StoreHandle {
         let (tx, rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(64);
         let (sync_needed_tx, _sync_needed_rx) = broadcast::channel(64);
-        let actor = StoreActor::new(store_id, store, logs_dir, node, rx, entry_tx.clone(), sync_needed_tx.clone());
+        let actor = StoreActor::new(store_id, state, logs_dir, node, rx, entry_tx.clone(), sync_needed_tx.clone());
         let handle = thread::spawn(move || actor.run());
         Self { store_id, tx, actor_handle: Some(handle), entry_tx, sync_needed_tx }
     }
