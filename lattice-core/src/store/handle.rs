@@ -8,7 +8,7 @@ use crate::{
 use crate::entry::SignedEntry;
 use super::actor::{StoreCmd, StoreActor};
 use super::state::State;
-use super::sync_state::SyncNeeded;
+use super::SyncNeeded;
 use tokio::sync::{broadcast, mpsc};
 use std::path::PathBuf;
 use std::thread;
@@ -53,7 +53,7 @@ impl StoreHandle {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.extension().map_or(false, |ext| ext == "log") {
-                    if let Ok(log) = super::log::Log::open(&path) {
+                    if let Ok(log) = super::Log::open(&path) {
                         if let Ok(iter) = log.iter() {
                             let replayed = state.replay_entries(iter).unwrap_or(0);
                             if replayed > 0 {
@@ -181,7 +181,7 @@ impl StoreHandle {
     }
     
     /// Get list of orphaned entries
-    pub async fn orphan_list(&self) -> Vec<super::orphan_store::OrphanInfo> {
+    pub async fn orphan_list(&self) -> Vec<super::OrphanInfo> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self.tx.send(StoreCmd::OrphanList { resp: resp_tx }).await;
@@ -197,7 +197,7 @@ impl StoreHandle {
         resp_rx.await.unwrap_or(0)
     }
 
-    pub async fn sync_state(&self) -> Result<super::sync_state::SyncState, NodeError> {
+    pub async fn sync_state(&self) -> Result<super::SyncState, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::SyncState { resp: resp_tx }).await
@@ -218,7 +218,7 @@ impl StoreHandle {
     }
 
     /// Subscribe to gap detection events (emitted when orphan entries are buffered)
-    pub async fn subscribe_gaps(&self) -> Result<broadcast::Receiver<super::orphan_store::GapInfo>, NodeError> {
+    pub async fn subscribe_gaps(&self) -> Result<broadcast::Receiver<super::GapInfo>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::SubscribeGaps { resp: resp_tx }).await
@@ -278,7 +278,7 @@ impl StoreHandle {
     
     /// Store a peer's sync state (received via gossip or status command).
     /// Returns SyncDiscrepancy showing what each side is missing.
-    pub async fn set_peer_sync_state(&self, peer: &PubKey, info: crate::proto::storage::PeerSyncInfo) -> Result<super::sync_state::SyncDiscrepancy, NodeError> {
+    pub async fn set_peer_sync_state(&self, peer: &PubKey, info: crate::proto::storage::PeerSyncInfo) -> Result<super::SyncDiscrepancy, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::SetPeerSyncState { peer: *peer, info, resp: resp_tx }).await

@@ -10,17 +10,15 @@
 mod state;
 mod actor;
 mod handle;
-mod sigchain;
-mod log;
-mod sync_state;
-mod orphan_store;
+pub mod sigchain;
 mod peer_sync_store;
 
 // Public API - types needed by Node and LatticeServer
 pub use state::{State, StateError, ParentValidationError};
 pub use handle::StoreHandle;
 pub use actor::{WatchEvent, WatchEventKind, WatchError};
-pub use sync_state::{SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
-pub use log::{Log, LogError};
-pub use orphan_store::{GapInfo, OrphanInfo};
 pub use peer_sync_store::PeerSyncStore;
+// Re-exports from sigchain submodule
+pub use sigchain::sync_state::{SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
+pub use sigchain::log::{Log, LogError};
+pub use sigchain::orphan_store::{GapInfo, OrphanInfo};

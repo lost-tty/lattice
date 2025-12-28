@@ -6,7 +6,7 @@
 //! - meta: String → Vec<u8> (system metadata: last_seq, last_hash, etc.)
 //! - author: PubKey → AuthorState (per-author replay tracking)
 
-use crate::store::log::LogError;
+use crate::store::LogError;
 use crate::store::sigchain::SigChainError;
 use crate::entry::{SignedEntry, ChainTip};
 use crate::proto::storage::{operation, HeadInfo as ProtoHeadInfo, HeadList};
@@ -450,7 +450,7 @@ mod tests {
     use crate::node_identity::NodeIdentity;
     use crate::entry::{Entry, SignedEntry, ChainTip};
     use crate::proto::storage::{Operation, Entry as ProtoEntry, SignedEntry as ProtoSignedEntry};
-    use crate::store::log::Log;    
+    use crate::store::Log;
 
     use crate::types::PubKey;
     use uuid::Uuid;

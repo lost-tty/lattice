@@ -3,10 +3,10 @@
 //! A SigChain manages a single author's append-only log. It validates entries
 //! before appending (correct seq, prev_hash, valid signature) and persists to disk.
 
-use crate::store::log::{Log, LogError};
+use super::log::{Log, LogError};
 use crate::entry::{Entry, SignedEntry, ChainTip};
-use crate::store::orphan_store::{GapInfo, OrphanStore, OrphanInfo};
-use crate::store::sync_state::SyncState;
+use super::orphan_store::{GapInfo, OrphanStore, OrphanInfo};
+use super::sync_state::SyncState;
 use crate::types::{Hash, PubKey};
 use crate::node_identity::NodeIdentity;
 use crate::proto::storage::Operation;

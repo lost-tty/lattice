@@ -7,11 +7,13 @@ use crate::{
 };
 use super::{
     state::{State, StateError, ParentValidationError},
-    sigchain::{SigChainError, SigChainManager, SigchainValidation},
-    sync_state::{SyncState, SyncDiscrepancy, SyncNeeded},
-    orphan_store::{GapInfo, OrphanInfo},
+    sigchain::{
+        SigChainError, SigChainManager, SigchainValidation,
+        SyncState, SyncDiscrepancy, SyncNeeded,
+        GapInfo, OrphanInfo,
+        Log,
+    },
     peer_sync_store::PeerSyncStore,
-    log,
 };
 use crate::proto::storage::PeerSyncInfo;
 use crate::types::Hash;
@@ -624,7 +626,7 @@ impl StoreActor {
         
         // Spawn thread to stream entries
         std::thread::spawn(move || {
-            let log = match log::Log::open(&log_path) {
+            let log = match Log::open(&log_path) {
                 Ok(l) => l,
                 Err(_) => return,
             };
@@ -1132,8 +1134,8 @@ mod tests {
         // CRITICAL: Check DAG orphan store is empty - no stale records
         // This is the bug we're testing for: old "C waiting for A" record leaked
         let orphan_db_path = logs_dir.join("orphans.db");
-        let orphan_store = crate::store::orphan_store::OrphanStore::open(&orphan_db_path).unwrap();
-        let dag_orphan_count = crate::store::orphan_store::tests::count_dag_orphans(&orphan_store);
+        let orphan_store = crate::store::sigchain::orphan_store::OrphanStore::open(&orphan_db_path).unwrap();
+        let dag_orphan_count = crate::store::sigchain::orphan_store::tests::count_dag_orphans(&orphan_store);
         assert_eq!(dag_orphan_count, 0, "DAG orphan store should be empty after all entries applied (found {} stale records)", dag_orphan_count);
     }
     
