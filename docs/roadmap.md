@@ -1,85 +1,138 @@
 # Lattice Roadmap
 
-## Completed Milestones
+## Completed
 
-### M1: Single-Node Append-Only Log ✓
-Node identity, HLC timestamps, entry signing, log file I/O, SigChain validation, redb store with KV tables, interactive CLI. Multi-store support with per-store directories and UUIDs.
+- **M1**: Single-node append-only log with SigChain, HLC, redb KV, interactive CLI
+- **M1.5**: DAG conflict resolution with multi-head tracking and deterministic LWW
+- **M1.9**: Async refactor with store actor pattern and tokio runtime
+- **M2**: Two-node sync via Iroh (mDNS + DNS), peer management, bidirectional sync
+- **Stability**: Gossip join reliability, bidirectional sync fix, diagnostics, orphan timestamps
+- **Sync Reliability**: Common HLC in SyncState, auto-sync on discrepancy with deferred check
 
-### M1.5: DAG Conflict Resolution ✓
-Multi-head tracking per key, deterministic LWW reads with HLC+author tiebreaker, parent_hashes for DAG causality, merge semantics via citing multiple heads.
+## Milestone 3: Extract `lattice-store` Crate
 
-### M1.9: Async Refactor ✓
-Store actor pattern (dedicated thread, channel commands), tokio runtime, async CLI via block_in_place.
+**Goal:** Clean crate boundaries as foundation for Multi-Store and CAS.
 
-### M2: Two-Node Sync ✓
-Iroh integration (mDNS + DNS discovery), peer management via `/nodes/` keys, join protocol with store UUID exchange, bidirectional sync with SyncState diff, framed protobuf messaging.
+**Files to extract** (~270KB):
+- `actor.rs`, `core.rs`, `handle.rs`, `log.rs`, `mod.rs`
+- `sigchain.rs`, `signed_entry.rs`, `sync_state.rs`, `orphan_store.rs`
+
+**Steps:**
+- [ ] Create `lattice-store` crate with `Cargo.toml`
+- [ ] Move store files, update internal imports
+- [ ] Export `StoreHandle`, `Store`, `SyncState`, `SyncNeeded`, etc.
+- [ ] `lattice-core` depends on `lattice-store`, re-exports types
+- [ ] Update `lattice-net` imports
+- [ ] Run tests, fix any breakage
+
+### 3B: Apply Trait (Logic Encapsulation)
+
+Move operation logic from `Store` into `Operation` types. Store becomes a dumb transaction provider.
+
+```rust
+pub trait StateContext {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
+    fn put(&mut self, key: &[u8], value: &[u8]);
+}
+
+pub trait Applyable {
+    fn apply(&self, ctx: &mut dyn StateContext, meta: &OpMetadata) -> Result<(), OpError>;
+}
+```
+
+- [ ] Define `StateContext` and `Applyable` traits in `ops.rs`
+- [ ] Implement `Applyable` for `Operation` proto type
+- [ ] Refactor `Store` to use trait dispatch instead of match statement
+- [ ] Add `MockContext` for unit testing operations in isolation
 
 ---
 
-## Priority 1: Stability
-
-**Goal:** Fix known bugs and add diagnostic tooling.
-
-### Regressions
-- [x] On join, node does not reliably join gossip
-- [x] `store sync` seems to be uni-directional now
-
-### Diagnostics
-- [x] Unicast `peer status` command with sync matrix and RTT
-- [x] Track gossip NeighborUp/Down events for real-time peer online status in `peers` command
-
-### Orphan Management
-- [x] Track received_at timestamp for orphans (preparation for TTL)
-
----
-
-## Priority 2: Sync & Gossip Reliability
-
-**Goal:** Production-ready mesh networking with simple, unified sync loop.
-
-- [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may need iroh fix)
-- [x] Add highest HLC common to all local logs to SyncState and show it in `store status` for each node
-- [x] Auto-trigger direct sync with peer when sync state discrepancy detected (with throttling)
-
----
-
-## Priority 3: Multi-Store
+## Milestone 4: Multi-Store
 
 **Goal:** Root store as control plane for declaring/managing additional stores.
 
-### 3A: Store Declarations in Root Store
+### 4A: Store Declarations in Root Store
 - [ ] Root store keys: `/stores/{uuid}/name`, `/stores/{uuid}/created_at`
 - [ ] CLI: `create-store [name]`, `delete-store <uuid>`, `list-stores`
 
-### 3B: Store Watcher (automatic materialization)
-- [ ] Node watches `/stores/` prefix, auto-creates local stores
-- [ ] Startup reconciliation with root store declarations
+### 4B: Store Watcher ("Cluster Manager")
 
-### 3C: Multi-Store Gossip
+Two-phase reconciliation:
+
+**Data Structure** (in `Node`):
+```rust
+app_stores: tokio::sync::RwLock<HashMap<Uuid, StoreHandle>>
+```
+
+**Implementation**:
+- [ ] Initial Reconciliation: On startup, process `/stores/` snapshot before returning
+- [ ] Live Reconciliation: Spawn background task watching `/stores/` prefix
+- [ ] On `Put`: Parse UUID, check if already running, open if new
+- [ ] On `Delete`: Optionally close/archive store
+
+**Edge Case**: Make watcher async/non-blocking. `Node::start` returns after Root Store opens locally - don't block on network sync. App Stores materialize as watcher processes local DB state.
+
+### 4C: Multi-Store Gossip
 - [ ] `setup_for_store` called for each active store
 - [ ] Per-store gossip topics, verify store-id before applying
 
-### 3D: Shared Peer List
-- [ ] All stores use root store peer list (`/nodes/`)
-- [ ] Peer authorization checked against root store on ingest
+### 4D: Shared Peer List (Ingest Guard)
+
+All stores use root store peer list for authorization.
+
+**Ingest Guard** (in `lattice-net/src/mesh/server.rs`):
+- [ ] On `JoinRequest`/`StatusRequest`: extract `remote_pubkey`
+- [ ] Check Root Store: `/nodes/{remote_pubkey}/status` == "active"?
+- [ ] If authorized: proceed with sync
+- [ ] If not: drop connection (or return 403)
 
 ---
 
-## Priority 4: HTTP API
+## Milestone 5: HTTP API
 
 **Goal:** External access to stores via REST.
 
-### 4A: Access Tokens
+### 5A: Access Tokens
 - [ ] Token storage: `/tokens/{id}/store_id`, `/tokens/{id}/secret_hash`, `/tokens/{id}/permissions`
 - [ ] CLI: `create-token`, `list-tokens`, `revoke-token`
 
-### 4B: HTTP Server (lattice-http crate)
+### 5B: HTTP Server (lattice-http crate)
 - [ ] REST endpoints: `GET/PUT/DELETE /stores/{uuid}/keys/{key}`
 - [ ] Auth via `Authorization: Bearer {token_id}:{secret}`
 
 ---
 
-## Priority 5: WebAssembly Consensus Bus
+## Milestone 6: Content-Addressable Store (CAS)
+
+**Goal:** Pressure-based blob storage with automatic caching and zombie redundancy.
+
+### 6A: Core (`lattice-cas` crate)
+- [ ] `BlobStore` struct with `put(data) -> hash`, `get(hash) -> data`
+- [ ] Content-addressed storage: `~/.local/share/lattice/cas/{hash[0:2]}/{hash}.blob`
+- [ ] Access time tracking: `get()` touches file for LRU
+
+### 6B: Pin Reconciler
+- [ ] Watch `/cas/pins/{my_id}/` prefix in KV
+- [ ] On `pending`: fetch blob from peers, write to disk, update to `stored`
+- [ ] On delete: demote to cache (don't delete file)
+
+### 6C: Garbage Collector
+- [ ] Config: `storage_quota`, `min_free_space`
+- [ ] Trigger: periodic or after large writes
+- [ ] LRU eviction: filter pinned, sort by atime, delete oldest
+- [ ] Update `/blobs/{hash}/nodes/{me}` on eviction
+
+### 6D: Global Discovery
+- [ ] `/blobs/{hash}/nodes/{node_id}` = presence marker
+- [ ] Fetch: query peers for `/blobs/{hash}/nodes/*`, request from first responder
+
+### 6E: Manifests (for scale)
+- [ ] Manifest format: content-addressed list of hashes (like Git Trees)
+- [ ] Recursive pinning: pin manifest → implicitly pin all referenced blobs
+- [ ] Graph-aware GC: walk pinned manifests to build reachability set before eviction
+- [ ] CLI: `cas manifest create <files...>`, `cas manifest list <hash>`
+
+## Milestone 7: WebAssembly Consensus Bus
 
 **Goal:** Transform from passive KV store to replicated state machine.
 
@@ -104,8 +157,6 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 
 ## Technical Debt
 
-**Crate Refactoring** (larger effort, defer)
-- [ ] Extract `Store`, `SigChain`, `StoreActor` into `lattice-store` crate
 - [ ] Trait boundaries: `KvStore` (user ops) vs `SyncStore` (network ops)
 - [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip regression)
 - [x] Proto: Change `HeadInfo.hlc` to proper `HLC` message type
@@ -118,7 +169,7 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] Refactor any `.unwrap` uses
 - [ ] Remove redundant `AUTHOR_TABLE` from DB - SigChainManager already loads all chains on startup
-- [ ] Move operation apply logic into `Operation::apply()` method (decouple from Store)
+- [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may need iroh fix)
 
 ---
 
@@ -170,4 +221,3 @@ Verify all data read from disk (log files, redb store) via hash/signature checks
 - Secure storage (Keychain, TPM)
 - FUSE filesystem mount
 - Merkle-ized state (signed root hash, O(1) sync checks)
-- **CAS (Content-Addressable Store)**: Optional per-node blob storage by hash. Not all nodes required to store blobs. A separate "pin map" (CRDT) in a regular store dictates which objects each node should persistently store. On read, nodes cache fetched blobs and pin anything declared in the shared pin map.

@@ -17,18 +17,64 @@
 - Atomic Batch Writes: Multiple key updates as single entry.
 - Conditional Updates (CAS): Update only if current value matches expected hash.
 
-**Content-Addressable Store (CAS):** *(TBD)*
+**Content-Addressable Store (CAS):** Pressure-based blob storage with automatic caching.
+
 - Separate `lattice-cas` crate for clean boundaries.
 - Optional per-node blob storage by content hash.
 - Not all nodes required to store blobs (heterogeneous storage).
-- **Pin Map**: Regular KV entries with state:
-  - `/cas/pins/{node_pubkey}/{hash} = pending|stored|evicting`
-  - `pending` = declared, not yet fetched
-  - `stored` = fetched and stored locally
-  - `evicting` = marked for removal, GC will delete
-  - Nodes watch their own prefix and fetch+store declared blobs
-- **Fetch**: Ask gossip peers "who has {hash}?", first responder sends blob.
-- **Caching**: On read, nodes cache fetched blobs and auto-pin if declared.
+
+**Two-Tier Storage:**
+
+| Tier   | Status         | KV State                            | Deletion Policy                             |
+|--------|----------------|-------------------------------------|---------------------------------------------|
+| Tier 1 | Pinned         | Key `/cas/pins/{me}/{hash}` exists  | Protected. Never deleted automatically.     |
+| Tier 2 | Cached         | No pin key exists, but file on disk | Volatile. Deleted only under disk pressure. |
+
+**Pin Map Schema** (`/cas/pins/{node_id}/{hash}`):
+- `pending` = "Please fetch this." (Trigger download)
+- `stored` = "I have this and it is Pinned." (Protected)
+- [Key Deleted] = "I no longer require this." (Demotion to cache)
+
+**Demotion Logic**: When pin removed, file is NOT deleted—just demoted to Tier 2 cache. Survives until disk pressure evicts it.
+
+**Garbage Collector** (LRU):
+- Config: `storage_quota` (soft limit), `min_free_space` (hard limit)
+- Trigger: `(TotalData > quota) OR (DiskFree < min_free_space)`
+- Algorithm:
+  1. List all blob files
+  2. Filter out pinned blobs (have `/cas/pins/{me}/{hash}` key)
+  3. Sort by access time (atime/mtime)
+  4. Delete oldest until pressure relieved
+  5. Update `/blobs/{hash}/nodes/{me}` (global discovery)
+
+**Access Time Tracking**: `cas.get(hash)` must "touch" file to update atime for LRU.
+
+**Zombie Redundancy** (network benefit):
+- Pin on 3 nodes → 3 protected copies
+- Other 97 nodes may have cached copies (Tier 2)
+- If all 3 pinned nodes offline → data still alive on cache nodes until they need space
+- Effective redundancy exceeds explicit pin count
+
+**Manifests** (for scale):
+
+Decouples file count from KV entry count. Instead of 1M files = 1M KV entries, use lightweight manifest blobs.
+
+- **Manifest Blob**: Content-addressed list of hashes (like Git Trees)
+  ```
+  hash: blake3(content)
+  content: [hash1, hash2, hash3, ...]  // or nested manifest hashes
+  ```
+- **Recursive Pinning**: Pinning a manifest implicitly pins all referenced blobs
+  - Pin `/cas/pins/{me}/{manifest_hash}` → protect manifest + all children
+  - No need for individual pin entries per file
+- **Graph-Aware GC**: Before deleting any blob, GC walks pinned manifests
+  - Build reachability set from all pinned manifest roots
+  - Only evict blobs not in reachability set
+  - Prevents orphaning files referenced by manifests
+- **Use Cases**: 
+  - Directory snapshots (manifest = list of file hashes)
+  - Large datasets (manifest = chunks of a file)
+  - Backup sets (manifest = collection of snapshots)
 
 **CRDTs:**
 - LWW-Register: Last-writer-wins for single values.
@@ -290,7 +336,7 @@ Stores can be exposed over HTTP API using token-based authentication. Tokens are
 
 ```
 /tokens/{token_id}/store_id   = {store_uuid}       # Which store this token accesses
-/tokens/{token_id}/secret_hash = {sha256(secret)}  # Hashed secret for verification
+/tokens/{token_id}/secret_hash = {blake3(secret)}  # Hashed secret for verification
 /tokens/{token_id}/name        = "Mobile Client"   # Optional description
 /tokens/{token_id}/created_at  = ...
 /tokens/{token_id}/expires_at  = ...               # Optional expiry (0 = no expiry)
@@ -300,10 +346,10 @@ Stores can be exposed over HTTP API using token-based authentication. Tokens are
 **Token Flow:**
 
 1. Admin generates secret locally: `secret = random_bytes(32)`
-2. Admin writes token to root store: `secret_hash = sha256(secret)`
+2. Admin writes token to root store: `secret_hash = blake3(secret)`
 3. Admin shares secret out-of-band (QR code, secure channel)
 4. Client calls HTTP API with `Authorization: Bearer {token_id}:{secret}`
-5. Server verifies `sha256(secret) == stored_hash`, checks permissions
+5. Server verifies `blake3(secret) == stored_hash`, checks permissions
 6. To revoke: delete `/tokens/{token_id}/*` or set `expires_at` in past
 
 **Security Notes:**
