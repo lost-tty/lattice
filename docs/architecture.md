@@ -131,12 +131,14 @@ Networking modes:
 
 ### Store/Network Boundary
 
-The store module exposes only `StoreHandle` to the network layer. Internal types (`Store`, `SigChain`, `StoreActor`, `Entry`) are hidden.
+The store module exposes `StoreHandle` to the network layer. Internal types (`KvStore`, `SigChain`, `StoreActor`, `Entry`) are hidden.
+
+`StoreHandle` provides a simple, non-generic API with direct methods for all operations:
 
 ```
 lattice-net                           lattice-core
 ┌─────────────────┐                  ┌───────────────────┐
-│  LatticeServer  │───────────────── │      Node         │
+│  MeshNetwork    │────────────────▶ │      Node         │
 │  (owns Endpoint)│                  │  (owns stores)    │
 └────────┬────────┘                  └─────────┬─────────┘
          │                                     │
@@ -144,13 +146,27 @@ lattice-net                           lattice-core
          ▼                                     ▼
   ┌───────────────────────────────────────────────────────────┐
   │                    StoreHandle                            │
-  │  • put(key, value), get(key), delete(key)                 │
+  │  Direct Methods:                                          │
+  │  • get(key), put(key, value), delete(key)                 │
+  │  • list(include_deleted), list_by_prefix(prefix, ...)     │
+  │  • get_heads(key)                                         │
+  │                                                           │
+  │  Sync/Gossip:                                             │
   │  • subscribe_entries() → for gossip broadcast             │
   │  • ingest_entry(SignedEntry) → for receiving gossip/sync  │
-  │  • stream_missing_entries(missing_ranges) → for sync send │
+  │  • stream_entries_in_range(...) → for sync send           │
   │  • sync_state() → for sync negotiation                    │
   └───────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────┐
+  │                  AuthorizedStore                          │
+  │  Network wrapper adding peer authorization checks:        │
+  │  • ingest_entry() verifies signature + peer status        │
+  │  • can_connect(), can_accept_entry() for access control   │
+  └───────────────────────────────────────────────────────────┘
 ```
+
+`AuthorizedStore` wraps `StoreHandle` for network operations, adding peer authorization checks before entry ingestion.
 
 ## Parts
 

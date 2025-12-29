@@ -8,62 +8,99 @@
 - **M2**: Two-node sync via Iroh (mDNS + DNS), peer management, bidirectional sync
 - **Stability**: Gossip join reliability, bidirectional sync fix, diagnostics, orphan timestamps
 - **Sync Reliability**: Common HLC in SyncState, auto-sync on discrepancy with deferred check
+- **Store Refactor**: Directory reorganization (`sigchain/`, `impls/kv/`), `Patch`/`ReadContext` traits, `KvPatch` with `TableOps`, encapsulated `StoreHandle::open()`
+- **Simplified StoreHandle**: Removed generic types and handler traits; KvStore is now the only implementation with direct methods (`get`, `put`, `delete`, `list`, `list_by_prefix`)
 
-## Milestone 3: Functional Core & Store Extraction
+---
 
-**Goal:** Clean crate boundaries and logic/storage separation for Multi-Store/CAS.
+## Milestone 3: Counter Datatype
 
-### 3A: Functional Core (Traits & Abstraction)
+**Goal:** Add PN-Counter (Positive-Negative Counter) as a second value type alongside bare values.
 
-Adopt "Functional Core, Imperative Shell" pattern. Separate logic (Planning) from storage (Commit).
+### 3A: Value Type Wrapper (Backward Compatible)
 
-**Files:** `store/interfaces/abstractions.rs`, `store/interfaces/ops.rs`, `store/impls/kv/patch.rs`
+Wrap values in protobuf `oneof` using **same field number** for zero-migration:
 
-**New Types:**
-```rust
-// The Plan (in store/impls/kv/patch.rs)
-pub struct KvPatch {
-    pub updates: HashMap<String, TableOps>,
-}
-
-pub trait ReadContext {
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError>;
-}
-
-// Pure Logic (in store/interfaces/ops.rs)
-pub trait Applyable<P: Patch> {
-    fn validate(&self, ctx: &dyn ReadContext) -> Result<(), OpError>;
-    fn plan(&self, ctx: &dyn ReadContext) -> Result<P, OpError>;
+```protobuf
+message HeadInfo {
+    uint64 hlc = 1;
+    bytes author = 2;
+    bytes hash = 3;
+    
+    oneof data {
+        bytes value = 5;          // Same field# as before!
+        CounterState counter = 6; // New type
+    }
 }
 ```
 
-**Steps:**
-- [x] Define `Patch`, `ReadContext`, `Applyable` traits (`store/interfaces/`)
-- [x] Implement `KvPatch` with `TableOps` (`store/impls/kv/patch.rs`)
-- [x] Implement `impl ReadContext for KvStore`
-- [x] Refactor directory structure: `sigchain/`, `state/`, `sync/` subdirectories per store
-- [x] Move store opening logic to `StoreHandle::open(store_dir)` (encapsulate KvStore+sigchain+replay)
-- [ ] Implement `impl Applyable<KvPatch> for KvPayload` (payload-level planning, replaces inline `apply_ops_to_patch`)
-- [ ] Refactor `KvStore::apply_entry()` to use `payload.plan(&ctx)` → `apply_patch()` flow
+Old data (field 5) deserializes into `data.value`. New counters use field 6.
 
-**Rationale:** Payload types may be flexible in future (CAS blobs, CRDTs). Trait abstraction enables swapping planning logic per payload type.
+**On read:**
+```rust
+match head_info.data {
+    Some(Data::Value(bytes)) => Value::Raw(bytes),
+    Some(Data::Counter(state)) => Value::Counter(state),
+    None => Value::Raw(vec![]),
+}
+```
 
-### 3B: Extract `lattice-store` Crate
+- [ ] Change `HeadInfo.value` to `oneof data { bytes value = 5; CounterState counter = 6; }`
+- [ ] Add `CounterState` message to proto
+- [ ] Update `KvStore` read/write to handle oneof
 
-Move decoupled store logic into separate crate.
+### 3B: Counter State
 
-**Files to extract** (~270KB):
-- `actor.rs`, `state.rs`, `handle.rs`, `mod.rs`
-- `sigchain/` submodule
-- `backend.rs`, `ops.rs`, `traits.rs`
+State-based PN-Counter stores each node's value separately:
 
-**Steps:**
-- [ ] Create `lattice-store` crate
-- [ ] Move files, update imports
-- [ ] Export public API (`StoreHandle`, traits)
-- [ ] Update `lattice-core` to depend on `lattice-store`
-- [ ] Verify `lattice-net` integration
-- [ ] Verify signatures of entries against peer public keys in root store
+```rust
+struct CounterState {
+    values: HashMap<PubKey, i64>,  // {node_a: 2, node_b: 5}
+}
+
+impl CounterState {
+    fn total(&self) -> i64 { self.values.values().sum() }
+    fn merge(&mut self, other: &Self) {
+        for (node, val) in &other.values {
+            let entry = self.values.entry(*node).or_insert(0);
+            *entry = (*entry).max(*val);  // Take max per node
+        }
+    }
+}
+```
+
+**Key insight:** Each node only updates its own slot. StoreActor already has `node: NodeIdentity`.
+
+### 3C: Operations
+
+- [ ] Add `Operation::CounterSet { key, value: i64 }` to proto (sets this node's value)
+- [ ] `KvStore` needs `NodeIdentity` to know which slot to update
+- [ ] Implement `KvStore::apply_counter_op()` - updates `values[self_node_id]`
+- [ ] Add `StoreHandle::increment(key, delta)` - reads current, sets current+delta
+- [ ] `get()` returns `CounterState::total()` as bytes for counter keys
+
+### 3D: Storage
+
+- [ ] New table or value type marker in `state.db`
+- [ ] Counter state serialized as protobuf map
+- [ ] Merge on read: combine all heads, next write may resolve (eventual consistency)
+
+### 3E: CLI
+
+- [ ] `incr <key> [delta]` - increment counter (default delta=1)
+- [ ] `decr <key> [delta]` - decrement counter (default delta=1)
+- [ ] `get <key>` shows total; `get -v <key>` shows per-node breakdown
+
+### 3F: Conflict Resolution & Client API
+
+**Counters:** Always auto-mergeable (CRDT). `get()` returns single merged value.
+
+**Raw values:** Expose all heads to client for explicit resolution:
+- `get(key)` → returns winner (deterministic LWW) + conflict flag
+- `get_heads(key)` → returns all heads for client-side merge
+- Client writes with `parent_hashes` pointing to heads it's resolving
+
+This keeps current DAG behavior for raw values while counters "just work".
 
 ---
 
@@ -146,56 +183,42 @@ All stores use root store peer list for authorization.
 
 ---
 
-## Milestone 7: Content-Addressable Store (CAS)
+## Milestone 7: Content-Addressable Store (CAS) via Garage
 
-**Goal:** Pressure-based blob storage with automatic caching and zombie redundancy.
+**Goal:** Blob storage using Garage as S3-compatible sidecar, orchestrated by root store.
 
-### 7A: Core (`lattice-cas` crate)
-- [ ] `BlobStore` struct with `put(data) -> hash`, `get(hash) -> data`
-- [ ] Content-addressed storage: `~/.local/share/lattice/cas/{hash[0:2]}/{hash}.blob`
-- [ ] Access time tracking: `get()` touches file for LRU
+**Architecture:**
+```
+Root Store (Lattice)              Garage Sidecar
+┌─────────────────────┐          ┌─────────────────────┐
+│ /cas/pins/{hash}    │ ───────▶ │ S3: lattice-blobs/  │
+│ /blobs/{hash}/meta  │          │ (actual bytes)      │
+│   orchestration     │          │ (replication, GC)   │
+└─────────────────────┘          └─────────────────────┘
+```
 
-### 7B: Pin Reconciler
-- [ ] Watch `/cas/pins/{my_id}/` prefix in KV
-- [ ] On `pending`: fetch blob from peers, write to disk, update to `stored`
-- [ ] On delete: demote to cache (don't delete file)
+### 7A: Garage Integration
 
-### 7C: Garbage Collector
-- [ ] Config: `storage_quota`, `min_free_space`
-- [ ] Trigger: periodic or after large writes
-- [ ] LRU eviction: filter pinned, sort by atime, delete oldest
-- [ ] Update `/blobs/{hash}/nodes/{me}` on eviction
+- [ ] Garage deployment config (Docker/systemd)
+- [ ] S3 client wrapper in `lattice-core` or separate `lattice-cas` crate
+- [ ] `put_blob(data) -> hash`, `get_blob(hash) -> data` using S3 API
+- [ ] Content-addressed keys: `s3://lattice-blobs/{hash}`
 
-### 7D: Global Discovery
-- [ ] `/blobs/{hash}/nodes/{node_id}` = presence marker
-- [ ] Fetch: query peers for `/blobs/{hash}/nodes/*`, request from first responder
+### 7B: Metadata & Pinning
 
-### 7E: Manifests (for scale)
-- [ ] Manifest format: content-addressed list of hashes (like Git Trees)
-- [ ] Recursive pinning: pin manifest → implicitly pin all referenced blobs
-- [ ] Graph-aware GC: walk pinned manifests to build reachability set before eviction
-- [ ] CLI: `cas manifest create <files...>`, `cas manifest list <hash>`
+Root store tracks blob metadata and pins:
 
-## Milestone 8: WebAssembly Consensus Bus
+- [ ] `/cas/pins/{node_id}/{hash}` = pin status (`pending`/`stored`)
+- [ ] `/blobs/{hash}/size` = blob size in bytes
+- [ ] `/blobs/{hash}/created_at` = upload timestamp
+- [ ] Pin reconciler: watch pins, trigger Garage fetch for `pending`
 
-**Goal:** Transform from passive KV store to replicated state machine.
+### 7C: CLI
 
-See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for detailed design.
-
-### Phase 1: Protocol
-- [ ] Add `Instruction` message alongside legacy `Operation` enum
-- [ ] Backward compatible: existing put/delete still works
-
-### Phase 2: Dispatcher
-- [ ] Refactor `StoreActor` to route by `program_id`
-- [ ] Native handler for `sys` (existing redb logic)
-
-### Phase 3: Runtime
-- [ ] Embed `wasmtime` runtime
-- [ ] Define host functions: `db_get`, `db_put`
-
-### Phase 4: Pilot
-- [ ] Deploy first WASM contract (Counter or Tagging bot)
+- [ ] `cas put <file>` - upload to Garage, record in root store
+- [ ] `cas get <hash>` - fetch from Garage
+- [ ] `cas pin <hash>` - mark as pinned
+- [ ] `cas ls` - list blobs with pin status
 
 ---
 
@@ -221,6 +244,7 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 - [x] **Zero-Knowledge of Peer Authorization (ACLs)**: `PeerProvider` trait with `can_join`, `can_connect`, `can_accept_entry`, `list_acceptable_authors`. Bootstrap authors from `JoinResponse` trusted during initial sync. Signature verification in `AuthorizedStore::ingest_entry`. Network layer checks peer status on gossip/RPC.
 - [x] **Mesh Bootstrapping**: `JoinResponse` includes `authorized_authors` (all acceptable authors from inviter) so new nodes can accept entries during initial sync. Bootstrap authors cleared after sync completes.
 - [x] Trait boundaries: `StoreHandle` (user ops) vs `AuthorizedStore` (network ops with peer authorization)
+- [x] **Simplified StoreHandle**: Removed generic types (`StoreHandle<S>`), handler traits, and `StoreOps` enum; KvStore is now the sole implementation with direct methods on handle
 - [ ] **Multi-platform traits**: Add `StateBackend` trait to abstract KV storage (redb/sqlite/wasm)
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] Refactor any `.unwrap` uses
