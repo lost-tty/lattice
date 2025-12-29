@@ -2,12 +2,15 @@
 
 use crate::{
     DataDir, MetaStore, NodeIdentity, PeerStatus, Uuid,
+    auth::PeerProvider,
     meta_store::MetaStoreError,
     node_identity::NodeError as IdentityError,
     store::{KvStore, StateError, StoreHandle, LogError, Log},
     types::PubKey,
 };
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::RwLock;
 use thiserror::Error;
 use tokio::sync::broadcast;
 
@@ -146,6 +149,7 @@ impl NodeBuilder {
             meta,
             root_store: tokio::sync::RwLock::new(None),
             event_tx,
+            peer_cache: std::sync::Arc::new(RwLock::new(HashMap::new())),
         })
     }
 }
@@ -161,6 +165,7 @@ pub struct Node {
     meta: MetaStore,
     root_store: tokio::sync::RwLock<Option<StoreHandle>>,
     event_tx: broadcast::Sender<NodeEvent>,
+    peer_cache: std::sync::Arc<RwLock<HashMap<PubKey, PeerStatus>>>,
 }
 
 impl Node {
@@ -237,6 +242,9 @@ impl Node {
             
             // Store original handle (owns actor thread)
             *self.root_store.write().await = Some(handle);
+            
+            // Start watching peer status changes to keep cache updated
+            self.start_peer_cache_watcher().await?;
         }
         Ok(())
     }
@@ -274,6 +282,9 @@ impl Node {
         // Store the handle - node owns it
         *self.root_store.write().await = Some(handle);
         
+        // Start watching peer status changes to keep cache updated
+        self.start_peer_cache_watcher().await?;
+        
         Ok(store_id)
     }
     
@@ -291,6 +302,9 @@ impl Node {
         
         // Emit event for listeners
         let _ = self.event_tx.send(NodeEvent::StoreReady(handle_clone.clone()));
+        
+        // Start watching peer status changes to keep cache updated
+        self.start_peer_cache_watcher().await?;
         
         // Publish our name to the store
         let _ = self.publish_name().await;
@@ -435,21 +449,11 @@ impl Node {
         Ok(())
     }
     
-    /// Verify a peer has one of the expected statuses
-    pub async fn verify_peer_status(&self, pubkey: PubKey, expected: &[PeerStatus]) -> Result<(), NodeError> {
-        match self.get_peer_status(pubkey).await? {
-            Some(status) if expected.contains(&status) => Ok(()),
-            Some(status) => Err(NodeError::Actor(format!(
-                "Peer status is '{:?}', expected one of {:?}", status, expected
-            ))),
-            None => Err(NodeError::Actor("Peer not found".to_string())),
-        }
-    }
-    
     /// Accept a peer's join request - verifies they're invited, sets active, returns join info
     pub async fn accept_join(&self, pubkey: PubKey) -> Result<JoinAcceptance, NodeError> {
-        // Verify peer is invited
-        self.verify_peer_status(pubkey, &[PeerStatus::Invited]).await?;
+        // Verify peer is invited (via PeerProvider trait)
+        PeerProvider::verify_peer_status(self, &pubkey, &[PeerStatus::Invited])
+            .map_err(|e| NodeError::Store(e))?;
         
         // Get root store ID
         let store_id = self.meta.root_store()?
@@ -519,11 +523,13 @@ impl Node {
         let info = StoreInfo { store_id, entries_replayed };
         
         // Spawn actor thread - actor owns store, sigchain manager, and node copy
+        // Note: peer_provider is None during open_store; peer cache is populated later
         let handle = StoreHandle::spawn(
             store_id,
             store,
             logs_dir,
             (*self.node).clone(),
+            None, // peer_provider populated after cache is ready
         );
         
         Ok((handle, info))
@@ -572,6 +578,82 @@ impl Node {
         });
         
         Ok((peers, rx))
+    }
+    
+    /// Start watching peer status changes and keep cache updated.
+    /// Called after root store opens.
+    async fn start_peer_cache_watcher(&self) -> Result<(), NodeError> {
+        let guard = self.root_store.read().await;
+        let store = guard.as_ref()
+            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        
+        // Watch for peer status changes
+        let pattern = r"^/nodes/([a-f0-9]+)/status$";
+        let (initial, mut rx) = store.watch(pattern).await?;
+        
+        // Populate initial cache
+        {
+            let mut cache = self.peer_cache.write().unwrap();
+            for (key, value) in initial {
+                if let Some(pubkey_hex) = parse_peer_status_key(&key) {
+                    if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
+                        if pubkey_bytes.len() == 32 {
+                            let pubkey: PubKey = pubkey_bytes.try_into().unwrap();
+                            let status_str = String::from_utf8_lossy(&value);
+                            if let Some(status) = PeerStatus::from_str(&status_str) {
+                                cache.insert(pubkey, status);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Clone what we need for the spawned task
+        let peer_cache = self.peer_cache.clone();
+        
+        // Spawn task to keep cache updated
+        tokio::spawn(async move {
+            use crate::WatchEventKind;
+            while let Ok(event) = rx.recv().await {
+                if let Some(pubkey_hex) = parse_peer_status_key(&event.key) {
+                    if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
+                        if pubkey_bytes.len() == 32 {
+                            let pubkey: PubKey = pubkey_bytes.try_into().unwrap();
+                            let mut cache = peer_cache.write().unwrap();
+                            match event.kind {
+                                WatchEventKind::Put { value } => {
+                                    let status_str = String::from_utf8_lossy(&value);
+                                    if let Some(status) = PeerStatus::from_str(&status_str) {
+                                        cache.insert(pubkey, status);
+                                    }
+                                }
+                                WatchEventKind::Delete => {
+                                    cache.remove(&pubkey);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
+        Ok(())
+    }
+}
+
+impl PeerProvider for Node {
+    fn verify_peer_status(&self, pubkey: &PubKey, expected: &[PeerStatus]) -> Result<(), StateError> {
+        let cache = self.peer_cache.read().unwrap();
+        match cache.get(pubkey) {
+            Some(status) if expected.contains(status) => Ok(()),
+            Some(status) => Err(StateError::Unauthorized(format!(
+                "Peer status is '{:?}', expected one of {:?}", status, expected
+            ))),
+            None => Err(StateError::Unauthorized(format!(
+                "Peer {} not found", hex::encode(pubkey)
+            ))),
+        }
     }
 }
 

@@ -18,8 +18,11 @@ use crate::store::{
 };
 use crate::proto::storage::PeerSyncInfo;
 use crate::types::Hash;
+use crate::auth::PeerProvider;
+use crate::node_identity::PeerStatus;
 use tokio::sync::{mpsc, oneshot, broadcast};
 use std::collections::HashMap;
+use std::sync::Arc;
 use regex::Regex;
 
 /// Event emitted when a watched key changes
@@ -179,6 +182,7 @@ pub struct StoreActor {
     chain_manager: SigChainManager,
     peer_store: PeerSyncStore,
     node: NodeIdentity,
+    peer_provider: Option<Arc<dyn PeerProvider>>,
     rx: mpsc::Receiver<StoreCmd>,
     /// Broadcast sender for emitting entries after they're committed locally
     entry_tx: broadcast::Sender<SignedEntry>,
@@ -197,6 +201,7 @@ impl StoreActor {
         state: KvStore,
         logs_dir: std::path::PathBuf,
         node: NodeIdentity,
+        peer_provider: Option<Arc<dyn PeerProvider>>,
         rx: mpsc::Receiver<StoreCmd>,
         entry_tx: broadcast::Sender<SignedEntry>,
         sync_needed_tx: broadcast::Sender<SyncNeeded>,
@@ -216,6 +221,7 @@ impl StoreActor {
             chain_manager,
             peer_store,
             node,
+            peer_provider,
             rx,
             entry_tx,
             sync_needed_tx,
@@ -487,7 +493,33 @@ impl StoreActor {
     /// 
     /// Note: This implements strict consistency where sigchain entries are blocked
     /// until their DAG dependencies are resolved (head-of-line blocking by design).
+    /// 
+    /// Note: Peer authorization is done at network layer (gossip/RPC) before entries
+    /// reach the store. Here we just verify the signature.
     fn apply_ingested_entry(&mut self, entry: &SignedEntry) -> Result<(), StoreActorError> {
+        // Step 1: Verify signature first - this proves author_id is authentic
+        entry.verify()
+            .map_err(|_| StoreActorError::State(StateError::Unauthorized(
+                "Invalid signature".to_string()
+            )))?;
+        
+        // Step 2: Peer Authorization - only accept entries from ourselves or authorized peers
+        if entry.author_id != self.node.public_key() {
+            if let Some(ref provider) = self.peer_provider {
+                provider.verify_peer_status(&entry.author_id, &[PeerStatus::Active, PeerStatus::Revoked])
+                    .map_err(StoreActorError::State)?;
+            }
+            // No peer_provider: trust entries during join (we trust the peer we're joining from)
+        }
+        
+        self.commit_entry(entry)
+    }
+
+    /// Process a verified entry.
+    /// - Adds to SigChain
+    /// - Applies to State
+    /// - Broadcasts to watchers
+    fn commit_entry(&mut self, signed_entry: &SignedEntry) -> Result<(), StoreActorError> {
         // Work queue contains:
         // - entry
         // - DAG orphan metadata (key, parent_hash, entry_hash) for deletion after processing
@@ -498,9 +530,9 @@ impl StoreActor {
             Option<(PubKey, Hash, Hash)>,  // Sigchain orphan: (author, prev_hash, entry_hash)
         );
         let mut work_queue: Vec<(SignedEntry, OrphanMeta)> = 
-            vec![(entry.clone(), (None, None))];
+            vec![(signed_entry.clone(), (None, None))];
         let mut is_primary_entry = true;
-        
+
         while let Some((current, (dag_orphan_meta, sigchain_orphan_meta))) = work_queue.pop() {
             // Step 1: Validate sigchain
             match self.chain_manager.validate_entry(&current) {
@@ -721,7 +753,7 @@ mod tests {
             TEST_STORE,
             state,
             logs_dir,
-            node.clone(),
+            node.clone(), None,
             cmd_rx,
             entry_tx,
             sync_needed_tx,
@@ -830,6 +862,7 @@ mod tests {
             state,
             logs_dir,
             node1.clone(),
+            None,
             cmd_rx,
             entry_tx,
             sync_needed_tx,
@@ -967,6 +1000,7 @@ mod tests {
             state,
             logs_dir,
             node1.clone(),
+            None,
             cmd_rx,
             entry_tx,
             sync_needed_tx,
@@ -1083,6 +1117,7 @@ mod tests {
             state,
             logs_dir.clone(),
             node1.clone(),
+            None,
             cmd_rx,
             entry_tx,
             sync_needed_tx,
@@ -1218,6 +1253,7 @@ mod tests {
             state,
             logs_dir.clone(),
             node.clone(),
+            None,
         );
         
         // Give actor time to initialize
@@ -1461,6 +1497,7 @@ mod tests {
             state,
             logs_dir,
             node.clone(),
+            None,
             cmd_rx, 
             entry_tx,
             sync_needed_tx,
@@ -1562,6 +1599,7 @@ mod tests {
             state,
             logs_dir.clone(),
             node.clone(),
+            None,
             cmd_rx, 
             entry_tx,
             sync_needed_tx,
@@ -1647,6 +1685,7 @@ mod tests {
             state,
             logs_dir,
             node.clone(),
+            None,
             cmd_rx,
             entry_tx,
             sync_needed_tx,
@@ -1749,6 +1788,7 @@ mod tests {
             state_a,
             logs_dir_a,
             node_a.clone(),
+            None,
             cmd_rx_a,
             entry_tx_a,
             sync_tx_a,
@@ -1759,6 +1799,7 @@ mod tests {
             state_b,
             logs_dir_b,
             node_b.clone(),
+            None,
             cmd_rx_b,
             entry_tx_b,
             sync_tx_b,
@@ -1865,6 +1906,7 @@ mod tests {
             state_a,
             logs_dir_a,
             node_a.clone(),
+            None,
             cmd_rx_a,
             entry_tx_a,
             sync_tx_a,
@@ -1875,6 +1917,7 @@ mod tests {
             state_b,
             logs_dir_b,
             node_b.clone(),
+            None,
             cmd_rx_b,
             entry_tx_b,
             sync_tx_b,
@@ -2017,9 +2060,9 @@ mod tests {
         let (sync_tx_c, _) = broadcast::channel(16);
         
         // Create and start actors
-        let actor_a = StoreActor::new(TEST_STORE, state_a, logs_dir_a.clone(), node_a.clone(), cmd_rx_a, entry_tx_a, sync_tx_a);
-        let actor_b = StoreActor::new(TEST_STORE, state_b, logs_dir_b, node_b.clone(), cmd_rx_b, entry_tx_b, sync_tx_b);
-        let actor_c = StoreActor::new(TEST_STORE, state_c, logs_dir_c, node_c.clone(), cmd_rx_c, entry_tx_c, sync_tx_c);
+        let actor_a = StoreActor::new(TEST_STORE, state_a, logs_dir_a.clone(), node_a.clone(), None, cmd_rx_a, entry_tx_a, sync_tx_a);
+        let actor_b = StoreActor::new(TEST_STORE, state_b, logs_dir_b, node_b.clone(), None, cmd_rx_b, entry_tx_b, sync_tx_b);
+        let actor_c = StoreActor::new(TEST_STORE, state_c, logs_dir_c, node_c.clone(), None, cmd_rx_c, entry_tx_c, sync_tx_c);
         
         let handle_a = std::thread::spawn(move || actor_a.run());
         let handle_b = std::thread::spawn(move || actor_b.run());
@@ -2166,8 +2209,8 @@ mod tests {
         let (sync_tx_d, _) = broadcast::channel(16);
         
         // Create actors
-        let actor_a = StoreActor::new(TEST_STORE, state_a, logs_dir_a, node_a.clone(), cmd_rx_a, entry_tx_a, sync_tx_a);
-        let actor_d = StoreActor::new(TEST_STORE, state_d, logs_dir_d, node_d.clone(), cmd_rx_d, entry_tx_d, sync_tx_d);
+        let actor_a = StoreActor::new(TEST_STORE, state_a, logs_dir_a, node_a.clone(), None, cmd_rx_a, entry_tx_a, sync_tx_a);
+        let actor_d = StoreActor::new(TEST_STORE, state_d, logs_dir_d, node_d.clone(), None, cmd_rx_d, entry_tx_d, sync_tx_d);
         
         let handle_a = std::thread::spawn(move || actor_a.run());
         let handle_d = std::thread::spawn(move || actor_d.run());

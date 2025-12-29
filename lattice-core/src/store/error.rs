@@ -41,6 +41,9 @@ pub enum StateError {
 
     #[error("Backend error: {0}")]
     Backend(String),
+    
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
 }
 
 /// Errors that occur when validating parent_hashes against current state

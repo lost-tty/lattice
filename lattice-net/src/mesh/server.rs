@@ -2,6 +2,7 @@
 
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
 use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle, PubKey};
+use lattice_core::auth::PeerProvider;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
@@ -606,7 +607,7 @@ async fn handle_status_request(
     tracing::debug!("[Status] Received status request for store {}", store_id);
     
     // Verify peer is active
-    node.verify_peer_status(*remote_pubkey, &[PeerStatus::Active]).await?;
+    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active])?;
     
     // Open the store
     let (store, _info) = node.open_store(store_id).await?;
@@ -634,7 +635,7 @@ async fn handle_fetch_request(
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
     // Verify peer is active
-    node.verify_peer_status(*remote_pubkey, &[PeerStatus::Active]).await?;
+    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active])?;
     
     // Open the store
     let (store, _info) = node.open_store(store_id).await?;

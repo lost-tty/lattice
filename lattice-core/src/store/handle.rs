@@ -4,6 +4,7 @@ use crate::{
     Uuid, PubKey,
     node::NodeError,
     node_identity::NodeIdentity,
+    auth::PeerProvider,
 };
 use crate::entry::SignedEntry;
 use super::actor::{StoreCmd, StoreActor};
@@ -11,6 +12,7 @@ use crate::store::impls::kv::KvStore;
 use super::SyncNeeded;
 use tokio::sync::{broadcast, mpsc};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 
 /// A handle to a specific store - wraps channel to actor thread
@@ -46,6 +48,7 @@ impl StoreHandle {
         state: KvStore,
         logs_dir: PathBuf,
         node: NodeIdentity,
+        peer_provider: Option<Arc<dyn PeerProvider>>,
     ) -> Self {
         // Crash recovery: replay all log files to recover entries
         // that were committed to sigchain but not applied to state
@@ -68,7 +71,7 @@ impl StoreHandle {
         let (tx, rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(64);
         let (sync_needed_tx, _sync_needed_rx) = broadcast::channel(64);
-        let actor = StoreActor::new(store_id, state, logs_dir, node, rx, entry_tx.clone(), sync_needed_tx.clone());
+        let actor = StoreActor::new(store_id, state, logs_dir, node, peer_provider, rx, entry_tx.clone(), sync_needed_tx.clone());
         let handle = thread::spawn(move || actor.run());
         Self { store_id, tx, actor_handle: Some(handle), entry_tx, sync_needed_tx }
     }

@@ -3,6 +3,7 @@
 use crate::{parse_node_id, LatticeEndpoint, ToLattice};
 use super::error::GossipError;
 use lattice_core::{Uuid, Node, StoreHandle, PeerStatus, PeerWatchEvent, PeerWatchEventKind, PubKey};
+use lattice_core::auth::PeerProvider;
 use lattice_core::proto::storage::PeerSyncInfo;
 use lattice_core::proto::network::GossipMessage;
 use iroh_gossip::Gossip;
@@ -125,7 +126,7 @@ impl GossipManager {
                     Ok(iroh_gossip::api::Event::Received(msg)) => {
                         // Check if sender is authorized before processing
                         let sender: PubKey = msg.delivered_from.to_lattice();
-                        if node.verify_peer_status(sender, &[PeerStatus::Active]).await.is_err() {
+                        if node.verify_peer_status(&sender, &[PeerStatus::Active]).is_err() {
                             tracing::warn!(
                                 store_id = %store_id,
                                 sender = %sender,

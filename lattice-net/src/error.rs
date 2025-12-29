@@ -17,6 +17,9 @@ pub enum LatticeNetError {
     #[error("Store error: {0}")]
     Store(#[from] lattice_core::node::NodeError),
     
+    #[error("State error: {0}")]
+    State(#[from] lattice_core::store::StateError),
+    
     #[error("Connection error: {0}")]
     Connection(String),
 
