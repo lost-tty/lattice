@@ -63,19 +63,27 @@ impl DataDir {
         self.stores_dir().join(store_id.to_string())
     }
 
-    /// Get the path to a store's logs directory.
-    pub fn store_logs_dir(&self, store_id: Uuid) -> PathBuf {
-        self.store_dir(store_id).join("logs")
+    /// Get the path to a store's sigchain directory.
+    /// SigChainManager owns this directory and manages log files within.
+    pub fn store_sigchain_dir(&self, store_id: Uuid) -> PathBuf {
+        self.store_dir(store_id).join("sigchain")
     }
 
-    /// Get the path to a specific author's log file within a store.
-    pub fn store_log_file(&self, store_id: Uuid, author_id_hex: &str) -> PathBuf {
-        self.store_logs_dir(store_id).join(format!("{}.log", author_id_hex))
+    /// Get the path to a specific author's log file within a store's sigchain.
+    pub fn store_sigchain_log(&self, store_id: Uuid, author_id_hex: &str) -> PathBuf {
+        self.store_sigchain_dir(store_id).join(format!("{}.log", author_id_hex))
     }
 
-    /// Get the path to a store's state database.
-    pub fn store_state_db(&self, store_id: Uuid) -> PathBuf {
-        self.store_dir(store_id).join("state.db")
+    /// Get the path to a store's state directory.
+    /// Backend implementations own this directory and manage their internal layout.
+    pub fn store_state_dir(&self, store_id: Uuid) -> PathBuf {
+        self.store_dir(store_id).join("state")
+    }
+
+    /// Get the path to a store's sync directory.
+    /// Contains peer sync state and other sync metadata.
+    pub fn store_sync_dir(&self, store_id: Uuid) -> PathBuf {
+        self.store_dir(store_id).join("sync")
     }
 
     /// Ensure base directory exists.
@@ -88,7 +96,9 @@ impl DataDir {
     /// Ensure directories for a specific store exist.
     pub fn ensure_store_dirs(&self, store_id: Uuid) -> std::io::Result<()> {
         self.ensure_dirs()?;
-        std::fs::create_dir_all(self.store_logs_dir(store_id))?;
+        std::fs::create_dir_all(self.store_sigchain_dir(store_id))?;
+        std::fs::create_dir_all(self.store_state_dir(store_id))?;
+        std::fs::create_dir_all(self.store_sync_dir(store_id))?;
         Ok(())
     }
 }
@@ -118,9 +128,10 @@ mod tests {
         let store_id = Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
         
         assert_eq!(dd.store_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
-        assert_eq!(dd.store_logs_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/logs"));
-        assert_eq!(dd.store_log_file(store_id, "abc123"), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/logs/abc123.log"));
-        assert_eq!(dd.store_state_db(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/state.db"));
+        assert_eq!(dd.store_sigchain_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/sigchain"));
+        assert_eq!(dd.store_sigchain_log(store_id, "abc123"), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/sigchain/abc123.log"));
+        assert_eq!(dd.store_state_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/state"));
+        assert_eq!(dd.store_sync_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/sync"));
     }
 
     #[test]

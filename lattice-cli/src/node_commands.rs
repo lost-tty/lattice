@@ -31,8 +31,8 @@ pub async fn cmd_init(node: &Node, _store: Option<&StoreHandle>, _server: Option
             let _ = writeln!(w, "Initialized with root store: {}", store_id);
             let _ = writeln!(w, "Node info stored in /nodes/{}/*", hex::encode(node.node_id()));
             drop(w);
-            match node.root_store().await.as_ref() {
-                Some(h) => CommandResult::SwitchTo(h.clone()),
+            match node.root_store().ok() {
+                Some(h) => CommandResult::SwitchTo(h),
                 None => CommandResult::Ok,
             }
         }
@@ -168,7 +168,7 @@ pub async fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _server: Opti
             let _ = writeln!(w, "Invited peer: {}", pubkey);
             let _ = writeln!(w, "  Status: {} (will become active after sync)", PeerStatus::Invited.as_str());
             let _ = writeln!(w, "\nFor the invited peer to join, run:");
-            let _ = writeln!(w, "  node join {}", hex::encode(node.info().node_id));
+            let _ = writeln!(w, "  node join {}", node.info().node_id);
         }
         Err(e) => {
             let mut w = writer.clone();
@@ -272,24 +272,16 @@ pub async fn cmd_revoke(node: &Node, _store: Option<&StoreHandle>, _server: Opti
 
 // --- Networking ---
 
-pub async fn cmd_join(_node: &Node, store: Option<&StoreHandle>, server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
-    let server = match server {
-        Some(s) => s,
-        None => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Iroh endpoint not started.");
-            return CommandResult::Ok;
-        }
-    };
-    
+pub async fn cmd_join(node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
     if store.is_some() {
         let mut w = writer.clone();
         let _ = writeln!(w, "Already initialized. Use 'sync' to sync with peers.");
         return CommandResult::Ok;
     }
     
-    let peer_id = match lattice_net::parse_node_id(&args[0]) {
-        Ok(id) => id,
+    // Parse peer ID (hex string to PubKey)
+    let peer_id = match lattice_core::PubKey::from_hex(&args[0]) {
+        Ok(pk) => pk,
         Err(e) => {
             let mut w = writer.clone();
             let _ = writeln!(w, "Invalid node ID: {}", e);
@@ -299,18 +291,45 @@ pub async fn cmd_join(_node: &Node, store: Option<&StoreHandle>, server: Option<
     
     {
         let mut w = writer.clone();
-        let _ = writeln!(w, "Joining mesh via {}...", peer_id.fmt_short());
+        let _ = writeln!(w, "Joining mesh via {}...", &args[0][..12]);
     }
     
-    match server.join_mesh(peer_id).await {
-        Ok(handle) => {
+    // Subscribe to events before requesting join
+    let mut events = node.subscribe_events();
+    
+    // Request join - this emits JoinRequested event
+    // Server event handler will do network protocol and call complete_join
+    if let Err(e) = node.join(peer_id) {
+        let mut w = writer.clone();
+        let _ = writeln!(w, "Join failed: {}", e);
+        return CommandResult::Ok;
+    }
+    
+    // Wait for StoreReady event (join complete)
+    let timeout = tokio::time::Duration::from_secs(30);
+    let result = tokio::time::timeout(timeout, async {
+        while let Ok(event) = events.recv().await {
+            if let lattice_core::NodeEvent::StoreReady(handle) = event {
+                return Some(handle);
+            }
+        }
+        None
+    }).await;
+    
+    match result {
+        Ok(Some(handle)) => {
             let mut w = writer.clone();
             let _ = writeln!(w, "Joined mesh!");
             CommandResult::SwitchTo(handle)
         }
-        Err(e) => {
+        Ok(None) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "Join failed: {}", e);
+            let _ = writeln!(w, "Join failed: event channel closed");
+            CommandResult::Ok
+        }
+        Err(_) => {
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Join failed: timeout waiting for response");
             CommandResult::Ok
         }
     }

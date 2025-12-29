@@ -1,9 +1,10 @@
 //! Integration tests for gossip connectivity after join
 //!
 //! These tests replicate PRODUCTION usage exactly - no manual gossip setup.
-//! They rely purely on the StoreReady event flow that happens in the CLI.
+//! They rely purely on the event-driven flow that happens in the CLI.
 
-use lattice_core::NodeBuilder;
+use lattice_core::{NodeBuilder, NodeEvent, PubKey};
+use lattice_core::Node;
 use lattice_net::LatticeServer;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +15,31 @@ fn temp_data_dir(name: &str) -> lattice_core::DataDir {
     let path = std::env::temp_dir().join(format!("lattice_gossip_test_{}", name));
     let _ = std::fs::remove_dir_all(&path);
     lattice_core::DataDir::new(path)
+}
+
+/// Helper: Join mesh via node.join() and wait for StoreReady event
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey) -> Option<lattice_core::StoreHandle> {
+    // Subscribe before requesting join
+    let mut events = node.subscribe_events();
+    
+    // Request join
+    if node.join(peer_pubkey).is_err() {
+        return None;
+    }
+    
+    // Wait for StoreReady event (join complete)
+    let timeout = tokio::time::Duration::from_secs(10);
+    match tokio::time::timeout(timeout, async {
+        while let Ok(event) = events.recv().await {
+            if let NodeEvent::StoreReady(handle) = event {
+                return Some(handle);
+            }
+        }
+        None
+    }).await {
+        Ok(Some(h)) => Some(h),
+        _ => None,
+    }
 }
 
 /// Replicate production flow - simulating two CLI sessions:
@@ -39,32 +65,28 @@ async fn test_production_flow_gossip() {
     let node_a = Arc::new(NodeBuilder { data_dir: data_a.clone() }.build().expect("node a session 2"));
     
     let server_a = LatticeServer::new_from_node(node_a.clone()).await.expect("server a");
-    node_a.start().await.expect("start a");  // Emits StoreReady → gossip setup
+    node_a.start().await.expect("start a");  // Emits NetworkStore → gossip setup
     
     sleep(Duration::from_millis(1000)).await;
     
     // Verify A's root store is accessible
-    let store_a = {
-        let guard = node_a.root_store().await;
-        guard.as_ref().expect("A should have root store after start").clone()
-    };
+    let store_a = node_a.root_store().expect("A should have root store after start");
     
     // Node B: not yet initialized
     let node_b = Arc::new(NodeBuilder { data_dir: data_b.clone() }.build().expect("node b"));
-    let server_b = LatticeServer::new_from_node(node_b.clone()).await.expect("server b");
+    let _server_b = LatticeServer::new_from_node(node_b.clone()).await.expect("server b");
     
     // === Node A: Invites B ===
     node_a.invite_peer(node_b.node_id()).await.expect("invite");
     
-    let a_pubkey = server_a.endpoint().public_key();
+    let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     sleep(Duration::from_millis(300)).await;
     
-    // === Node B: Joins mesh ===
-    // This triggers complete_join() → StoreReady → gossip setup for B
-    let store_b = match server_b.join_mesh(a_pubkey).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Skipping test - no network: {}", e);
+    // === Node B: Joins mesh via event-driven flow ===
+    let store_b = match join_mesh_via_event(&node_b, a_pubkey).await {
+        Some(s) => s,
+        None => {
+            eprintln!("Skipping test - no network");
             let _ = std::fs::remove_dir_all(data_a.base());
             let _ = std::fs::remove_dir_all(data_b.base());
             return;
@@ -76,7 +98,6 @@ async fn test_production_flow_gossip() {
     
     // Verify gossip is connected
     let _a_gossip_peers = server_a.connected_peers().await;
-    let _b_gossip_peers = server_b.connected_peers().await;
     
     // === Test A → B direction ===
     store_a.put(b"/from_a", b"hello from A").await.expect("put from A");

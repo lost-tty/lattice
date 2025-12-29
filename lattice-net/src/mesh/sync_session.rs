@@ -5,7 +5,8 @@
 //! After initial handshake, both run identical exchange logic.
 
 use crate::{MessageSink, MessageStream};
-use lattice_core::{StoreHandle, NodeError, SyncState, PubKey};
+use lattice_core::{NodeError, SyncState, PubKey};
+use lattice_core::store::AuthorizedStore;
 use lattice_core::proto::storage::SignedEntry;
 use lattice_core::proto::network::{PeerMessage, peer_message, AuthorRange, FetchRequest, FetchResponse, StatusRequest, StatusResponse};
 
@@ -18,7 +19,7 @@ pub struct SyncResult {
 
 /// Symmetric sync session - same core logic runs on both sides
 pub struct SyncSession<'a> {
-    store: &'a StoreHandle,
+    store: &'a AuthorizedStore,
     sink: &'a mut MessageSink,
     stream: &'a mut MessageStream,
     peer_id: PubKey,
@@ -26,7 +27,7 @@ pub struct SyncSession<'a> {
 
 impl<'a> SyncSession<'a> {
     pub fn new(
-        store: &'a StoreHandle,
+        store: &'a AuthorizedStore,
         sink: &'a mut MessageSink,
         stream: &'a mut MessageStream,
         peer_id: PubKey,

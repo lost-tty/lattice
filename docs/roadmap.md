@@ -17,37 +17,36 @@
 
 Adopt "Functional Core, Imperative Shell" pattern. Separate logic (Planning) from storage (Commit).
 
-**Files:** `store/ops.rs`, `store/backend.rs`, `store/traits.rs`
+**Files:** `store/interfaces/abstractions.rs`, `store/interfaces/ops.rs`, `store/impls/kv/patch.rs`
 
 **New Types:**
 ```rust
-// The Plan
-pub struct WriteBatch {
-    pub puts: Vec<(Vec<u8>, Vec<u8>)>,
-    pub deletes: Vec<Vec<u8>>,
+// The Plan (in store/impls/kv/patch.rs)
+pub struct KvPatch {
+    pub updates: HashMap<String, TableOps>,
 }
 
 pub trait ReadContext {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError>;
 }
 
-// Low-level atomic storage abstraction
-pub trait StateBackend: Send + Sync {
-    fn write_batch(&self, batch: WriteBatch) -> Result<(), StateError>;
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError>;
-}
-
-// Pure Logic
-pub trait Applyable {
-    fn plan(&self, ctx: &dyn ReadContext) -> Result<WriteBatch, OpError>;
+// Pure Logic (in store/interfaces/ops.rs)
+pub trait Applyable<P: Patch> {
+    fn validate(&self, ctx: &dyn ReadContext) -> Result<(), OpError>;
+    fn plan(&self, ctx: &dyn ReadContext) -> Result<P, OpError>;
 }
 ```
 
 **Steps:**
-- [ ] Define `WriteBatch`, `ReadContext`, `Applyable` traits
-- [ ] Implement `StateBackend` trait (Redb wrapper)
-- [ ] Refactor `State` to use `StateBackend` + `WriteBatch`
-- [ ] Refactor `StoreActor` to use `plan()` -> `write_batch()` flow
+- [x] Define `Patch`, `ReadContext`, `Applyable` traits (`store/interfaces/`)
+- [x] Implement `KvPatch` with `TableOps` (`store/impls/kv/patch.rs`)
+- [x] Implement `impl ReadContext for KvStore`
+- [x] Refactor directory structure: `sigchain/`, `state/`, `sync/` subdirectories per store
+- [x] Move store opening logic to `StoreHandle::open(store_dir)` (encapsulate KvStore+sigchain+replay)
+- [ ] Implement `impl Applyable<KvPatch> for KvPayload` (payload-level planning, replaces inline `apply_ops_to_patch`)
+- [ ] Refactor `KvStore::apply_entry()` to use `payload.plan(&ctx)` → `apply_patch()` flow
+
+**Rationale:** Payload types may be flexible in future (CAS blobs, CRDTs). Trait abstraction enables swapping planning logic per payload type.
 
 ### 3B: Extract `lattice-store` Crate
 
@@ -68,15 +67,39 @@ Move decoupled store logic into separate crate.
 
 ---
 
-## Milestone 4: Multi-Store
+## Milestone 4: Mesh API & Registry Refactor
+
+**Goal:** Type-safe API for mesh management with clear separation of controller (Mesh) vs data channel (StoreHandle).
+
+See [architecture.md - Mesh API Facade Pattern](architecture.md#mesh-api-facade-pattern-future) for design.
+
+### 4A: Mesh Wrapper Type
+- [ ] Create `Mesh` struct wrapping root `StoreHandle` + `PeerProvider`
+- [ ] Move `invite_peer`, `revoke_peer`, `list_peers` from `Node` to `Mesh`
+- [ ] Add `Mesh::open_channel(uuid)` factory for subordinate stores
+
+### 4B: Node Registry Refactor
+- [ ] Change `Node::root_store` → `stores: HashMap<Uuid, StoreHandle>`
+- [ ] Add `Node::get_mesh(id)` → returns `Mesh` wrapper
+- [ ] Add `Node::get_store(id)` → raw `StoreHandle` access
+- [ ] Update `meta_store` to track multiple managed stores
+
+### 4C: CLI Context Switching
+- [ ] Add `active_mesh` state to CLI session
+- [ ] Implement `mesh init`, `mesh list`, `mesh switch` commands
+- [ ] Data commands (`put`, `get`, `peer`) operate on active mesh
+
+---
+
+## Milestone 5: Multi-Store
 
 **Goal:** Root store as control plane for declaring/managing additional stores.
 
-### 4A: Store Declarations in Root Store
+### 5A: Store Declarations in Root Store
 - [ ] Root store keys: `/stores/{uuid}/name`, `/stores/{uuid}/created_at`
 - [ ] CLI: `create-store [name]`, `delete-store <uuid>`, `list-stores`
 
-### 4B: Store Watcher ("Cluster Manager")
+### 5B: Store Watcher ("Cluster Manager")
 
 Two-phase reconciliation:
 
@@ -93,11 +116,11 @@ app_stores: tokio::sync::RwLock<HashMap<Uuid, StoreHandle>>
 
 **Edge Case**: Make watcher async/non-blocking. `Node::start` returns after Root Store opens locally - don't block on network sync. App Stores materialize as watcher processes local DB state.
 
-### 4C: Multi-Store Gossip
+### 5C: Multi-Store Gossip
 - [ ] `setup_for_store` called for each active store
 - [ ] Per-store gossip topics, verify store-id before applying
 
-### 4D: Shared Peer List (Ingest Guard)
+### 5D: Shared Peer List (Ingest Guard)
 
 All stores use root store peer list for authorization.
 
@@ -109,51 +132,51 @@ All stores use root store peer list for authorization.
 
 ---
 
-## Milestone 5: HTTP API
+## Milestone 6: HTTP API
 
 **Goal:** External access to stores via REST.
 
-### 5A: Access Tokens
+### 6A: Access Tokens
 - [ ] Token storage: `/tokens/{id}/store_id`, `/tokens/{id}/secret_hash`, `/tokens/{id}/permissions`
 - [ ] CLI: `create-token`, `list-tokens`, `revoke-token`
 
-### 5B: HTTP Server (lattice-http crate)
+### 6B: HTTP Server (lattice-http crate)
 - [ ] REST endpoints: `GET/PUT/DELETE /stores/{uuid}/keys/{key}`
 - [ ] Auth via `Authorization: Bearer {token_id}:{secret}`
 
 ---
 
-## Milestone 6: Content-Addressable Store (CAS)
+## Milestone 7: Content-Addressable Store (CAS)
 
 **Goal:** Pressure-based blob storage with automatic caching and zombie redundancy.
 
-### 6A: Core (`lattice-cas` crate)
+### 7A: Core (`lattice-cas` crate)
 - [ ] `BlobStore` struct with `put(data) -> hash`, `get(hash) -> data`
 - [ ] Content-addressed storage: `~/.local/share/lattice/cas/{hash[0:2]}/{hash}.blob`
 - [ ] Access time tracking: `get()` touches file for LRU
 
-### 6B: Pin Reconciler
+### 7B: Pin Reconciler
 - [ ] Watch `/cas/pins/{my_id}/` prefix in KV
 - [ ] On `pending`: fetch blob from peers, write to disk, update to `stored`
 - [ ] On delete: demote to cache (don't delete file)
 
-### 6C: Garbage Collector
+### 7C: Garbage Collector
 - [ ] Config: `storage_quota`, `min_free_space`
 - [ ] Trigger: periodic or after large writes
 - [ ] LRU eviction: filter pinned, sort by atime, delete oldest
 - [ ] Update `/blobs/{hash}/nodes/{me}` on eviction
 
-### 6D: Global Discovery
+### 7D: Global Discovery
 - [ ] `/blobs/{hash}/nodes/{node_id}` = presence marker
 - [ ] Fetch: query peers for `/blobs/{hash}/nodes/*`, request from first responder
 
-### 6E: Manifests (for scale)
+### 7E: Manifests (for scale)
 - [ ] Manifest format: content-addressed list of hashes (like Git Trees)
 - [ ] Recursive pinning: pin manifest → implicitly pin all referenced blobs
 - [ ] Graph-aware GC: walk pinned manifests to build reachability set before eviction
 - [ ] CLI: `cas manifest create <files...>`, `cas manifest list <hash>`
 
-## Milestone 7: WebAssembly Consensus Bus
+## Milestone 8: WebAssembly Consensus Bus
 
 **Goal:** Transform from passive KV store to replicated state machine.
 
@@ -195,14 +218,19 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 - [x] **HeadInfo.hlc Option cleanup**: Proto `HeadInfo.hlc` is `Option<Hlc>` but always set in practice - make non-optional or add `HLC::default()` fallback
 - [x] Extract `PEER_SYNC_TABLE` from `state.db` for better separation
 - [x] **Module reorganization**: Move sigchain-related files into `store/sigchain/` submodule (sigchain.rs, log.rs, orphan_store.rs, sync_state.rs)
+- [x] **Zero-Knowledge of Peer Authorization (ACLs)**: `PeerProvider` trait with `can_join`, `can_connect`, `can_accept_entry`, `list_acceptable_authors`. Bootstrap authors from `JoinResponse` trusted during initial sync. Signature verification in `AuthorizedStore::ingest_entry`. Network layer checks peer status on gossip/RPC.
+- [x] **Mesh Bootstrapping**: `JoinResponse` includes `authorized_authors` (all acceptable authors from inviter) so new nodes can accept entries during initial sync. Bootstrap authors cleared after sync completes.
+- [x] Trait boundaries: `StoreHandle` (user ops) vs `AuthorizedStore` (network ops with peer authorization)
 - [ ] **Multi-platform traits**: Add `StateBackend` trait to abstract KV storage (redb/sqlite/wasm)
-- [ ] Trait boundaries: `KvStore` (user ops) vs `SyncStore` (network ops)
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] Refactor any `.unwrap` uses
 - [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip )
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
-- [ ] **Zero-Knowledge of Peer Authorization (ACLs)**: Implement ACL layer in `SigChainManager`/`StoreActor` to reject entries from unknown authors (fixes store UUID attack vector).
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
+- [ ] **Checkpointing / Finality**
+  - **Objective**: Protect against "Deep History Attacks" (leaked keys rewriting past) by periodically finalizing the state hash.
+  - **Status**: **SECURITY NECESSITY** (Required for robust historical protection).
+  - **Dependencies**: SigChain.
 
 ---
 

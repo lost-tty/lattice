@@ -42,6 +42,8 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&StoreHandle>, server: O
         }
     };
     
+    let store_id = store.id();
+    
     {
         let mut w = writer.clone();
         let _ = writeln!(w, "[Sync] Starting background sync...");
@@ -49,7 +51,7 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&StoreHandle>, server: O
     
     // Spawn the entire sync operation as a background task
     tokio::spawn(async move {
-        match server.sync_all(&store).await {
+        match server.sync_all_by_id(store_id).await {
             Ok(results) => {
                 let mut w = writer.clone();
                 if results.is_empty() {

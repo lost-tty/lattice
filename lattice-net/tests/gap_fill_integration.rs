@@ -1,6 +1,7 @@
 //! Integration tests for gap filling between networked peers
 
-use lattice_core::NodeBuilder;
+use lattice_core::{NodeBuilder, NodeEvent, PubKey};
+use lattice_core::Node;
 use lattice_net::LatticeServer;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +12,31 @@ fn temp_data_dir(name: &str) -> lattice_core::DataDir {
     let path = std::env::temp_dir().join(format!("lattice_integ_test_{}", name));
     let _ = std::fs::remove_dir_all(&path);
     lattice_core::DataDir::new(path)
+}
+
+/// Helper: Join mesh via node.join() and wait for StoreReady event
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey) -> Option<lattice_core::StoreHandle> {
+    // Subscribe before requesting join
+    let mut events = node.subscribe_events();
+    
+    // Request join
+    if node.join(peer_pubkey).is_err() {
+        return None;
+    }
+    
+    // Wait for StoreReady event (join complete)
+    let timeout = tokio::time::Duration::from_secs(10);
+    match tokio::time::timeout(timeout, async {
+        while let Ok(event) = events.recv().await {
+            if let NodeEvent::StoreReady(handle) = event {
+                return Some(handle);
+            }
+        }
+        None
+    }).await {
+        Ok(Some(h)) => Some(h),
+        _ => None,
+    }
 }
 
 /// Integration test: Targeted author sync during gap filling.
@@ -30,19 +56,22 @@ async fn test_targeted_author_sync() {
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
     
+    // Explicitly register store for network access
+    server_a.register_store(store_a.clone()).await;
+    
     node_a.invite_peer(node_b.node_id()).await.expect("invite");
     
-    // B joins via A's endpoint (relies on mDNS for local discovery)
-    let a_pubkey = server_a.endpoint().public_key();
+    // B joins via event-driven flow
+    let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     
     // Allow some time for mDNS discovery
     sleep(Duration::from_millis(200)).await;
     
-    let store_b = match server_b.join_mesh(a_pubkey).await {
-        Ok(s) => s,
-        Err(e) => {
+    let store_b = match join_mesh_via_event(&node_b, a_pubkey).await {
+        Some(s) => s,
+        None => {
             // Skip test if no network connectivity (CI/isolated environment)
-            eprintln!("Skipping test - no network connectivity: {}", e);
+            eprintln!("Skipping test - no network connectivity or join failed");
             let _ = std::fs::remove_dir_all(data_a.base());
             let _ = std::fs::remove_dir_all(data_b.base());
             return;
@@ -51,14 +80,14 @@ async fn test_targeted_author_sync() {
     
     sleep(Duration::from_millis(300)).await;
     
-    // A writes entries
+    // A writes entries AFTER B joined
     store_a.put(b"/data", b"test").await.expect("put");
     
     // B syncs specifically for A's author
-    let author = *node_a.node_id();
-    let _applied = server_b.sync_author_all(&store_b, lattice_core::PubKey::from(author)).await.expect("sync author");
+    let author = PubKey::from(*node_a.node_id());
+    let _applied = server_b.sync_author_all_by_id(store_b.id(), author).await.expect("sync author");
     
-    // Verify entry arrived
+    // Verify entry arrived after sync
     let val = store_b.get(b"/data").await.expect("get");
     assert_eq!(val, Some(b"test".to_vec()));
     
@@ -81,15 +110,18 @@ async fn test_sync_multiple_entries() {
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
     
+    // Explicitly register store for network access
+    server_a.register_store(store_a.clone()).await;
+    
     node_a.invite_peer(node_b.node_id()).await.expect("invite");
     
-    let a_pubkey = server_a.endpoint().public_key();
+    let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     sleep(Duration::from_millis(200)).await;
     
-    let store_b = match server_b.join_mesh(a_pubkey).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Skipping test - no network: {}", e);
+    let store_b = match join_mesh_via_event(&node_b, a_pubkey).await {
+        Some(s) => s,
+        None => {
+            eprintln!("Skipping test - no network");
             let _ = std::fs::remove_dir_all(data_a.base());
             let _ = std::fs::remove_dir_all(data_b.base());
             return;
@@ -98,13 +130,13 @@ async fn test_sync_multiple_entries() {
     
     sleep(Duration::from_millis(300)).await;
     
-    // A writes multiple entries
+    // A writes multiple entries AFTER B joined
     for i in 1..=5 {
         store_a.put(format!("/key{}", i).as_bytes(), format!("value{}", i).as_bytes()).await.expect("put");
     }
     
-    // B syncs
-    let _results = server_b.sync_all(&store_b).await.expect("sync");
+    // B syncs to get the new entries
+    let _results = server_b.sync_all_by_id(store_b.id()).await.expect("sync");
     
     // Verify all entries synced
     for i in 1..=5 {

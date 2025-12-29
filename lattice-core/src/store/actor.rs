@@ -18,11 +18,9 @@ use crate::store::{
 };
 use crate::proto::storage::PeerSyncInfo;
 use crate::types::Hash;
-use crate::auth::PeerProvider;
-use crate::node_identity::PeerStatus;
+
 use tokio::sync::{mpsc, oneshot, broadcast};
 use std::collections::HashMap;
-use std::sync::Arc;
 use regex::Regex;
 
 /// Event emitted when a watched key changes
@@ -182,7 +180,7 @@ pub struct StoreActor {
     chain_manager: SigChainManager,
     peer_store: PeerSyncStore,
     node: NodeIdentity,
-    peer_provider: Option<Arc<dyn PeerProvider>>,
+
     rx: mpsc::Receiver<StoreCmd>,
     /// Broadcast sender for emitting entries after they're committed locally
     entry_tx: broadcast::Sender<SignedEntry>,
@@ -201,7 +199,7 @@ impl StoreActor {
         state: KvStore,
         logs_dir: std::path::PathBuf,
         node: NodeIdentity,
-        peer_provider: Option<Arc<dyn PeerProvider>>,
+
         rx: mpsc::Receiver<StoreCmd>,
         entry_tx: broadcast::Sender<SignedEntry>,
         sync_needed_tx: broadcast::Sender<SyncNeeded>,
@@ -221,7 +219,6 @@ impl StoreActor {
             chain_manager,
             peer_store,
             node,
-            peer_provider,
             rx,
             entry_tx,
             sync_needed_tx,
@@ -494,23 +491,14 @@ impl StoreActor {
     /// Note: This implements strict consistency where sigchain entries are blocked
     /// until their DAG dependencies are resolved (head-of-line blocking by design).
     /// 
-    /// Note: Peer authorization is done at network layer (gossip/RPC) before entries
-    /// reach the store. Here we just verify the signature.
+    /// Note: Signature is verified here as defense in depth, even though
+    /// AuthorizedStore also verifies at the network layer.
     fn apply_ingested_entry(&mut self, entry: &SignedEntry) -> Result<(), StoreActorError> {
-        // Step 1: Verify signature first - this proves author_id is authentic
+        // Verify signature - defense in depth
         entry.verify()
             .map_err(|_| StoreActorError::State(StateError::Unauthorized(
                 "Invalid signature".to_string()
             )))?;
-        
-        // Step 2: Peer Authorization - only accept entries from ourselves or authorized peers
-        if entry.author_id != self.node.public_key() {
-            if let Some(ref provider) = self.peer_provider {
-                provider.verify_peer_status(&entry.author_id, &[PeerStatus::Active, PeerStatus::Revoked])
-                    .map_err(StoreActorError::State)?;
-            }
-            // No peer_provider: trust entries during join (we trust the peer we're joining from)
-        }
         
         self.commit_entry(entry)
     }
@@ -736,31 +724,18 @@ mod tests {
     /// and applied when the parent entry arrives.
     #[test]
     fn test_dag_orphan_buffering_and_retry() {
+        // Use standard store directory layout
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().to_path_buf();
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_path = dir.join("state.db");
-        let logs_dir = dir.join("logs");
-        std::fs::create_dir_all(&logs_dir).unwrap();
+        let store_dir = tmp.path().to_path_buf();
         
-        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        let (entry_tx, _entry_rx) = broadcast::channel(32);
-        let (sync_needed_tx, _) = broadcast::channel(16);
-        
-        let actor = StoreActor::new(
+        let (handle, _info) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state,
-            logs_dir,
-            node.clone(), None,
-            cmd_rx,
-            entry_tx,
-            sync_needed_tx,
-        );
+            store_dir,
+            node.clone(),
+        ).unwrap();
         
-        // Run actor in background thread
-        let actor_handle = std::thread::spawn(move || actor.run());
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
         // Create entry1: first write to /key with no parent_hashes
         let clock1 = MockClock::new(1000);
@@ -784,55 +759,29 @@ mod tests {
         let hash2 = entry2.hash();
         
         // Step 1: Ingest entry2 FIRST - should fail parent validation and be buffered
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
-            entry: entry2.clone(), 
-            resp: resp_tx 
-        }).unwrap();
-        let result = resp_rx.blocking_recv().unwrap();
+        let result = rt.block_on(handle.ingest_entry(entry2.clone()));
         // Entry2 should be accepted (buffered as DAG orphan, not rejected)
         assert!(result.is_ok(), "entry2 should be accepted (buffered)");
         
         // Verify /key has no heads yet (entry2 is buffered, not applied)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::GetHeads { 
-            key: b"/key".to_vec(), 
-            resp: resp_tx 
-        }).unwrap();
-        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads = rt.block_on(handle.get_heads(b"/key")).unwrap();
         assert_eq!(heads.len(), 0, "/key should have no heads while entry2 is buffered");
         
         // Step 2: Ingest entry1 - should apply AND trigger entry2 to apply
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
-            entry: entry1.clone(), 
-            resp: resp_tx 
-        }).unwrap();
-        let result = resp_rx.blocking_recv().unwrap();
+        let result = rt.block_on(handle.ingest_entry(entry1.clone()));
         assert!(result.is_ok(), "entry1 should apply successfully");
         
         // Step 3: Verify /key now has a single head with hash2 (entry2 was applied)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::GetHeads { 
-            key: b"/key".to_vec(), 
-            resp: resp_tx 
-        }).unwrap();
-        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads = rt.block_on(handle.get_heads(b"/key")).unwrap();
         assert_eq!(heads.len(), 1, "/key should have exactly 1 head");
         assert_eq!(heads[0].hash, hash2, "head should be entry2's hash");
         
         // Verify the value is from entry2
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::Get { 
-            key: b"/key".to_vec(), 
-            resp: resp_tx 
-        }).unwrap();
-        let value = resp_rx.blocking_recv().unwrap().unwrap();
+        let value = rt.block_on(handle.get(b"/key")).unwrap();
         assert_eq!(value, Some(b"value2".to_vec()), "value should be from entry2");
         
-        // Shutdown
-        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
-        actor_handle.join().unwrap();
+        // Shutdown via drop
+        drop(handle);
     }
     
     /// Test merge conflict resolution: entry with two parent hashes (DAG merge).
@@ -843,32 +792,21 @@ mod tests {
     /// B arrives -> C becomes ready and is applied.
     #[test]
     fn test_merge_conflict_partial_parent_satisfaction() {
-        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_path = dir.join("state.db");
-        let logs_dir = dir.join("logs");
-        std::fs::create_dir_all(&logs_dir).unwrap();
+        // Use standard store directory layout
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().to_path_buf();
         
-        let state = KvStore::open(&state_path).unwrap();
         let node1 = NodeIdentity::generate(); // Author 1: creates A
         let node2 = NodeIdentity::generate(); // Author 2: creates B
         let node3 = NodeIdentity::generate(); // Author 3: creates C (merge)
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        let (entry_tx, _entry_rx) = broadcast::channel(32);
-        let (sync_needed_tx, _) = broadcast::channel(16);
         
-        let actor = StoreActor::new(
+        let (handle, _info) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state,
-            logs_dir,
+            store_dir,
             node1.clone(),
-            None,
-            cmd_rx,
-            entry_tx,
-            sync_needed_tx,
-        );
+        ).unwrap();
         
-        let actor_handle = std::thread::spawn(move || actor.run());
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
         // Author1: Create entry_a - writes to /merged (genesis for this key from author1)
         let clock_a = MockClock::new(1000);
@@ -902,77 +840,36 @@ mod tests {
         
         // Step 1: Ingest entry_c FIRST
         // Sigchain valid (seq 1 for author3), but DAG parents [A,B] missing -> buffered
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
-            entry: entry_c.clone(), 
-            resp: resp_tx 
-        }).unwrap();
-        let result = resp_rx.blocking_recv().unwrap();
+        let result = rt.block_on(handle.ingest_entry(entry_c.clone()));
         assert!(result.is_ok(), "entry_c should be accepted (buffered as DAG orphan)");
         
         // Verify /merged has no heads yet
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::GetHeads { 
-            key: b"/merged".to_vec(), 
-            resp: resp_tx 
-        }).unwrap();
-        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
         assert_eq!(heads.len(), 0, "/merged should have no heads");
         
         // Step 2: Ingest entry_b SECOND (harder case: B arrives before A)
-        // B applies, creating a head. But C is buffered waiting for A (first in parent list).
-        // C does NOT wake up because it's keyed by hash_a, not hash_b.
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
-            entry: entry_b.clone(), 
-            resp: resp_tx 
-        }).unwrap();
-        let result = resp_rx.blocking_recv().unwrap();
+        let result = rt.block_on(handle.ingest_entry(entry_b.clone()));
         assert!(result.is_ok(), "entry_b should apply successfully");
         
         // Verify /merged has 1 head (from B) - C is still buffered waiting for A
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::GetHeads { 
-            key: b"/merged".to_vec(), 
-            resp: resp_tx 
-        }).unwrap();
-        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head from B (C still waiting for A)");
         assert_eq!(heads[0].hash.as_slice(), hash_b.as_ref());
         
         // Step 3: Ingest entry_a LAST
-        // A applies, creating second head. C wakes up (was waiting for A).
-        // Now both parents present -> C applies and merges heads.
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
-            entry: entry_a.clone(), 
-            resp: resp_tx 
-        }).unwrap();
-        let result = resp_rx.blocking_recv().unwrap();
+        let result = rt.block_on(handle.ingest_entry(entry_a.clone()));
         assert!(result.is_ok(), "entry_a should apply successfully");
         
         // Verify /merged now has 1 head (C merged A and B)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::GetHeads { 
-            key: b"/merged".to_vec(), 
-            resp: resp_tx 
-        }).unwrap();
-        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head (merged by C)");
         assert_eq!(heads[0].hash.as_slice(), hash_c.as_ref(), "head should be entry_c's hash");
         
         // Verify merged value
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::Get { 
-            key: b"/merged".to_vec(), 
-            resp: resp_tx 
-        }).unwrap();
-        let value = resp_rx.blocking_recv().unwrap().unwrap();
+        let value = rt.block_on(handle.get(b"/merged")).unwrap();
         assert_eq!(value, Some(b"merged_value".to_vec()), "value should be merged");
         
-        // Shutdown
-        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
-        actor_handle.join().unwrap();
+        drop(handle);
     }
     
     /// Test merge conflict with C -> A -> B order.
@@ -981,32 +878,21 @@ mod tests {
     /// B arrives -> C wakes up, both parents present -> C applies.
     #[test]
     fn test_merge_conflict_rebuffer_on_partial_satisfaction() {
-        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_path = dir.join("state.db");
-        let logs_dir = dir.join("logs");
-        std::fs::create_dir_all(&logs_dir).unwrap();
+        // Use standard store directory layout
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().to_path_buf();
         
-        let state = KvStore::open(&state_path).unwrap();
         let node1 = NodeIdentity::generate();
         let node2 = NodeIdentity::generate();
         let node3 = NodeIdentity::generate();
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        let (entry_tx, _entry_rx) = broadcast::channel(32);
-        let (sync_needed_tx, _) = broadcast::channel(16);
         
-        let actor = StoreActor::new(
+        let (handle, _info) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state,
-            logs_dir,
+            store_dir,
             node1.clone(),
-            None,
-            cmd_rx,
-            entry_tx,
-            sync_needed_tx,
-        );
+        ).unwrap();
         
-        let actor_handle = std::thread::spawn(move || actor.run());
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
         // Author1: entry_a writes to /merged
         let clock_a = MockClock::new(1000);
@@ -1039,55 +925,31 @@ mod tests {
         let hash_c = entry_c.hash();
         
         // Step 1: C arrives first -> buffered waiting for A (first in parent list)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
-            entry: entry_c.clone(), 
-            resp: resp_tx 
-        }).unwrap();
-        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        assert!(rt.block_on(handle.ingest_entry(entry_c.clone())).is_ok());
         
         // Verify no heads
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
-        assert_eq!(resp_rx.blocking_recv().unwrap().unwrap().len(), 0);
+        assert_eq!(rt.block_on(handle.get_heads(b"/merged")).unwrap().len(), 0);
         
         // Step 2: A arrives -> C wakes, B still missing -> C re-buffered for B
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
-            entry: entry_a.clone(), 
-            resp: resp_tx 
-        }).unwrap();
-        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        assert!(rt.block_on(handle.ingest_entry(entry_a.clone())).is_ok());
         
         // Verify 1 head from A (C is re-buffered, not applied)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
-        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head from A (C re-buffered for B)");
         assert_eq!(heads[0].hash.as_slice(), hash_a.as_ref());
         
         // Step 3: B arrives -> C wakes, both present -> C applies
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { 
-            entry: entry_b.clone(), 
-            resp: resp_tx 
-        }).unwrap();
-        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        assert!(rt.block_on(handle.ingest_entry(entry_b.clone())).is_ok());
         
         // Verify 1 head from C (merged A and B)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
-        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head (merged by C)");
         assert_eq!(heads[0].hash.as_slice(), hash_c.as_ref());
         
         // Verify value
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::Get { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
-        assert_eq!(resp_rx.blocking_recv().unwrap().unwrap(), Some(b"merged_value".to_vec()));
+        assert_eq!(rt.block_on(handle.get(b"/merged")).unwrap(), Some(b"merged_value".to_vec()));
         
-        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
-        actor_handle.join().unwrap();
+        drop(handle);
     }
     
     /// Test that orphan store is cleaned up after multi-parent merge completes.
@@ -1098,32 +960,22 @@ mod tests {
     /// Bug: old "C waiting for A" record was never deleted.
     #[test]
     fn test_orphan_store_cleanup_on_rebuffer() {
-        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_path = dir.join("state.db");
-        let logs_dir = dir.join("logs");
-        std::fs::create_dir_all(&logs_dir).unwrap();
+        // Use standard store directory layout
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().to_path_buf();
+        let sigchain_dir = store_dir.join("sigchain");
         
-        let state = KvStore::open(&state_path).unwrap();
         let node1 = NodeIdentity::generate();
         let node2 = NodeIdentity::generate();
         let node3 = NodeIdentity::generate();
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        let (entry_tx, _entry_rx) = broadcast::channel(32);
-        let (sync_needed_tx, _) = broadcast::channel(16);
         
-        let actor = StoreActor::new(
+        let (handle, _info) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state,
-            logs_dir.clone(),
+            store_dir,
             node1.clone(),
-            None,
-            cmd_rx,
-            entry_tx,
-            sync_needed_tx,
-        );
+        ).unwrap();
         
-        let actor_handle = std::thread::spawn(move || actor.run());
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
         // Author1: entry_a writes to /merged
         let clock_a = MockClock::new(1000);
@@ -1156,34 +1008,25 @@ mod tests {
         let hash_c = entry_c.hash();
         
         // Step 1: C arrives -> buffered for A
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_c.clone(), resp: resp_tx }).unwrap();
-        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        assert!(rt.block_on(handle.ingest_entry(entry_c.clone())).is_ok());
         
         // Step 2: A arrives -> C wakes, B missing, C re-buffered for B
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
-        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        assert!(rt.block_on(handle.ingest_entry(entry_a.clone())).is_ok());
         
         // Step 3: B arrives -> C wakes, applies
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
-        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        assert!(rt.block_on(handle.ingest_entry(entry_b.clone())).is_ok());
         
         // Verify C merged successfully
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::GetHeads { key: b"/merged".to_vec(), resp: resp_tx }).unwrap();
-        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
         assert_eq!(heads.len(), 1);
         assert_eq!(heads[0].hash.as_slice(), hash_c.as_ref());
         
         // Shutdown actor so we can check orphan store directly
-        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
-        actor_handle.join().unwrap();
+        drop(handle);
         
         // CRITICAL: Check DAG orphan store is empty - no stale records
         // This is the bug we're testing for: old "C waiting for A" record leaked
-        let orphan_db_path = logs_dir.join("orphans.db");
+        let orphan_db_path = sigchain_dir.join("orphans.db");
         let orphan_store = crate::store::sigchain::orphan_store::OrphanStore::open(&orphan_db_path).unwrap();
         let dag_orphan_count = crate::store::sigchain::orphan_store::tests::count_dag_orphans(&orphan_store);
         assert_eq!(dag_orphan_count, 0, "DAG orphan store should be empty after all entries applied (found {} stale records)", dag_orphan_count);
@@ -1196,13 +1039,14 @@ mod tests {
     fn test_crash_recovery_on_actor_spawn() {
         use crate::store::sigchain::SigChain;
         
-        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_path = dir.join("state.db");
-        let logs_dir = dir.join("logs");
-        std::fs::create_dir_all(&logs_dir).unwrap();
+        // Use standard store directory layout
+        let tmp = tempfile::tempdir().unwrap(); 
+        let store_dir = tmp.path().to_path_buf();
+        let state_dir = store_dir.join("state");
+        let sigchain_dir = store_dir.join("sigchain");
+        std::fs::create_dir_all(&sigchain_dir).unwrap();
         
-        let state = KvStore::open(&state_path).unwrap();
+        let state = KvStore::open(&state_dir).unwrap();
         let node = NodeIdentity::generate();
         let author = node.public_key();
         
@@ -1212,7 +1056,7 @@ mod tests {
         }
         
         // Write 3 entries to sigchain log directly (simulating commits)
-        let log_path = logs_dir.join(format!("{}.log", hex::encode(author)));
+        let log_path = sigchain_dir.join(format!("{}.log", hex::encode(author)));
         let mut sigchain = SigChain::new(&log_path, TEST_STORE, crate::types::PubKey::from(*author)).unwrap();
         
         let mut entries = Vec::new();
@@ -1245,16 +1089,16 @@ mod tests {
         drop(sigchain);
         
         // === RESTART ===
-        // Reopen store and spawn actor with StoreHandle
-        // The actor should replay log and recover entries 2 and 3
-        let state = KvStore::open(&state_path).unwrap();
-        let handle = crate::store::handle::StoreHandle::spawn(
+        // Reopen store using StoreHandle::open() which handles full initialization
+        // The open() should replay log and recover entries 2 and 3
+        let (handle, info) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state,
-            logs_dir.clone(),
+            store_dir,
             node.clone(),
-            None,
-        );
+        ).unwrap();
+        
+        // Verify crash recovery replayed entries
+        assert!(info.entries_replayed >= 2, "Should have replayed at least 2 entries, got {}", info.entries_replayed);
         
         // Give actor time to initialize
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1364,7 +1208,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
-        let state_path = dir.join("state.db");
+        let state_path = dir.join("state");
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         
@@ -1478,31 +1322,19 @@ mod tests {
              KvPayload { ops }.encode_to_vec()
         }
 
-        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_path = dir.join("state.db");
-        let logs_dir = dir.join("logs");
-        std::fs::create_dir_all(&logs_dir).unwrap();
+        // Use standard store directory layout
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().to_path_buf();
         
-        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         
-        // Spawn actor
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        let (entry_tx, _entry_rx) = broadcast::channel(16);
-        let (sync_needed_tx, _) = broadcast::channel(16);
-        
-        let actor = StoreActor::new(
+        let (handle, _info) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state,
-            logs_dir,
+            store_dir,
             node.clone(),
-            None,
-            cmd_rx, 
-            entry_tx,
-            sync_needed_tx,
-        );
-        let actor_handle = std::thread::spawn(move || actor.run());
+        ).unwrap();
+        
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
         // Create entry A (seq 1)
         let clock_a = MockClock::new(1000);
@@ -1524,87 +1356,58 @@ mod tests {
             .sign(&node);
         
         // Step 1: Send B first -> becomes orphan
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
-        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        assert!(rt.block_on(handle.ingest_entry(entry_b.clone())).is_ok());
         
         // Verify orphan exists
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::OrphanList { resp: resp_tx }).unwrap();
-        let orphans = resp_rx.blocking_recv().unwrap();
+        let orphans = rt.block_on(handle.orphan_list());
         assert_eq!(orphans.len(), 1, "B should be orphaned");
         
         // Step 2: Send A -> A applies, B should be resolved and applied
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
-        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        assert!(rt.block_on(handle.ingest_entry(entry_a.clone())).is_ok());
         
         // Step 3: Send B again (duplicate - simulating sync resending)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
-        // This may succeed or fail (already applied), either is fine
-        let _ = resp_rx.blocking_recv();
+        let _ = rt.block_on(handle.ingest_entry(entry_b.clone()));
         
         // Step 4: Send A again (duplicate)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
-        let _ = resp_rx.blocking_recv();
+        let _ = rt.block_on(handle.ingest_entry(entry_a.clone()));
         
         // Verify value is correct
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::Get { key: b"/key".to_vec(), resp: resp_tx }).unwrap();
-        let value = resp_rx.blocking_recv().unwrap().unwrap();
+        let value = rt.block_on(handle.get(b"/key")).unwrap();
         assert_eq!(value, Some(b"value_b".to_vec()));
         
         // Step 5: Check orphan store is empty
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::OrphanList { resp: resp_tx }).unwrap();
-        let orphans = resp_rx.blocking_recv().unwrap();
+        let orphans = rt.block_on(handle.orphan_list());
         assert!(orphans.is_empty(), 
             "Orphan store should be empty after duplicates. Found {} orphans: {:?}", 
             orphans.len(),
             orphans.iter().map(|o| format!("author:{} seq:{} awaiting:{}", hex::encode(&o.author[..4]), o.seq, hex::encode(&o.prev_hash[..4]))).collect::<Vec<_>>()
         );
         
-        // Shutdown
-        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
-        actor_handle.join().unwrap();
+        drop(handle);
     }
     
     /// Test OrphanCleanup command properly removes stale orphans.
     /// Simulates a stale orphan (seq < next_seq) and verifies cleanup removes it.
     #[test]
     fn test_orphan_cleanup_command() {
-         use crate::store::impls::kv::KvPayload;
+        use crate::store::impls::kv::KvPayload;
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
              KvPayload { ops }.encode_to_vec()
         }
 
-        let tmp = tempfile::tempdir().unwrap(); let dir = tmp.path().to_path_buf();
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_path = dir.join("state.db");
-        let logs_dir = dir.join("logs");
-        std::fs::create_dir_all(&logs_dir).unwrap();
+        // Use standard store directory layout
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().to_path_buf();
         
-        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
         
-        // Spawn actor
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        let (entry_tx, _entry_rx) = broadcast::channel(16);
-        let (sync_needed_tx, _) = broadcast::channel(16);
-        
-        let actor = StoreActor::new(
+        let (handle, _info) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state,
-            logs_dir.clone(),
+            store_dir,
             node.clone(),
-            None,
-            cmd_rx, 
-            entry_tx,
-            sync_needed_tx,
-        );
-        let actor_handle = std::thread::spawn(move || actor.run());
+        ).unwrap();
+        
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
         // Create entry A (seq 1) and entry B (seq 2)
         let clock_a = MockClock::new(1000);
@@ -1625,40 +1428,25 @@ mod tests {
             .sign(&node);
         
         // Step 1: Send B first -> becomes orphan
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
-        assert!(resp_rx.blocking_recv().unwrap().is_ok());
+        assert!(rt.block_on(handle.ingest_entry(entry_b.clone())).is_ok());
         
         // Verify orphan exists
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::OrphanList { resp: resp_tx }).unwrap();
-        let orphans = resp_rx.blocking_recv().unwrap();
+        let orphans = rt.block_on(handle.orphan_list());
         assert_eq!(orphans.len(), 1, "B should be orphaned");
         
         // Step 2: Send A -> A and B both get applied
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
-        assert!(resp_rx.blocking_recv().unwrap().is_ok());
-        
-        // Now manually insert a "stale" orphan by sending B again (with old code it would create stale orphan)
-        // But with our fix, it won't. So we test the cleanup path by checking it handles edge cases.
+        assert!(rt.block_on(handle.ingest_entry(entry_a.clone())).is_ok());
         
         // Step 3: Call OrphanCleanup
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::OrphanCleanup { resp: resp_tx }).unwrap();
-        let removed = resp_rx.blocking_recv().unwrap();
+        let removed = rt.block_on(handle.orphan_cleanup());
         // Should be 0 since no stale orphans (the fix prevents them from being created)
         assert_eq!(removed, 0, "No stale orphans should exist with the bug fix");
         
         // Verify orphan store is empty
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::OrphanList { resp: resp_tx }).unwrap();
-        let orphans = resp_rx.blocking_recv().unwrap();
+        let orphans = rt.block_on(handle.orphan_list());
         assert!(orphans.is_empty(), "Orphan store should be empty");
         
-        // Shutdown
-        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
-        actor_handle.join().unwrap();
+        drop(handle);
     }
     
     /// Test that StoreActor emits SyncNeeded event when a peer is ahead of us.
@@ -1667,31 +1455,22 @@ mod tests {
     fn test_sync_needed_event_emission() {
         use std::time::Duration;
         
+        // Use standard store directory layout
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().to_path_buf();
-        let state_path = dir.join("state.db");
-        let logs_dir = dir.join("logs");
-        std::fs::create_dir_all(&logs_dir).unwrap();
+        let store_dir = tmp.path().to_path_buf();
         
-        let state = KvStore::open(&state_path).unwrap();
         let node = NodeIdentity::generate();
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        let (entry_tx, _) = broadcast::channel(16);
-        // CRITICAL: Keep the receiver to verify event emission
-        let (sync_needed_tx, mut sync_needed_rx) = broadcast::channel(16);
         
-        let actor = StoreActor::new(
+        let (handle, _info) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state,
-            logs_dir,
+            store_dir,
             node.clone(),
-            None,
-            cmd_rx,
-            entry_tx,
-            sync_needed_tx,
-        );
+        ).unwrap();
         
-        let actor_handle = std::thread::spawn(move || actor.run());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        
+        // Subscribe to sync_needed events
+        let mut sync_needed_rx = handle.subscribe_sync_needed();
         
         // Create a peer state that is AHEAD of us
         let peer_bytes = PubKey::from([99u8; 32]);
@@ -1705,23 +1484,15 @@ mod tests {
             updated_at: 0,
         };
         
-        // Send SetPeerSyncState command
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::SetPeerSyncState { 
-            peer: PubKey::from(*peer_bytes), 
-            info: peer_info,
-            resp: resp_tx,
-        }).unwrap();
-        
-        // Verify command response contains correct discrepancy
-        let discrepancy = resp_rx.blocking_recv().unwrap().unwrap();
+        // Send SetPeerSyncState command via handle
+        let discrepancy = rt.block_on(handle.set_peer_sync_state(&peer_bytes, peer_info)).unwrap();
         assert_eq!(discrepancy.entries_we_need, 50, "Should report 50 entries we need");
         assert_eq!(discrepancy.entries_they_need, 0, "Peer has everything we have");
         
         // Verify SyncNeeded event was broadcast
         std::thread::sleep(Duration::from_millis(10));
         let event = sync_needed_rx.try_recv().expect("Should have received SyncNeeded event");
-        assert_eq!(event.peer, PubKey::from(*peer_bytes), "Event should contain correct peer");
+        assert_eq!(event.peer, peer_bytes, "Event should contain correct peer");
         assert_eq!(event.discrepancy.entries_we_need, 50, "Event should contain correct discrepancy");
         
         // Test NO event when peer has no sync_state (nothing to compare)
@@ -1730,105 +1501,57 @@ mod tests {
             updated_at: 0,
         };
         
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx.blocking_send(StoreCmd::SetPeerSyncState { 
-            peer: PubKey::from([88u8; 32]), 
-            info: peer_info_empty,
-            resp: resp_tx,
-        }).unwrap();
-        
-        let discrepancy = resp_rx.blocking_recv().unwrap().unwrap();
+        let discrepancy = rt.block_on(handle.set_peer_sync_state(&PubKey::from([88u8; 32]), peer_info_empty)).unwrap();
         assert!(!discrepancy.is_out_of_sync(), "Should be in sync when no sync_state");
         
         // Should NOT have emitted a SyncNeeded event
         std::thread::sleep(Duration::from_millis(10));
         assert!(sync_needed_rx.try_recv().is_err(), "Should NOT emit event when in sync");
         
-        // Shutdown
-        cmd_tx.blocking_send(StoreCmd::Shutdown).unwrap();
-        actor_handle.join().unwrap();
-}
+        drop(handle);
+    }
 
     /// Test sync state diffing: Node A has entries, Node B is empty.
     /// Compute diff via SyncState and apply entries to sync.
     #[test]
     fn test_sync_state_diff_and_apply() {
-        
-        // Create two actors (A and B)
+        // Use standard store directory layout
         let tmp_a = tempfile::tempdir().unwrap();
-        let dir_a = tmp_a.path().to_path_buf();
-        let state_path_a = dir_a.join("state.db");
-        let logs_dir_a = dir_a.join("logs");
-        std::fs::create_dir_all(&logs_dir_a).unwrap();
+        let store_dir_a = tmp_a.path().to_path_buf();
         
         let tmp_b = tempfile::tempdir().unwrap();
-        let dir_b = tmp_b.path().to_path_buf();
-        let state_path_b = dir_b.join("state.db");
-        let logs_dir_b = dir_b.join("logs");
-        std::fs::create_dir_all(&logs_dir_b).unwrap();
+        let store_dir_b = tmp_b.path().to_path_buf();
         
-        let state_a = KvStore::open(&state_path_a).unwrap();
-        let state_b = KvStore::open(&state_path_b).unwrap();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         
-        // Setup channels for A
-        let (cmd_tx_a, cmd_rx_a) = mpsc::channel(32);
-        let (entry_tx_a, _) = broadcast::channel(16);
-        let (sync_tx_a, _) = broadcast::channel(16);
-        
-        // Setup channels for B
-        let (cmd_tx_b, cmd_rx_b) = mpsc::channel(32);
-        let (entry_tx_b, _) = broadcast::channel(16);
-        let (sync_tx_b, _) = broadcast::channel(16);
-        
-        // Create actors
-        let actor_a = StoreActor::new(
+        let (handle_a, _info_a) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state_a,
-            logs_dir_a,
+            store_dir_a,
             node_a.clone(),
-            None,
-            cmd_rx_a,
-            entry_tx_a,
-            sync_tx_a,
-        );
+        ).unwrap();
         
-        let actor_b = StoreActor::new(
+        let (handle_b, _info_b) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state_b,
-            logs_dir_b,
+            store_dir_b,
             node_b.clone(),
-            None,
-            cmd_rx_b,
-            entry_tx_b,
-            sync_tx_b,
-        );
+        ).unwrap();
         
-        // Start actor threads
-        let handle_a = std::thread::spawn(move || actor_a.run());
-        let handle_b = std::thread::spawn(move || actor_b.run());
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
         // Node A writes 3 entries via Put command
         for i in 1u64..=3 {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_a.blocking_send(StoreCmd::Put {
-                key: format!("/key{}", i).into_bytes(),
-                value: format!("value{}", i).into_bytes(),
-                resp: resp_tx,
-            }).unwrap();
-            resp_rx.blocking_recv().unwrap().unwrap();
+            rt.block_on(handle_a.put(
+                format!("/key{}", i).as_bytes(),
+                format!("value{}", i).as_bytes(),
+            )).unwrap();
         }
         
         // Get sync state from A
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_a = resp_rx.blocking_recv().unwrap().unwrap();
+        let sync_a = rt.block_on(handle_a.sync_state()).unwrap();
         
         // Get sync state from B (empty)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_b.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_b = resp_rx.blocking_recv().unwrap().unwrap();
+        let sync_b = rt.block_on(handle_b.sync_state()).unwrap();
         
         // Compute diff: B needs entries from A
         let missing = sync_b.diff(&sync_a);
@@ -1837,126 +1560,75 @@ mod tests {
         assert_eq!(missing[0].from_seq, 0, "B has nothing");
         assert_eq!(missing[0].to_seq, 3, "A has 3 entries");
         
-        // Get entries from A's log and apply to B
-        // (In real sync, we'd stream via StoreCmd::StreamEntriesInRange)
         // For simplicity, we'll just do direct Put commands to B for the same keys
         for i in 1u64..=3 {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_b.blocking_send(StoreCmd::Put {
-                key: format!("/key{}", i).into_bytes(),
-                value: format!("value{}", i).into_bytes(),
-                resp: resp_tx,
-            }).unwrap();
-            resp_rx.blocking_recv().unwrap().unwrap();
+            rt.block_on(handle_b.put(
+                format!("/key{}", i).as_bytes(),
+                format!("value{}", i).as_bytes(),
+            )).unwrap();
         }
         
         // Verify B has same KV state
         for i in 1u64..=3 {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_b.blocking_send(StoreCmd::Get {
-                key: format!("/key{}", i).into_bytes(),
-                resp: resp_tx,
-            }).unwrap();
-            let value = resp_rx.blocking_recv().unwrap().unwrap();
+            let value = rt.block_on(handle_b.get(format!("/key{}", i).as_bytes())).unwrap();
             assert_eq!(value, Some(format!("value{}", i).into_bytes()));
         }
         
-        // Shutdown
-        cmd_tx_a.blocking_send(StoreCmd::Shutdown).unwrap();
-        cmd_tx_b.blocking_send(StoreCmd::Shutdown).unwrap();
-        handle_a.join().unwrap();
-        handle_b.join().unwrap();
+        drop(handle_a);
+        drop(handle_b);
     }
 
     /// Test that two stores can sync in both directions.
     /// Each node writes entries, then they exchange via sync state diff.
     #[test]
     fn test_bidirectional_sync() {
-        // Create two actors (A and B)
+        // Use standard store directory layout
         let tmp_a = tempfile::tempdir().unwrap();
-        let dir_a = tmp_a.path().to_path_buf();
-        let state_path_a = dir_a.join("state.db");
-        let logs_dir_a = dir_a.join("logs");
-        std::fs::create_dir_all(&logs_dir_a).unwrap();
+        let store_dir_a = tmp_a.path().to_path_buf();
         
         let tmp_b = tempfile::tempdir().unwrap();
-        let dir_b = tmp_b.path().to_path_buf();
-        let state_path_b = dir_b.join("state.db");
-        let logs_dir_b = dir_b.join("logs");
-        std::fs::create_dir_all(&logs_dir_b).unwrap();
+        let store_dir_b = tmp_b.path().to_path_buf();
         
-        let state_a = KvStore::open(&state_path_a).unwrap();
-        let state_b = KvStore::open(&state_path_b).unwrap();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         
-        // Setup channels for A
-        let (cmd_tx_a, cmd_rx_a) = mpsc::channel(32);
-        let (entry_tx_a, mut entry_rx_a) = broadcast::channel(16);
-        let (sync_tx_a, _) = broadcast::channel(16);
-        
-        // Setup channels for B
-        let (cmd_tx_b, cmd_rx_b) = mpsc::channel(32);
-        let (entry_tx_b, mut entry_rx_b) = broadcast::channel(16);
-        let (sync_tx_b, _) = broadcast::channel(16);
-        
-        // Create actors
-        let actor_a = StoreActor::new(
+        let (handle_a, _info_a) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state_a,
-            logs_dir_a,
+            store_dir_a,
             node_a.clone(),
-            None,
-            cmd_rx_a,
-            entry_tx_a,
-            sync_tx_a,
-        );
+        ).unwrap();
         
-        let actor_b = StoreActor::new(
+        let (handle_b, _info_b) = crate::store::handle::StoreHandle::open(
             TEST_STORE,
-            state_b,
-            logs_dir_b,
+            store_dir_b,
             node_b.clone(),
-            None,
-            cmd_rx_b,
-            entry_tx_b,
-            sync_tx_b,
-        );
+        ).unwrap();
         
-        // Start actor threads
-        let handle_a = std::thread::spawn(move || actor_a.run());
-        let handle_b = std::thread::spawn(move || actor_b.run());
+        // Subscribe to entry broadcasts
+        let mut entry_rx_a = handle_a.subscribe_entries();
+        let mut entry_rx_b = handle_b.subscribe_entries();
+        
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
         // Node A writes 2 entries
         for i in 1u64..=2 {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_a.blocking_send(StoreCmd::Put {
-                key: format!("/a{}", i).into_bytes(),
-                value: format!("from_a{}", i).into_bytes(),
-                resp: resp_tx,
-            }).unwrap();
-            resp_rx.blocking_recv().unwrap().unwrap();
+            rt.block_on(handle_a.put(
+                format!("/a{}", i).as_bytes(),
+                format!("from_a{}", i).as_bytes(),
+            )).unwrap();
         }
         
         // Node B writes 2 entries
         for i in 1u64..=2 {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_b.blocking_send(StoreCmd::Put {
-                key: format!("/b{}", i).into_bytes(),
-                value: format!("from_b{}", i).into_bytes(),
-                resp: resp_tx,
-            }).unwrap();
-            resp_rx.blocking_recv().unwrap().unwrap();
+            rt.block_on(handle_b.put(
+                format!("/b{}", i).as_bytes(),
+                format!("from_b{}", i).as_bytes(),
+            )).unwrap();
         }
         
         // Get sync states
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_a = resp_rx.blocking_recv().unwrap().unwrap();
-        
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_b.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_b = resp_rx.blocking_recv().unwrap().unwrap();
+        let sync_a = rt.block_on(handle_a.sync_state()).unwrap();
+        let sync_b = rt.block_on(handle_b.sync_state()).unwrap();
         
         // A needs B's entries
         let a_needs = sync_a.diff(&sync_b);
@@ -1970,103 +1642,72 @@ mod tests {
         
         // Drain entry broadcasts from A and apply to B
         while let Ok(entry) = entry_rx_a.try_recv() {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_b.blocking_send(StoreCmd::IngestEntry { entry, resp: resp_tx }).unwrap();
-            resp_rx.blocking_recv().unwrap().unwrap();
+            rt.block_on(handle_b.ingest_entry(entry)).unwrap();
         }
         
         // Drain entry broadcasts from B and apply to A
         while let Ok(entry) = entry_rx_b.try_recv() {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_a.blocking_send(StoreCmd::IngestEntry { entry, resp: resp_tx }).unwrap();
-            resp_rx.blocking_recv().unwrap().unwrap();
+            rt.block_on(handle_a.ingest_entry(entry)).unwrap();
         }
         
         // Both should now have all 4 keys
         for key in ["/a1", "/a2", "/b1", "/b2"] {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_a.blocking_send(StoreCmd::Get { key: key.as_bytes().to_vec(), resp: resp_tx }).unwrap();
-            assert!(resp_rx.blocking_recv().unwrap().unwrap().is_some(), "A missing {}", key);
-            
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_b.blocking_send(StoreCmd::Get { key: key.as_bytes().to_vec(), resp: resp_tx }).unwrap();
-            assert!(resp_rx.blocking_recv().unwrap().unwrap().is_some(), "B missing {}", key);
+            assert!(rt.block_on(handle_a.get(key.as_bytes())).unwrap().is_some(), "A missing {}", key);
+            assert!(rt.block_on(handle_b.get(key.as_bytes())).unwrap().is_some(), "B missing {}", key);
         }
         
         // Sync states should match
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_a_after = resp_rx.blocking_recv().unwrap().unwrap();
-        
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_b.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_b_after = resp_rx.blocking_recv().unwrap().unwrap();
+        let sync_a_after = rt.block_on(handle_a.sync_state()).unwrap();
+        let sync_b_after = rt.block_on(handle_b.sync_state()).unwrap();
         
         assert!(sync_a_after.diff(&sync_b_after).is_empty());
         assert!(sync_b_after.diff(&sync_a_after).is_empty());
         
-        // Shutdown
-        cmd_tx_a.blocking_send(StoreCmd::Shutdown).unwrap();
-        cmd_tx_b.blocking_send(StoreCmd::Shutdown).unwrap();
-        handle_a.join().unwrap();
-        handle_b.join().unwrap();
+        drop(handle_a);
+        drop(handle_b);
     }
 
     /// Test that three stores can all sync with each other.
     #[test]
     fn test_three_way_sync() {
-         use crate::store::impls::kv::KvPayload;
+        use crate::store::impls::kv::KvPayload;
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
              KvPayload { ops }.encode_to_vec()
         }
 
-        // Create three actors
+        // Use standard store directory layout
         let tmp_a = tempfile::tempdir().unwrap();
-        let dir_a = tmp_a.path().to_path_buf();
-        let state_path_a = dir_a.join("state.db");
-        let logs_dir_a = dir_a.join("logs");
-        std::fs::create_dir_all(&logs_dir_a).unwrap();
+        let store_dir_a = tmp_a.path().to_path_buf();
         
         let tmp_b = tempfile::tempdir().unwrap();
-        let dir_b = tmp_b.path().to_path_buf();
-        let state_path_b = dir_b.join("state.db");
-        let logs_dir_b = dir_b.join("logs");
-        std::fs::create_dir_all(&logs_dir_b).unwrap();
+        let store_dir_b = tmp_b.path().to_path_buf();
         
         let tmp_c = tempfile::tempdir().unwrap();
-        let dir_c = tmp_c.path().to_path_buf();
-        let state_path_c = dir_c.join("state.db");
-        let logs_dir_c = dir_c.join("logs");
-        std::fs::create_dir_all(&logs_dir_c).unwrap();
+        let store_dir_c = tmp_c.path().to_path_buf();
         
-        let state_a = KvStore::open(&state_path_a).unwrap();
-        let state_b = KvStore::open(&state_path_b).unwrap();
-        let state_c = KvStore::open(&state_path_c).unwrap();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let node_c = NodeIdentity::generate();
         
-        // Setup channels
-        let (cmd_tx_a, cmd_rx_a) = mpsc::channel(32);
-        let (entry_tx_a, _) = broadcast::channel(16);
-        let (sync_tx_a, _) = broadcast::channel(16);
+        let (handle_a, _info_a) = crate::store::handle::StoreHandle::open(
+            TEST_STORE,
+            store_dir_a,
+            node_a.clone(),
+        ).unwrap();
         
-        let (cmd_tx_b, cmd_rx_b) = mpsc::channel(32);
-        let (entry_tx_b, _) = broadcast::channel(16);
-        let (sync_tx_b, _) = broadcast::channel(16);
+        let (handle_b, _info_b) = crate::store::handle::StoreHandle::open(
+            TEST_STORE,
+            store_dir_b,
+            node_b.clone(),
+        ).unwrap();
         
-        let (cmd_tx_c, cmd_rx_c) = mpsc::channel(32);
-        let (entry_tx_c, _) = broadcast::channel(16);
-        let (sync_tx_c, _) = broadcast::channel(16);
+        let (handle_c, _info_c) = crate::store::handle::StoreHandle::open(
+            TEST_STORE,
+            store_dir_c,
+            node_c.clone(),
+        ).unwrap();
         
-        // Create and start actors
-        let actor_a = StoreActor::new(TEST_STORE, state_a, logs_dir_a.clone(), node_a.clone(), None, cmd_rx_a, entry_tx_a, sync_tx_a);
-        let actor_b = StoreActor::new(TEST_STORE, state_b, logs_dir_b, node_b.clone(), None, cmd_rx_b, entry_tx_b, sync_tx_b);
-        let actor_c = StoreActor::new(TEST_STORE, state_c, logs_dir_c, node_c.clone(), None, cmd_rx_c, entry_tx_c, sync_tx_c);
-        
-        let handle_a = std::thread::spawn(move || actor_a.run());
-        let handle_b = std::thread::spawn(move || actor_b.run());
-        let handle_c = std::thread::spawn(move || actor_c.run());
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
         // Each node writes one entry using manual Entry creation (so we control the author)
         let clock = MockClock::new(1000);
@@ -2093,127 +1734,82 @@ mod tests {
             .sign(&node_c);
         
         // Ingest each entry to its respective actor
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
-        resp_rx.blocking_recv().unwrap().unwrap();
-        
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_b.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
-        resp_rx.blocking_recv().unwrap().unwrap();
-        
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_c.blocking_send(StoreCmd::IngestEntry { entry: entry_c.clone(), resp: resp_tx }).unwrap();
-        resp_rx.blocking_recv().unwrap().unwrap();
+        rt.block_on(handle_a.ingest_entry(entry_a.clone())).unwrap();
+        rt.block_on(handle_b.ingest_entry(entry_b.clone())).unwrap();
+        rt.block_on(handle_c.ingest_entry(entry_c.clone())).unwrap();
         
         // Now sync all entries to all nodes by ingesting the original signed entries
         // This properly preserves the original author signatures
         
         // Ingest A's entry to B and C
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_b.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
-        let _ = resp_rx.blocking_recv();
-        
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_c.blocking_send(StoreCmd::IngestEntry { entry: entry_a.clone(), resp: resp_tx }).unwrap();
-        let _ = resp_rx.blocking_recv();
+        let _ = rt.block_on(handle_b.ingest_entry(entry_a.clone()));
+        let _ = rt.block_on(handle_c.ingest_entry(entry_a.clone()));
         
         // Ingest B's entry to A and C
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
-        let _ = resp_rx.blocking_recv();
-        
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_c.blocking_send(StoreCmd::IngestEntry { entry: entry_b.clone(), resp: resp_tx }).unwrap();
-        let _ = resp_rx.blocking_recv();
+        let _ = rt.block_on(handle_a.ingest_entry(entry_b.clone()));
+        let _ = rt.block_on(handle_c.ingest_entry(entry_b.clone()));
         
         // Ingest C's entry to A and B
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::IngestEntry { entry: entry_c.clone(), resp: resp_tx }).unwrap();
-        let _ = resp_rx.blocking_recv();
-        
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_b.blocking_send(StoreCmd::IngestEntry { entry: entry_c.clone(), resp: resp_tx }).unwrap();
-        let _ = resp_rx.blocking_recv();
+        let _ = rt.block_on(handle_a.ingest_entry(entry_c.clone()));
+        let _ = rt.block_on(handle_b.ingest_entry(entry_c.clone()));
         
         // All three stores should have all three keys
-        for cmd_tx in [&cmd_tx_a, &cmd_tx_b, &cmd_tx_c] {
+        for handle in [&handle_a, &handle_b, &handle_c] {
             for key in ["/key_a", "/key_b", "/key_c"] {
-                let (resp_tx, resp_rx) = oneshot::channel();
-                cmd_tx.blocking_send(StoreCmd::Get { key: key.as_bytes().to_vec(), resp: resp_tx }).unwrap();
-                assert!(resp_rx.blocking_recv().unwrap().unwrap().is_some(), "missing {}", key);
+                assert!(rt.block_on(handle.get(key.as_bytes())).unwrap().is_some(), "missing {}", key);
             }
         }
         
         // All sync states should match
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_a = resp_rx.blocking_recv().unwrap().unwrap();
-        
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_b.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_b = resp_rx.blocking_recv().unwrap().unwrap();
-        
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_c.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_c = resp_rx.blocking_recv().unwrap().unwrap();
+        let sync_a = rt.block_on(handle_a.sync_state()).unwrap();
+        let sync_b = rt.block_on(handle_b.sync_state()).unwrap();
+        let sync_c = rt.block_on(handle_c.sync_state()).unwrap();
         
         assert!(sync_a.diff(&sync_b).is_empty(), "A and B should be in sync");
         assert!(sync_b.diff(&sync_c).is_empty(), "B and C should be in sync");
         assert!(sync_c.diff(&sync_a).is_empty(), "C and A should be in sync");
         
-        // Shutdown
-        cmd_tx_a.blocking_send(StoreCmd::Shutdown).unwrap();
-        cmd_tx_b.blocking_send(StoreCmd::Shutdown).unwrap();
-        cmd_tx_c.blocking_send(StoreCmd::Shutdown).unwrap();
-        handle_a.join().unwrap();
-        handle_b.join().unwrap();
-        handle_c.join().unwrap();
+        drop(handle_a);
+        drop(handle_b);
+        drop(handle_c);
     }
 
     /// Test multi-node sync after merge: 3 nodes create multi-heads, then merge, then sync to new node.
     #[test]
     fn test_multinode_sync_after_merge() {
-         use crate::store::impls::kv::KvPayload;
+        use crate::store::impls::kv::KvPayload;
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
              KvPayload { ops }.encode_to_vec()
         }
 
-        // Create two actors (A merges, D syncs from A)
+        // Use standard store directory layout
         let tmp_a = tempfile::tempdir().unwrap();
-        let dir_a = tmp_a.path().to_path_buf();
-        let state_path_a = dir_a.join("state.db");
-        let logs_dir_a = dir_a.join("logs");
-        std::fs::create_dir_all(&logs_dir_a).unwrap();
+        let store_dir_a = tmp_a.path().to_path_buf();
         
         let tmp_d = tempfile::tempdir().unwrap();
-        let dir_d = tmp_d.path().to_path_buf();
-        let state_path_d = dir_d.join("state.db");
-        let logs_dir_d = dir_d.join("logs");
-        std::fs::create_dir_all(&logs_dir_d).unwrap();
+        let store_dir_d = tmp_d.path().to_path_buf();
         
-        let state_a = KvStore::open(&state_path_a).unwrap();
-        let state_d = KvStore::open(&state_path_d).unwrap();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let node_c = NodeIdentity::generate();
         let node_d = NodeIdentity::generate();
         
-        // Setup channels for A
-        let (cmd_tx_a, cmd_rx_a) = mpsc::channel(32);
-        let (entry_tx_a, mut entry_rx_a) = broadcast::channel(32);
-        let (sync_tx_a, _) = broadcast::channel(16);
+        let (handle_a, _info_a) = crate::store::handle::StoreHandle::open(
+            TEST_STORE,
+            store_dir_a,
+            node_a.clone(),
+        ).unwrap();
         
-        // Setup channels for D
-        let (cmd_tx_d, cmd_rx_d) = mpsc::channel(32);
-        let (entry_tx_d, _) = broadcast::channel(16);
-        let (sync_tx_d, _) = broadcast::channel(16);
+        let (handle_d, _info_d) = crate::store::handle::StoreHandle::open(
+            TEST_STORE,
+            store_dir_d,
+            node_d.clone(),
+        ).unwrap();
         
-        // Create actors
-        let actor_a = StoreActor::new(TEST_STORE, state_a, logs_dir_a, node_a.clone(), None, cmd_rx_a, entry_tx_a, sync_tx_a);
-        let actor_d = StoreActor::new(TEST_STORE, state_d, logs_dir_d, node_d.clone(), None, cmd_rx_d, entry_tx_d, sync_tx_d);
+        // Subscribe to entries from A
+        let mut entry_rx_a = handle_a.subscribe_entries();
         
-        let handle_a = std::thread::spawn(move || actor_a.run());
-        let handle_d = std::thread::spawn(move || actor_d.run());
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
         // Create entries from 3 different authors (simulating offline writes)
         let clock = MockClock::new(1000);
@@ -2241,37 +1837,24 @@ mod tests {
         
         // Ingest all 3 entries to A (creates 3 heads)
         for entry in [&entry_from_a, &entry_from_b, &entry_from_c] {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_a.blocking_send(StoreCmd::IngestEntry { entry: entry.clone(), resp: resp_tx }).unwrap();
-            resp_rx.blocking_recv().unwrap().unwrap();
+            rt.block_on(handle_a.ingest_entry(entry.clone())).unwrap();
         }
         
         // Verify A has 3 heads
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::GetHeads { key: b"/a".to_vec(), resp: resp_tx }).unwrap();
-        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads = rt.block_on(handle_a.get_heads(b"/a")).unwrap();
         assert_eq!(heads.len(), 3, "Should have 3 heads before merge");
         
         // Node A merges by doing a Put (which references all current heads)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::Put { key: b"/a".to_vec(), value: b"merged".to_vec(), resp: resp_tx }).unwrap();
-        resp_rx.blocking_recv().unwrap().unwrap();
+        rt.block_on(handle_a.put(b"/a", b"merged")).unwrap();
         
         // Verify A now has 1 head
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::GetHeads { key: b"/a".to_vec(), resp: resp_tx }).unwrap();
-        let heads = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads = rt.block_on(handle_a.get_heads(b"/a")).unwrap();
         assert_eq!(heads.len(), 1, "Should have 1 head after merge");
         assert_eq!(heads[0].value, b"merged");
         
         // Get sync states
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_a.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_a = resp_rx.blocking_recv().unwrap().unwrap();
-        
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_d.blocking_send(StoreCmd::SyncState { resp: resp_tx }).unwrap();
-        let sync_d = resp_rx.blocking_recv().unwrap().unwrap();
+        let sync_a = rt.block_on(handle_a.sync_state()).unwrap();
+        let sync_d = rt.block_on(handle_d.sync_state()).unwrap();
         
         // D should need entries from multiple authors
         let missing = sync_d.diff(&sync_a);
@@ -2279,23 +1862,16 @@ mod tests {
         
         // Sync all entries from A to D via broadcast channel
         while let Ok(entry) = entry_rx_a.try_recv() {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            cmd_tx_d.blocking_send(StoreCmd::IngestEntry { entry, resp: resp_tx }).unwrap();
-            let _ = resp_rx.blocking_recv();
+            let _ = rt.block_on(handle_d.ingest_entry(entry));
         }
         
         // D should have same state as A (1 head, merged)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        cmd_tx_d.blocking_send(StoreCmd::GetHeads { key: b"/a".to_vec(), resp: resp_tx }).unwrap();
-        let heads_d = resp_rx.blocking_recv().unwrap().unwrap();
+        let heads_d = rt.block_on(handle_d.get_heads(b"/a")).unwrap();
         assert_eq!(heads_d.len(), 1, "D should have 1 head after sync");
         assert_eq!(heads_d[0].value, b"merged");
         
-        // Shutdown
-        cmd_tx_a.blocking_send(StoreCmd::Shutdown).unwrap();
-        cmd_tx_d.blocking_send(StoreCmd::Shutdown).unwrap();
-        handle_a.join().unwrap();
-        handle_d.join().unwrap();
+        drop(handle_a);
+        drop(handle_d);
     }
 }
 

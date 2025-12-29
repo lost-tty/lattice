@@ -44,6 +44,9 @@ pub enum StateError {
     
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+    
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Errors that occur when validating parent_hashes against current state

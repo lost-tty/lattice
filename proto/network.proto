@@ -12,6 +12,7 @@ message JoinRequest {
 message JoinResponse {
   bytes store_uuid = 1;      // Root store UUID (16 bytes) for new node to create
   bytes inviter_pubkey = 2;  // Inviter's public key for verification
+  repeated bytes authorized_authors = 3;  // All known author pubkeys (for bootstrap sync)
 }
 
 // 2. Peer Message Wrapper (unicast RPC)

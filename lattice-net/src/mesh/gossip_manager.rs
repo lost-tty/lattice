@@ -2,7 +2,8 @@
 
 use crate::{parse_node_id, LatticeEndpoint, ToLattice};
 use super::error::GossipError;
-use lattice_core::{Uuid, Node, StoreHandle, PeerStatus, PeerWatchEvent, PeerWatchEventKind, PubKey};
+use lattice_core::{Uuid, Node, PeerStatus, PeerWatchEvent, PeerWatchEventKind, PubKey};
+use lattice_core::store::AuthorizedStore;
 use lattice_core::auth::PeerProvider;
 use lattice_core::proto::storage::PeerSyncInfo;
 use lattice_core::proto::network::GossipMessage;
@@ -47,7 +48,7 @@ impl GossipManager {
     
     /// Setup gossip for a store - uses node.watch_peers() for bootstrap peers
     #[tracing::instrument(skip(self, node, store), fields(store_id = %store.id()))]
-    pub async fn setup_for_store(&self, node: std::sync::Arc<Node>, store: &StoreHandle) -> Result<(), GossipError> {
+    pub async fn setup_for_store(&self, node: std::sync::Arc<Node>, store: AuthorizedStore) -> Result<(), GossipError> {
         let store_id = store.id();
         
         // Watch peer status - initial snapshot gives bootstrap peers
@@ -79,10 +80,13 @@ impl GossipManager {
         // Simple pending flag for SyncState piggybacking. Start true to announce on startup.
         let pending_syncstate = Arc::new(AtomicBool::new(true));
         
-        // Spawn background tasks
+        // Subscribe BEFORE spawning tasks to avoid missing entries
+        let entry_rx = store.subscribe_entries();
+        
+        // Spawn background tasks - all use AuthorizedStore for security
         self.spawn_receiver(store.clone(), receiver, node.clone(), self.online_peers.clone(), pending_syncstate.clone());
-        self.spawn_forwarder(store.clone(), store.subscribe_entries(), pending_syncstate.clone());
-        self.spawn_syncstate_fallback(store.clone(), pending_syncstate);
+        self.spawn_forwarder(store.clone(), entry_rx, pending_syncstate.clone());
+        self.spawn_syncstate_fallback(store, pending_syncstate);
         self.spawn_peer_watcher(store_id, rx);
         
         tracing::debug!("Gossip tasks spawned");
@@ -101,7 +105,7 @@ impl GossipManager {
     
     fn spawn_receiver(
         &self,
-        store: StoreHandle,
+        store: AuthorizedStore,
         mut rx: iroh_gossip::api::GossipReceiver,
         node: std::sync::Arc<Node>,
         online_peers: Arc<RwLock<HashMap<iroh::PublicKey, Instant>>>,
@@ -124,9 +128,9 @@ impl GossipManager {
                 tracing::debug!(store_id = %store_id, event = ?event, "Gossip event");
                 match event {
                     Ok(iroh_gossip::api::Event::Received(msg)) => {
-                        // Check if sender is authorized before processing
+                        // Check if gossip sender is authorized (separate from entry author check)
                         let sender: PubKey = msg.delivered_from.to_lattice();
-                        if node.verify_peer_status(&sender, &[PeerStatus::Active]).is_err() {
+                        if !node.can_connect(&sender) {
                             tracing::warn!(
                                 store_id = %store_id,
                                 sender = %sender,
@@ -144,7 +148,7 @@ impl GossipManager {
                             }
                         };
                         
-                        // Handle entry (if present)
+                        // Handle entry (if present) - AuthorizedStore checks entry author
                         if let Some(entry) = gossip_msg.entry {
                             tracing::debug!(store_id = %store_id, from = %msg.delivered_from.fmt_short(), "Gossip entry received");
                             let internal: Result<lattice_core::entry::SignedEntry, _> = entry.try_into();
@@ -202,7 +206,7 @@ impl GossipManager {
     
     fn spawn_forwarder(
         &self,
-        store: StoreHandle,
+        store: AuthorizedStore,
         mut entry_rx: tokio::sync::broadcast::Receiver<lattice_core::entry::SignedEntry>,
         pending_syncstate: Arc<AtomicBool>,
     ) {
@@ -244,7 +248,7 @@ impl GossipManager {
     /// Fallback timer for read-only nodes - broadcasts SyncState when pending but no outbound entries
     fn spawn_syncstate_fallback(
         &self,
-        store: StoreHandle,
+        store: AuthorizedStore,
         pending_syncstate: Arc<AtomicBool>,
     ) {
         let senders = self.senders.clone();

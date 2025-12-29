@@ -257,14 +257,16 @@ Each node stores logs as one file per author:
 ├── identity.key                            # Ed25519 private key
 ├── stores/
 │   └── {store_uuid}/
-│       ├── logs/
+│       ├── sigchain/                       # SigChainManager owns
 │       │   └── {author_id_hex}.log         # Append-only SignedEntry stream
-│       └── state.db                        # redb: KV snapshot + frontiers
+│       ├── state/                          # Backend owns (KvStore creates state.db)
+│       │   └── state.db                    # redb: KV snapshot + frontiers
+│       └── sync/                           # Sync metadata
 └── meta.db                                 # redb: global metadata (known stores, peers)
 ```
 
-- Logs: Append-only binary files per `(store, author)`, containing serialized `SignedEntry` messages.
-- State DB (redb): Per-store KV state and frontiers. Updated as entries are applied.
+- Sigchain: Append-only binary files per `(store, author)`, containing serialized `SignedEntry` messages.
+- State: Backend-specific storage. For `KvStore`, creates `state.db` (redb) with KV state and frontiers.
 
 #### state.db Tables (per store, redb)
 
@@ -309,6 +311,15 @@ The root store acts as the **control plane** for all stores in the mesh. Additio
 3. **Materialization**: Each node watches `/stores/` prefix, creates/deletes local stores
 4. **Sync**: Each store syncs independently using its own gossip topic
 
+**Store Type Convention:**
+
+| Store Role         | Type              | Rationale                                                                                                 |
+|--------------------|-------------------|-----------------------------------------------------------------------------------------------------------|
+| Root Store         | KV (always)       | Holds mesh control plane data (`/nodes/*`, `/stores/*`, `/config/*`) which is inherently key-value shaped |
+| Subordinate Stores | Flexible (future) | Can be KV, Blob, SQL, etc. Type declared in root store at `/stores/{uuid}/type`                           |
+
+The root store being KV is a design convention, not a limitation. This simplifies the bootstrap path (`Node::open_store()` knows root is always KV) while allowing subordinate stores to use different backends via factory dispatch in `Mesh::open_channel()`.
+
 **Root Store Keys for Stores:**
 
 ```
@@ -336,6 +347,55 @@ Root Store                     Side Stores
                               │ another store   │
                               │                 │
                               └─────────────────┘
+```
+
+**Mesh API Facade Pattern (Future):**
+
+To solve Primitive Obsession and provide clear semantic distinction between "mesh controller" and "data channel", introduce a `Mesh` wrapper:
+
+```rust
+/// Mesh: Semantic view over a Root StoreHandle
+/// Provides type safety: "Am I allowed to invite peers to this?"
+pub struct Mesh {
+    root: StoreHandle,        // The root/administrator store
+    provider: Arc<dyn PeerProvider>,
+}
+
+impl Mesh {
+    /// Create new mesh - generates UUID, initializes root store
+    pub async fn init(node: &Node, alias: &str) -> Result<Self, NodeError>;
+    
+    /// Peer management - writes /nodes/{pk}/status
+    pub async fn invite_peer(&self, pubkey: PubKey) -> Result<(), NodeError>;
+    pub async fn revoke_peer(&self, pubkey: PubKey) -> Result<(), NodeError>;
+    pub async fn list_peers(&self) -> Result<Vec<(PubKey, PeerStatus)>, NodeError>;
+    
+    /// Factory for subordinate stores - injects PeerProvider
+    pub fn open_channel(&self, uuid: Uuid) -> StoreHandle {
+        StoreHandle::spawn(uuid, ..., Some(self.provider.clone()))
+    }
+    
+    /// Access underlying store for data operations
+    pub fn store(&self) -> &StoreHandle { &self.root }
+}
+```
+
+**Benefits:**
+
+| Aspect | Raw `StoreHandle` | `Mesh` Wrapper |
+|--------|-------------------|----------------|
+| Type Safety | Compiler can't distinguish root vs subordinate | `Mesh` = controller, `StoreHandle` = data channel |
+| Intent | Ambiguous API surface | Clear semantic methods |
+| DI Wiring | Manual per-store | Factory encapsulates injection |
+| Future-Proofing | Generic store logic | Place for mesh policies (retention, etc.) |
+
+**Node API with Mesh:**
+
+```rust
+impl Node {
+    pub fn get_mesh(&self, id: Uuid) -> Option<Mesh>;     // Returns controller
+    pub fn get_store(&self, id: Uuid) -> Option<StoreHandle>; // Raw access
+}
 ```
 
 **HTTP API Access Tokens:**
@@ -476,13 +536,68 @@ Practical model:
 Future:
 - Capability-based permissions: Explore finer-grained write access (e.g., per-key or per-prefix permissions) via capabilities. Exact mechanism TBD.
 
-### Zero-Knowledge of Peer Authorization (ACLs)
+### Zero-Knowledge of Peer Authorization (ACLs) - IMPLEMENTED
 
-**The Issue:** The code verifies who signed an entry, but not if they are allowed to write to that specific store.
+**Solution:** Registry + Dependency Injection with `PeerProvider` trait.
 
-**Attack Vector:** If I know your store UUID, I can connect to you, generate a random Ed25519 keypair, and start syncing validly signed entries into your store. Your node will accept them because the signature matches the public key provided in the entry.
+**Architecture:**
 
-**Remediation:** You need an Access Control List (ACL) layer in `SigChainManager` or `StoreActor` that rejects entries signed by unknown authors unless they are explicitly invited.
+The Root Store acts as the **Identity Provider** (Kernel), providing "User Space" authorization services to specialized Application Stores.
+
+```
+                    ┌─────────────────────────────────┐
+                    │           Node                  │
+                    │  ┌─────────────────────────┐    │
+                    │  │   Root Store (KV)       │    │
+                    │  │   /nodes/*/status       │───┐│
+                    │  └─────────────────────────┘   ││
+                    │              ▲                 ││
+                    │              │ peer_cache      ││
+                    │              │ (HashMap)       ││
+                    │              ▼                 ││
+                    │  ┌─────────────────────────┐   ││
+                    │  │  PeerProvider trait     │◀──┘│
+                    │  │  verify_peer_status()   │    │
+                    │  └───────────┬─────────────┘    │
+                    │              │ injected via Arc │
+                    └──────────────┼──────────────────┘
+                                   │
+       ┌───────────────────────────┼───────────────────────────┐
+       ▼                           ▼                           ▼
+┌──────────────┐           ┌──────────────┐           ┌──────────────┐
+│  StoreActor  │           │  BlobStore   │           │   SQLStore   │
+│  (KV)        │           │  (future)    │           │   (future)   │
+└──────────────┘           └──────────────┘           └──────────────┘
+```
+
+**Implementation:**
+
+1. **`PeerProvider` trait** (`auth.rs`): Generic interface dealing only in `PubKey` and `PeerStatus`
+   ```rust
+   pub trait PeerProvider: Send + Sync {
+       fn verify_peer_status(&self, pubkey: &PubKey, expected: &[PeerStatus]) -> Result<(), StateError>;
+   }
+   ```
+
+2. **Node's peer cache**: Populated from `/nodes/*/status` entries via `start_peer_cache_watcher()`
+   - Initial load on store open
+   - Live updates via store watcher for status changes
+
+3. **`StoreActor::apply_ingested_entry()`**:
+   - Verifies signature first (proves `author_id` authentic)
+   - Checks peer status via `PeerProvider` (`Active` or `Revoked`)
+   - Trusts entries during join (no provider when cache not yet ready)
+
+4. **Network layer defense in depth**:
+   - `GossipManager`: Verifies peer status before processing gossip
+   - `LatticeServer`: Verifies peer status on RPC handlers
+
+**Benefits:**
+
+- **Uniform Security Model**: One invite grants access across all subordinate stores
+- **Mixed-Type Meshes**: KV, SQL, Blob stores all under one mesh
+- **Thin Subordinates**: Focus on their domain, delegate auth to Root
+- **Protocol Agnostic**: UUIDs route to appropriate handles
 
 ### Denial of Service (DoS) via Gossip
 
@@ -519,4 +634,4 @@ Future:
    - Can reconstruct historical peer state at any point
    - Recommended for rigorous verification
 
-*Current behavior:* Signature verified during ingest, peer status checked on network receive.
+*Current behavior:* Signature verified in `apply_ingested_entry`, peer status checked via `PeerProvider` (reads from cache populated by root store watcher).

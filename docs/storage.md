@@ -7,8 +7,11 @@
 ├── identity.key              # Ed25519 private key (not replicated)
 ├── meta.db                   # Global metadata (redb)
 └── stores/{uuid}/
-    ├── logs/{author}.log     # Append-only SignedEntry stream
-    └── state.db              # Per-store KV state (redb)
+    ├── sigchain/             # SigChainManager owns this directory
+    │   └── {author}.log      # Append-only SignedEntry stream
+    ├── state/                # Backend owns this directory
+    │   └── state.db          # Per-store KV state (redb, for KvStore)
+    └── sync/                 # Sync metadata
 ```
 
 ## meta.db (redb)

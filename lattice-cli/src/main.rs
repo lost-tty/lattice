@@ -92,8 +92,8 @@ async fn main() {
     let _ = node_commands::cmd_node_status(&node, None, server.as_deref(), &[], writer.clone()).await;
     
     // Update current store based on root store status
-    if let Some(store) = node.root_store().await.as_ref() {
-        *current_store.write().unwrap() = Some(store.clone());
+    if let Some(store) = node.root_store().ok() {
+        *current_store.write().unwrap() = Some(store);
     }
 
     loop {

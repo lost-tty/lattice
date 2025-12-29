@@ -11,6 +11,7 @@ mod actor;
 mod handle;
 mod peer_sync_store;
 mod error;
+mod authorized_store;
 
 // Public submodules
 pub mod sigchain;
@@ -25,10 +26,12 @@ pub use impls::kv::{KvPatch, Store};
 // Public API - types needed by Node and LatticeServer
 pub use error::{StateError, ParentValidationError};
 pub use impls::kv::KvStore;
-pub use handle::StoreHandle;
+pub use handle::{StoreHandle, StoreInfo, OpenedStore};
 pub use actor::{WatchEvent, WatchEventKind, WatchError};
 pub use peer_sync_store::PeerSyncStore;
+pub use authorized_store::AuthorizedStore;
 // Re-exports from sigchain submodule
 pub use sigchain::sync_state::{SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
 pub use sigchain::log::{Log, LogError};
 pub use sigchain::orphan_store::{GapInfo, OrphanInfo};
+

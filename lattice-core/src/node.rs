@@ -5,7 +5,8 @@ use crate::{
     auth::PeerProvider,
     meta_store::MetaStoreError,
     node_identity::NodeError as IdentityError,
-    store::{KvStore, StateError, StoreHandle, LogError, Log},
+    store::{StateError, StoreHandle, LogError},
+    store_registry::StoreRegistry,
     types::PubKey,
 };
 use std::collections::HashMap;
@@ -62,10 +63,8 @@ pub struct NodeInfo {
     pub stores: Vec<Uuid>,
 }
 
-pub struct StoreInfo {
-    pub store_id: Uuid,
-    pub entries_replayed: u64,
-}
+// Re-export StoreInfo from store module
+pub use crate::store::StoreInfo;
 
 /// Result of accepting a peer's join request
 pub struct JoinAcceptance {
@@ -85,10 +84,16 @@ pub struct PeerInfo {
 /// Events emitted by Node for interested listeners (e.g., LatticeServer)
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
-    /// Store is ready (opened and available)
+    /// Store is ready (opened and available) - informational only
     StoreReady(StoreHandle),
+    /// Request to network this store (server should call register_store)
+    NetworkStore(StoreHandle),
     /// Sync requested (catch up with peers)
-    SyncRequested(StoreHandle),
+    SyncRequested(Uuid),
+    /// Request to join a mesh via peer (server handles network protocol)
+    JoinRequested(PubKey),
+    /// Sync with a specific peer (used after joining to get initial data)
+    SyncWithPeer { store_id: Uuid, peer: PubKey },
 }
 
 /// Event for peer status changes (from watch_peers)
@@ -143,13 +148,18 @@ impl NodeBuilder {
         // Create event channel
         let (event_tx, _) = broadcast::channel(16);
 
+        let node = std::sync::Arc::new(node);
+        let meta = std::sync::Arc::new(meta);
+        let registry = StoreRegistry::new(self.data_dir.clone(), meta.clone(), node.clone());
+        
         Ok(Node {
             data_dir: self.data_dir,
-            node: std::sync::Arc::new(node),
+            node,
             meta,
-            root_store: tokio::sync::RwLock::new(None),
+            registry,
             event_tx,
             peer_cache: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            bootstrap_authors: std::sync::Arc::new(RwLock::new(std::collections::HashSet::new())),
         })
     }
 }
@@ -162,10 +172,12 @@ impl Default for NodeBuilder {
 pub struct Node {
     data_dir: DataDir,
     node: std::sync::Arc<NodeIdentity>,
-    meta: MetaStore,
-    root_store: tokio::sync::RwLock<Option<StoreHandle>>,
+    meta: std::sync::Arc<MetaStore>,
+    registry: StoreRegistry,
     event_tx: broadcast::Sender<NodeEvent>,
     peer_cache: std::sync::Arc<RwLock<HashMap<PubKey, PeerStatus>>>,
+    /// Bootstrap authors trusted during initial sync (cleared after first sync)
+    bootstrap_authors: std::sync::Arc<RwLock<std::collections::HashSet<PubKey>>>,
 }
 
 impl Node {
@@ -184,6 +196,19 @@ impl Node {
     /// Subscribe to node events (e.g., root store activation)
     pub fn subscribe_events(&self) -> broadcast::Receiver<NodeEvent> {
         self.event_tx.subscribe()
+    }
+    
+    /// Set bootstrap authors - trusted for initial sync before peer list is synced.
+    /// These are provided by the inviting peer in JoinResponse.
+    pub fn set_bootstrap_authors(&self, authors: Vec<PubKey>) {
+        let mut bootstrap = self.bootstrap_authors.write().unwrap();
+        bootstrap.clear();
+        bootstrap.extend(authors);
+    }
+    
+    /// Clear bootstrap authors after initial sync completes.
+    pub fn clear_bootstrap_authors(&self) {
+        self.bootstrap_authors.write().unwrap().clear();
     }
 
     /// Get the signing key for Iroh integration (same Ed25519 key).
@@ -211,12 +236,10 @@ impl Node {
     /// Publish this node's name from meta.db to the root store.
     /// Used after joining a mesh to announce ourselves.
     pub async fn publish_name(&self) -> Result<(), NodeError> {
+        let handle = self.root_store()?;
         if let Some(name) = self.name() {
-            let guard = self.root_store.read().await;
-            if let Some(handle) = guard.as_ref() {
-                let name_key = format!("/nodes/{:x}/name", self.node.public_key());
-                handle.put(name_key.as_bytes(), name.as_bytes()).await?;
-            }
+            let name_key = format!("/nodes/{:x}/name", self.node.public_key());
+            handle.put(name_key.as_bytes(), name.as_bytes()).await?;
         }
         Ok(())
     }
@@ -226,22 +249,24 @@ impl Node {
         Ok(self.meta.root_store()?)
     }
     
-    /// Get reference to the cached root store handle (if open)
-    pub async fn root_store(&self) -> tokio::sync::RwLockReadGuard<'_, Option<StoreHandle>> {
-        self.root_store.read().await
+    /// Get the root store handle, opening it if needed.
+    /// Returns error if no root store is configured.
+    pub fn root_store(&self) -> Result<StoreHandle, NodeError> {
+        let root_id = self.meta.root_store()?
+            .ok_or_else(|| NodeError::Actor("No root store configured".to_string()))?;
+        let (handle, _) = self.registry.get_or_open(root_id)?;
+        Ok(handle)
     }
     
-    /// Start the node - opens root store if set and emits StoreReady event.
+    /// Start the node - opens root store if set and emits NetworkStore event.
     pub async fn start(&self) -> Result<(), NodeError> {
         if let Some(id) = self.meta.root_store()? {
-            let (handle, _info) = self.open_store(id).await?;
+            let (handle, _info) = self.registry.get_or_open(id)?;
             
-            // Emit events for listeners
+            // Emit events for listeners - NetworkStore triggers server registration
             let _ = self.event_tx.send(NodeEvent::StoreReady(handle.clone()));
-            let _ = self.event_tx.send(NodeEvent::SyncRequested(handle.clone()));
-            
-            // Store original handle (owns actor thread)
-            *self.root_store.write().await = Some(handle);
+            let _ = self.event_tx.send(NodeEvent::NetworkStore(handle.clone()));
+            let _ = self.event_tx.send(NodeEvent::SyncRequested(id));
             
             // Start watching peer status changes to keep cache updated
             self.start_peer_cache_watcher().await?;
@@ -255,11 +280,11 @@ impl Node {
         if self.meta.root_store()?.is_some() {
             return Err(NodeError::AlreadyInitialized);
         }
-        let store_id = self.create_store()?;
+        let store_id = self.registry.create(Uuid::new_v4())?;
         self.meta.set_root_store(store_id)?;
         
         // Open the store and write our node info as separate keys
-        let (handle, _) = self.open_store(store_id).await?;
+        let (handle, _) = self.registry.get_or_open(store_id)?;
         let pubkey_hex = hex::encode(self.node.public_key());
         
         // Store node metadata as separate keys
@@ -279,29 +304,36 @@ impl Node {
         let status_key = format!("/nodes/{}/status", pubkey_hex);
         handle.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await?;
         
-        // Store the handle - node owns it
-        *self.root_store.write().await = Some(handle);
-        
         // Start watching peer status changes to keep cache updated
         self.start_peer_cache_watcher().await?;
+        
+        // Emit NetworkStore event - server will register for networking
+        let _ = self.event_tx.send(NodeEvent::NetworkStore(handle));
         
         Ok(store_id)
     }
     
+    /// Request to join a mesh via the given peer.
+    /// Emits JoinRequested event - server handles the network protocol.
+    /// After join completes, StoreReady event will be emitted.
+    pub fn join(&self, peer_id: PubKey) -> Result<(), NodeError> {
+        if self.meta.root_store()?.is_some() {
+            return Err(NodeError::AlreadyInitialized);
+        }
+        let _ = self.event_tx.send(NodeEvent::JoinRequested(peer_id));
+        Ok(())
+    }
+    
     /// Complete joining a mesh - creates store with given UUID, sets as root, caches handle.
     /// Called after receiving store_id from peer's JoinResponse.
-    pub async fn complete_join(&self, store_id: Uuid) -> Result<StoreHandle, NodeError> {
+    /// If `via_peer` is provided, server will sync with that peer after registration.
+    pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<StoreHandle, NodeError> {
         // Create local store with that UUID
-        self.create_store_with_uuid(store_id)?;
+        self.registry.create(store_id)?;
         self.meta.set_root_store(store_id)?;
         
-        // Open and cache the handle (original stays in cache)
-        let (handle, _) = self.open_store(store_id).await?;
-        let handle_clone = handle.clone();
-        *self.root_store.write().await = Some(handle);
-        
-        // Emit event for listeners
-        let _ = self.event_tx.send(NodeEvent::StoreReady(handle_clone.clone()));
+        // Open and cache the handle (registry caches it)
+        let (handle, _) = self.registry.get_or_open(store_id)?;
         
         // Start watching peer status changes to keep cache updated
         self.start_peer_cache_watcher().await?;
@@ -309,16 +341,25 @@ impl Node {
         // Publish our name to the store
         let _ = self.publish_name().await;
         
-        Ok(handle_clone)
+        // Emit StoreReady for listeners waiting on join completion (like CLI)
+        let _ = self.event_tx.send(NodeEvent::StoreReady(handle.clone()));
+        
+        // Emit NetworkStore event - server will register for networking
+        let _ = self.event_tx.send(NodeEvent::NetworkStore(handle.clone()));
+        
+        // If we joined via a specific peer, emit SyncWithPeer to get initial data
+        if let Some(peer) = via_peer {
+            let _ = self.event_tx.send(NodeEvent::SyncWithPeer { store_id, peer });
+        }
+        
+        Ok(handle)
     }
     
     // --- Peer Management ---
     
     /// Invite a peer to the mesh. Writes their info with status = invited.
     pub async fn invite_peer(&self, pubkey: crate::types::PubKey) -> Result<(), NodeError> {
-        let guard = self.root_store.read().await;
-        let store = guard.as_ref()
-            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        let store = self.root_store()?;
         
         let pubkey_hex = format!("{:x}", pubkey);
         let my_pubkey_hex = format!("{:x}", self.node.public_key());
@@ -345,9 +386,7 @@ impl Node {
     
     /// List all peers in the mesh with their info
     pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, NodeError> {
-        let guard = self.root_store.read().await;
-        let store = guard.as_ref()
-            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        let store = self.root_store()?;
         
         // Only list keys under /nodes/ prefix
         let nodes = store.list_by_prefix(b"/nodes/", false).await?;
@@ -400,10 +439,8 @@ impl Node {
 
     /// Revoke a peer (sets status to Revoked)
     pub async fn revoke_peer(&self, pubkey: PubKey) -> Result<(), NodeError> {
-        let guard = self.root_store.read().await;
-        if guard.is_none() {
-            return Err(NodeError::Actor("No root store open".to_string()));
-        }
+        // Verify root store is available
+        let _ = self.root_store()?;
         
         // Prevent self-revocation
         if pubkey == self.node.public_key() {
@@ -421,9 +458,7 @@ impl Node {
     
     /// Get a peer's status
     pub async fn get_peer_status(&self, pubkey: PubKey) -> Result<Option<PeerStatus>, NodeError> {
-        let guard = self.root_store.read().await;
-        let store = guard.as_ref()
-            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        let store = self.root_store()?;
         
         let pubkey_hex = hex::encode(pubkey);
         let status_key = format!("/nodes/{}/status", pubkey_hex);
@@ -439,9 +474,7 @@ impl Node {
     
     /// Set a peer's status
     pub async fn set_peer_status(&self, pubkey: PubKey, status: PeerStatus) -> Result<(), NodeError> {
-        let guard = self.root_store.read().await;
-        let store = guard.as_ref()
-            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        let store = self.root_store()?;
         
         let pubkey_hex = hex::encode(pubkey);
         let status_key = format!("/nodes/{}/status", pubkey_hex);
@@ -452,8 +485,11 @@ impl Node {
     /// Accept a peer's join request - verifies they're invited, sets active, returns join info
     pub async fn accept_join(&self, pubkey: PubKey) -> Result<JoinAcceptance, NodeError> {
         // Verify peer is invited (via PeerProvider trait)
-        PeerProvider::verify_peer_status(self, &pubkey, &[PeerStatus::Invited])
-            .map_err(|e| NodeError::Store(e))?;
+        if !PeerProvider::can_join(self, &pubkey) {
+            return Err(NodeError::Store(crate::store::StateError::Unauthorized(
+                format!("Peer {} is not invited", hex::encode(pubkey))
+            )));
+        }
         
         // Get root store ID
         let store_id = self.meta.root_store()?
@@ -486,53 +522,12 @@ impl Node {
     }
     
     fn create_store_internal(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
-        self.data_dir.ensure_store_dirs(store_id)?;
-        let _ = KvStore::open(self.data_dir.store_state_db(store_id))?;
-        self.meta.add_store(store_id)?;
+        self.registry.create(store_id)?;
         Ok(store_id)
     }
 
     pub async fn open_store(&self, store_id: Uuid) -> Result<(StoreHandle, StoreInfo), NodeError> {
-        // Check if this store is already cached as root_store
-        {
-            let guard = self.root_store.read().await;
-            if let Some(ref handle) = *guard {
-                if handle.id() == store_id {
-                    let info = StoreInfo { store_id, entries_replayed: 0 };
-                    return Ok((handle.clone(), info));
-                }
-            }
-        }
-        
-        // Not cached, open it fresh
-        self.data_dir.ensure_store_dirs(store_id)?;
-        
-        let author_id_hex = format!("{:x}", self.node.public_key());
-        let log_path = self.data_dir.store_log_file(store_id, &author_id_hex);
-        let logs_dir = log_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        
-        let store = KvStore::open(self.data_dir.store_state_db(store_id))?;
-        let entries_replayed = if log_path.exists() {
-            let log = Log::open(&log_path)?;
-            let iter = log.iter()?;
-            store.replay_entries(iter)?
-        } else {
-            0
-        };
-        
-        let info = StoreInfo { store_id, entries_replayed };
-        
-        // Spawn actor thread - actor owns store, sigchain manager, and node copy
-        // Note: peer_provider is None during open_store; peer cache is populated later
-        let handle = StoreHandle::spawn(
-            store_id,
-            store,
-            logs_dir,
-            (*self.node).clone(),
-            None, // peer_provider populated after cache is ready
-        );
-        
-        Ok((handle, info))
+        Ok(self.registry.get_or_open(store_id)?)
     }
     
     /// Watch for peer status changes on the root store.
@@ -540,9 +535,7 @@ impl Node {
     /// 
     /// Both the initial snapshot and receiver provide typed `(pubkey, PeerStatus)` data.
     pub async fn watch_peers(&self) -> Result<(Vec<(String, PeerStatus)>, broadcast::Receiver<PeerWatchEvent>), NodeError> {
-        let guard = self.root_store.read().await;
-        let store = guard.as_ref()
-            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        let store = self.root_store()?;
         
         let pattern = r"^/nodes/([a-f0-9]+)/status$";
         let (initial, mut raw_rx) = store.watch(pattern).await?;
@@ -583,9 +576,7 @@ impl Node {
     /// Start watching peer status changes and keep cache updated.
     /// Called after root store opens.
     async fn start_peer_cache_watcher(&self) -> Result<(), NodeError> {
-        let guard = self.root_store.read().await;
-        let store = guard.as_ref()
-            .ok_or_else(|| NodeError::Actor("No root store open".to_string()))?;
+        let store = self.root_store()?;
         
         // Watch for peer status changes
         let pattern = r"^/nodes/([a-f0-9]+)/status$";
@@ -643,17 +634,39 @@ impl Node {
 }
 
 impl PeerProvider for Node {
-    fn verify_peer_status(&self, pubkey: &PubKey, expected: &[PeerStatus]) -> Result<(), StateError> {
+    fn can_join(&self, peer: &PubKey) -> bool {
         let cache = self.peer_cache.read().unwrap();
-        match cache.get(pubkey) {
-            Some(status) if expected.contains(status) => Ok(()),
-            Some(status) => Err(StateError::Unauthorized(format!(
-                "Peer status is '{:?}', expected one of {:?}", status, expected
-            ))),
-            None => Err(StateError::Unauthorized(format!(
-                "Peer {} not found", hex::encode(pubkey)
-            ))),
+        matches!(cache.get(peer), Some(PeerStatus::Invited))
+    }
+    
+    fn can_connect(&self, peer: &PubKey) -> bool {
+        // Check bootstrap authors first (trusted during initial sync)
+        if self.bootstrap_authors.read().unwrap().contains(peer) {
+            return true;
         }
+        let cache = self.peer_cache.read().unwrap();
+        matches!(cache.get(peer), Some(PeerStatus::Active) | Some(PeerStatus::Dormant))
+    }
+    
+    fn can_accept_entry(&self, author: &PubKey) -> bool {
+        // Check bootstrap authors first (trusted during initial sync)
+        if self.bootstrap_authors.read().unwrap().contains(author) {
+            return true;
+        }
+        let cache = self.peer_cache.read().unwrap();
+        matches!(
+            cache.get(author),
+            Some(PeerStatus::Active) | Some(PeerStatus::Dormant) | Some(PeerStatus::Revoked)
+        )
+    }
+    
+    fn list_acceptable_authors(&self) -> Vec<PubKey> {
+        // Return all peers that can accept entries (Active, Dormant, Revoked)
+        let cache = self.peer_cache.read().unwrap();
+        cache.iter()
+            .filter(|(_, status)| matches!(status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
+            .map(|(pubkey, _)| *pubkey)
+            .collect()
     }
 }
 
@@ -717,7 +730,7 @@ mod tests {
             .expect("create node");
         
         // Initially no root store
-        assert!(node.root_store().await.is_none());
+        assert!(node.root_store().is_err());
         
         // Init creates root store
         let root_id = node.init().await.expect("init failed");
@@ -777,7 +790,7 @@ mod tests {
             .build()
             .expect("create node");
         node.init().await.expect("init");
-        let store = node.root_store().await;
+        let store = node.root_store();
         let store = store.as_ref().unwrap();
         
         // Get baseline seq after init
@@ -819,7 +832,7 @@ mod tests {
         let pubkey_hex = hex::encode(node.node_id());
         let name_key = format!("/nodes/{}/name", pubkey_hex);
         {
-            let store = node.root_store().await;
+            let store = node.root_store();
             let store = store.as_ref().unwrap();
             let stored_name = store.get(name_key.as_bytes()).await.unwrap();
             assert_eq!(stored_name, Some(initial_name.as_bytes().to_vec()));
@@ -834,7 +847,7 @@ mod tests {
         
         // Verify store updated
         {
-            let store = node.root_store().await;
+            let store = node.root_store();
             let store = store.as_ref().unwrap();
             let stored_name = store.get(name_key.as_bytes()).await.unwrap();
             assert_eq!(stored_name, Some(new_name.as_bytes().to_vec()));
@@ -912,8 +925,7 @@ mod tests {
         
         // Step 1: Node A initializes
         let store_id = node_a.init().await.expect("A init");
-        let store_a = node_a.root_store().await;
-        let store_a = store_a.as_ref().expect("A has root store");
+        let store_a = node_a.root_store().expect("A has root store");
         
         // Step 2: A invites B
         node_a.invite_peer(node_b.node_id()).await.expect("invite B");
@@ -923,7 +935,7 @@ mod tests {
         assert!(peers.iter().any(|p| p.status == PeerStatus::Invited));
         
         // Step 3: B "joins" (complete_join simulates receiving JoinResponse)
-        let store_b = node_b.complete_join(store_id).await.expect("B join");
+        let store_b = node_b.complete_join(store_id, None).await.expect("B join");
         
         // Verify B has the same store ID
         assert_eq!(store_b.id(), store_id);
@@ -959,7 +971,7 @@ mod tests {
             .expect("create node");
         node.init().await.expect("init");
         
-        let store = node.root_store().await;
+        let store = node.root_store();
         let store = store.as_ref().unwrap();
         
         // Watch for keys starting with /test/
@@ -990,7 +1002,7 @@ mod tests {
             .expect("create node");
         node.init().await.expect("init");
         
-        let store = node.root_store().await;
+        let store = node.root_store();
         let store = store.as_ref().unwrap();
         
         // First put, then watch, then delete
@@ -1016,7 +1028,7 @@ mod tests {
             .expect("create node");
         node.init().await.expect("init");
         
-        let store = node.root_store().await;
+        let store = node.root_store();
         let store = store.as_ref().unwrap();
         
         // Watch only /nodes/
@@ -1044,7 +1056,7 @@ mod tests {
             .expect("create node");
         node.init().await.expect("init");
         
-        let store = node.root_store().await;
+        let store = node.root_store();
         let store = store.as_ref().unwrap();
         
         // Watch for peer status keys specifically
@@ -1072,7 +1084,7 @@ mod tests {
             .expect("create node");
         node.init().await.expect("init");
         
-        let store = node.root_store().await;
+        let store = node.root_store();
         let store = store.as_ref().unwrap();
         
         // Invalid regex should return error
@@ -1091,7 +1103,7 @@ mod tests {
             .expect("create node");
         node.init().await.expect("init");
         
-        let store = node.root_store().await;
+        let store = node.root_store();
         let store = store.as_ref().unwrap();
         
         // Two watchers with different patterns

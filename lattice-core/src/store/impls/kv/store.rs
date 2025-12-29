@@ -31,9 +31,13 @@ pub struct KvStore {
 }
 
 impl KvStore {
-    /// Open or create a state at the given path
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, StateError> {
-        let db = Database::create(path)?;
+    /// Open or create a KvStore in the given directory.
+    /// Creates the directory (if needed) and `state.db` inside.
+    pub fn open(state_dir: impl AsRef<Path>) -> Result<Self, StateError> {
+        let dir = state_dir.as_ref();
+        std::fs::create_dir_all(dir)?;
+        let db_path = dir.join("state.db");
+        let db = Database::create(db_path)?;
         Ok(Self { db })
     }
     
@@ -501,7 +505,7 @@ mod tests {
 
     #[test]
     fn test_single_write_one_head() {
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();
@@ -549,7 +553,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_writes_multiple_heads() {
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();
@@ -583,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_merge_write_single_head() {
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();
@@ -632,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_delete_preserves_concurrent_heads() {
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();
@@ -687,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_delete_all_heads_removes_key() {
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();
@@ -735,7 +739,7 @@ mod tests {
         // 3. Bob (offline): Put K = v2 citing H1 (doesn't know about delete)
         // 4. Result: Should have 2 heads (tombstone + v2), not just v2
         
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();
@@ -793,7 +797,7 @@ mod tests {
         // 4. Charlie (sees both) creates K = v3 citing H1 and H2
         // 5. Result: 1 head (merged)
         
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();
@@ -853,7 +857,7 @@ mod tests {
         // Applying the same entry twice should not duplicate the head
         // This is critical for log replay and network message deduplication
         
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();
@@ -893,10 +897,10 @@ mod tests {
         // Simulates: put a=1, put a=2, then replay from log
         // After replay, should have only 1 head (the latest)
         
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
-        let _ = std::fs::remove_file(&path);
+        let _tmp = tempfile::tempdir().unwrap(); let state_dir = _tmp.path().to_path_buf();
         
-        let state = KvStore::open(&path).unwrap();
+        let state = KvStore::open(&state_dir).unwrap();
+        let state_db = state_dir.join("state.db");
         let node = NodeIdentity::generate();
         
         // First write: a = 1
@@ -926,8 +930,8 @@ mod tests {
         
         // Now simulate log replay: clear state and re-apply both entries
         drop(state);
-        let _ = std::fs::remove_file(&path);
-        let state = KvStore::open(&path).unwrap();
+        let _ = std::fs::remove_file(&state_db);  // Remove state.db file to reset
+        let state = KvStore::open(&state_dir).unwrap();
         
         // Check what parent_hashes entry2 actually has
         let proto: ProtoSignedEntry = entry2.clone().into();
@@ -944,8 +948,6 @@ mod tests {
         let heads = state.get_heads(b"/key").unwrap();
         assert_eq!(heads.len(), 1, "After replay entry2, should have 1 head, got {}: {:?}", 
             heads.len(), heads.iter().map(|h| String::from_utf8_lossy(&h.value)).collect::<Vec<_>>());
-        
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -955,8 +957,8 @@ mod tests {
         // This simulates: put a=1, put a=2, then restart and replay from log
         // The replay should skip already-applied entries
         
-        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().join("test.db");
-        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.db");
+        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().to_path_buf();
+        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.log");
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
         
@@ -1017,8 +1019,8 @@ mod tests {
         use crate::store::sigchain::SigChain;
         
         // Fast resume: entries already applied are skipped based on per-author seq
-        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().join("test.db");
-        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.db");
+        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().to_path_buf();
+        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.log");
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
         
@@ -1065,8 +1067,8 @@ mod tests {
         
         // Simulates: log has 5 entries, state.db only has first 3 applied (crash)
         // Replay should apply entries 4 and 5
-        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().join("test.db");
-        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.db");
+        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().to_path_buf();
+        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.log");
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
         
@@ -1122,14 +1124,12 @@ mod tests {
         // 4. Restore state.db from backup
         // 5. Restart and replay - should apply entries 4-5
         
-        let _tmp_state = tempfile::tempdir().unwrap(); let state_path = _tmp_state.path().join("test.db");
-        let _tmp_backup = tempfile::tempdir().unwrap(); let backup_path = _tmp_backup.path().join("test.db");
-        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.db");
-        let _ = std::fs::remove_file(&state_path);
-        let _ = std::fs::remove_file(&backup_path);
-        let _ = std::fs::remove_file(&log_path);
+        let _tmp_state = tempfile::tempdir().unwrap(); let state_dir = _tmp_state.path().to_path_buf();
+        let _tmp_backup = tempfile::tempdir().unwrap(); let backup_file = _tmp_backup.path().join("backup.db");
+        let _tmp_log = tempfile::tempdir().unwrap(); let log_path = _tmp_log.path().join("test.log");
         
-        let state = KvStore::open(&state_path).unwrap();
+        let state = KvStore::open(&state_dir).unwrap();
+        let state_db_file = state_dir.join("state.db");  // KvStore creates state.db inside state_dir
         let node = NodeIdentity::generate();
         let author = node.public_key();
         let mut sigchain = SigChain::new(&log_path, TEST_STORE, PubKey::from(*node.public_key())).unwrap();
@@ -1151,10 +1151,10 @@ mod tests {
         
         // Close and backup state.db
         drop(state);
-        std::fs::copy(&state_path, &backup_path).unwrap();
+        std::fs::copy(&state_db_file, &backup_file).unwrap();
         
         // Reopen and apply entries 4-5
-        let state = KvStore::open(&state_path).unwrap();
+        let state = KvStore::open(&state_dir).unwrap();
         for i in 4u64..=5 {
             let clock = MockClock::new(i * 1000);
             let entry = Entry::next_after(sigchain.tip())
@@ -1173,10 +1173,10 @@ mod tests {
         // Now restore state.db from backup (simulating crash/rollback)
         drop(state);
         drop(sigchain);
-        std::fs::copy(&backup_path, &state_path).unwrap();
+        std::fs::copy(&backup_file, &state_db_file).unwrap();
         
         // Restart and replay
-        let state = KvStore::open(&state_path).unwrap();
+        let state = KvStore::open(&state_dir).unwrap();
         
         // State should be at seq 3 (restored from backup)
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 3, "Restored to seq 3");
@@ -1190,10 +1190,6 @@ mod tests {
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 5, "seq updated to 5");
         assert_eq!(state.get_heads(b"/key4").unwrap().len(), 1, "key4 now applied");
         assert_eq!(state.get_heads(b"/key5").unwrap().len(), 1, "key5 now applied");
-        
-        let _ = std::fs::remove_file(&state_path);
-        let _ = std::fs::remove_file(&backup_path);
-        let _ = std::fs::remove_file(&log_path);
     }
 
     #[test]
@@ -1290,13 +1286,10 @@ mod tests {
     #[test]
     fn test_conflict_deterministic_resolution() {
         // Test that two nodes writing the same key resolve deterministically
-        let _tmp_a = tempfile::tempdir().unwrap(); let path_a = _tmp_a.path().join("test.db");
-        let _tmp_b = tempfile::tempdir().unwrap(); let path_b = _tmp_b.path().join("test.db");
-        let _tmp_log_a = tempfile::tempdir().unwrap(); let log_path_a = _tmp_log_a.path().join("test.db");
-        let _tmp_log_b = tempfile::tempdir().unwrap(); let log_path_b = _tmp_log_b.path().join("test.db");
-        for p in [&path_a, &path_b, &log_path_a, &log_path_b] {
-            let _ = std::fs::remove_file(p);
-        }
+        let _tmp_a = tempfile::tempdir().unwrap(); let path_a = _tmp_a.path().to_path_buf();
+        let _tmp_b = tempfile::tempdir().unwrap(); let path_b = _tmp_b.path().to_path_buf();
+        let _tmp_log_a = tempfile::tempdir().unwrap(); let log_path_a = _tmp_log_a.path().join("a.log");
+        let _tmp_log_b = tempfile::tempdir().unwrap(); let log_path_b = _tmp_log_b.path().join("b.log");
         
         let store_a = KvStore::open(&path_a).unwrap();
         let store_b = KvStore::open(&path_b).unwrap();
@@ -1364,7 +1357,7 @@ mod tests {
     #[test]
     fn test_hlc_tiebreak_explicit() {
         // Explicit test: equal HLC, winner determined by node ID (author bytes)
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();
@@ -1418,7 +1411,7 @@ mod tests {
     /// - The merge entry arrives BEFORE the entries it merges!
     #[test]
     fn test_multinode_sync_wrong_order() {
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();
@@ -1493,7 +1486,7 @@ mod tests {
 
     #[test]
     fn test_list_by_prefix_filters_tombstones() {
-        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().join("test.db");
+        let _tmp = tempfile::tempdir().unwrap(); let path = _tmp.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
         
         let state = KvStore::open(&path).unwrap();

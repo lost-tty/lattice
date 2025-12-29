@@ -20,6 +20,7 @@ pub mod store;
 pub mod types;
 pub mod head;
 pub mod auth;
+pub mod store_registry;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (16 MB)

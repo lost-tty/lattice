@@ -4,7 +4,7 @@ use crate::{
     Uuid, PubKey,
     node::NodeError,
     node_identity::NodeIdentity,
-    auth::PeerProvider,
+
 };
 use crate::entry::SignedEntry;
 use super::actor::{StoreCmd, StoreActor};
@@ -12,8 +12,14 @@ use crate::store::impls::kv::KvStore;
 use super::SyncNeeded;
 use tokio::sync::{broadcast, mpsc};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::thread;
+
+/// Information about a store open operation
+#[derive(Debug, Clone)]
+pub struct StoreInfo {
+    pub store_id: Uuid,
+    pub entries_replayed: u64,
+}
 
 /// A handle to a specific store - wraps channel to actor thread
 #[derive(Debug)]
@@ -37,22 +43,83 @@ impl Clone for StoreHandle {
     }
 }
 
-impl StoreHandle {
-    /// Spawn a store actor in a new thread, returning a handle to it.
-    /// Uses std::thread since redb is blocking.
+/// An opened store without an actor running.
+/// Use `into_handle()` to spawn the actor when ready.
+pub struct OpenedStore {
+    store_id: Uuid,
+    store_dir: PathBuf,
+    state: KvStore,
+    entries_replayed: u64,
+}
+
+impl OpenedStore {
+    /// Open or create a store from its directory.
+    /// - Creates directories if needed
+    /// - Opens KvStore (creates empty db if needed)
+    /// - Replays sigchain logs for crash recovery
     /// 
-    /// On spawn, replays all log files to ensure crash consistency.
-    /// This recovers any entries that were committed to sigchain but not applied to state.
-    pub fn spawn(
-        store_id: Uuid,
-        state: KvStore,
-        logs_dir: PathBuf,
+    /// Does NOT spawn actor - use `into_handle()` when ready.
+    pub fn open(store_id: Uuid, store_dir: PathBuf) -> Result<Self, super::StateError> {
+        let state_dir = store_dir.join("state");
+        let sigchain_dir = store_dir.join("sigchain");
+        
+        // Ensure directories exist
+        std::fs::create_dir_all(&sigchain_dir)?;
+        
+        // Open KvStore (creates state/ dir and state.db inside)
+        let state = KvStore::open(&state_dir)?;
+        
+        // Crash recovery: replay all log files
+        let entries_replayed = Self::replay_sigchain_logs(&sigchain_dir, &state);
+        
+        Ok(Self { store_id, store_dir, state, entries_replayed })
+    }
+    
+    /// Get the store ID
+    pub fn id(&self) -> Uuid {
+        self.store_id
+    }
+    
+    /// Spawn actor and get a handle.
+    /// Consumes the OpenedStore.
+    pub fn into_handle(
+        self,
         node: NodeIdentity,
-        peer_provider: Option<Arc<dyn PeerProvider>>,
-    ) -> Self {
-        // Crash recovery: replay all log files to recover entries
-        // that were committed to sigchain but not applied to state
-        if let Ok(entries) = std::fs::read_dir(&logs_dir) {
+    ) -> (StoreHandle, StoreInfo) {
+        let sigchain_dir = self.store_dir.join("sigchain");
+        
+        // Set up channels and spawn actor
+        let (tx, rx) = mpsc::channel(32);
+        let (entry_tx, _entry_rx) = broadcast::channel(64);
+        let (sync_needed_tx, _sync_needed_rx) = broadcast::channel(64);
+        let actor = StoreActor::new(self.store_id, self.state, sigchain_dir, node, rx, entry_tx.clone(), sync_needed_tx.clone());
+        let actor_handle = thread::spawn(move || actor.run());
+        
+        let handle = StoreHandle { 
+            store_id: self.store_id, 
+            tx, 
+            actor_handle: Some(actor_handle), 
+            entry_tx, 
+            sync_needed_tx 
+        };
+        let info = StoreInfo { store_id: self.store_id, entries_replayed: self.entries_replayed };
+        (handle, info)
+    }
+    
+    /// Access the underlying state directly (no actor).
+    pub fn state(&self) -> &KvStore {
+        &self.state
+    }
+    
+    /// Get number of entries replayed during crash recovery.
+    pub fn entries_replayed(&self) -> u64 {
+        self.entries_replayed
+    }
+    
+    /// Replay all sigchain log files to recover entries not yet applied to state.
+    fn replay_sigchain_logs(sigchain_dir: &std::path::Path, state: &KvStore) -> u64 {
+        let mut total_replayed = 0u64;
+        if let Ok(entries) = std::fs::read_dir(sigchain_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.extension().map_or(false, |ext| ext == "log") {
@@ -62,18 +129,26 @@ impl StoreHandle {
                             if replayed > 0 {
                                 eprintln!("[info] Crash recovery: replayed {} entries from {:?}", replayed, path.file_name());
                             }
+                            total_replayed += replayed;
                         }
                     }
                 }
             }
         }
-        
-        let (tx, rx) = mpsc::channel(32);
-        let (entry_tx, _entry_rx) = broadcast::channel(64);
-        let (sync_needed_tx, _sync_needed_rx) = broadcast::channel(64);
-        let actor = StoreActor::new(store_id, state, logs_dir, node, peer_provider, rx, entry_tx.clone(), sync_needed_tx.clone());
-        let handle = thread::spawn(move || actor.run());
-        Self { store_id, tx, actor_handle: Some(handle), entry_tx, sync_needed_tx }
+        total_replayed
+    }
+}
+
+impl StoreHandle {
+    /// Open a store and spawn actor in one step.
+    /// Convenience method combining `OpenedStore::open()` + `into_handle()`.
+    pub fn open(
+        store_id: Uuid,
+        store_dir: PathBuf,
+        node: NodeIdentity,
+    ) -> Result<(Self, StoreInfo), super::StateError> {
+        let opened = OpenedStore::open(store_id, store_dir)?;
+        Ok(opened.into_handle(node))
     }
     
     pub fn id(&self) -> Uuid { self.store_id }

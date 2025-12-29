@@ -2,10 +2,12 @@
 
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
 use lattice_core::{Node, NodeError, NodeEvent, PeerStatus, Uuid, StoreHandle, PubKey};
-use lattice_core::auth::PeerProvider;
+use lattice_core::store::AuthorizedStore;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
+use std::collections::HashMap;
+use tokio::sync::RwLock;
 use lattice_core::proto::network::{PeerMessage, peer_message, JoinRequest, JoinResponse, StatusRequest};
 
 /// Result of a sync operation with a peer
@@ -14,11 +16,17 @@ pub struct SyncResult {
     pub entries_sent_by_peer: u64,
 }
 
+/// Type alias for the stores registry - shared between SyncProtocol and LatticeServer
+type StoresRegistry = Arc<RwLock<HashMap<Uuid, AuthorizedStore>>>;
+
 /// LatticeServer wraps Node + Endpoint + Gossip and provides mesh networking methods.
+/// All registered stores are wrapped in AuthorizedStore for network security.
 pub struct LatticeServer {
     node: Arc<Node>,
     endpoint: LatticeEndpoint,
     gossip_manager: Arc<super::gossip_manager::GossipManager>,
+    /// Registry of authorized stores - network only interacts with registered stores
+    stores: StoresRegistry,
     #[allow(dead_code)]
     router: Router,
 }
@@ -26,6 +34,7 @@ pub struct LatticeServer {
 /// Protocol handler for lattice sync connections
 struct SyncProtocol {
     node: Arc<Node>,
+    stores: StoresRegistry,
 }
 
 impl std::fmt::Debug for SyncProtocol {
@@ -37,8 +46,9 @@ impl std::fmt::Debug for SyncProtocol {
 impl ProtocolHandler for SyncProtocol {
     fn accept(&self, conn: Connection) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
         let node = self.node.clone();
+        let stores = self.stores.clone();
         Box::pin(async move {
-            if let Err(e) = handle_connection(node, conn).await {
+            if let Err(e) = handle_connection(node, stores, conn).await {
                 tracing::error!(error = %e, "Connection handler error");
             }
             Ok(())
@@ -59,7 +69,11 @@ impl LatticeServer {
     #[tracing::instrument(skip(node, endpoint))]
     pub async fn new(node: Arc<Node>, endpoint: LatticeEndpoint) -> Result<Arc<Self>, super::error::ServerError> {
         let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint));
-        let sync_protocol = SyncProtocol { node: node.clone() };
+        
+        // Create shared stores registry - used by both SyncProtocol and LatticeServer
+        let stores: StoresRegistry = Arc::new(RwLock::new(HashMap::new()));
+        
+        let sync_protocol = SyncProtocol { node: node.clone(), stores: stores.clone() };
         let router = Router::builder(endpoint.endpoint().clone())
             .accept(LATTICE_ALPN, sync_protocol)
             .accept(iroh_gossip::ALPN, gossip_manager.gossip().clone())
@@ -69,55 +83,150 @@ impl LatticeServer {
             node: node.clone(), 
             endpoint,
             gossip_manager: gossip_manager.clone(),
+            stores,
             router,
         });
         
-        // Subscribe to events before spawning handler to prevent race condition.
-        // If we subscribe inside the spawned task, events emitted between spawn()
-        // and subscribe() would be lost (broadcast channels don't buffer for late subscribers).
+        // Subscribe to node events and spawn handler
         let event_rx = node.subscribe_events();
-        
-        // Spawn background task to handle store events
         let server_clone = server.clone();
         tokio::spawn(async move {
-            Self::run_node_ready_handler(server_clone, event_rx).await;
+            Self::run_event_handler(server_clone, event_rx).await;
         });
         
         Ok(server)
     }
     
-    async fn run_node_ready_handler(server: Arc<Self>, mut event_rx: tokio::sync::broadcast::Receiver<NodeEvent>) {
+    /// Handle node events - registers stores on NetworkStore event
+    async fn run_event_handler(server: Arc<Self>, mut event_rx: tokio::sync::broadcast::Receiver<NodeEvent>) {
         while let Ok(event) = event_rx.recv().await {
             match event {
-                NodeEvent::StoreReady(store) => {
-                    tracing::info!(store_id = %store.id(), "Node ready");
+                NodeEvent::JoinRequested(peer_id) => {
+                    // Convert PubKey to iroh::PublicKey
+                    let iroh_peer_id = iroh::PublicKey::from_bytes(&peer_id)
+                        .expect("PubKey should be valid 32 bytes");
                     
-                    // Subscribe BEFORE gossip setup to avoid missing events
-                    // (broadcast channels don't buffer for late subscribers)
-                    let sync_needed_rx = store.subscribe_sync_needed();
-                    
-                    if let Err(e) = server.gossip_manager.setup_for_store(server.node.clone(), &store).await {
-                        tracing::error!(error = %e, "Gossip setup failed");
+                    if let Err(e) = Self::handle_join_request_event(&server, iroh_peer_id).await {
+                        tracing::error!(error = %e, "Join failed");
                     }
-                    
-                    Self::spawn_gap_watcher(server.clone(), store.clone());
-                    Self::spawn_sync_coordinator_with_rx(server.clone(), store, sync_needed_rx);
                 }
-                NodeEvent::SyncRequested(store) => {
-                    if let Ok(results) = server.sync_all(&store).await {
-                        if !results.is_empty() {
-                            let total: u64 = results.iter().map(|r| r.entries_applied).sum();
-                            tracing::info!(entries = total, peers = results.len(), "Sync complete");
+                NodeEvent::NetworkStore(store) => {
+                    // Node explicitly requested this store be networked
+                    server.register_store(store).await;
+                }
+                NodeEvent::SyncWithPeer { store_id, peer } => {
+                    // Sync with a specific peer (e.g., after joining mesh)
+                    let iroh_peer_id = iroh::PublicKey::from_bytes(&peer)
+                        .expect("PubKey should be valid 32 bytes");
+                    
+                    tracing::debug!("[Sync] Syncing with peer to get data...");
+                    if let Ok(result) = server.sync_with_peer_by_id(store_id, iroh_peer_id, &[]).await {
+                        tracing::debug!("[Sync] Complete: {} entries", result.entries_applied);
+                    }
+                }
+                NodeEvent::SyncRequested(store_id) => {
+                    if server.stores.read().await.contains_key(&store_id) {
+                        if let Ok(results) = server.sync_all_by_id(store_id).await {
+                            if !results.is_empty() {
+                                let total: u64 = results.iter().map(|r| r.entries_applied).sum();
+                                tracing::info!(entries = total, peers = results.len(), "Sync complete");
+                            }
                         }
                     }
                 }
+                _ => {} // Ignore other events
             }
         }
     }
     
+    /// Handle JoinRequested event - does network protocol
+    async fn handle_join_request_event(server: &Arc<Self>, peer_id: iroh::PublicKey) -> Result<(), NodeError> {
+        tracing::info!(peer = %peer_id.fmt_short(), "Joining mesh via peer");
+        
+        let conn = server.endpoint.connect(peer_id).await
+            .map_err(|e| NodeError::Actor(format!("Connection failed: {}", e)))?;
+        
+        let (send, recv) = conn.open_bi().await
+            .map_err(|e| NodeError::Actor(format!("Failed to open stream: {}", e)))?;
+        
+        let mut sink = MessageSink::new(send);
+        let mut stream = MessageStream::new(recv);
+        
+        // Send JoinRequest
+        let req = PeerMessage {
+            message: Some(peer_message::Message::JoinRequest(JoinRequest {
+                node_pubkey: server.node.node_id().to_vec(),
+            })),
+        };
+        sink.send(&req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
+        sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
+        
+        // Receive JoinResponse
+        let msg = stream.recv().await
+            .map_err(|e| NodeError::Actor(e.to_string()))?
+            .ok_or_else(|| NodeError::Actor("Peer closed stream".to_string()))?;
+        
+        match msg.message {
+            Some(peer_message::Message::JoinResponse(resp)) => {
+                let store_uuid = lattice_core::Uuid::from_slice(&resp.store_uuid)
+                    .map_err(|_| NodeError::Actor("Invalid UUID from peer".to_string()))?;
+                
+                // Convert iroh::PublicKey to PubKey for complete_join
+                let via_peer = PubKey::from(*peer_id.as_bytes());
+                
+                // Extract and set bootstrap authors before sync
+                // This allows us to accept entries during initial sync
+                let bootstrap_authors: Vec<PubKey> = resp.authorized_authors.iter()
+                    .filter_map(|bytes| PubKey::try_from(bytes.as_slice()).ok())
+                    .collect();
+                
+                if !bootstrap_authors.is_empty() {
+                    tracing::debug!("[Join] Setting {} bootstrap authors", bootstrap_authors.len());
+                    server.node.set_bootstrap_authors(bootstrap_authors);
+                }
+                
+                let _handle = server.node.complete_join(store_uuid, Some(via_peer)).await?;
+                
+                Ok(())
+            }
+            _ => Err(NodeError::Actor("Unexpected response".to_string())),
+        }
+    }
+    
+    /// Explicitly register a store for network access.
+    /// This creates an AuthorizedStore wrapper and sets up gossip/sync infrastructure.
+    /// Stores must be registered before they can be accessed via sync/fetch requests.
+    pub async fn register_store(self: &Arc<Self>, store: StoreHandle) {
+        let store_id = store.id();
+        
+        // Check if already registered
+        if self.stores.read().await.contains_key(&store_id) {
+            tracing::debug!(store_id = %store_id, "Store already registered");
+            return;
+        }
+        
+        tracing::info!(store_id = %store_id, "Registering store for network");
+        
+        // Create AuthorizedStore - the single entry point for network authorization
+        let authorized_store = AuthorizedStore::new(store, self.node.clone());
+        
+        // Register in store registry BEFORE setting up background tasks
+        self.stores.write().await.insert(store_id, authorized_store.clone());
+        
+        // Subscribe BEFORE gossip setup to avoid missing events
+        let sync_needed_rx = authorized_store.subscribe_sync_needed();
+        
+        if let Err(e) = self.gossip_manager.setup_for_store(self.node.clone(), authorized_store.clone()).await {
+            tracing::error!(error = %e, "Gossip setup failed");
+        }
+        
+        Self::spawn_gap_watcher(self.clone(), authorized_store.clone());
+        Self::spawn_sync_coordinator_with_rx(self.clone(), authorized_store, sync_needed_rx);
+    }
+    
     /// Spawn gap watcher that triggers sync when orphans are detected.
     /// Uses deduplication to avoid event storms.
-    fn spawn_gap_watcher(server: Arc<Self>, store: StoreHandle) {
+    fn spawn_gap_watcher(server: Arc<Self>, store: AuthorizedStore) {
         tokio::spawn(async move {
             let Ok(mut gap_rx) = store.subscribe_gaps().await else { return };
             
@@ -164,7 +273,7 @@ impl LatticeServer {
     /// 3. Still out of sync? → trigger sync
     fn spawn_sync_coordinator_with_rx(
         server: Arc<Self>, 
-        store: StoreHandle,
+        store: AuthorizedStore,
         mut sync_rx: tokio::sync::broadcast::Receiver<lattice_core::SyncNeeded>,
     ) {
         const COOLDOWN_SECS: u64 = 30;
@@ -383,53 +492,9 @@ impl LatticeServer {
         results.into_iter().collect()
     }
     
-    /// Join an existing mesh by connecting to a peer.
-    pub async fn join_mesh(&self, peer_id: iroh::PublicKey) -> Result<StoreHandle, NodeError> {
-        let conn = self.endpoint.connect(peer_id).await
-            .map_err(|e| NodeError::Actor(format!("Connection failed: {}", e)))?;
-        
-        let (send, recv) = conn.open_bi().await
-            .map_err(|e| NodeError::Actor(format!("Failed to open stream: {}", e)))?;
-        
-        let mut sink = MessageSink::new(send);
-        let mut stream = MessageStream::new(recv);
-        
-        // Send JoinRequest
-        let req = PeerMessage {
-            message: Some(peer_message::Message::JoinRequest(JoinRequest {
-                node_pubkey: self.node.node_id().to_vec(),
-            })),
-        };
-        sink.send(&req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
-        sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
-        
-        // Receive JoinResponse
-        let msg = stream.recv().await
-            .map_err(|e| NodeError::Actor(e.to_string()))?
-            .ok_or_else(|| NodeError::Actor("Peer closed stream".to_string()))?;
-        
-        match msg.message {
-            Some(peer_message::Message::JoinResponse(resp)) => {
-                let store_uuid = lattice_core::Uuid::from_slice(&resp.store_uuid)
-                    .map_err(|_| NodeError::Actor("Invalid UUID from peer".to_string()))?;
-                
-                let handle = self.node.complete_join(store_uuid).await?;
-                
-                // Sync with peer to get initial data
-                tracing::debug!("[Join] Syncing with peer to get initial data...");
-                if let Ok(result) = self.sync_with_peer(&handle, peer_id, &[]).await {
-                    tracing::debug!("[Join] Initial sync complete: {} entries", result.entries_applied);
-                }
-                
-                Ok(handle)
-            }
-            _ => Err(NodeError::Actor("Unexpected response".to_string())),
-        }
-    }
-    
     /// Sync with a peer using symmetric SyncSession protocol.
     /// Both sides run the same exchange logic after handshake.
-    pub async fn sync_with_peer(&self, store: &StoreHandle, peer_id: iroh::PublicKey, _authors: &[PubKey]) -> Result<SyncResult, NodeError> {
+    pub async fn sync_with_peer(&self, store: &AuthorizedStore, peer_id: iroh::PublicKey, _authors: &[PubKey]) -> Result<SyncResult, NodeError> {
         let conn = self.endpoint.connect(peer_id).await
             .map_err(|e| NodeError::Actor(format!("Connection failed: {}", e)))?;
         
@@ -464,7 +529,7 @@ impl LatticeServer {
     }
     
     /// Sync with specific peers in parallel, optionally filtering authors
-    async fn sync_peers(&self, store: &StoreHandle, peer_ids: &[iroh::PublicKey], authors: &[PubKey]) -> Vec<SyncResult> {
+    async fn sync_peers(&self, store: &AuthorizedStore, peer_ids: &[iroh::PublicKey], authors: &[PubKey]) -> Vec<SyncResult> {
         use futures_util::future::join_all;
         use std::time::Duration;
         
@@ -492,7 +557,7 @@ impl LatticeServer {
     }
     
     /// Sync a specific author with all active peers in parallel (for gap filling)
-    pub async fn sync_author_all(&self, store: &StoreHandle, author: PubKey) -> Result<u64, NodeError> {
+    pub async fn sync_author_all(&self, store: &AuthorizedStore, author: PubKey) -> Result<u64, NodeError> {
         let peer_ids = self.active_peer_ids().await?;
         if peer_ids.is_empty() {
             return Ok(0);
@@ -503,7 +568,7 @@ impl LatticeServer {
     }
     
     /// Sync with all active peers in parallel.
-    pub async fn sync_all(&self, store: &StoreHandle) -> Result<Vec<SyncResult>, NodeError> {
+    pub async fn sync_all(&self, store: &AuthorizedStore) -> Result<Vec<SyncResult>, NodeError> {
         let peer_ids = self.active_peer_ids().await?;
         if peer_ids.is_empty() {
             tracing::debug!("[Sync] No active peers");
@@ -516,11 +581,49 @@ impl LatticeServer {
         
         Ok(results)
     }
+    
+    // ==================== Registry-based API ====================
+    
+    /// Get a registered store by ID. Returns None if not registered.
+    pub async fn get_store(&self, store_id: Uuid) -> Option<AuthorizedStore> {
+        self.stores.read().await.get(&store_id).cloned()
+    }
+    
+    /// Sync with all active peers for a store (by ID).
+    /// Returns error if store is not registered.
+    pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, NodeError> {
+        let store = self.stores.read().await.get(&store_id).cloned()
+            .ok_or_else(|| NodeError::Actor(format!("Store {} not registered", store_id)))?;
+        self.sync_all(&store).await
+    }
+    
+    /// Sync a specific author with all active peers (by store ID).
+    /// Returns error if store is not registered.
+    pub async fn sync_author_all_by_id(&self, store_id: Uuid, author: PubKey) -> Result<u64, NodeError> {
+        let store = self.stores.read().await.get(&store_id).cloned()
+            .ok_or_else(|| NodeError::Actor(format!("Store {} not registered", store_id)))?;
+        self.sync_author_all(&store, author).await
+    }
+    
+    /// Sync with a specific peer (by store ID).
+    /// Returns error if store is not registered.
+    pub async fn sync_with_peer_by_id(&self, store_id: Uuid, peer_id: iroh::PublicKey, authors: &[PubKey]) -> Result<SyncResult, NodeError> {
+        let store = self.stores.read().await.get(&store_id).cloned()
+            .ok_or_else(|| NodeError::Actor(format!("Store {} not registered", store_id)))?;
+        self.sync_with_peer(&store, peer_id, authors).await
+    }
+}
+
+/// Helper to lookup store from registry
+async fn lookup_store(stores: &StoresRegistry, store_id: Uuid) -> Result<AuthorizedStore, LatticeNetError> {
+    stores.read().await.get(&store_id).cloned()
+        .ok_or_else(|| LatticeNetError::Connection(format!("Store {} not registered", store_id)))
 }
 
 /// Handle a single incoming connection
 async fn handle_connection(
     node: Arc<Node>,
+    stores: StoresRegistry,
     conn: Connection,
 ) -> Result<(), LatticeNetError> {
     let remote_id = conn.remote_id();
@@ -552,11 +655,11 @@ async fn handle_connection(
                 break;  // Join is terminal
             }
             Some(peer_message::Message::StatusRequest(req)) => {
-                handle_status_request(&node, &remote_pubkey, req, &mut sink, &mut stream).await?;
+                handle_status_request(stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
                 // Continue loop - client may send FetchRequest next
             }
             Some(peer_message::Message::FetchRequest(req)) => {
-                handle_fetch_request(&node, &remote_pubkey, req, &mut sink).await?;
+                handle_fetch_request(stores.clone(), &remote_pubkey, req, &mut sink).await?;
                 // Continue loop - client may send more requests
             }
             _ => {
@@ -581,10 +684,20 @@ async fn handle_join_request(
     // Accept the join - verifies invited, sets active, returns store ID
     let acceptance = node.accept_join(*remote_pubkey).await?;
     
+    // Use PeerProvider to get all acceptable authors for bootstrap
+    use lattice_core::auth::PeerProvider;
+    let authorized_authors: Vec<Vec<u8>> = node.list_acceptable_authors()
+        .into_iter()
+        .map(|p| p.to_vec())
+        .collect();
+    
+    tracing::debug!("[Join] Sending {} authorized authors", authorized_authors.len());
+    
     let resp = PeerMessage {
         message: Some(peer_message::Message::JoinResponse(JoinResponse {
             store_uuid: acceptance.store_id.as_bytes().to_vec(),
-            inviter_pubkey: vec![],
+            inviter_pubkey: node.node_id().to_vec(),
+            authorized_authors,
         })),
     };
     sink.send(&resp).await?;
@@ -595,7 +708,7 @@ async fn handle_join_request(
 
 /// Handle an incoming status request using symmetric SyncSession
 async fn handle_status_request(
-    node: &Node,
+    stores: StoresRegistry,
     remote_pubkey: &lattice_core::PubKey,
     req: StatusRequest,
     sink: &mut MessageSink,
@@ -606,11 +719,15 @@ async fn handle_status_request(
     
     tracing::debug!("[Status] Received status request for store {}", store_id);
     
-    // Verify peer is active
-    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active])?;
+    // Lookup store from registry - only respond to registered stores
+    let authorized_store = lookup_store(&stores, store_id).await?;
     
-    // Open the store
-    let (store, _info) = node.open_store(store_id).await?;
+    // Verify peer can connect (using store's peer provider)
+    if !authorized_store.can_connect(remote_pubkey) {
+        return Err(LatticeNetError::Connection(format!(
+            "Peer {} not authorized", hex::encode(remote_pubkey)
+        )));
+    };
     
     // Parse incoming peer state
     let incoming_state = req.sync_state
@@ -618,7 +735,7 @@ async fn handle_status_request(
         .unwrap_or_default();
     
     // Use SyncSession for symmetric handling
-    let mut session = super::sync_session::SyncSession::new(&store, sink, stream, *remote_pubkey);
+    let mut session = super::sync_session::SyncSession::new(&authorized_store, sink, stream, *remote_pubkey);
     let _ = session.run_as_responder(incoming_state).await?;
     
     Ok(())
@@ -626,7 +743,7 @@ async fn handle_status_request(
 
 /// Handle a FetchRequest - streams entries in chunks
 async fn handle_fetch_request(
-    node: &Node,
+    stores: StoresRegistry,
     remote_pubkey: &lattice_core::PubKey,
     req: lattice_core::proto::network::FetchRequest,
     sink: &mut MessageSink,
@@ -634,14 +751,18 @@ async fn handle_fetch_request(
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
-    // Verify peer is active
-    node.verify_peer_status(remote_pubkey, &[PeerStatus::Active])?;
+    // Lookup store from registry - only respond to registered stores
+    let authorized_store = lookup_store(&stores, store_id).await?;
     
-    // Open the store
-    let (store, _info) = node.open_store(store_id).await?;
+    // Verify peer can connect (using store's peer provider)
+    if !authorized_store.can_connect(remote_pubkey) {
+        return Err(LatticeNetError::Connection(format!(
+            "Peer {} not authorized", hex::encode(remote_pubkey)
+        )));
+    };
     
     // Stream entries in chunks
-    stream_entries_to_sink(sink, &store, &req.store_id, &req.ranges).await?;
+    stream_entries_to_sink(sink, &authorized_store, &req.store_id, &req.ranges).await?;
     
     Ok(())
 }
@@ -652,7 +773,7 @@ const CHUNK_SIZE: usize = 100;
 
 async fn stream_entries_to_sink(
     sink: &mut MessageSink,
-    store: &StoreHandle,
+    store: &AuthorizedStore,
     store_id: &[u8],
     ranges: &[lattice_core::proto::network::AuthorRange],
 ) -> Result<(), LatticeNetError> {
