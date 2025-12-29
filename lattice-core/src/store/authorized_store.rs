@@ -21,14 +21,8 @@ use tokio::sync::{broadcast, mpsc};
 /// Authorized store wrapper - the interface between lattice-net and stores.
 /// 
 /// Wraps a StoreHandle + PeerProvider to enforce authorization on entry ingestion.
-/// 
-/// # Usage
-/// ```ignore
-/// let node: Arc<Node> = ...;
-/// let store: StoreHandle = ...;
-/// let authorized = AuthorizedStore::new(store, node);
-/// // Use authorized.ingest_entry(), authorized.sync_state(), etc.
-/// ```
+/// Use `AuthorizedStore::new(store, peer_provider)` to create, then call
+/// `ingest_entry()`, `sync_state()`, etc. for network operations.
 #[derive(Clone)]
 pub struct AuthorizedStore {
     store: StoreHandle,

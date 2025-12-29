@@ -3,11 +3,11 @@
 use crate::commands::{CommandResult, Writer};
 use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
 use lattice_core::{Node, StoreHandle, PubKey};
-use lattice_net::LatticeServer;
+use lattice_net::MeshNetwork;
 use std::time::Instant;
 use std::io::Write;
 
-pub async fn cmd_store_status(node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_status(node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -23,8 +23,8 @@ pub async fn cmd_store_status(node: &Node, store: Option<&StoreHandle>, _server:
     CommandResult::Ok
 }
 
-pub async fn cmd_store_sync(_node: &Node, store: Option<&StoreHandle>, server: Option<std::sync::Arc<LatticeServer>>, _args: &[String], writer: Writer) -> CommandResult {
-    let server = match server {
+pub async fn cmd_store_sync(_node: &Node, store: Option<&StoreHandle>, mesh: Option<std::sync::Arc<MeshNetwork>>, _args: &[String], writer: Writer) -> CommandResult {
+    let mesh = match mesh {
         Some(s) => s,
         None => {
             let mut w = writer.clone();
@@ -51,7 +51,7 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&StoreHandle>, server: O
     
     // Spawn the entire sync operation as a background task
     tokio::spawn(async move {
-        match server.sync_all_by_id(store_id).await {
+        match mesh.engine().sync_all_by_id(store_id).await {
             Ok(results) => {
                 let mut w = writer.clone();
                 if results.is_empty() {
@@ -71,7 +71,7 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&StoreHandle>, server: O
     CommandResult::Ok
 }
 
-pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -89,7 +89,7 @@ pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&StoreHandle>, _serv
     CommandResult::Ok
 }
 
-pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -177,7 +177,7 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _server:
     CommandResult::Ok
 }
 
-pub async fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -197,7 +197,7 @@ pub async fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _server: Option<
     CommandResult::Ok
 }
 
-pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -251,7 +251,7 @@ pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _server: Option<
     CommandResult::Ok
 }
 
-pub async fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -271,7 +271,7 @@ pub async fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _server: Opti
     CommandResult::Ok
 }
 
-pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -332,7 +332,7 @@ pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _server: Option
     CommandResult::Ok
 }
 
-pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let store = match store {
         Some(s) => s,
         None => {
@@ -387,7 +387,7 @@ struct HistoryEntry {
     parent_hashes: Vec<lattice_core::Hash>,
 }
 
-pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");

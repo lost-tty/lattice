@@ -7,7 +7,7 @@ mod display_helpers;
 mod graph_renderer;
 mod tracing_writer;
 
-use lattice_net::LatticeServer;
+use lattice_net::MeshNetwork;
 use commands::CommandResult;
 use lattice_core::NodeBuilder;
 use rustyline_async::{Readline, ReadlineEvent};
@@ -72,7 +72,7 @@ async fn main() {
     let current_store = Arc::new(RwLock::new(None));
     
     // Create server FIRST so it can receive StoreReady event from node.start()
-    let server: Option<Arc<LatticeServer>> = match LatticeServer::new_from_node(node.clone()).await {
+    let mesh: Option<Arc<MeshNetwork>> = match MeshNetwork::new_from_node(node.clone()).await {
         Ok(s) => {
             tracing::info!("Iroh: {} (listening)", s.endpoint().public_key().fmt_short());
             Some(s)
@@ -89,7 +89,7 @@ async fn main() {
     }
     
     // Show node status (after server so gossip is set up)
-    let _ = node_commands::cmd_node_status(&node, None, server.as_deref(), &[], writer.clone()).await;
+    let _ = node_commands::cmd_node_status(&node, None, mesh.as_deref(), &[], writer.clone()).await;
     
     // Update current store based on root store status
     if let Some(store) = node.root_store().ok() {
@@ -133,7 +133,7 @@ async fn main() {
                             let result = handle_command(
                                 &node, 
                                 store_guard.as_ref(), 
-                                server.clone(), 
+                                mesh.clone(), 
                                 cli,
                                 writer.clone(),
                             ).await;
@@ -150,7 +150,7 @@ async fn main() {
                             // Non-state-changing commands: spawn in background
                             let node = node.clone();
                             let store = current_store.read().unwrap().clone();
-                            let server = server.clone();
+                            let server = mesh.clone();
                             let writer = writer.clone();
                             
                             tokio::spawn(async move {

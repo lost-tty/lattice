@@ -23,7 +23,7 @@ pub mod impls;
 pub use interfaces::{Patch, ReadContext};
 pub use impls::kv::{KvPatch, Store};
 
-// Public API - types needed by Node and LatticeServer
+// Public API - types needed by Node and MeshNetwork
 pub use error::{StateError, ParentValidationError};
 pub use impls::kv::KvStore;
 pub use handle::{StoreHandle, StoreInfo, OpenedStore};

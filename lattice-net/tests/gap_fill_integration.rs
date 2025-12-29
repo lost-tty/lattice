@@ -2,7 +2,7 @@
 
 use lattice_core::{NodeBuilder, NodeEvent, PubKey};
 use lattice_core::Node;
-use lattice_net::LatticeServer;
+use lattice_net::MeshNetwork;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -49,8 +49,8 @@ async fn test_targeted_author_sync() {
     let node_a = Arc::new(NodeBuilder { data_dir: data_a.clone() }.build().expect("node a"));
     let node_b = Arc::new(NodeBuilder { data_dir: data_b.clone() }.build().expect("node b"));
     
-    let server_a = LatticeServer::new_from_node(node_a.clone()).await.expect("server a");
-    let server_b = LatticeServer::new_from_node(node_b.clone()).await.expect("server b");
+    let server_a = MeshNetwork::new_from_node(node_a.clone()).await.expect("server a");
+    let server_b = MeshNetwork::new_from_node(node_b.clone()).await.expect("server b");
     
     // Node A inits and invites B
     let store_id = node_a.init().await.expect("init a");
@@ -85,7 +85,7 @@ async fn test_targeted_author_sync() {
     
     // B syncs specifically for A's author
     let author = PubKey::from(*node_a.node_id());
-    let _applied = server_b.sync_author_all_by_id(store_b.id(), author).await.expect("sync author");
+    let _applied = server_b.engine().sync_author_all_by_id(store_b.id(), author).await.expect("sync author");
     
     // Verify entry arrived after sync
     let val = store_b.get(b"/data").await.expect("get");
@@ -104,8 +104,8 @@ async fn test_sync_multiple_entries() {
     let node_a = Arc::new(NodeBuilder { data_dir: data_a.clone() }.build().expect("node a"));
     let node_b = Arc::new(NodeBuilder { data_dir: data_b.clone() }.build().expect("node b"));
     
-    let server_a = LatticeServer::new_from_node(node_a.clone()).await.expect("server a");
-    let server_b = LatticeServer::new_from_node(node_b.clone()).await.expect("server b");
+    let server_a = MeshNetwork::new_from_node(node_a.clone()).await.expect("server a");
+    let server_b = MeshNetwork::new_from_node(node_b.clone()).await.expect("server b");
     
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
@@ -136,7 +136,7 @@ async fn test_sync_multiple_entries() {
     }
     
     // B syncs to get the new entries
-    let _results = server_b.sync_all_by_id(store_b.id()).await.expect("sync");
+    let _results = server_b.engine().sync_all_by_id(store_b.id()).await.expect("sync");
     
     // Verify all entries synced
     for i in 1..=5 {

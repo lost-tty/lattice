@@ -160,7 +160,7 @@ impl GossipManager {
                         }
                         
                         // Handle piggybacked sender_state (if present)
-                        // Store broadcasts SyncNeeded event if we're behind - LatticeServer subscribes
+                        // Store broadcasts SyncNeeded event if we're behind - MeshNetwork subscribes
                         if let Some(sync_state) = gossip_msg.sender_state {
                             let formatted = format_sync_state(&sync_state);
                             

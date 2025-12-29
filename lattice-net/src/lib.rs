@@ -17,7 +17,7 @@ pub use error::LatticeNetError;
 pub use framing::{MessageSink, MessageStream};
 pub use lattice_core::proto::storage::SyncState;
 pub use lattice_core::proto::network::{StatusRequest, StatusResponse, FetchRequest, FetchResponse, AuthorRange};
-pub use mesh::{LatticeServer, SyncResult};
+pub use mesh::{MeshNetwork, SyncResult};
 
 /// Parse a PublicKey (NodeId) from hex or base32 string
 pub fn parse_node_id(s: &str) -> Result<PublicKey, LatticeNetError> {

@@ -2,7 +2,7 @@
 
 use crate::commands::{CommandResult, Writer};
 use lattice_core::{Node, StoreHandle, PeerStatus, PubKey, Uuid};
-use lattice_net::LatticeServer;
+use lattice_net::MeshNetwork;
 use chrono::DateTime;
 use owo_colors::OwoColorize;
 use std::time::{Instant, Duration};
@@ -24,7 +24,7 @@ fn format_elapsed(elapsed: Duration) -> String {
 
 // --- Store management ---
 
-pub async fn cmd_init(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_init(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     match node.init().await {
         Ok(store_id) => {
             let mut w = writer.clone();
@@ -44,7 +44,7 @@ pub async fn cmd_init(node: &Node, _store: Option<&StoreHandle>, _server: Option
     }
 }
 
-pub async fn cmd_create_store(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_create_store(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     match node.create_store() {
         Ok(store_id) => {
             let mut w = writer.clone();
@@ -71,7 +71,7 @@ pub async fn cmd_create_store(node: &Node, _store: Option<&StoreHandle>, _server
     }
 }
 
-pub async fn cmd_use_store(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_use_store(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let store_id = match Uuid::parse_str(&args[0]) {
         Ok(id) => id,
         Err(_) => {
@@ -100,7 +100,7 @@ pub async fn cmd_use_store(node: &Node, _store: Option<&StoreHandle>, _server: O
     }
 }
 
-pub async fn cmd_list_stores(node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_list_stores(node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let stores = match node.list_stores() {
         Ok(s) => s,
         Err(e) => {
@@ -125,7 +125,7 @@ pub async fn cmd_list_stores(node: &Node, store: Option<&StoreHandle>, _server: 
 
 // --- Info ---
 
-pub async fn cmd_node_status(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_node_status(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let mut w = writer.clone();
     let _ = writeln!(w, "Node ID:  {}", hex::encode(node.node_id()));
     if let Some(name) = node.name() {
@@ -152,7 +152,7 @@ pub async fn cmd_node_status(node: &Node, _store: Option<&StoreHandle>, _server:
 
 // --- Peer management ---
 
-pub async fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let pubkey = match PubKey::from_hex(&args[0]) {
         Ok(pk) => pk,
         Err(e) => {
@@ -178,7 +178,7 @@ pub async fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _server: Opti
     CommandResult::Ok
 }
 
-pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, server: Option<&LatticeServer>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let peers = match node.list_peers().await {
         Ok(p) => p,
         Err(e) => {
@@ -195,7 +195,7 @@ pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, server: Option
     }
     
     // Get connected (online) peers from gossip with last-seen time
-    let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = if let Some(s) = server {
+    let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = if let Some(s) = mesh {
         s.connected_peers().await
             .into_iter()
             .map(|(pk, last_seen)| (PubKey::from(*pk.as_bytes()), last_seen))
@@ -247,7 +247,7 @@ pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, server: Option
     CommandResult::Ok
 }
 
-pub async fn cmd_revoke(node: &Node, _store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_revoke(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let pubkey = match PubKey::from_hex(&args[0]) {
         Ok(pk) => pk,
         Err(e) => {
@@ -272,7 +272,7 @@ pub async fn cmd_revoke(node: &Node, _store: Option<&StoreHandle>, _server: Opti
 
 // --- Networking ---
 
-pub async fn cmd_join(node: &Node, store: Option<&StoreHandle>, _server: Option<&LatticeServer>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_join(node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     if store.is_some() {
         let mut w = writer.clone();
         let _ = writeln!(w, "Already initialized. Use 'sync' to sync with peers.");

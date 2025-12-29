@@ -15,6 +15,7 @@ pub use iroh::PublicKey;
 pub const LATTICE_ALPN: &[u8] = b"lattice-sync/1";
 
 /// Wrapper around Iroh endpoint with Lattice integration
+#[derive(Clone)]
 pub struct LatticeEndpoint {
     endpoint: Endpoint,
 }

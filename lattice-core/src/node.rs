@@ -81,7 +81,7 @@ pub struct PeerInfo {
     pub status: PeerStatus,
 }
 
-/// Events emitted by Node for interested listeners (e.g., LatticeServer)
+/// Events emitted by Node for interested listeners (e.g., MeshNetwork)
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
     /// Store is ready (opened and available) - informational only
