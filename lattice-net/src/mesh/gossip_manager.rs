@@ -1,8 +1,8 @@
 //! GossipManager - Encapsulates gossip subsystem complexity
 
-use crate::{parse_node_id, LatticeEndpoint, ToLattice};
+use crate::{LatticeEndpoint, ToLattice};
 use super::error::GossipError;
-use lattice_core::{Uuid, Node, PeerStatus, PeerWatchEvent, PeerWatchEventKind, PubKey};
+use lattice_core::{Uuid, Node, PeerStatus, PeerEvent, PubKey};
 use lattice_core::store::AuthorizedStore;
 use lattice_core::auth::PeerProvider;
 use lattice_core::proto::storage::PeerSyncInfo;
@@ -46,20 +46,21 @@ impl GossipManager {
         &self.gossip
     }
     
-    /// Setup gossip for a store - uses node.watch_peers() for bootstrap peers
+    /// Setup gossip for a store - uses PeerProvider for bootstrap peers
     #[tracing::instrument(skip(self, node, store), fields(store_id = %store.id()))]
     pub async fn setup_for_store(&self, node: std::sync::Arc<Node>, store: AuthorizedStore) -> Result<(), GossipError> {
         let store_id = store.id();
         
-        // Watch peer status - initial snapshot gives bootstrap peers
-        let (peers, rx) = node.watch_peers().await
+        // Get initial peers from peer cache and subscribe to changes
+        let peers = node.list_peers().await
             .map_err(|e| GossipError::Watch(format!("{:?}", e)))?;
+        let rx = node.subscribe_peer_events();
         
-        tracing::debug!(initial_peers = peers.len(), "Watch peers initial snapshot");
+        tracing::debug!(initial_peers = peers.len(), "Peer list snapshot");
         
         let bootstrap_peers: Vec<iroh::PublicKey> = peers.iter()
-            .filter(|(_, status)| *status == PeerStatus::Active)
-            .filter_map(|(pubkey, _)| parse_node_id(pubkey).ok())
+            .filter(|p| p.status == PeerStatus::Active)
+            .filter_map(|p| iroh::PublicKey::from_bytes(&p.pubkey).ok())
             .filter(|id| *id != self.my_pubkey)
             .collect();
         
@@ -285,30 +286,48 @@ impl GossipManager {
     fn spawn_peer_watcher(
         &self,
         store_id: Uuid,
-        mut rx: tokio::sync::broadcast::Receiver<PeerWatchEvent>,
+        mut rx: tokio::sync::broadcast::Receiver<PeerEvent>,
     ) {
         let my_pubkey = self.my_pubkey;
         let senders = self.senders.clone();
         
         tokio::spawn(async move {
             while let Ok(event) = rx.recv().await {
-                let Ok(peer_id) = parse_node_id(&event.pubkey) else { continue };
-                if peer_id == my_pubkey { continue; }
-                
-                match event.kind {
-                    PeerWatchEventKind::StatusChanged(PeerStatus::Active) => {
-                        tracing::debug!(peer = &event.pubkey[..8.min(event.pubkey.len())], "Peer active - joining gossip");
-                        if let Some(sender) = senders.read().await.get(&store_id) {
-                            let _ = sender.join_peers(vec![peer_id]).await;
+                match event {
+                    PeerEvent::Added { pubkey, status } if status == PeerStatus::Active => {
+                        if let Ok(peer_id) = iroh::PublicKey::from_bytes(&pubkey) {
+                            if peer_id == my_pubkey { continue; }
+                            tracing::debug!(peer = %peer_id.fmt_short(), "Peer added (active) - joining gossip");
+                            if let Some(sender) = senders.read().await.get(&store_id) {
+                                let _ = sender.join_peers(vec![peer_id]).await;
+                            }
                         }
                     }
-                    PeerWatchEventKind::StatusChanged(status) => {
-                        tracing::debug!(peer = &event.pubkey[..8.min(event.pubkey.len())], 
-                            status = ?status, "Peer status changed");
+                    PeerEvent::StatusChanged { pubkey, old: _, new } if new == PeerStatus::Active => {
+                        if let Ok(peer_id) = iroh::PublicKey::from_bytes(&pubkey) {
+                            if peer_id == my_pubkey { continue; }
+                            tracing::debug!(peer = %peer_id.fmt_short(), "Peer now active - joining gossip");
+                            if let Some(sender) = senders.read().await.get(&store_id) {
+                                let _ = sender.join_peers(vec![peer_id]).await;
+                            }
+                        }
                     }
-                    PeerWatchEventKind::Removed => {
-                        tracing::debug!(peer = &event.pubkey[..8.min(event.pubkey.len())], "Peer removed");
+                    PeerEvent::StatusChanged { pubkey, old, new } => {
+                        let pk = PubKey::from(pubkey);
+                        tracing::debug!(
+                            pubkey = %pk,
+                            old = ?old, new = ?new,
+                            "Peer status changed"
+                        );
                     }
+                    PeerEvent::Removed { pubkey } => {
+                        let pk = PubKey::from(pubkey);
+                        tracing::debug!(
+                            pubkey = %pk,
+                            "Peer removed"
+                        );
+                    }
+                    _ => {}
                 }
             }
         });

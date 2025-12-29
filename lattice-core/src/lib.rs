@@ -28,7 +28,8 @@ pub const MAX_ENTRY_SIZE: usize = 16 * 1024 * 1024;
 
 // Node-level exports
 pub use node_identity::{NodeIdentity, PeerStatus};
-pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, PeerWatchEvent, PeerWatchEventKind, parse_peer_status_key, PEER_STATUS_PATTERN};
+pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, parse_peer_status_key, PEER_STATUS_PATTERN};
+pub use auth::{PeerProvider, PeerEvent};
 
 // Store exports (re-exported from store submodule)
 pub use store::{KvStore, StateError, StoreHandle, WatchEvent, WatchEventKind, WatchError};

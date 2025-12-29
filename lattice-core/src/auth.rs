@@ -4,6 +4,19 @@
 //! peer status without direct access to Node (avoiding circular deps).
 
 use crate::types::PubKey;
+use crate::PeerStatus;
+use tokio::sync::broadcast;
+
+/// Event emitted when peer status changes
+#[derive(Clone, Debug)]
+pub enum PeerEvent {
+    /// New peer added to mesh
+    Added { pubkey: PubKey, status: PeerStatus },
+    /// Peer status changed (e.g., Active → Revoked)
+    StatusChanged { pubkey: PubKey, old: PeerStatus, new: PeerStatus },
+    /// Peer removed from mesh
+    Removed { pubkey: PubKey },
+}
 
 /// Trait for verifying peer authorization.
 /// Implemented by Node, which maintains a cache of peer statuses.
@@ -24,4 +37,8 @@ pub trait PeerProvider: Send + Sync {
     /// List all authors whose entries we can accept.
     /// Used to populate JoinResponse with authorized authors for bootstrap.
     fn list_acceptable_authors(&self) -> Vec<PubKey>;
+    
+    /// Subscribe to peer status change events.
+    /// Used by GossipManager/MeshEngine to react to peer changes.
+    fn subscribe_peer_events(&self) -> broadcast::Receiver<PeerEvent>;
 }

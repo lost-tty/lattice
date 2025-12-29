@@ -96,24 +96,6 @@ pub enum NodeEvent {
     SyncWithPeer { store_id: Uuid, peer: PubKey },
 }
 
-/// Event for peer status changes (from watch_peers)
-#[derive(Clone, Debug)]
-pub struct PeerWatchEvent {
-    /// Peer's public key (hex encoded)
-    pub pubkey: String,
-    /// The status change
-    pub kind: PeerWatchEventKind,
-}
-
-/// Kind of peer status change
-#[derive(Clone, Debug)]
-pub enum PeerWatchEventKind {
-    /// Peer status was set
-    StatusChanged(PeerStatus),
-    /// Peer was removed (deleted)
-    Removed,
-}
-
 pub struct NodeBuilder {
     pub data_dir: DataDir,
 }
@@ -152,12 +134,14 @@ impl NodeBuilder {
         let meta = std::sync::Arc::new(meta);
         let registry = StoreRegistry::new(self.data_dir.clone(), meta.clone(), node.clone());
         
+        let (peer_event_tx, _) = broadcast::channel(64);
         Ok(Node {
             data_dir: self.data_dir,
             node,
             meta,
             registry,
             event_tx,
+            peer_event_tx,
             peer_cache: std::sync::Arc::new(RwLock::new(HashMap::new())),
             bootstrap_authors: std::sync::Arc::new(RwLock::new(std::collections::HashSet::new())),
         })
@@ -175,6 +159,7 @@ pub struct Node {
     meta: std::sync::Arc<MetaStore>,
     registry: StoreRegistry,
     event_tx: broadcast::Sender<NodeEvent>,
+    peer_event_tx: broadcast::Sender<crate::auth::PeerEvent>,
     peer_cache: std::sync::Arc<RwLock<HashMap<PubKey, PeerStatus>>>,
     /// Bootstrap authors trusted during initial sync (cleared after first sync)
     bootstrap_authors: std::sync::Arc<RwLock<std::collections::HashSet<PubKey>>>,
@@ -530,49 +515,6 @@ impl Node {
         Ok(self.registry.get_or_open(store_id)?)
     }
     
-    /// Watch for peer status changes on the root store.
-    /// Returns initial snapshot of peers with their status and a receiver for status changes.
-    /// 
-    /// Both the initial snapshot and receiver provide typed `(pubkey, PeerStatus)` data.
-    pub async fn watch_peers(&self) -> Result<(Vec<(String, PeerStatus)>, broadcast::Receiver<PeerWatchEvent>), NodeError> {
-        let store = self.root_store()?;
-        
-        let pattern = r"^/nodes/([a-f0-9]+)/status$";
-        let (initial, mut raw_rx) = store.watch(pattern).await?;
-        
-        // Parse initial snapshot into (pubkey, status) pairs
-        let peers: Vec<(String, PeerStatus)> = initial.iter()
-            .filter_map(|(k, v)| {
-                let pubkey = parse_peer_status_key(k)?;
-                let status = PeerStatus::from_str(&String::from_utf8_lossy(v))?;
-                Some((pubkey, status))
-            })
-            .collect();
-        
-        // Create transformed channel for PeerWatchEvent
-        let (tx, rx) = broadcast::channel(64);
-        tokio::spawn(async move {
-            use crate::WatchEventKind;
-            while let Ok(event) = raw_rx.recv().await {
-                if let Some(pubkey) = parse_peer_status_key(&event.key) {
-                    let kind = match event.kind {
-                        WatchEventKind::Put { value } => {
-                            if let Some(status) = PeerStatus::from_str(&String::from_utf8_lossy(&value)) {
-                                PeerWatchEventKind::StatusChanged(status)
-                            } else {
-                                continue;
-                            }
-                        }
-                        WatchEventKind::Delete => PeerWatchEventKind::Removed,
-                    };
-                    let _ = tx.send(PeerWatchEvent { pubkey, kind });
-                }
-            }
-        });
-        
-        Ok((peers, rx))
-    }
-    
     /// Start watching peer status changes and keep cache updated.
     /// Called after root store opens.
     async fn start_peer_cache_watcher(&self) -> Result<(), NodeError> {
@@ -592,7 +534,12 @@ impl Node {
                             let pubkey: PubKey = pubkey_bytes.try_into().unwrap();
                             let status_str = String::from_utf8_lossy(&value);
                             if let Some(status) = PeerStatus::from_str(&status_str) {
-                                cache.insert(pubkey, status);
+                                cache.insert(pubkey, status.clone());
+                                // Emit Added event for initial peers
+                                let _ = self.peer_event_tx.send(crate::auth::PeerEvent::Added { 
+                                    pubkey, 
+                                    status,
+                                });
                             }
                         }
                     }
@@ -602,6 +549,7 @@ impl Node {
         
         // Clone what we need for the spawned task
         let peer_cache = self.peer_cache.clone();
+        let peer_event_tx = self.peer_event_tx.clone();
         
         // Spawn task to keep cache updated
         tokio::spawn(async move {
@@ -615,12 +563,25 @@ impl Node {
                             match event.kind {
                                 WatchEventKind::Put { value } => {
                                     let status_str = String::from_utf8_lossy(&value);
-                                    if let Some(status) = PeerStatus::from_str(&status_str) {
-                                        cache.insert(pubkey, status);
+                                    if let Some(new_status) = PeerStatus::from_str(&status_str) {
+                                        let old_status = cache.insert(pubkey, new_status.clone());
+                                        // Emit appropriate event
+                                        let event = match old_status {
+                                            Some(old) if old != new_status => {
+                                                crate::auth::PeerEvent::StatusChanged { pubkey, old, new: new_status }
+                                            }
+                                            None => {
+                                                crate::auth::PeerEvent::Added { pubkey, status: new_status }
+                                            }
+                                            _ => continue, // No change
+                                        };
+                                        let _ = peer_event_tx.send(event);
                                     }
                                 }
                                 WatchEventKind::Delete => {
-                                    cache.remove(&pubkey);
+                                    if cache.remove(&pubkey).is_some() {
+                                        let _ = peer_event_tx.send(crate::auth::PeerEvent::Removed { pubkey });
+                                    }
                                 }
                             }
                         }
@@ -667,6 +628,10 @@ impl PeerProvider for Node {
             .filter(|(_, status)| matches!(status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
             .map(|(pubkey, _)| *pubkey)
             .collect()
+    }
+    
+    fn subscribe_peer_events(&self) -> broadcast::Receiver<crate::auth::PeerEvent> {
+        self.peer_event_tx.subscribe()
     }
 }
 
