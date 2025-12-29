@@ -88,6 +88,15 @@ Decouples file count from KV entry count. Instead of 1M files = 1M KV entries, u
 - LWW-Register: Last-writer-wins for single values.
 - LWW-Element-Set: Set with add/remove, element present if add > remove timestamp.
 
+## Terminology
+
+- **Lattice**: A group of nodes sharing a root store (the cluster/mesh they form)
+- **Node**: A single Lattice instance with its own identity (keypair)
+- **Store**: A replicated key-value store with SigChain entries
+- **Root Store**: The control plane store containing peer list and metadata
+- **MeshNetwork**: The network layer providing sync/gossip/join operations
+- **MeshEngine**: Component handling outbound sync and connection operations
+
 ## Concepts
 
 - Transitive Pairing: Nodes can introduce new nodes to the mesh.

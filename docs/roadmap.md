@@ -239,8 +239,27 @@ See [architecture/wasm-consensus-bus.md](architecture/wasm-consensus-bus.md) for
 Research areas and papers that may inform future Lattice development.
 
 ### Sync Efficiency: Negentropy
-Range-based set reconciliation for efficient diff calculation. Replaces O(n) vector clock sync with sub-linear bandwidth. Used by Nostr ecosystem.
-- **Apply to:** `mesh/protocol.rs` sync diff logic
+Range-based set reconciliation using hash fingerprints. Replaces O(n) vector clock sync with sub-linear bandwidth. Used by Nostr ecosystem.
+
+**Current `seq` Dependencies to Migrate:**
+| Component | Current | Negentropy Approach |
+|-----------|---------|---------------------|
+| `SyncState.diff()` | `MissingRange{from_seq, to_seq}` | Hash fingerprint exchange → list of missing hashes |
+| `FetchRequest.ranges` | `{author, from_seq, to_seq}` | Fetch by hash directly |
+| `Log::iter_range()` | Range by seq | Need hash→entry index for lookup |
+| `GapInfo` | Triggers sync when `seq > next_seq` | "Missing prev_hash X" → fetch by hash |
+
+**What to Keep:**
+- `seq` for **local sigchain validation** (prevents insertion attacks, enforces append-only)
+- `ChainTip.seq` as internal implementation detail
+
+**Required Infrastructure:**
+- [ ] Add hash→entry index (for efficient fetch-by-hash)
+- [ ] Implement negentropy fingerprint generation per store
+- [ ] Replace `SyncState` protocol with negentropy exchange
+- [ ] Decouple `seq` from network sync protocol (keep internal only)
+
+- **Apply to:** `mesh/protocol.rs` sync diff logic, `SyncState`, `FetchRequest`
 - **Ref:** [Negentropy Protocol](https://github.com/hoytech/negentropy)
 
 ### Data Pruning: Willow Protocol
