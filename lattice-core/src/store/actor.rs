@@ -33,7 +33,9 @@ pub struct WatchEvent {
 /// Kind of watch event
 #[derive(Clone, Debug)]
 pub enum WatchEventKind {
-    Put { value: Vec<u8> },
+    /// Key was updated - carries all current heads for conflict visibility
+    Update { heads: Vec<Head> },
+    /// Key was deleted
     Delete,
 }
 
@@ -389,8 +391,9 @@ impl StoreActor {
             .collect();
         self.create_local_entry(parent_hashes, vec![Operation::put(key, value)])?;
         
-        // Emit watch event
-        self.emit_watch_event(key, WatchEventKind::Put { value: value.to_vec() });
+        // Emit watch event with current heads (after apply)
+        let heads = self.state.get_heads(key)?;
+        self.emit_watch_event(key, WatchEventKind::Update { heads });
         
         Ok(())
     }
@@ -628,9 +631,9 @@ impl StoreActor {
             for op in &kv_payload.ops {
                 match &op.op_type {
                     Some(OpType::Put(put_op)) => {
-                        self.emit_watch_event(&put_op.key, WatchEventKind::Put { 
-                            value: put_op.value.clone() 
-                        });
+                        if let Ok(heads) = self.state.get_heads(&put_op.key) {
+                            self.emit_watch_event(&put_op.key, WatchEventKind::Update { heads });
+                        }
                     }
                     Some(OpType::Delete(delete_op)) => {
                         self.emit_watch_event(&delete_op.key, WatchEventKind::Delete);

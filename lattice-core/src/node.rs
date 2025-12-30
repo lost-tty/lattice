@@ -561,8 +561,10 @@ impl Node {
                             let pubkey: PubKey = pubkey_bytes.try_into().unwrap();
                             let mut cache = peer_cache.write().unwrap();
                             match event.kind {
-                                WatchEventKind::Put { value } => {
-                                    let status_str = String::from_utf8_lossy(&value);
+                                WatchEventKind::Update { heads } => {
+                                    // Extract value from first head (LWW winner)
+                                    let value = heads.first().map(|h| h.value.as_slice()).unwrap_or(&[]);
+                                    let status_str = String::from_utf8_lossy(value);
                                     if let Some(new_status) = PeerStatus::from_str(&status_str) {
                                         let old_status = cache.insert(pubkey, new_status.clone());
                                         // Emit appropriate event
@@ -949,10 +951,11 @@ mod tests {
         let event = rx.recv().await.expect("recv");
         assert_eq!(event.key, b"/test/key1");
         match event.kind {
-            crate::WatchEventKind::Put { value } => {
+            crate::WatchEventKind::Update { heads } => {
+                let value = heads.first().map(|h| h.value.as_slice()).unwrap_or(&[]);
                 assert_eq!(value, b"value1");
             }
-            _ => panic!("Expected Put event"),
+            _ => panic!("Expected Update event"),
         }
         
         let _ = std::fs::remove_dir_all(data_dir.base());
