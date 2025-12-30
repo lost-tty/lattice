@@ -1183,12 +1183,15 @@ mod tests {
         drop(handle);
     }
     
-    /// Test sigchain orphan data loss prevention.
+    /// Regression test: sigchain orphan data loss prevention.
+    /// 
     /// Scenario: Entry B is orphaned waiting for A. A arrives and commits.
     /// B is returned as ready orphan, but then we simulate a "crash" before B is processed.
     /// On restart, B should still be recoverable (not lost).
     /// 
-    /// This test exposes the bug: commit_entry deletes orphans before they're fully processed.
+    /// Historical bug (FIXED): commit_entry used to delete orphans eagerly before
+    /// they were fully processed. Now, commit_entry returns orphan metadata and the
+    /// caller (apply_ingested_entry) deletes only after apply_entry succeeds.
     #[test]
     fn test_sigchain_orphan_not_lost_on_crash() {
         use crate::store::sigchain::SigChainManager;
@@ -1245,15 +1248,12 @@ mod tests {
         // B should be returned as ready
         assert_eq!(ready_orphans.len(), 1, "B should be returned as ready orphan");
         
-        // CRITICAL: Check if B is still in orphan store after commit_entry
-        // BUG: B was deleted eagerly, so if we crash here, B is lost!
+        // CRITICAL: B must still be in orphan store after commit_entry.
+        // If this fails, orphans would be lost on crash (regression).
         let orphan_count_after = manager.sigchain_orphan_count();
-        
-        // This assertion will FAIL with the current code (bug exists)
-        // After fix, B should still be in orphan store until explicitly deleted
         assert_eq!(orphan_count_after, 1, 
-            "BUG: Sigchain orphan B should NOT be deleted until fully processed! \
-             If this fails, orphans can be lost on crash.");
+            "Orphan B must remain in store until explicitly deleted after processing. \
+             Regression: orphans lost on crash.");
     }
     
     /// Test concurrent offline writes scenario.
