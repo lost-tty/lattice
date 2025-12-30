@@ -374,7 +374,7 @@ impl Node {
         let store = self.root_store()?;
         
         // Only list keys under /nodes/ prefix
-        let nodes = store.list_by_prefix(b"/nodes/", false).await?;
+        let nodes = store.list_by_prefix(b"/nodes/").await?;
         
         // Collect unique pubkeys with status
         let mut peers_map: std::collections::HashMap<String, PeerStatus> = std::collections::HashMap::new();
@@ -553,7 +553,7 @@ impl Node {
         
         // Spawn task to keep cache updated
         tokio::spawn(async move {
-            use crate::WatchEventKind;
+            use crate::{WatchEventKind, Head};
             while let Ok(event) = rx.recv().await {
                 if let Some(pubkey_hex) = parse_peer_status_key(&event.key) {
                     if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
@@ -562,8 +562,10 @@ impl Node {
                             let mut cache = peer_cache.write().unwrap();
                             match event.kind {
                                 WatchEventKind::Update { heads } => {
-                                    // Extract value from first head (LWW winner)
-                                    let value = heads.first().map(|h| h.value.as_slice()).unwrap_or(&[]);
+                                    // Use LWW merge to get winner (not just first)
+                                    let value = Head::merge_lww(&heads)
+                                        .map(|h| h.value.as_slice())
+                                        .unwrap_or(&[]);
                                     let status_str = String::from_utf8_lossy(value);
                                     if let Some(new_status) = PeerStatus::from_str(&status_str) {
                                         let old_status = cache.insert(pubkey, new_status.clone());
@@ -952,7 +954,9 @@ mod tests {
         assert_eq!(event.key, b"/test/key1");
         match event.kind {
             crate::WatchEventKind::Update { heads } => {
-                let value = heads.first().map(|h| h.value.as_slice()).unwrap_or(&[]);
+                let value = crate::Head::merge_lww(&heads)
+                    .map(|h| h.value.as_slice())
+                    .unwrap_or(&[]);
                 assert_eq!(value, b"value1");
             }
             _ => panic!("Expected Update event"),

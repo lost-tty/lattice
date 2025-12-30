@@ -328,14 +328,10 @@ impl KvStore {
         Ok(())
     }
     
-    /// Get a value by key (returns deterministic winner from heads, None if tombstone)
+    /// Get a value by key (returns deterministic winner from live heads)
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
         let heads = self.get_heads(key)?;
-        match Self::pick_winner(&heads) {
-            Some(winner) if winner.tombstone => Ok(None),
-            Some(winner) => Ok(Some(winner.value.clone())),
-            None => Ok(None),
-        }
+        Ok(Head::merge_lww(&heads).map(|h| h.value.clone()))
     }
     
     /// Get all heads for a key (for conflict inspection).
@@ -366,38 +362,19 @@ impl KvStore {
         }
     }
     
-    /// Pick deterministic winner from heads: highest HLC, then highest author bytes.
-    /// Heads should already be sorted by get_heads(), so winner is first.
-    pub fn pick_winner(heads: &[Head]) -> Option<&Head> {
-        // If heads are already sorted (via get_heads), first is winner
-        // If not sorted, compute winner via max
-        if heads.is_empty() {
-            None
-        } else {
-            // Use max_by for correctness even on unsorted input
-            heads.iter().max_by(|a, b| {
-                    a.hlc.cmp(&b.hlc)
-                    .then_with(|| a.author.cmp(&b.author))
-            })
-        }
-    }
-
     /// Check if a put operation is needed given current heads
-    /// Returns false if the winning head has the same value (idempotent)
+    /// Returns false if a live head already has the same value
     pub fn needs_put(heads: &[Head], value: &[u8]) -> bool {
-        match Self::pick_winner(heads) {
-            Some(winner) => winner.value != value,  // Skip if winner already has value
-            None => true,  // No heads = need put
+        match Head::merge_lww(heads) {
+            Some(winner) => winner.value != value,
+            None => true,  // No live heads = need put
         }
     }
     
     /// Check if a delete operation is needed given current heads
-    /// Returns false if no heads or winning head is already a tombstone (idempotent)
+    /// Returns false if no live heads exist
     pub fn needs_delete(heads: &[Head]) -> bool {
-        match Self::pick_winner(heads) {
-            Some(winner) => !winner.tombstone,  // Skip if winner is already tombstone
-            None => false,  // No heads = nothing to delete
-        }
+        Head::merge_lww(heads).is_some()
     }
     
     /// Get author state for a specific author
@@ -416,15 +393,18 @@ impl KvStore {
         }
     }
 
-    /// List all key-value pairs (winner values only)
-    /// If include_deleted is true, includes tombstoned entries
-    pub fn list_all(&self, include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
-        self.list_by_prefix(&[], include_deleted)
+    /// List all key-value pairs (live values only, tombstones filtered)
+    pub fn list_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
+        self.list_by_prefix(&[])
     }
     
-    /// List all key-value pairs matching a prefix (winner values only)
-    /// If include_deleted is true, includes tombstoned entries
-    pub fn list_by_prefix(&self, prefix: &[u8], include_deleted: bool) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
+    /// List all keys with their raw heads (for conflict inspection)
+    pub fn list_heads_all(&self) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
+        self.list_heads_by_prefix(&[])
+    }
+    
+    /// List all keys matching a prefix with their raw heads (for conflict inspection)
+    pub fn list_heads_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
         let txn = self.db.begin_read()?;
         let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(TABLE_KV);
         
@@ -449,13 +429,62 @@ impl KvStore {
             let heads: Vec<Head> = proto_heads.into_iter()
                     .map(|h| Head::try_from(h).map_err(|e| StateError::Conversion(e.to_string())))
                     .collect::<Result<Vec<_>, StateError>>()?;
-            if let Some(winner) = Self::pick_winner(&heads) {
-                if include_deleted || !winner.tombstone {
-                    result.push((key_bytes, winner.value.clone()));
-                }
-            }
+            result.push((key_bytes, heads));
         }
         Ok(result)
+    }
+    
+    /// List all key-value pairs matching a prefix (live values only, tombstones filtered)
+    pub fn list_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
+        let heads_list = self.list_heads_by_prefix(prefix)?;
+        Ok(heads_list
+            .into_iter()
+            .filter_map(|(key, heads)| {
+                Head::merge_lww(&heads).map(|w| (key, w.value.clone()))
+            })
+            .collect())
+    }
+    
+    /// List all key-value pairs matching a regex pattern (live values only)
+    /// Extracts literal prefix for efficient DB scan, then filters by regex.
+    pub fn list_by_regex(&self, pattern: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
+        let heads_list = self.list_heads_by_regex(pattern)?;
+        Ok(heads_list
+            .into_iter()
+            .filter_map(|(key, heads)| {
+                Head::merge_lww(&heads).map(|w| (key, w.value.clone()))
+            })
+            .collect())
+    }
+    
+    /// List all keys matching a regex pattern with their raw heads
+    /// Extracts literal prefix for efficient DB scan, then filters by regex.
+    pub fn list_heads_by_regex(&self, pattern: &str) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
+        use regex::Regex;
+        use regex_syntax::hir::literal::Extractor;
+        
+        // Parse regex
+        let regex = Regex::new(pattern)
+            .map_err(|e| StateError::Backend(format!("Invalid regex: {}", e)))?;
+        
+        // Extract literal prefix for efficient DB scan
+        let prefix = regex_syntax::parse(pattern).ok()
+            .and_then(|hir| {
+                let seq = Extractor::new().extract(&hir);
+                seq.literals()
+                    .and_then(|lits| lits.first().map(|l| l.as_bytes().to_vec()))
+            })
+            .unwrap_or_default();
+        
+        // Prefix scan + regex filter
+        let all_heads = self.list_heads_by_prefix(&prefix)?;
+        Ok(all_heads
+            .into_iter()
+            .filter(|(key, _)| {
+                let key_str = String::from_utf8_lossy(key);
+                regex.is_match(&key_str)
+            })
+            .collect())
     }
 }
 
@@ -465,7 +494,7 @@ impl Store for KvStore {
     }
 
     fn list(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
-        self.list_by_prefix(prefix, false)
+        self.list_by_prefix(prefix)
     }
 
     fn chain_tip(&self, author: &PubKey) -> Result<Option<ChainTip>, StateError> {
@@ -529,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_deterministic_winner() {
-        // Test pick_winner logic directly (no store needed)
+        // Test Head::merge_lww logic directly (no store needed)
         let heads = vec![
             Head {
                 value: b"older".to_vec(),
@@ -547,7 +576,7 @@ mod tests {
             },
         ];
         
-        let winner = KvStore::pick_winner(&heads).unwrap();
+        let winner = Head::merge_lww(&heads).unwrap();
         assert_eq!(winner.value, b"newer"); // Higher HLC wins
     }
 
@@ -1512,31 +1541,32 @@ mod tests {
             .sign(&node);
         state.apply_entry(&entry2).unwrap();
         
-        // Delete key1
+        // Delete key1 (must cite entry1 as parent to supersede it)
         let clock3 = MockClock::new(3000);
         let entry3 = Entry::next_after(Some(&ChainTip::from(&entry2)))
             .timestamp(HLC::now_with_clock(&clock3))
             .store_id(TEST_STORE)
-            .parent_hashes(vec![entry2.hash()])
+            .parent_hashes(vec![entry1.hash()])  // Cite entry1 (the key1 put)
             .payload(make_payload(vec![Operation::delete(b"/test/key1")]))
             .sign(&node);
         state.apply_entry(&entry3).unwrap();
         
-        // list_by_prefix without include_deleted should only show key2
-        let entries = state.list_by_prefix(b"/test/", false).unwrap();
+        // list_by_prefix (live only) should only show key2
+        let entries = state.list_by_prefix(b"/test/").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, b"/test/key2");
         
-        // list_by_prefix with include_deleted should show both (key1 as tombstone)
-        let entries_all = state.list_by_prefix(b"/test/", true).unwrap();
-        assert_eq!(entries_all.len(), 2);
+        // list_heads_by_prefix shows all keys (including tombstones)
+        let heads_list = state.list_heads_by_prefix(b"/test/").unwrap();
+        assert_eq!(heads_list.len(), 2);
         
-        // Verify list_all also respects the flag
-        let all_entries = state.list_all(false).unwrap();
+        // Verify list_all (live only)
+        let all_entries = state.list_all().unwrap();
         assert_eq!(all_entries.len(), 1);
         
-        let all_entries_incl_deleted = state.list_all(true).unwrap();
-        assert_eq!(all_entries_incl_deleted.len(), 2);
+        // Verify list_heads_all (all including tombstones)
+        let all_heads = state.list_heads_all().unwrap();
+        assert_eq!(all_heads.len(), 2);
         
         let _ = std::fs::remove_file(&path);
     }

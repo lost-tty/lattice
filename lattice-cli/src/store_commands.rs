@@ -284,9 +284,9 @@ pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&
     
     let start = Instant::now();
     let result = if let Some(p) = &prefix {
-        h.list_by_prefix(p.as_bytes(), verbose).await
+        h.list_by_prefix(p.as_bytes()).await
     } else {
-        h.list(verbose).await
+        h.list().await
     };
     
     let mut w = writer.clone();

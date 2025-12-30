@@ -39,9 +39,27 @@ pub enum WatchEventKind {
     Delete,
 }
 
-/// A registered watcher with compiled regex
+/// Filter for matching keys in a watcher
+enum WatcherFilter {
+    Regex(Regex),
+    Prefix(Vec<u8>),
+}
+
+impl WatcherFilter {
+    fn matches(&self, key: &[u8]) -> bool {
+        match self {
+            WatcherFilter::Regex(regex) => {
+                let key_str = String::from_utf8_lossy(key);
+                regex.is_match(&key_str)
+            }
+            WatcherFilter::Prefix(prefix) => key.starts_with(prefix),
+        }
+    }
+}
+
+/// A registered watcher with filter
 struct Watcher {
-    pattern: Regex,
+    filter: WatcherFilter,
     tx: broadcast::Sender<WatchEvent>,
 }
 
@@ -72,12 +90,10 @@ pub enum StoreCmd {
         resp: oneshot::Sender<Result<Vec<Head>, StateError>>,
     },
     List {
-        include_deleted: bool,
         resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StateError>>,
     },
     ListByPrefix {
         prefix: Vec<u8>,
-        include_deleted: bool,
         resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StateError>>,
     },
     Put {
@@ -120,8 +136,11 @@ pub enum StoreCmd {
     },
     Watch {
         pattern: String,
-        include_deleted: bool,
-        resp: oneshot::Sender<Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<WatchEvent>), WatchError>>,
+        resp: oneshot::Sender<Result<(Vec<(Vec<u8>, Vec<Head>)>, broadcast::Receiver<WatchEvent>), WatchError>>,
+    },
+    WatchByPrefix {
+        prefix: Vec<u8>,
+        resp: oneshot::Sender<Result<(Vec<(Vec<u8>, Vec<Head>)>, broadcast::Receiver<WatchEvent>), WatchError>>,
     },
     SubscribeGaps {
         resp: oneshot::Sender<broadcast::Receiver<GapInfo>>,
@@ -175,6 +194,37 @@ impl std::fmt::Display for StoreActorError {
 }
 
 impl std::error::Error for StoreActorError {}
+
+/// Extract literal prefix from a regex pattern for efficient DB queries.
+/// Uses regex-syntax to parse the pattern and extract leading literals.
+/// 
+/// Examples:
+/// - `^/nodes/.*` -> Some("/nodes/")
+/// - `^/stores/[a-f0-9]+/data` -> Some("/stores/")  
+/// - `foo|bar` -> None (alternation, no common prefix)
+fn extract_literal_prefix(pattern: &str) -> Option<Vec<u8>> {
+    use regex_syntax::hir::literal::Extractor;
+    
+    let hir = regex_syntax::parse(pattern).ok()?;
+    let seq = Extractor::new().extract(&hir);
+    
+    // Get literals if any exist
+    let literals = seq.literals()?;
+    if literals.is_empty() {
+        return None;
+    }
+    
+    // Return first (prefix) literal
+    let lit = literals.first()?;
+    let bytes = lit.as_bytes();
+    
+    // Only use if prefix is non-empty
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes.to_vec())
+    }
+}
 
 /// The store actor - runs in its own thread, owns Store and SigChainManager
 pub struct StoreActor {
@@ -240,11 +290,11 @@ impl StoreActor {
                 StoreCmd::GetHeads { key, resp } => {
                     let _ = resp.send(self.state.get_heads(&key));
                 }
-                StoreCmd::List { include_deleted, resp } => {
-                    let _ = resp.send(self.state.list_all(include_deleted));
+                StoreCmd::List { resp } => {
+                    let _ = resp.send(self.state.list_all());
                 }
-                StoreCmd::ListByPrefix { prefix, include_deleted, resp } => {
-                    let _ = resp.send(self.state.list_by_prefix(&prefix, include_deleted));
+                StoreCmd::ListByPrefix { prefix, resp } => {
+                    let _ = resp.send(self.state.list_by_prefix(&prefix));
                 }
                 StoreCmd::Put { key, value, resp } => {
                     let result = self.do_put(&key, &value);
@@ -296,39 +346,54 @@ impl StoreActor {
                     let removed = self.cleanup_stale_orphans();
                     let _ = resp.send(removed);
                 }
-                StoreCmd::Watch { pattern, include_deleted, resp } => {
+                StoreCmd::Watch { pattern, resp } => {
+                    // Helper to set up watcher and return initial snapshot
+                    let mut setup = |filter: WatcherFilter, initial: Vec<(Vec<u8>, Vec<Head>)>| {
+                        let (tx, rx) = broadcast::channel(64);
+                        let id = self.next_watcher_id;
+                        self.next_watcher_id += 1;
+                        self.watchers.insert(id, Watcher { filter, tx });
+                        (initial, rx)
+                    };
+                    
                     match Regex::new(&pattern) {
                         Ok(regex) => {
-                            // Get initial snapshot of matching entries
-                            let all_entries = match self.state.list_all(include_deleted) {
-                                Ok(entries) => entries,
+                            let prefix = extract_literal_prefix(&pattern).unwrap_or_default();
+                            let all_heads = match self.state.list_heads_by_prefix(&prefix) {
+                                Ok(heads) => heads,
                                 Err(e) => {
                                     let _ = resp.send(Err(WatchError::InvalidRegex(format!("Store error: {}", e))));
                                     continue;
                                 }
                             };
                             
-                            // Filter by regex
-                            let initial: Vec<(Vec<u8>, Vec<u8>)> = all_entries
-                                .into_iter()
-                                .filter(|(key, _)| {
-                                    let key_str = String::from_utf8_lossy(key);
-                                    regex.is_match(&key_str)
-                                })
+                            // Filter by full regex (prefix scan may have false positives)
+                            let initial = all_heads.into_iter()
+                                .filter(|(key, _)| regex.is_match(&String::from_utf8_lossy(key)))
                                 .collect();
                             
-                            // Set up watcher
-                            let (tx, rx) = broadcast::channel(64);
-                            let id = self.next_watcher_id;
-                            self.next_watcher_id += 1;
-                            self.watchers.insert(id, Watcher { pattern: regex, tx });
-                            
-                            let _ = resp.send(Ok((initial, rx)));
+                            let _ = resp.send(Ok(setup(WatcherFilter::Regex(regex), initial)));
                         }
                         Err(e) => {
                             let _ = resp.send(Err(WatchError::InvalidRegex(e.to_string())));
                         }
                     }
+                }
+                StoreCmd::WatchByPrefix { prefix, resp } => {
+                    let all_heads = match self.state.list_heads_by_prefix(&prefix) {
+                        Ok(heads) => heads,
+                        Err(e) => {
+                            let _ = resp.send(Err(WatchError::InvalidRegex(format!("Store error: {}", e))));
+                            continue;
+                        }
+                    };
+                    
+                    let (tx, rx) = broadcast::channel(64);
+                    let id = self.next_watcher_id;
+                    self.next_watcher_id += 1;
+                    self.watchers.insert(id, Watcher { filter: WatcherFilter::Prefix(prefix), tx });
+                    
+                    let _ = resp.send(Ok((all_heads, rx)));
                 }
                 StoreCmd::SubscribeGaps { resp } => {
                     let _ = resp.send(self.chain_manager.subscribe_gaps());
@@ -437,7 +502,7 @@ impl StoreActor {
                 continue;
             }
             
-            if watcher.pattern.is_match(&key_str) {
+            if watcher.filter.matches(key) {
                 let _ = watcher.tx.send(WatchEvent {
                     key: key.to_vec(),
                     kind: kind.clone(),
