@@ -18,12 +18,16 @@ use tokio::sync::broadcast;
 /// Regex pattern for peer status keys
 pub const PEER_STATUS_PATTERN: &str = r"^/nodes/([a-f0-9]+)/status$";
 
+/// Static compiled regex for peer status keys (None if pattern is invalid - should never happen)
+static PEER_STATUS_REGEX: std::sync::LazyLock<Option<regex::Regex>> = 
+    std::sync::LazyLock::new(|| regex::Regex::new(PEER_STATUS_PATTERN).ok());
+
 /// Parse a peer status key like `/nodes/{pubkey}/status` and extract the pubkey hex.
 /// Returns None if the key doesn't match the expected format.
 pub fn parse_peer_status_key(key: &[u8]) -> Option<String> {
     let key_str = String::from_utf8_lossy(key);
-    let regex = regex::Regex::new(PEER_STATUS_PATTERN).expect("valid regex");
-    regex.captures(&key_str)
+    PEER_STATUS_REGEX.as_ref()
+        .and_then(|re| re.captures(&key_str))
         .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
 }
 
@@ -55,6 +59,9 @@ pub enum NodeError {
 
     #[error("Validation error: {0}")]
     Validation(String),
+    
+    #[error("Lock poisoned")]
+    LockPoisoned,
 }
 
 pub struct NodeInfo {
@@ -185,15 +192,20 @@ impl Node {
     
     /// Set bootstrap authors - trusted for initial sync before peer list is synced.
     /// These are provided by the inviting peer in JoinResponse.
-    pub fn set_bootstrap_authors(&self, authors: Vec<PubKey>) {
-        let mut bootstrap = self.bootstrap_authors.write().unwrap();
+    pub fn set_bootstrap_authors(&self, authors: Vec<PubKey>) -> Result<(), NodeError> {
+        let mut bootstrap = self.bootstrap_authors.write()
+            .map_err(|_| NodeError::LockPoisoned)?;
         bootstrap.clear();
         bootstrap.extend(authors);
+        Ok(())
     }
     
     /// Clear bootstrap authors after initial sync completes.
-    pub fn clear_bootstrap_authors(&self) {
-        self.bootstrap_authors.write().unwrap().clear();
+    pub fn clear_bootstrap_authors(&self) -> Result<(), NodeError> {
+        self.bootstrap_authors.write()
+            .map_err(|_| NodeError::LockPoisoned)?
+            .clear();
+        Ok(())
     }
 
     /// Get the signing key for Iroh integration (same Ed25519 key).
@@ -528,12 +540,12 @@ impl Node {
         
         // Populate initial cache
         {
-            let mut cache = self.peer_cache.write().unwrap();
+            let mut cache = self.peer_cache.write()
+                .map_err(|_| NodeError::LockPoisoned)?;
             for (key, heads) in initial {
                 if let Some(pubkey_hex) = parse_peer_status_key(&key) {
                     if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
-                        if pubkey_bytes.len() == 32 {
-                            let pubkey: PubKey = pubkey_bytes.try_into().unwrap();
+                        if let Ok(pubkey) = PubKey::try_from(pubkey_bytes) {
                             if let Some(winner) = heads.lww_head() {
                                 let status_str = String::from_utf8_lossy(&winner.value);
                                 if let Some(status) = PeerStatus::from_str(&status_str) {
@@ -560,35 +572,36 @@ impl Node {
             while let Ok(event) = rx.recv().await {
                 if let Some(pubkey_hex) = parse_peer_status_key(&event.key) {
                     if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
-                        if pubkey_bytes.len() == 32 {
-                            let pubkey: PubKey = pubkey_bytes.try_into().unwrap();
-                            let mut cache = peer_cache.write().unwrap();
-                            match event.kind {
-                                WatchEventKind::Update { heads } => {
-                                    // Use LWW merge to get winner (not just first)
-                                    let value = heads.lww_head()
-                                        .map(|h| h.value.as_slice())
-                                        .unwrap_or(&[]);
-                                    let status_str = String::from_utf8_lossy(value);
-                                    if let Some(new_status) = PeerStatus::from_str(&status_str) {
-                                        let old_status = cache.insert(pubkey, new_status.clone());
-                                        // Emit appropriate event
-                                        let event = match old_status {
-                                            Some(old) if old != new_status => {
-                                                crate::auth::PeerEvent::StatusChanged { pubkey, old, new: new_status }
-                                            }
-                                            None => {
-                                                crate::auth::PeerEvent::Added { pubkey, status: new_status }
-                                            }
-                                            _ => continue, // No change
-                                        };
-                                        let _ = peer_event_tx.send(event);
-                                    }
+                        let Ok(pubkey) = PubKey::try_from(pubkey_bytes) else { continue };
+                        let Ok(mut cache) = peer_cache.write() else {
+                            eprintln!("[lattice] Peer cache lock poisoned, stopping watcher");
+                            break;
+                        };
+                        match event.kind {
+                            WatchEventKind::Update { heads } => {
+                                // Use LWW merge to get winner (not just first)
+                                let value = heads.lww_head()
+                                    .map(|h| h.value.as_slice())
+                                    .unwrap_or(&[]);
+                                let status_str = String::from_utf8_lossy(value);
+                                if let Some(new_status) = PeerStatus::from_str(&status_str) {
+                                    let old_status = cache.insert(pubkey, new_status.clone());
+                                    // Emit appropriate event
+                                    let event = match old_status {
+                                        Some(old) if old != new_status => {
+                                            crate::auth::PeerEvent::StatusChanged { pubkey, old, new: new_status }
+                                        }
+                                        None => {
+                                            crate::auth::PeerEvent::Added { pubkey, status: new_status }
+                                        }
+                                        _ => continue, // No change
+                                    };
+                                    let _ = peer_event_tx.send(event);
                                 }
-                                WatchEventKind::Delete => {
-                                    if cache.remove(&pubkey).is_some() {
-                                        let _ = peer_event_tx.send(crate::auth::PeerEvent::Removed { pubkey });
-                                    }
+                            }
+                            WatchEventKind::Delete => {
+                                if cache.remove(&pubkey).is_some() {
+                                    let _ = peer_event_tx.send(crate::auth::PeerEvent::Removed { pubkey });
                                 }
                             }
                         }
@@ -603,25 +616,25 @@ impl Node {
 
 impl PeerProvider for Node {
     fn can_join(&self, peer: &PubKey) -> bool {
-        let cache = self.peer_cache.read().unwrap();
+        let Ok(cache) = self.peer_cache.read() else { return false };
         matches!(cache.get(peer), Some(PeerStatus::Invited))
     }
     
     fn can_connect(&self, peer: &PubKey) -> bool {
         // Check bootstrap authors first (trusted during initial sync)
-        if self.bootstrap_authors.read().unwrap().contains(peer) {
+        if self.bootstrap_authors.read().map(|b| b.contains(peer)).unwrap_or(false) {
             return true;
         }
-        let cache = self.peer_cache.read().unwrap();
+        let Ok(cache) = self.peer_cache.read() else { return false };
         matches!(cache.get(peer), Some(PeerStatus::Active) | Some(PeerStatus::Dormant))
     }
     
     fn can_accept_entry(&self, author: &PubKey) -> bool {
         // Check bootstrap authors first (trusted during initial sync)
-        if self.bootstrap_authors.read().unwrap().contains(author) {
+        if self.bootstrap_authors.read().map(|b| b.contains(author)).unwrap_or(false) {
             return true;
         }
-        let cache = self.peer_cache.read().unwrap();
+        let Ok(cache) = self.peer_cache.read() else { return false };
         matches!(
             cache.get(author),
             Some(PeerStatus::Active) | Some(PeerStatus::Dormant) | Some(PeerStatus::Revoked)
@@ -630,7 +643,7 @@ impl PeerProvider for Node {
     
     fn list_acceptable_authors(&self) -> Vec<PubKey> {
         // Return all peers that can accept entries (Active, Dormant, Revoked)
-        let cache = self.peer_cache.read().unwrap();
+        let Ok(cache) = self.peer_cache.read() else { return Vec::new() };
         cache.iter()
             .filter(|(_, status)| matches!(status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
             .map(|(pubkey, _)| *pubkey)

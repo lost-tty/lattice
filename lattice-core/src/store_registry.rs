@@ -46,9 +46,10 @@ impl StoreRegistry {
     
     /// Get a store handle, opening and spawning actor if not already cached
     pub fn get_or_open(&self, store_id: Uuid) -> Result<(StoreHandle, StoreInfo), StateError> {
-        // Check cache first
         {
-            let stores = self.stores.read().unwrap();
+            let Ok(stores) = self.stores.read() else {
+                return Err(StateError::Backend("lock poisoned".into()));
+            };
             if let Some(handle) = stores.get(&store_id) {
                 let info = StoreInfo { store_id, entries_replayed: 0 };
                 return Ok((handle.clone(), info));
@@ -58,12 +59,14 @@ impl StoreRegistry {
         // Not cached - open and cache the ORIGINAL (keeps actor alive)
         let store_dir = self.data_dir.store_dir(store_id);
         let opened = OpenedStore::open(store_id, store_dir)?;
-        let (handle, info) = opened.into_handle((*self.node).clone());
+        let (handle, info) = opened.into_handle((*self.node).clone())?;
         
         // Cache original handle (owns actor thread), return a clone
         let handle_clone = handle.clone();
         {
-            let mut stores = self.stores.write().unwrap();
+            let Ok(mut stores) = self.stores.write() else {
+                return Err(StateError::Backend("lock poisoned".into()));
+            };
             stores.insert(store_id, handle);
         }
         
@@ -77,7 +80,7 @@ impl StoreRegistry {
     
     /// Check if a store is cached (has an open handle)
     pub fn is_open(&self, store_id: &Uuid) -> bool {
-        let stores = self.stores.read().unwrap();
+        let Ok(stores) = self.stores.read() else { return false };
         stores.contains_key(store_id)
     }
 }

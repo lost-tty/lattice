@@ -104,8 +104,10 @@ impl MeshNetwork {
             match event {
                 NodeEvent::JoinRequested(peer_id) => {
                     // Convert PubKey to iroh::PublicKey
-                    let iroh_peer_id = iroh::PublicKey::from_bytes(&peer_id)
-                        .expect("PubKey should be valid 32 bytes");
+                    let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer_id) else {
+                        tracing::error!("Invalid PubKey for JoinRequested");
+                        continue;
+                    };
                     
                     if let Err(e) = server.engine.handle_join_request_event(iroh_peer_id).await {
                         tracing::error!(error = %e, "Join failed");
@@ -117,8 +119,10 @@ impl MeshNetwork {
                 }
                 NodeEvent::SyncWithPeer { store_id, peer } => {
                     // Sync with a specific peer (e.g., after joining mesh)
-                    let iroh_peer_id = iroh::PublicKey::from_bytes(&peer)
-                        .expect("PubKey should be valid 32 bytes");
+                    let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
+                        tracing::error!("Invalid PubKey for SyncWithPeer");
+                        continue;
+                    };
                     
                     tracing::debug!("[Sync] Syncing with peer to get data...");
                     if let Ok(result) = server.engine.sync_with_peer_by_id(store_id, iroh_peer_id, &[]).await {

@@ -81,7 +81,7 @@ impl MeshEngine {
                 
                 if !bootstrap_authors.is_empty() {
                     tracing::debug!("[Join] Setting {} bootstrap authors", bootstrap_authors.len());
-                    self.node.set_bootstrap_authors(bootstrap_authors);
+                    self.node.set_bootstrap_authors(bootstrap_authors)?;
                 }
                 
                 let _handle = self.node.complete_join(store_uuid, Some(via_peer)).await?;

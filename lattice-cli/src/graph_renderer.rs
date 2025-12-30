@@ -240,7 +240,7 @@ impl Grid {
                 let cell = self.get(x, y);
                 if cell.color > 0 {
                     // Output with color
-                    write!(output, "\x1b[{}m{}\x1b[0m", cell.color, cell.to_char()).unwrap();
+                    let _ = write!(output, "\x1b[{}m{}\x1b[0m", cell.color, cell.to_char());
                 } else {
                     output.push(cell.to_char());
                 }
@@ -249,7 +249,7 @@ impl Grid {
             // Append label if present
             if let Some(label) = labels.get(y) {
                 if !label.is_empty() {
-                    write!(output, " {}", label).unwrap();
+                    let _ = write!(output, " {}", label);
                 }
             }
             
@@ -305,7 +305,8 @@ pub fn render_dag(
     // Count incoming edges (parents in set) for each entry
     let mut in_degree: HashMap<Hash, usize> = HashMap::new();
     for hash in entries.keys() {
-        let parents_in_set = entries.get(hash).unwrap().parent_hashes.iter()
+        let Some(entry) = entries.get(hash) else { continue };
+        let parents_in_set = entry.parent_hashes.iter()
             .filter(|p| entry_hashes.contains(*p))
             .count();
         in_degree.insert(*hash, parents_in_set);
@@ -364,7 +365,7 @@ pub fn render_dag(
     // For each entry, find the row of its last descendant (to know when column becomes free)
     let mut last_descendant_row: HashMap<Hash, usize> = HashMap::new();
     for hash in order.iter() {
-        let entry = entries.get(hash).unwrap();
+        let Some(entry) = entries.get(hash) else { continue };
         let my_row = hash_to_row[hash];
         // Update each parent's last descendant
         for parent in &entry.parent_hashes {
@@ -387,7 +388,7 @@ pub fn render_dag(
     
     // Assign columns with reuse
     for (row, hash) in order.iter().enumerate() {
-        let entry = entries.get(hash).unwrap();
+        let Some(entry) = entries.get(hash) else { continue };
         let parents_in_set: Vec<Hash> = entry.parent_hashes.iter()
             .filter(|p| entry_hashes.contains(*p))
             .cloned()
@@ -459,7 +460,7 @@ pub fn render_dag(
     
     // Draw entries and connections
     for hash in &order {
-        let entry = entries.get(hash).unwrap();
+        let Some(entry) = entries.get(hash) else { continue };
         let row = hash_to_row[hash];
         let col = hash_to_col[hash];
         let grid_x = col * 2;

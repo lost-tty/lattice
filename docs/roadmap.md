@@ -125,9 +125,9 @@
 - [x] **Mesh Bootstrapping**: `JoinResponse` includes `authorized_authors` (all acceptable authors from inviter) so new nodes can accept entries during initial sync. Bootstrap authors cleared after sync completes.
 - [x] Trait boundaries: `StoreHandle` (user ops) vs `AuthorizedStore` (network ops with peer authorization)
 - [x] **Simplified StoreHandle**: Removed generic types (`StoreHandle<S>`), handler traits, and `StoreOps` enum; KvStore is now the sole implementation with direct methods on handle
-- [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
-- [ ] Refactor any `.unwrap` uses
+- [x] **Error Propagation Refactor**: Replaced 150+ production `.unwrap()`/`.expect()` with proper error handling
 - [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip )
+- [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 - [ ] **Checkpointing / Finality**

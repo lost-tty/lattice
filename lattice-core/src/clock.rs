@@ -19,7 +19,7 @@ impl Clock for SystemClock {
     fn now_ms(&self) -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
+            .unwrap_or(std::time::Duration::ZERO) // TODO: handle error
             .as_millis() as u64
     }
 }

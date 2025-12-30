@@ -41,13 +41,19 @@ async fn main() {
     // Uses RUST_LOG env var, defaults to info for lattice crates
     // Suppresses noisy iroh warnings (mDNS, magicsock unreachable hosts)
     let make_writer = tracing_writer::SharedWriterMakeWriter::new(writer.clone());
-    let filter = EnvFilter::from_default_env()
-        .add_directive("warn".parse().unwrap())
-        .add_directive("lattice_net=info".parse().unwrap())
-        .add_directive("lattice_core=info".parse().unwrap())
-        .add_directive("iroh_net::magicsock=error".parse().unwrap())
-        .add_directive("iroh::magicsock=error".parse().unwrap())
-        .add_directive("swarm_discovery=error".parse().unwrap());
+    
+    const DIRECTIVES: &[&str] = &[
+        "warn",
+        "lattice_net=info",
+        "lattice_core=info",
+        "iroh_net::magicsock=error",
+        "iroh::magicsock=error",
+        "swarm_discovery=error",
+    ];
+    
+    let filter = DIRECTIVES.iter()
+        .filter_map(|d| d.parse().ok())
+        .fold(EnvFilter::from_default_env(), |f, d| f.add_directive(d));
 
     tracing_subscriber::fmt()
         .with_writer(make_writer)
@@ -93,11 +99,15 @@ async fn main() {
     
     // Update current store based on root store status
     if let Some(store) = node.root_store().ok() {
-        *current_store.write().unwrap() = Some(store);
+        if let Ok(mut guard) = current_store.write() {
+            *guard = Some(store);
+        }
     }
 
     loop {
-        let prompt = make_prompt(current_store.read().unwrap().as_ref());
+        let prompt = current_store.read()
+            .map(|guard| make_prompt(guard.as_ref()))
+            .unwrap_or_else(|_| "lattice:error> ".to_string());
         let _ = rl.update_prompt(&prompt);
         
         match rl.readline().await {
@@ -129,7 +139,7 @@ async fn main() {
                         
                         if needs_blocking {
                             // State-changing commands: await result inline
-                            let store_guard = current_store.read().unwrap();
+                            let Ok(store_guard) = current_store.read() else { continue };
                             let result = handle_command(
                                 &node, 
                                 store_guard.as_ref(), 
@@ -142,14 +152,16 @@ async fn main() {
                                 CommandResult::Ok => {}
                                 CommandResult::SwitchTo(h) => {
                                     drop(store_guard);
-                                    *current_store.write().unwrap() = Some(h);
+                                    if let Ok(mut guard) = current_store.write() {
+                                        *guard = Some(h);
+                                    }
                                 }
                                 CommandResult::Quit => break,
                             }
                         } else {
                             // Non-state-changing commands: spawn in background
                             let node = node.clone();
-                            let store = current_store.read().unwrap().clone();
+                            let store = current_store.read().ok().and_then(|g| g.clone());
                             let server = mesh.clone();
                             let writer = writer.clone();
                             
@@ -185,5 +197,5 @@ async fn main() {
     }
     
     // Flush any remaining output
-    rl.flush().unwrap();
+    let _ = rl.flush();
 }

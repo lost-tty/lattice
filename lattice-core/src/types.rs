@@ -39,7 +39,8 @@ macro_rules! define_bytes {
                         hex_str.len()
                     ));
                 }
-                Ok(Self(bytes.try_into().unwrap()))
+                // SAFETY: length checked above
+                Ok(Self(bytes.try_into().map_err(|_| "internal error: length mismatch".to_string())?))
             }
         }
 

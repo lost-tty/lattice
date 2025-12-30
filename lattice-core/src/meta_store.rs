@@ -61,7 +61,7 @@ impl MetaStore {
             let mut table = write_txn.open_table(STORES_TABLE)?;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default() // TODO: handle error
                 .as_millis() as u64;
             table.insert(store_id.as_bytes().as_slice(), now)?;
         }

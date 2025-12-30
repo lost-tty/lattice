@@ -231,8 +231,8 @@ impl TryFrom<ProtoEntry> for Entry {
         // Convert parent hashes
         let mut parent_hashes = Vec::new();
         for h in p.parent_hashes {
-            if h.len() == 32 {
-                parent_hashes.push(h.try_into().unwrap());
+            if let Ok(hash) = h.try_into() {
+                parent_hashes.push(hash);
             }
             // Skip invalid parent hashes? Or error? For now mimic lenient behavior but ideally strict.
         }
@@ -275,8 +275,10 @@ impl TryFrom<ProtoSignedEntry> for SignedEntry {
             return Err(EntryError::InvalidSignatureLength(p.signature.len()));
         }
         
-        let author_id: PubKey = p.author_id.try_into().unwrap();
-        let signature_bytes: [u8; 64] = p.signature.try_into().unwrap();
+        let author_id: PubKey = p.author_id.try_into()
+            .map_err(|v: Vec<u8>| EntryError::InvalidPublicKeyLength(v.len()))?;
+        let signature_bytes: [u8; 64] = p.signature.try_into()
+            .map_err(|v: Vec<u8>| EntryError::InvalidSignatureLength(v.len()))?;
         
         // 2. Verify signature against *raw bytes* before decoding
         // This fails if the bytes are invalid/tampered

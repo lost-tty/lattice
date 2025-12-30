@@ -85,14 +85,14 @@ impl OpenedStore {
     pub fn into_handle(
         self,
         node: NodeIdentity,
-    ) -> (StoreHandle, StoreInfo) {
+    ) -> Result<(StoreHandle, StoreInfo), super::StateError> {
         let sigchain_dir = self.store_dir.join("sigchain");
         
         // Set up channels and spawn actor
         let (tx, rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(64);
         let (sync_needed_tx, _sync_needed_rx) = broadcast::channel(64);
-        let actor = StoreActor::new(self.store_id, self.state, sigchain_dir, node, rx, entry_tx.clone(), sync_needed_tx.clone());
+        let actor = StoreActor::new(self.store_id, self.state, sigchain_dir, node, rx, entry_tx.clone(), sync_needed_tx.clone())?;
         let actor_handle = thread::spawn(move || actor.run());
         
         let handle = StoreHandle { 
@@ -103,7 +103,7 @@ impl OpenedStore {
             sync_needed_tx 
         };
         let info = StoreInfo { store_id: self.store_id, entries_replayed: self.entries_replayed };
-        (handle, info)
+        Ok((handle, info))
     }
     
     /// Access the underlying state directly (no actor).
@@ -148,7 +148,7 @@ impl StoreHandle {
         node: NodeIdentity,
     ) -> Result<(Self, StoreInfo), super::StateError> {
         let opened = OpenedStore::open(store_id, store_dir)?;
-        Ok(opened.into_handle(node))
+        opened.into_handle(node)
     }
     
     pub fn id(&self) -> Uuid { self.store_id }

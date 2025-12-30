@@ -255,18 +255,18 @@ impl StoreActor {
         rx: mpsc::Receiver<StoreCmd>,
         entry_tx: broadcast::Sender<SignedEntry>,
         sync_needed_tx: broadcast::Sender<SyncNeeded>,
-    ) -> Self {
+    ) -> Result<Self, StateError> {
         // Create chain manager - loads all chains and builds hash index
-        let mut chain_manager = SigChainManager::new(&logs_dir, store_id);
+        let mut chain_manager = SigChainManager::new(&logs_dir, store_id)?;
         let local_author = node.public_key();
-        chain_manager.get_or_create(local_author);  // Ensure local chain exists
+        chain_manager.get_or_create(local_author)?;  // Ensure local chain exists
      
         // Initialize peer store in separate DB file for better separation
         let store_root = logs_dir.parent().unwrap_or(&logs_dir);
         let peer_db_path = store_root.join("peer_sync.db");
-        let peer_store = PeerSyncStore::open(&peer_db_path).expect("Failed to open peer_sync.db");
+        let peer_store = PeerSyncStore::open(&peer_db_path)?;
 
-        Self {
+        Ok(Self {
             state,
             chain_manager,
             peer_store,
@@ -276,7 +276,7 @@ impl StoreActor {
             sync_needed_tx,
             watchers: HashMap::new(),
             next_watcher_id: 0,
-        }
+        })
     }
 
     /// Run the actor loop - processes commands until Shutdown received
@@ -522,7 +522,7 @@ impl StoreActor {
         
         for orphan in orphans {
             // Check if this entry is already in the sigchain
-            let chain = self.chain_manager.get_or_create(orphan.author);
+            let Ok(chain) = self.chain_manager.get_or_create(orphan.author) else { continue };
             if orphan.seq < chain.next_seq() {
                 // Entry is behind the current position - it's already applied
                 self.chain_manager.delete_sigchain_orphan(&orphan.author, &orphan.prev_hash, &orphan.entry_hash);
@@ -537,7 +537,7 @@ impl StoreActor {
     fn create_local_entry(&mut self, parent_hashes: Vec<Hash>, ops: Vec<Operation>) -> Result<(), StoreActorError> {
         // Build the entry (without appending)
         let local_author = self.node.public_key();
-        let sigchain = self.chain_manager.get_or_create(local_author);
+        let sigchain = self.chain_manager.get_or_create(local_author)?;
         use prost::Message;
         use crate::store::KvPayload;
         let payload = KvPayload { ops }.encode_to_vec();
@@ -589,7 +589,7 @@ impl StoreActor {
 
         while let Some((current, (dag_orphan_meta, sigchain_orphan_meta))) = work_queue.pop() {
             // Step 1: Validate sigchain
-            match self.chain_manager.validate_entry(&current) {
+            match self.chain_manager.validate_entry(&current)? {
                 SigchainValidation::Valid => {
                     // Step 2: Validate state (parent_hashes exist in history)
                     match self.state.validate_parent_hashes_with_index(&current, |hash| self.chain_manager.hash_exists(hash)) {
@@ -1205,7 +1205,7 @@ mod tests {
         let node = NodeIdentity::generate();
         
         // Create manager
-        let mut manager = SigChainManager::new(&logs_dir, TEST_STORE);
+        let mut manager = SigChainManager::new(&logs_dir, TEST_STORE).unwrap();
         
         // Create entry A (seq 1) and entry B (seq 2)
         let clock_a = MockClock::new(1000);
@@ -1225,7 +1225,7 @@ mod tests {
             .sign(&node);
         
         // Ingest B first -> becomes orphan waiting for A
-        let result_b = manager.validate_entry(&entry_b);
+        let result_b = manager.validate_entry(&entry_b).unwrap();
         match result_b {
             crate::store::sigchain::SigchainValidation::Orphan { gap, prev_hash } => {
                 manager.buffer_sigchain_orphan(&entry_b, gap.author, crate::types::Hash::from(prev_hash), gap.to_seq, gap.from_seq, gap.last_known_hash.unwrap_or(crate::types::Hash::ZERO)).unwrap();
@@ -1238,7 +1238,7 @@ mod tests {
         assert_eq!(orphan_count, 1, "B should be buffered as sigchain orphan");
         
         // Ingest A -> A commits, B should become ready
-        let result_a = manager.validate_entry(&entry_a);
+        let result_a = manager.validate_entry(&entry_a).unwrap();
         assert!(matches!(result_a, crate::store::sigchain::SigchainValidation::Valid));
         let ready_orphans = manager.commit_entry(&entry_a).unwrap();
         
@@ -1334,7 +1334,7 @@ mod tests {
         let hash_h2 = entry_h2.hash();
         
         // Create a SigChainManager to track hash history
-        let mut manager = crate::store::sigchain::SigChainManager::new(&logs_dir, TEST_STORE);
+        let mut manager = crate::store::sigchain::SigChainManager::new(&logs_dir, TEST_STORE).unwrap();
         
         // Manually register H0 and H1 in the hash index (simulating they were committed)
         manager.register_hash(hash_h0);
