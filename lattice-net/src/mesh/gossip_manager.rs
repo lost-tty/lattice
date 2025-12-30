@@ -97,9 +97,9 @@ impl GossipManager {
     /// Get currently connected gossip peers with last-seen time
     pub async fn online_peers(&self) -> HashMap<iroh::PublicKey, Instant> {
         let peers = self.online_peers.read().await.clone();
-        tracing::debug!(count = peers.len(), "online_peers() called");
+        tracing::trace!(count = peers.len(), "online_peers() called");
         for (pk, _) in &peers {
-            tracing::debug!(peer = %pk.fmt_short(), "online_peer entry");
+            tracing::trace!(peer = %pk.fmt_short(), "online_peer entry");
         }
         peers
     }
@@ -116,14 +116,21 @@ impl GossipManager {
         
         tokio::spawn(async move {
             // Get initial neighbors and add to online_peers
-            {
+            let initial_count = {
                 let mut online = online_peers.write().await;
-                for peer in rx.neighbors() {
-                    tracing::info!(peer = %peer.fmt_short(), "Initial gossip neighbor");
-                    online.insert(peer, Instant::now());
+                let neighbors: Vec<_> = rx.neighbors().collect();
+                tracing::info!(
+                    store_id = %store_id, 
+                    count = neighbors.len(), 
+                    "Initial gossip neighbors"
+                );
+                for peer in &neighbors {
+                    tracing::debug!(peer = %peer.fmt_short(), "Initial gossip neighbor");
+                    online.insert(*peer, Instant::now());
                 }
-            }
-            tracing::info!(store_id = %store_id, "Gossip receiver started");
+                neighbors.len()
+            };
+            tracing::info!(store_id = %store_id, initial_neighbors = initial_count, "Gossip receiver started");
             
             while let Some(event) = futures_util::StreamExt::next(&mut rx).await {
                 tracing::debug!(store_id = %store_id, event = ?event, "Gossip event");
@@ -131,6 +138,19 @@ impl GossipManager {
                     Ok(iroh_gossip::api::Event::Received(msg)) => {
                         // Check if gossip sender is authorized (separate from entry author check)
                         let sender: PubKey = msg.delivered_from.to_lattice();
+                        
+                        // Check if this peer is tracked as a neighbor
+                        let is_neighbor = online_peers.read().await.contains_key(&msg.delivered_from);
+                        if !is_neighbor {
+                            tracing::warn!(
+                                store_id = %store_id,
+                                peer = %msg.delivered_from.fmt_short(),
+                                "Received gossip from peer NOT in online_peers (missing NeighborUp?)"
+                            );
+                            // Add them now since they're clearly connected
+                            online_peers.write().await.insert(msg.delivered_from, Instant::now());
+                        }
+                        
                         if !node.can_connect(&sender) {
                             tracing::warn!(
                                 store_id = %store_id,
@@ -186,12 +206,30 @@ impl GossipManager {
                         }
                     }
                     Ok(iroh_gossip::api::Event::NeighborUp(peer_id)) => {
-                        tracing::info!(peer = %peer_id.fmt_short(), "Gossip peer connected");
-                        online_peers.write().await.insert(peer_id, Instant::now());
+                        let count = {
+                            let mut peers = online_peers.write().await;
+                            peers.insert(peer_id, Instant::now());
+                            peers.len()
+                        };
+                        tracing::info!(
+                            store_id = %store_id,
+                            peer = %peer_id.fmt_short(), 
+                            total_neighbors = count,
+                            "NeighborUp: gossip peer connected"
+                        );
                     }
                     Ok(iroh_gossip::api::Event::NeighborDown(peer_id)) => {
-                        tracing::info!(peer = %peer_id.fmt_short(), "Gossip peer disconnected");
-                        online_peers.write().await.remove(&peer_id);
+                        let count = {
+                            let mut peers = online_peers.write().await;
+                            peers.remove(&peer_id);
+                            peers.len()
+                        };
+                        tracing::info!(
+                            store_id = %store_id,
+                            peer = %peer_id.fmt_short(), 
+                            total_neighbors = count,
+                            "NeighborDown: gossip peer disconnected"
+                        );
                     }
                     Ok(iroh_gossip::api::Event::Lagged) => {
                         tracing::warn!(store_id = %store_id, "Gossip receiver lagged");

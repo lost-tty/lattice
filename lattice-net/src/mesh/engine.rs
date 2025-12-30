@@ -40,11 +40,17 @@ impl MeshEngine {
     }
     
     /// Handle JoinRequested event - does network protocol (outbound)
+    #[tracing::instrument(skip(self), fields(peer = %peer_id.fmt_short()))]
     pub async fn handle_join_request_event(&self, peer_id: iroh::PublicKey) -> Result<(), NodeError> {
-        tracing::info!(peer = %peer_id.fmt_short(), "Joining mesh via peer");
+        tracing::info!("Join protocol: connecting to peer");
         
         let conn = self.endpoint.connect(peer_id).await
-            .map_err(|e| NodeError::Actor(format!("Connection failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "Join failed: connection error");
+                NodeError::Actor(format!("Connection failed: {}", e))
+            })?;
+        
+        tracing::debug!("Join protocol: connection established, opening stream");
         
         let (send, recv) = conn.open_bi().await
             .map_err(|e| NodeError::Actor(format!("Failed to open stream: {}", e)))?;
@@ -80,15 +86,23 @@ impl MeshEngine {
                     .collect();
                 
                 if !bootstrap_authors.is_empty() {
-                    tracing::debug!("[Join] Setting {} bootstrap authors", bootstrap_authors.len());
+                    tracing::info!(count = bootstrap_authors.len(), "Join protocol: received bootstrap authors");
+                    for author in &bootstrap_authors {
+                        tracing::debug!(author = %author, "Bootstrap author");
+                    }
                     self.node.set_bootstrap_authors(bootstrap_authors)?;
                 }
                 
+                tracing::info!(store_id = %store_uuid, "Join protocol: completing join");
                 let _handle = self.node.complete_join(store_uuid, Some(via_peer)).await?;
+                tracing::info!("Join protocol: complete");
                 
                 Ok(())
             }
-            _ => Err(NodeError::Actor("Unexpected response".to_string())),
+            _ => {
+                tracing::error!("Join protocol: unexpected response from peer");
+                Err(NodeError::Actor("Unexpected response".to_string()))
+            }
         }
     }
     
@@ -161,9 +175,14 @@ impl MeshEngine {
     }
     
     /// Sync with a peer using symmetric SyncSession protocol
+    #[tracing::instrument(skip(self, store, _authors), fields(store_id = %store.id(), peer = %peer_id.fmt_short()))]
     pub async fn sync_with_peer(&self, store: &AuthorizedStore, peer_id: iroh::PublicKey, _authors: &[PubKey]) -> Result<SyncResult, NodeError> {
+        tracing::debug!("Sync: connecting to peer");
         let conn = self.endpoint.connect(peer_id).await
-            .map_err(|e| NodeError::Actor(format!("Connection failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "Sync: connection failed");
+                NodeError::Actor(format!("Connection failed: {}", e))
+            })?;
         
         let (send, recv) = conn.open_bi().await
             .map_err(|e| NodeError::Actor(format!("Failed to open stream: {}", e)))?;
@@ -176,6 +195,8 @@ impl MeshEngine {
         let result = session.run_as_initiator().await?;
         
         sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
+        
+        tracing::info!(entries = result.entries_received, "Sync: complete");
         
         Ok(SyncResult { 
             entries_applied: result.entries_received, 

@@ -103,43 +103,69 @@ impl MeshNetwork {
         while let Ok(event) = event_rx.recv().await {
             match event {
                 NodeEvent::JoinRequested(peer_id) => {
-                    // Convert PubKey to iroh::PublicKey
                     let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer_id) else {
-                        tracing::error!("Invalid PubKey for JoinRequested");
+                        tracing::error!(peer = %lattice_core::PubKey::from(peer_id), "JoinRequested: invalid PubKey");
                         continue;
                     };
+                    tracing::info!(peer = %iroh_peer_id.fmt_short(), "Event: JoinRequested → starting join protocol");
                     
                     if let Err(e) = server.engine.handle_join_request_event(iroh_peer_id).await {
-                        tracing::error!(error = %e, "Join failed");
+                        tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "Event: JoinRequested → join failed");
                     }
                 }
                 NodeEvent::NetworkStore(store) => {
-                    // Node explicitly requested this store be networked
+                    tracing::info!(store_id = %store.id(), "Event: NetworkStore → registering store");
                     server.register_store(store).await;
                 }
                 NodeEvent::SyncWithPeer { store_id, peer } => {
-                    // Sync with a specific peer (e.g., after joining mesh)
                     let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
-                        tracing::error!("Invalid PubKey for SyncWithPeer");
+                        tracing::error!("SyncWithPeer: invalid PubKey");
                         continue;
                     };
+                    tracing::info!(
+                        store_id = %store_id, 
+                        peer = %iroh_peer_id.fmt_short(), 
+                        "Event: SyncWithPeer → starting targeted sync"
+                    );
                     
-                    tracing::debug!("[Sync] Syncing with peer to get data...");
-                    if let Ok(result) = server.engine.sync_with_peer_by_id(store_id, iroh_peer_id, &[]).await {
-                        tracing::debug!("[Sync] Complete: {} entries", result.entries_applied);
+                    match server.engine.sync_with_peer_by_id(store_id, iroh_peer_id, &[]).await {
+                        Ok(result) => tracing::info!(
+                            store_id = %store_id,
+                            peer = %iroh_peer_id.fmt_short(),
+                            entries = result.entries_applied,
+                            "Event: SyncWithPeer → complete"
+                        ),
+                        Err(e) => tracing::warn!(
+                            store_id = %store_id,
+                            peer = %iroh_peer_id.fmt_short(),
+                            error = %e,
+                            "Event: SyncWithPeer → failed"
+                        ),
                     }
                 }
                 NodeEvent::SyncRequested(store_id) => {
+                    tracing::info!(store_id = %store_id, "Event: SyncRequested → syncing with all peers");
                     if server.engine.get_store(store_id).await.is_some() {
-                        if let Ok(results) = server.engine.sync_all_by_id(store_id).await {
-                            if !results.is_empty() {
+                        match server.engine.sync_all_by_id(store_id).await {
+                            Ok(results) if !results.is_empty() => {
                                 let total: u64 = results.iter().map(|r| r.entries_applied).sum();
-                                tracing::info!(entries = total, peers = results.len(), "Sync complete");
+                                tracing::info!(
+                                    store_id = %store_id,
+                                    entries = total, 
+                                    peers = results.len(), 
+                                    "Event: SyncRequested → complete"
+                                );
                             }
+                            Ok(_) => tracing::debug!(store_id = %store_id, "Event: SyncRequested → no peers to sync"),
+                            Err(e) => tracing::warn!(store_id = %store_id, error = %e, "Event: SyncRequested → failed"),
                         }
+                    } else {
+                        tracing::warn!(store_id = %store_id, "Event: SyncRequested → store not registered");
                     }
                 }
-                _ => {} // Ignore other events
+                other => {
+                    tracing::trace!(event = ?other, "Event: ignored");
+                }
             }
         }
     }
