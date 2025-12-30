@@ -194,6 +194,7 @@ Verify all data read from disk (log files, redb store) via hash/signature checks
 
 ## Future
 
+- One-time join tokens: reverse invite flow so guest presents token instead of inviter knowing pubkey upfront. See [one-time-join-tokens.md](one-time-join-tokens.md).
 - TTL expiry for long-lived orphans (received_at timestamp now tracked)
 - Transitive sync across all peers
 - CRDTs: PN-Counters, OR-Sets for peer list
