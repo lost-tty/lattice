@@ -6,12 +6,12 @@
 //! - meta: String → Vec<u8> (system metadata: last_seq, last_hash, etc.)
 //! - author: PubKey → AuthorState (per-author replay tracking)
 
-use super::{KvPatch, Store};
-use crate::store::error::{StateError, ParentValidationError};
-use crate::store::LogError;
+use super::kv_patch::KvPatch;
+use super::kv_types::{operation, KvPayload};
+use super::error::{StateError, ParentValidationError};
+use super::LogError;
 use crate::entry::{SignedEntry, ChainTip};
 use crate::proto::storage::{HeadInfo as ProtoHeadInfo, HeadList};
-use super::{operation, KvPayload};
 use crate::types::{Hash, PubKey};
 use crate::hlc::HLC;
 use crate::head::Head;
@@ -488,26 +488,6 @@ impl KvStore {
     }
 }
 
-impl Store for KvStore {
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
-        KvStore::get(self, key)
-    }
-
-    fn list(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
-        self.list_by_prefix(prefix)
-    }
-
-    fn chain_tip(&self, author: &PubKey) -> Result<Option<ChainTip>, StateError> {
-        KvStore::chain_tip(self, author)
-    }
-}
-
-impl crate::store::interfaces::ReadContext for KvStore {
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
-        KvStore::get(self, key)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,7 +496,7 @@ mod tests {
     use crate::node_identity::NodeIdentity;
     use crate::entry::{Entry, SignedEntry, ChainTip};
     use crate::proto::storage::{Entry as ProtoEntry, SignedEntry as ProtoSignedEntry};
-    use crate::store::impls::kv::{Operation, KvPayload};
+    use crate::store::{Operation, KvPayload};
     use crate::store::Log;
     use prost::Message;
     use uuid::Uuid;

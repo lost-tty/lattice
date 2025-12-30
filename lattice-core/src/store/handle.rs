@@ -8,7 +8,7 @@ use crate::{
 };
 use crate::entry::SignedEntry;
 use super::actor::{StoreCmd, StoreActor};
-use crate::store::impls::kv::KvStore;
+use crate::store::KvStore;
 use super::SyncNeeded;
 use tokio::sync::{broadcast, mpsc};
 use std::path::PathBuf;

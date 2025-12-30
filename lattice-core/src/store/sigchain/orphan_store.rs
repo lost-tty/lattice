@@ -420,7 +420,7 @@ pub(crate) mod tests {
         use crate::entry::Entry;
         use crate::hlc::HLC;
         use crate::node_identity::NodeIdentity;
-        use crate::store::impls::kv::{Operation, KvPayload};
+        use crate::store::{Operation, KvPayload};
 
         fn make_payload(ops: Vec<Operation>) -> Vec<u8> {
             KvPayload { ops }.encode_to_vec()

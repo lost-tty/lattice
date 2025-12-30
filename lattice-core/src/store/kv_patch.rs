@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use crate::store::interfaces::Patch;
 
 #[derive(Debug, Default)]
 pub struct TableOps {
@@ -20,10 +19,9 @@ impl KvPatch {
     pub fn delete(&mut self, table: &str, key: Vec<u8>) {
         self.updates.entry(table.to_string()).or_default().deletes.push(key);
     }
-}
-
-impl Patch for KvPatch {
-    fn combine(&mut self, other: Self) {
+    
+    /// Combine two patches (monoid operation)
+    pub fn combine(&mut self, other: Self) {
         for (table, ops) in other.updates {
             let entry = self.updates.entry(table).or_default();
             entry.puts.extend(ops.puts);
