@@ -163,7 +163,8 @@ impl StoreHandle {
         self.sync_needed_tx.subscribe()
     }
 
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, NodeError> {
+    /// Get all heads for a key
+    pub async fn get(&self, key: &[u8]) -> Result<Vec<crate::Head>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::Get { key: key.to_vec(), resp: resp_tx }).await
@@ -173,17 +174,8 @@ impl StoreHandle {
             .map_err(NodeError::Store)
     }
 
-    pub async fn get_heads(&self, key: &[u8]) -> Result<Vec<crate::Head>, NodeError> {
-        use StoreCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx.send(StoreCmd::GetHeads { key: key.to_vec(), resp: resp_tx }).await
-            .map_err(|_| NodeError::ChannelClosed)?;
-        resp_rx.await
-            .map_err(|_| NodeError::ChannelClosed)?
-            .map_err(NodeError::Store)
-    }
-
-    pub async fn list(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
+    /// List all keys with their heads
+    pub async fn list(&self) -> Result<Vec<(Vec<u8>, Vec<crate::Head>)>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::List { resp: resp_tx }).await
@@ -192,11 +184,23 @@ impl StoreHandle {
             .map_err(|_| NodeError::ChannelClosed)?
             .map_err(NodeError::Store)
     }
-
-    pub async fn list_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NodeError> {
+    
+    /// List keys by prefix with their heads
+    pub async fn list_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<crate::Head>)>, NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::ListByPrefix { prefix: prefix.to_vec(), resp: resp_tx }).await
+            .map_err(|_| NodeError::ChannelClosed)?;
+        resp_rx.await
+            .map_err(|_| NodeError::ChannelClosed)?
+            .map_err(NodeError::Store)
+    }
+    
+    /// List keys by regex with their heads
+    pub async fn list_by_regex(&self, pattern: &str) -> Result<Vec<(Vec<u8>, Vec<crate::Head>)>, NodeError> {
+        use StoreCmd;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx.send(StoreCmd::ListByRegex { pattern: pattern.to_string(), resp: resp_tx }).await
             .map_err(|_| NodeError::ChannelClosed)?;
         resp_rx.await
             .map_err(|_| NodeError::ChannelClosed)?
@@ -326,31 +330,8 @@ impl StoreHandle {
     }
     
     /// Watch for key changes matching a regex pattern.
-    /// Returns initial snapshot of matching entries (live values only) plus a receiver for future changes.
-    /// 
-    /// Example patterns:
-    /// - `^/nodes/.*` - matches all node keys
-    /// - `^/nodes/[a-f0-9]+/status$` - matches peer status keys
-    /// 
-    /// The initial snapshot is atomic with the watch subscription - no events will be missed.
-    /// This is a convenience wrapper over `watch_heads` that applies LWW merge.
-    pub async fn watch(&self, pattern: &str) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<super::actor::WatchEvent>), NodeError> {
-        let (heads_snapshot, rx) = self.watch_heads(pattern).await?;
-        
-        // Apply merge_lww to get live values
-        let merged: Vec<(Vec<u8>, Vec<u8>)> = heads_snapshot
-            .into_iter()
-            .filter_map(|(key, heads)| {
-                crate::Head::merge_lww(&heads).map(|h| (key, h.value.clone()))
-            })
-            .collect();
-        
-        Ok((merged, rx))
-    }
-    
-    /// Watch with raw heads access (for conflict inspection or custom merge strategies).
-    /// Returns initial snapshot as Vec<Head> per key.
-    pub async fn watch_heads(&self, pattern: &str) -> Result<(Vec<(Vec<u8>, Vec<crate::Head>)>, broadcast::Receiver<super::actor::WatchEvent>), NodeError> {
+    /// Returns initial snapshot with heads plus a receiver for future changes.
+    pub async fn watch(&self, pattern: &str) -> Result<(Vec<(Vec<u8>, Vec<crate::Head>)>, broadcast::Receiver<super::actor::WatchEvent>), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::Watch { 
@@ -363,24 +344,8 @@ impl StoreHandle {
             .map_err(|e| NodeError::Actor(e.to_string()))
     }
     
-    /// Watch for key changes matching a prefix (live values only).
-    /// More efficient than regex for binary keys.
-    pub async fn watch_by_prefix(&self, prefix: &[u8]) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, broadcast::Receiver<super::actor::WatchEvent>), NodeError> {
-        let (heads_snapshot, rx) = self.watch_heads_by_prefix(prefix).await?;
-        
-        // Apply merge_lww to get live values
-        let merged: Vec<(Vec<u8>, Vec<u8>)> = heads_snapshot
-            .into_iter()
-            .filter_map(|(key, heads)| {
-                crate::Head::merge_lww(&heads).map(|h| (key, h.value.clone()))
-            })
-            .collect();
-        
-        Ok((merged, rx))
-    }
-    
-    /// Watch with raw heads access by prefix (efficient for binary keys).
-    pub async fn watch_heads_by_prefix(&self, prefix: &[u8]) -> Result<(Vec<(Vec<u8>, Vec<crate::Head>)>, broadcast::Receiver<super::actor::WatchEvent>), NodeError> {
+    /// Watch for key changes matching a prefix.
+    pub async fn watch_by_prefix(&self, prefix: &[u8]) -> Result<(Vec<(Vec<u8>, Vec<crate::Head>)>, broadcast::Receiver<super::actor::WatchEvent>), NodeError> {
         use StoreCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx.send(StoreCmd::WatchByPrefix { 

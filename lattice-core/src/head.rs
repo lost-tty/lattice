@@ -58,16 +58,3 @@ impl From<Head> for ProtoHeadInfo {
         }
     }
 }
-
-impl Head {
-    /// Merge heads using Last-Write-Wins strategy, skipping tombstones.
-    /// Returns the live winner: highest HLC, then highest author (deterministic tiebreaker).
-    pub fn merge_lww(heads: &[Head]) -> Option<&Head> {
-        heads.iter()
-            .filter(|h| !h.tombstone)
-            .max_by(|a, b| {
-                a.hlc.cmp(&b.hlc)
-                    .then_with(|| a.author.cmp(&b.author))
-            })
-    }
-}

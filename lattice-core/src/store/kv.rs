@@ -15,6 +15,7 @@ use crate::proto::storage::{HeadInfo as ProtoHeadInfo, HeadList};
 use crate::types::{Hash, PubKey};
 use crate::hlc::HLC;
 use crate::head::Head;
+use crate::merge::Merge;
 use prost::Message;
 use std::collections::{HashSet, HashMap};
 use std::path::Path;
@@ -170,7 +171,7 @@ impl KvStore {
                 None => continue,
             };
             
-            let current_heads = self.get_heads(key)
+            let current_heads = self.get(key)
                 .map_err(|e| ParentValidationError::State(e.to_string()))?;
             
             let current_hashes: HashSet<Hash> = current_heads.iter()
@@ -328,15 +329,9 @@ impl KvStore {
         Ok(())
     }
     
-    /// Get a value by key (returns deterministic winner from live heads)
-    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
-        let heads = self.get_heads(key)?;
-        Ok(Head::merge_lww(&heads).map(|h| h.value.clone()))
-    }
-    
     /// Get all heads for a key (for conflict inspection).
     /// Heads are sorted deterministically: highest HLC first, ties broken by author.
-    pub fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, StateError> {
+    pub fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateError> {
         let txn = self.db.begin_read()?;
         let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(TABLE_KV);
         let val = match txn.open_table(table_def) {
@@ -365,7 +360,7 @@ impl KvStore {
     /// Check if a put operation is needed given current heads
     /// Returns false if a live head already has the same value
     pub fn needs_put(heads: &[Head], value: &[u8]) -> bool {
-        match Head::merge_lww(heads) {
+        match heads.lww_head() {
             Some(winner) => winner.value != value,
             None => true,  // No live heads = need put
         }
@@ -374,7 +369,7 @@ impl KvStore {
     /// Check if a delete operation is needed given current heads
     /// Returns false if no live heads exist
     pub fn needs_delete(heads: &[Head]) -> bool {
-        Head::merge_lww(heads).is_some()
+        heads.lww_head().is_some()
     }
     
     /// Get author state for a specific author
@@ -393,17 +388,12 @@ impl KvStore {
         }
     }
 
-    /// List all key-value pairs (live values only, tombstones filtered)
-    pub fn list_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
-        self.list_by_prefix(&[])
-    }
-    
-    /// List all keys with their raw heads (for conflict inspection)
+    /// List all keys with their raw heads
     pub fn list_heads_all(&self) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
         self.list_heads_by_prefix(&[])
     }
     
-    /// List all keys matching a prefix with their raw heads (for conflict inspection)
+    /// List all keys matching a prefix with their raw heads
     pub fn list_heads_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
         let txn = self.db.begin_read()?;
         let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(TABLE_KV);
@@ -432,29 +422,6 @@ impl KvStore {
             result.push((key_bytes, heads));
         }
         Ok(result)
-    }
-    
-    /// List all key-value pairs matching a prefix (live values only, tombstones filtered)
-    pub fn list_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
-        let heads_list = self.list_heads_by_prefix(prefix)?;
-        Ok(heads_list
-            .into_iter()
-            .filter_map(|(key, heads)| {
-                Head::merge_lww(&heads).map(|w| (key, w.value.clone()))
-            })
-            .collect())
-    }
-    
-    /// List all key-value pairs matching a regex pattern (live values only)
-    /// Extracts literal prefix for efficient DB scan, then filters by regex.
-    pub fn list_by_regex(&self, pattern: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StateError> {
-        let heads_list = self.list_heads_by_regex(pattern)?;
-        Ok(heads_list
-            .into_iter()
-            .filter_map(|(key, heads)| {
-                Head::merge_lww(&heads).map(|w| (key, w.value.clone()))
-            })
-            .collect())
     }
     
     /// List all keys matching a regex pattern with their raw heads
@@ -529,7 +496,7 @@ mod tests {
         
         state.apply_entry(&entry).unwrap();
         
-        let heads = state.get_heads(b"/key").unwrap();
+        let heads = state.get(b"/key").unwrap();
         assert_eq!(heads.len(), 1);
         assert_eq!(heads[0].value, b"value");
         
@@ -556,7 +523,7 @@ mod tests {
             },
         ];
         
-        let winner = Head::merge_lww(&heads).unwrap();
+        let winner = heads.lww_head().unwrap();
         assert_eq!(winner.value, b"newer"); // Higher HLC wins
     }
 
@@ -588,7 +555,7 @@ mod tests {
         state.apply_entry(&entry2).unwrap();
         
         // Should have TWO heads now
-        let heads = state.get_heads(b"/key").unwrap();
+        let heads = state.get(b"/key").unwrap();
         assert_eq!(heads.len(), 2);
         
         let _ = std::fs::remove_file(&path);
@@ -621,7 +588,7 @@ mod tests {
             .sign(&node);
         state.apply_entry(&entry2).unwrap();
         
-        assert_eq!(state.get_heads(b"/key").unwrap().len(), 2);
+        assert_eq!(state.get(b"/key").unwrap().len(), 2);
         
         // Merge write citing BOTH heads as parents
         let hash1 = entry1.hash();
@@ -636,7 +603,7 @@ mod tests {
         state.apply_entry(&entry3).unwrap();
         
         // Should now have ONE head
-        let heads = state.get_heads(b"/key").unwrap();
+        let heads = state.get(b"/key").unwrap();
         assert_eq!(heads.len(), 1);
         assert_eq!(heads[0].value, b"merged");
         
@@ -669,7 +636,7 @@ mod tests {
             .sign(&node2);
         state.apply_entry(&entry2).unwrap();
         
-        assert_eq!(state.get_heads(b"/key").unwrap().len(), 2);
+        assert_eq!(state.get(b"/key").unwrap().len(), 2);
         
         // Delete citing only entry1 as parent
         // NOTE: Test used seq 3 manually, but citing entry1 (seq 1). 
@@ -686,7 +653,7 @@ mod tests {
         state.apply_entry(&entry3).unwrap();
         
         // entry2 should survive (wasn't cited as parent), plus tombstone head
-        let heads = state.get_heads(b"/key").unwrap();
+        let heads = state.get(b"/key").unwrap();
         assert_eq!(heads.len(), 2, "Expected tombstone + v2, got {}", heads.len());
         
         // One should be a tombstone, one should be v2
@@ -715,7 +682,7 @@ mod tests {
             .sign(&node);
         state.apply_entry(&entry1).unwrap();
         
-        assert!(state.get(b"/key").unwrap().is_some());
+        assert!(state.get(b"/key").unwrap().lww_head().is_some());
         
         // Delete citing the only head
         let hash1 = entry1.hash();
@@ -729,10 +696,10 @@ mod tests {
         state.apply_entry(&entry2).unwrap();
         
         // Key should show as deleted (tombstone wins)
-        assert!(state.get(b"/key").unwrap().is_none());
+        assert!(state.get(b"/key").unwrap().lww_head().is_none());
         
         // Should have one tombstone head
-        let heads = state.get_heads(b"/key").unwrap();
+        let heads = state.get(b"/key").unwrap();
         assert_eq!(heads.len(), 1);
         assert!(heads[0].tombstone);
         
@@ -785,7 +752,7 @@ mod tests {
         state.apply_entry(&entry3).unwrap();
         
         // Should have 2 heads: Alice's tombstone and Bob's v2
-        let heads = state.get_heads(b"/key").unwrap();
+        let heads = state.get(b"/key").unwrap();
         assert_eq!(heads.len(), 2, "Expected 2 heads (tombstone + put), got {}", heads.len());
         
         // One should be a tombstone, one should be v2
@@ -836,11 +803,11 @@ mod tests {
         let h2 = entry2.hash();
         
         // Should have 2 heads now
-        let heads = state.get_heads(b"/key").unwrap();
+        let heads = state.get(b"/key").unwrap();
         assert_eq!(heads.len(), 2, "Expected 2 diverged heads");
         
         // Verify deterministic winner (higher HLC wins)
-        let value = state.get(b"/key").unwrap().unwrap();
+        let value = state.get(b"/key").unwrap().lww().unwrap();
         assert_eq!(value, b"bob_v2"); // Bob has higher HLC (2000 > 1000)
         
         // Charlie merges by citing both H1 and H2
@@ -854,7 +821,7 @@ mod tests {
         state.apply_entry(&entry3).unwrap();
         
         // Should have 1 head now (merged)
-        let heads = state.get_heads(b"/key").unwrap();
+        let heads = state.get(b"/key").unwrap();
         assert_eq!(heads.len(), 1, "Expected 1 merged head");
         assert_eq!(heads[0].value, b"charlie_merged");
         
@@ -882,21 +849,21 @@ mod tests {
         
         // Apply once
         state.apply_entry(&entry1).unwrap();
-        assert_eq!(state.get_heads(b"/key").unwrap().len(), 1);
+        assert_eq!(state.get(b"/key").unwrap().len(), 1);
         
         // Apply again - should get NotSuccessor error
         assert!(matches!(
             state.apply_entry(&entry1),
             Err(StateError::NotSuccessor { .. })
         ));
-        assert_eq!(state.get_heads(b"/key").unwrap().len(), 1, "Duplicate entry should not create duplicate head");
+        assert_eq!(state.get(b"/key").unwrap().len(), 1, "Duplicate entry should not create duplicate head");
         
         // Apply a third time - also NotSuccessor
         assert!(matches!(
             state.apply_entry(&entry1),
             Err(StateError::NotSuccessor { .. })
         ));
-        assert_eq!(state.get_heads(b"/key").unwrap().len(), 1);
+        assert_eq!(state.get(b"/key").unwrap().len(), 1);
         
         let _ = std::fs::remove_file(&path);
     }
@@ -923,7 +890,7 @@ mod tests {
         state.apply_entry(&entry1).unwrap();
         let h1 = entry1.hash();
         
-        assert_eq!(state.get_heads(b"/key").unwrap().len(), 1);
+        assert_eq!(state.get(b"/key").unwrap().len(), 1);
         
         // Second write: a = 2, citing h1 as parent
         let clock2 = MockClock::new(2000);
@@ -935,7 +902,7 @@ mod tests {
             .sign(&node);
         state.apply_entry(&entry2).unwrap();
         
-        assert_eq!(state.get_heads(b"/key").unwrap().len(), 1, "After put 2, should have 1 head");
+        assert_eq!(state.get(b"/key").unwrap().len(), 1, "After put 2, should have 1 head");
         
         // Now simulate log replay: clear state and re-apply both entries
         drop(state);
@@ -950,11 +917,11 @@ mod tests {
         
         // Replay entry1
         state.apply_entry(&entry1).unwrap();
-        assert_eq!(state.get_heads(b"/key").unwrap().len(), 1, "After replay entry1");
+        assert_eq!(state.get(b"/key").unwrap().len(), 1, "After replay entry1");
         
         // Replay entry2
         state.apply_entry(&entry2).unwrap();
-        let heads = state.get_heads(b"/key").unwrap();
+        let heads = state.get(b"/key").unwrap();
         assert_eq!(heads.len(), 1, "After replay entry2, should have 1 head, got {}: {:?}", 
             heads.len(), heads.iter().map(|h| String::from_utf8_lossy(&h.value)).collect::<Vec<_>>());
     }
@@ -998,7 +965,7 @@ mod tests {
         sigchain.append(&entry2).unwrap();
         state.apply_entry(&entry2).unwrap();
         
-        assert_eq!(state.get_heads(b"/key").unwrap().len(), 1, "Before restart");
+        assert_eq!(state.get(b"/key").unwrap().len(), 1, "Before restart");
         let author = node.public_key();
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 2, "author seq should be 2");
         
@@ -1013,7 +980,7 @@ mod tests {
         let replayed = Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
         assert_eq!(replayed, 0, "0 new entries (all skipped)");
         
-        let final_heads = state.get_heads(b"/key").unwrap();
+        let final_heads = state.get(b"/key").unwrap();
         assert_eq!(final_heads.len(), 1, 
             "After replay, should have 1 head, got {}: {:?}", 
             final_heads.len(), 
@@ -1052,7 +1019,7 @@ mod tests {
         }
         
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 3);
-        assert_eq!(state.get_heads(b"/key3").unwrap().len(), 1);
+        assert_eq!(state.get(b"/key3").unwrap().len(), 1);
         
         // Restart and replay - should skip all entries
         drop(state);
@@ -1064,7 +1031,7 @@ mod tests {
         // All 3 entries were read but skipped (already applied)
         assert_eq!(replayed, 0, "0 new entries (all skipped)");
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 3, "seq unchanged");
-        assert_eq!(state.get_heads(b"/key3").unwrap().len(), 1, "heads unchanged");
+        assert_eq!(state.get(b"/key3").unwrap().len(), 1, "heads unchanged");
         
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
@@ -1104,7 +1071,7 @@ mod tests {
         }
         
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 3);
-        assert!(state.get_heads(b"/key4").unwrap().is_empty(), "key4 not applied yet");
+        assert!(state.get(b"/key4").unwrap().is_empty(), "key4 not applied yet");
         
         // Simulate restart and replay
         drop(state);
@@ -1115,8 +1082,8 @@ mod tests {
         
         assert_eq!(replayed, 2, "Only 2 new entries applied (3 skipped)");
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 5, "seq updated to 5");
-        assert_eq!(state.get_heads(b"/key4").unwrap().len(), 1, "key4 now applied");
-        assert_eq!(state.get_heads(b"/key5").unwrap().len(), 1, "key5 now applied");
+        assert_eq!(state.get(b"/key4").unwrap().len(), 1, "key4 now applied");
+        assert_eq!(state.get(b"/key5").unwrap().len(), 1, "key5 now applied");
         
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&log_path);
@@ -1177,7 +1144,7 @@ mod tests {
         }
         
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 5);
-        assert_eq!(state.get_heads(b"/key5").unwrap().len(), 1);
+        assert_eq!(state.get(b"/key5").unwrap().len(), 1);
         
         // Now restore state.db from backup (simulating crash/rollback)
         drop(state);
@@ -1189,7 +1156,7 @@ mod tests {
         
         // State should be at seq 3 (restored from backup)
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 3, "Restored to seq 3");
-        assert!(state.get_heads(b"/key4").unwrap().is_empty(), "key4 not in restored state");
+        assert!(state.get(b"/key4").unwrap().is_empty(), "key4 not in restored state");
         
         // Replay log - should apply entries 4 and 5 (skip 1-3)
         let replayed = Log::open(&log_path).and_then(|l| l.iter()).map(|iter| state.replay_entries(iter).unwrap_or(0)).unwrap_or(0);
@@ -1197,8 +1164,8 @@ mod tests {
         
         // Now seq should be 5 and keys 4-5 should exist
         assert_eq!(state.chain_tip(&author).unwrap().unwrap().seq, 5, "seq updated to 5");
-        assert_eq!(state.get_heads(b"/key4").unwrap().len(), 1, "key4 now applied");
-        assert_eq!(state.get_heads(b"/key5").unwrap().len(), 1, "key5 now applied");
+        assert_eq!(state.get(b"/key4").unwrap().len(), 1, "key4 now applied");
+        assert_eq!(state.get(b"/key5").unwrap().len(), 1, "key5 now applied");
     }
 
     #[test]
@@ -1326,8 +1293,8 @@ mod tests {
         Log::open_or_create(&log_path_b).unwrap().append(&entry_b).unwrap();
         
         // Before sync: A has A's value, B has B's value
-        assert_eq!(store_a.get(b"/shared_key").unwrap(), Some(b"value_from_a".to_vec()));
-        assert_eq!(store_b.get(b"/shared_key").unwrap(), Some(b"value_from_b".to_vec()));
+        assert_eq!(store_a.get(b"/shared_key").unwrap().lww(), Some(b"value_from_a".to_vec()));
+        assert_eq!(store_b.get(b"/shared_key").unwrap().lww(), Some(b"value_from_b".to_vec()));
         
         // Sync A → B and B → A
         for entry in read_entries(&log_path_a) {
@@ -1338,13 +1305,13 @@ mod tests {
         }
         
         // After sync: both should have SAME value (deterministic winner)
-        let value_a = store_a.get(b"/shared_key").unwrap();
-        let value_b = store_b.get(b"/shared_key").unwrap();
+        let value_a = store_a.get(b"/shared_key").unwrap().lww();
+        let value_b = store_b.get(b"/shared_key").unwrap().lww();
         assert_eq!(value_a, value_b, "Conflict should resolve deterministically");
         
         // Both should have 2 heads for this key (conflict)
-        let heads_a = store_a.get_heads(b"/shared_key").unwrap();
-        let heads_b = store_b.get_heads(b"/shared_key").unwrap();
+        let heads_a = store_a.get(b"/shared_key").unwrap();
+        let heads_b = store_b.get(b"/shared_key").unwrap();
         assert_eq!(heads_a.len(), 2, "Should have 2 heads (conflict)");
         assert_eq!(heads_b.len(), 2, "Should have 2 heads (conflict)");
         
@@ -1400,10 +1367,10 @@ mod tests {
         state.apply_entry(&entry_high).unwrap();
         
         // Winner should be the one with higher author bytes
-        let value = state.get(b"/tiebreak_key").unwrap();
+        let value = state.get(b"/tiebreak_key").unwrap().lww();
         assert_eq!(value, Some(b"from_high".to_vec()), "Higher author bytes should win");
         
-        let heads = state.get_heads(b"/tiebreak_key").unwrap();
+        let heads = state.get(b"/tiebreak_key").unwrap();
         assert_eq!(heads.len(), 2);
         assert_eq!(heads[0].value, b"from_high".to_vec(), "heads[0] should be winner");
         assert_eq!(heads[0].author, high_node.public_key());
@@ -1481,7 +1448,7 @@ mod tests {
         state.apply_entry(&entry_c).unwrap();
         
         // Check final state
-        let heads = state.get_heads(b"/a").unwrap();
+        let heads = state.get(b"/a").unwrap();
         println!("Final heads count: {}", heads.len());
         for (i, h) in heads.iter().enumerate() {
             println!("  head[{}]: value={:?}", i, String::from_utf8_lossy(&h.value));
@@ -1531,8 +1498,11 @@ mod tests {
             .sign(&node);
         state.apply_entry(&entry3).unwrap();
         
-        // list_by_prefix (live only) should only show key2
-        let entries = state.list_by_prefix(b"/test/").unwrap();
+        // list by prefix with merge (live only) should only show key2
+        let entries: Vec<_> = state.list_heads_by_prefix(b"/test/").unwrap()
+            .into_iter()
+            .filter_map(|(k, heads)| heads.lww_head().map(|h| (k, h.value.clone())))
+            .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, b"/test/key2");
         
@@ -1540,8 +1510,11 @@ mod tests {
         let heads_list = state.list_heads_by_prefix(b"/test/").unwrap();
         assert_eq!(heads_list.len(), 2);
         
-        // Verify list_all (live only)
-        let all_entries = state.list_all().unwrap();
+        // Verify list all with merge (live only)
+        let all_entries: Vec<_> = state.list_heads_all().unwrap()
+            .into_iter()
+            .filter_map(|(k, heads)| heads.lww_head().map(|h| (k, h.value.clone())))
+            .collect();
         assert_eq!(all_entries.len(), 1);
         
         // Verify list_heads_all (all including tombstones)

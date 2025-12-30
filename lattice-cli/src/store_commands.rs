@@ -2,7 +2,7 @@
 
 use crate::commands::{CommandResult, Writer};
 use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
-use lattice_core::{Node, StoreHandle, PubKey};
+use lattice_core::{Merge, Node, StoreHandle, PubKey};
 use lattice_net::MeshNetwork;
 use std::time::Instant;
 use std::io::Write;
@@ -208,11 +208,11 @@ pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&M
     let key = args[0].as_bytes();
     
     let mut w = writer.clone();
-    if verbose {
-        // Show all heads
-        match h.get_heads(key).await {
-            Ok(heads) if heads.is_empty() => { let _ = writeln!(w, "(nil)"); }
-            Ok(heads) => {
+    match h.get(key).await {
+        Ok(heads) if heads.is_empty() => { let _ = writeln!(w, "(nil)"); }
+        Ok(heads) => {
+            if verbose {
+                // Show all heads
                 for (i, head) in heads.iter().enumerate() {
                     let winner = if i == 0 { "→" } else { " " };
                     let tombstone = if head.tombstone { "⊗" } else { "" };
@@ -229,24 +229,22 @@ pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&M
                 if heads.len() > 1 {
                     let _ = writeln!(w, "⚠ {} heads (conflict)", heads.len());
                 }
-                let _ = writeln!(w, "({:.2?})", start.elapsed());
-            }
-            Err(e) => { let _ = writeln!(w, "Error: {}", e); }
-        }
-    } else {
-        match h.get(key).await {
-            Ok(Some(v)) => {
-                let heads = h.get_heads(key).await.unwrap_or_default();
-                if heads.len() > 1 {
-                    let _ = writeln!(w, "{} (⚠ {} heads)", format_value(&v), heads.len());
-                } else {
-                    let _ = writeln!(w, "{}", format_value(&v));
+            } else {
+                // Apply LWW merge for simple output
+                match heads.lww_head() {
+                    Some(winner) => {
+                        if heads.len() > 1 {
+                            let _ = writeln!(w, "{} (⚠ {} heads)", format_value(&winner.value), heads.len());
+                        } else {
+                            let _ = writeln!(w, "{}", format_value(&winner.value));
+                        }
+                    }
+                    None => { let _ = writeln!(w, "(nil)"); }
                 }
-                let _ = writeln!(w, "({:.2?})", start.elapsed());
             }
-            Ok(None) => { let _ = writeln!(w, "(nil)"); }
-            Err(e) => { let _ = writeln!(w, "Error: {}", e); }
+            let _ = writeln!(w, "({:.2?})", start.elapsed());
         }
+        Err(e) => { let _ = writeln!(w, "Error: {}", e); }
     }
     CommandResult::Ok
 }
@@ -295,11 +293,12 @@ pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&
             if entries.is_empty() {
                 let _ = writeln!(w, "(empty)");
             } else {
-                for (k, v) in &entries {
+                // Count live keys (those with non-tombstone winners)
+                let mut live_count = 0;
+                for (k, heads) in &entries {
                     let key_str = format_value(k);
                     if verbose {
                         // Show all heads for this key
-                        let heads = h.get_heads(k).await.unwrap_or_default();
                         let _ = writeln!(w, "{}:", key_str);
                         for (i, head) in heads.iter().enumerate() {
                             let winner = if i == 0 { "→" } else { " " };
@@ -313,18 +312,22 @@ pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&
                                     winner, format_value(&head.value), head.hlc, author_short, hash_short);
                             }
                         }
+                        live_count += 1;
                     } else {
-                        // Check for multiple heads
-                        let heads = h.get_heads(k).await.unwrap_or_default();
-                        if heads.len() > 1 {
-                            let _ = writeln!(w, "{} = {} (⚠ {} heads)", key_str, format_value(v), heads.len());
-                        } else {
-                            let _ = writeln!(w, "{} = {}", key_str, format_value(v));
+                        // Apply LWW merge - only show live values
+                        if let Some(winner) = heads.lww_head() {
+                            if heads.len() > 1 {
+                                let _ = writeln!(w, "{} = {} (⚠ {} heads)", key_str, format_value(&winner.value), heads.len());
+                            } else {
+                                let _ = writeln!(w, "{} = {}", key_str, format_value(&winner.value));
+                            }
+                            live_count += 1;
                         }
+                        // Skip tombstoned keys in non-verbose mode
                     }
                 }
                 let prefix_str = prefix.as_ref().map(|p| format!(" (prefix: {})", p)).unwrap_or_default();
-                let _ = writeln!(w, "({} keys{}, {:.2?})", entries.len(), prefix_str, start.elapsed());
+                let _ = writeln!(w, "({} keys{}, {:.2?})", live_count, prefix_str, start.elapsed());
             }
         }
         Err(e) => { let _ = writeln!(w, "Error: {}", e); }

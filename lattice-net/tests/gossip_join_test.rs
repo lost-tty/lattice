@@ -3,7 +3,7 @@
 //! These tests replicate PRODUCTION usage exactly - no manual gossip setup.
 //! They rely purely on the event-driven flow that happens in the CLI.
 
-use lattice_core::{NodeBuilder, NodeEvent, PubKey};
+use lattice_core::{Merge, NodeBuilder, NodeEvent, PubKey};
 use lattice_core::Node;
 use lattice_net::MeshNetwork;
 use std::sync::Arc;
@@ -106,8 +106,8 @@ async fn test_production_flow_gossip() {
     let mut received_at_b = false;
     for _ in 0..20 {
         sleep(Duration::from_millis(100)).await;
-        if let Ok(Some(val)) = store_b.get(b"/from_a").await {
-            assert_eq!(val, b"hello from A".to_vec());
+        if let Some(val) = store_b.get(b"/from_a").await.unwrap_or_default().lww_head() {
+            assert_eq!(val.value, b"hello from A".to_vec());
             received_at_b = true;
             break;
         }
@@ -121,8 +121,8 @@ async fn test_production_flow_gossip() {
     let mut received_at_a = false;
     for _ in 0..20 {
         sleep(Duration::from_millis(100)).await;
-        if let Ok(Some(val)) = store_a.get(b"/from_b").await {
-            assert_eq!(val, b"hello from B".to_vec());
+        if let Some(val) = store_a.get(b"/from_b").await.unwrap_or_default().lww_head() {
+            assert_eq!(val.value, b"hello from B".to_vec());
             received_at_a = true;
             break;
         }

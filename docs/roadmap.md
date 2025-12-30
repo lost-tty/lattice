@@ -9,216 +9,96 @@
 - **Stability**: Gossip join reliability, bidirectional sync fix, diagnostics, orphan timestamps
 - **Sync Reliability**: Common HLC in SyncState, auto-sync on discrepancy with deferred check
 - **Store Refactor**: Directory reorganization (`sigchain/`, `impls/kv/`), `Patch`/`ReadContext` traits, `KvPatch` with `TableOps`, encapsulated `StoreHandle::open()`
-- **Simplified StoreHandle**: Removed generic types and handler traits; KvStore is now the only implementation with direct methods (`get`, `put`, `delete`, `list`, `list_by_prefix`)
+- **Simplified StoreHandle**: Removed generic types and handler traits; KvStore is now the only implementation with direct methods
+- **Heads-Only API**: `get()`, `list()`, `watch()` return raw `Vec<Head>`. `Merge` trait provides `.lww()`, `.fww()`, `.all()`, `MergeList` for lists. See `docs/store-api.md`.
 
 ---
 
-## Milestone 3: Counter Datatype
+## Milestone 3: Mesh API Refactor
 
-**Goal:** Add PN-Counter (Positive-Negative Counter) as a second value type alongside bare values.
+**Goal:** Type-safe API for mesh management. See [architecture.md](architecture.md#mesh-api-facade-pattern-future).
 
-### 3A: Value Type Wrapper (Backward Compatible)
-
-Wrap values in protobuf `oneof` using **same field number** for zero-migration:
-
-```protobuf
-message HeadInfo {
-    uint64 hlc = 1;
-    bytes author = 2;
-    bytes hash = 3;
-    
-    oneof data {
-        bytes value = 5;          // Same field# as before!
-        CounterState counter = 6; // New type
-    }
-}
-```
-
-Old data (field 5) deserializes into `data.value`. New counters use field 6.
-
-**On read:**
-```rust
-match head_info.data {
-    Some(Data::Value(bytes)) => Value::Raw(bytes),
-    Some(Data::Counter(state)) => Value::Counter(state),
-    None => Value::Raw(vec![]),
-}
-```
-
-- [ ] Change `HeadInfo.value` to `oneof data { bytes value = 5; CounterState counter = 6; }`
-- [ ] Add `CounterState` message to proto
-- [ ] Update `KvStore` read/write to handle oneof
-
-### 3B: Counter State
-
-State-based PN-Counter stores each node's value separately:
-
-```rust
-struct CounterState {
-    values: HashMap<PubKey, i64>,  // {node_a: 2, node_b: 5}
-}
-
-impl CounterState {
-    fn total(&self) -> i64 { self.values.values().sum() }
-    fn merge(&mut self, other: &Self) {
-        for (node, val) in &other.values {
-            let entry = self.values.entry(*node).or_insert(0);
-            *entry = (*entry).max(*val);  // Take max per node
-        }
-    }
-}
-```
-
-**Key insight:** Each node only updates its own slot. StoreActor already has `node: NodeIdentity`.
-
-### 3C: Operations
-
-- [ ] Add `Operation::CounterSet { key, value: i64 }` to proto (sets this node's value)
-- [ ] `KvStore` needs `NodeIdentity` to know which slot to update
-- [ ] Implement `KvStore::apply_counter_op()` - updates `values[self_node_id]`
-- [ ] Add `StoreHandle::increment(key, delta)` - reads current, sets current+delta
-- [ ] `get()` returns `CounterState::total()` as bytes for counter keys
-
-### 3D: Storage
-
-- [ ] New table or value type marker in `state.db`
-- [ ] Counter state serialized as protobuf map
-- [ ] Merge on read: combine all heads, next write may resolve (eventual consistency)
-
-### 3E: CLI
-
-- [ ] `incr <key> [delta]` - increment counter (default delta=1)
-- [ ] `decr <key> [delta]` - decrement counter (default delta=1)
-- [ ] `get <key>` shows total; `get -v <key>` shows per-node breakdown
-
-### 3F: Conflict Resolution & Client API
-
-**Counters:** Always auto-mergeable (CRDT). `get()` returns single merged value.
-
-**Raw values:** Expose all heads to client for explicit resolution:
-- `get(key)` → returns winner (deterministic LWW) + conflict flag
-- `get_heads(key)` → returns all heads for client-side merge
-- Client writes with `parent_hashes` pointing to heads it's resolving
-
-This keeps current DAG behavior for raw values while counters "just work".
-
----
-
-## Milestone 4: Mesh API & Registry Refactor
-
-**Goal:** Type-safe API for mesh management with clear separation of controller (Mesh) vs data channel (StoreHandle).
-
-See [architecture.md - Mesh API Facade Pattern](architecture.md#mesh-api-facade-pattern-future) for design.
-
-### 4A: Mesh Wrapper Type
+### 3A: Mesh Wrapper Type
 - [ ] Create `Mesh` struct wrapping root `StoreHandle` + `PeerProvider`
-- [ ] Move `invite_peer`, `revoke_peer`, `list_peers` from `Node` to `Mesh`
-- [ ] Add `Mesh::open_channel(uuid)` factory for subordinate stores
+- [ ] Move peer commands from `Node` to `Mesh`
 
-### 4B: Node Registry Refactor
-- [ ] Change `Node::root_store` → `stores: HashMap<Uuid, StoreHandle>`
-- [ ] Add `Node::get_mesh(id)` → returns `Mesh` wrapper
-- [ ] Add `Node::get_store(id)` → raw `StoreHandle` access
-- [ ] Update `meta_store` to track multiple managed stores
+### 3B: Node Registry Refactor
+- [ ] `Node::get_mesh(id)` → `Mesh` wrapper
+- [ ] `Node::get_store(id)` → raw `StoreHandle`
 
-### 4C: CLI Context Switching
-- [ ] Add `active_mesh` state to CLI session
-- [ ] Implement `mesh init`, `mesh list`, `mesh switch` commands
-- [ ] Data commands (`put`, `get`, `peer`) operate on active mesh
+### 3C: CLI Context Switching
+- [ ] `mesh init`, `mesh list`, `mesh switch` commands
 
 ---
 
-## Milestone 5: Multi-Store
+## Milestone 4: Multi-Store
 
 **Goal:** Root store as control plane for declaring/managing additional stores.
 
-### 5A: Store Declarations in Root Store
+### 4A: Store Declarations in Root Store
 - [ ] Root store keys: `/stores/{uuid}/name`, `/stores/{uuid}/created_at`
-- [ ] CLI: `create-store [name]`, `delete-store <uuid>`, `list-stores`
+- [ ] CLI: `store create [name]`, `store delete <uuid>`, `store list`
 
-### 5B: Store Watcher ("Cluster Manager")
+### 4B: Store Watcher ("Cluster Manager")
 
-Two-phase reconciliation:
+- [ ] `app_stores: RwLock<HashMap<Uuid, StoreHandle>>` in `Node`
+- [ ] Initial Reconciliation: On startup, process `/stores/` snapshot
+- [ ] Live Reconciliation: Background task watching `/stores/` prefix
+- [ ] On Put: open new store; On Delete: close/archive store
 
-**Data Structure** (in `Node`):
-```rust
-app_stores: tokio::sync::RwLock<HashMap<Uuid, StoreHandle>>
-```
-
-**Implementation**:
-- [ ] Initial Reconciliation: On startup, process `/stores/` snapshot before returning
-- [ ] Live Reconciliation: Spawn background task watching `/stores/` prefix
-- [ ] On `Put`: Parse UUID, check if already running, open if new
-- [ ] On `Delete`: Optionally close/archive store
-
-**Edge Case**: Make watcher async/non-blocking. `Node::start` returns after Root Store opens locally - don't block on network sync. App Stores materialize as watcher processes local DB state.
-
-### 5C: Multi-Store Gossip
+### 4C: Multi-Store Gossip
 - [ ] `setup_for_store` called for each active store
 - [ ] Per-store gossip topics, verify store-id before applying
 
-### 5D: Shared Peer List (Ingest Guard)
-
-All stores use root store peer list for authorization.
-
-**Ingest Guard** (in `lattice-net/src/mesh/server.rs`):
-- [ ] On `JoinRequest`/`StatusRequest`: extract `remote_pubkey`
-- [ ] Check Root Store: `/nodes/{remote_pubkey}/status` == "active"?
-- [ ] If authorized: proceed with sync
-- [ ] If not: drop connection (or return 403)
+### 4D: Shared Peer List (Ingest Guard)
+- [ ] All stores use root store peer list for authorization
+- [ ] Check `/nodes/{pubkey}/status` on connect
 
 ---
 
-## Milestone 6: HTTP API
+## Milestone 5: HTTP API
 
 **Goal:** External access to stores via REST.
 
-### 6A: Access Tokens
-- [ ] Token storage: `/tokens/{id}/store_id`, `/tokens/{id}/secret_hash`, `/tokens/{id}/permissions`
-- [ ] CLI: `create-token`, `list-tokens`, `revoke-token`
+### 5A: Access Tokens
+- [ ] Token storage: `/tokens/{id}/store_id`, `/tokens/{id}/secret_hash`
+- [ ] CLI: `token create`, `token list`, `token revoke`
 
-### 6B: HTTP Server (lattice-http crate)
+### 5B: HTTP Server (lattice-http crate)
 - [ ] REST endpoints: `GET/PUT/DELETE /stores/{uuid}/keys/{key}`
 - [ ] Auth via `Authorization: Bearer {token_id}:{secret}`
 
 ---
 
+## Milestone 6: Counter Datatype
+
+**Goal:** Add PN-Counter as a module on top of raw KV APIs. See [pn-counter.md](pn-counter.md).
+
+### 6A: Counter Module
+- [ ] Add `CounterState` proto message
+- [ ] Create `counter.rs` with `Counter` struct
+- [ ] Implement merge and `incr(delta)`
+
+### 6B: CLI
+- [ ] `incr <key> [delta]`, `decr <key> [delta]`
+- [ ] `get -v <key>` shows per-node breakdown
+
+---
+
 ## Milestone 7: Content-Addressable Store (CAS) via Garage
 
-**Goal:** Blob storage using Garage as S3-compatible sidecar, orchestrated by root store.
-
-**Architecture:**
-```
-Root Store (Lattice)              Garage Sidecar
-┌─────────────────────┐          ┌─────────────────────┐
-│ /cas/pins/{hash}    │ ───────▶ │ S3: lattice-blobs/  │
-│ /blobs/{hash}/meta  │          │ (actual bytes)      │
-│   orchestration     │          │ (replication, GC)   │
-└─────────────────────┘          └─────────────────────┘
-```
+**Goal:** Blob storage using Garage as S3-compatible sidecar.
 
 ### 7A: Garage Integration
-
-- [ ] Garage deployment config (Docker/systemd)
-- [ ] S3 client wrapper in `lattice-core` or separate `lattice-cas` crate
-- [ ] `put_blob(data) -> hash`, `get_blob(hash) -> data` using S3 API
-- [ ] Content-addressed keys: `s3://lattice-blobs/{hash}`
+- [ ] S3 client wrapper in `lattice-cas` crate
+- [ ] `put_blob(data) -> hash`, `get_blob(hash) -> data`
 
 ### 7B: Metadata & Pinning
-
-Root store tracks blob metadata and pins:
-
-- [ ] `/cas/pins/{node_id}/{hash}` = pin status (`pending`/`stored`)
-- [ ] `/blobs/{hash}/size` = blob size in bytes
-- [ ] `/blobs/{hash}/created_at` = upload timestamp
-- [ ] Pin reconciler: watch pins, trigger Garage fetch for `pending`
+- [ ] `/cas/pins/{node_id}/{hash}` in root store
+- [ ] Pin reconciler: watch pins, trigger Garage fetch
 
 ### 7C: CLI
-
-- [ ] `cas put <file>` - upload to Garage, record in root store
-- [ ] `cas get <hash>` - fetch from Garage
-- [ ] `cas pin <hash>` - mark as pinned
-- [ ] `cas ls` - list blobs with pin status
+- [ ] `cas put`, `cas get`, `cas pin`, `cas ls`
 
 ---
 
@@ -245,7 +125,6 @@ Root store tracks blob metadata and pins:
 - [x] **Mesh Bootstrapping**: `JoinResponse` includes `authorized_authors` (all acceptable authors from inviter) so new nodes can accept entries during initial sync. Bootstrap authors cleared after sync completes.
 - [x] Trait boundaries: `StoreHandle` (user ops) vs `AuthorizedStore` (network ops with peer authorization)
 - [x] **Simplified StoreHandle**: Removed generic types (`StoreHandle<S>`), handler traits, and `StoreOps` enum; KvStore is now the sole implementation with direct methods on handle
-- [ ] **Multi-platform traits**: Add `StateBackend` trait to abstract KV storage (redb/sqlite/wasm)
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] Refactor any `.unwrap` uses
 - [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip )
@@ -255,6 +134,7 @@ Root store tracks blob metadata and pins:
   - **Objective**: Protect against "Deep History Attacks" (leaked keys rewriting past) by periodically finalizing the state hash.
   - **Status**: **SECURITY NECESSITY** (Required for robust historical protection).
   - **Dependencies**: SigChain.
+- [ ] **Streaming list_by_prefix**: Currently collects entire result into Vec before processing. Redb's `range()` returns an iterator, but we can't return it (lifetime tied to txn). Consider callback API or channels for large datasets.
 
 ---
 

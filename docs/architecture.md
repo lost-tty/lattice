@@ -149,7 +149,7 @@ lattice-net                           lattice-core
   │  Direct Methods:                                          │
   │  • get(key), put(key, value), delete(key)                 │
   │  • list(include_deleted), list_by_prefix(prefix, ...)     │
-  │  • get_heads(key)                                         │
+  │  • get(key)                                         │
   │                                                           │
   │  Sync/Gossip:                                             │
   │  • subscribe_entries() → for gossip broadcast             │

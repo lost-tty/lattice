@@ -1,6 +1,6 @@
 //! Integration tests for gap filling between networked peers
 
-use lattice_core::{NodeBuilder, NodeEvent, PubKey};
+use lattice_core::{Merge, NodeBuilder, NodeEvent, PubKey};
 use lattice_core::Node;
 use lattice_net::MeshNetwork;
 use std::sync::Arc;
@@ -88,7 +88,7 @@ async fn test_targeted_author_sync() {
     let _applied = server_b.engine().sync_author_all_by_id(store_b.id(), author).await.expect("sync author");
     
     // Verify entry arrived after sync
-    let val = store_b.get(b"/data").await.expect("get");
+    let val = store_b.get(b"/data").await.expect("get").lww();
     assert_eq!(val, Some(b"test".to_vec()));
     
     let _ = std::fs::remove_dir_all(data_a.base());
@@ -142,7 +142,7 @@ async fn test_sync_multiple_entries() {
     for i in 1..=5 {
         let key = format!("/key{}", i);
         let expected = format!("value{}", i);
-        let val = store_b.get(key.as_bytes()).await.expect("get");
+        let val = store_b.get(key.as_bytes()).await.expect("get").lww();
         assert_eq!(val, Some(expected.into_bytes()), "key{} should sync", i);
     }
     

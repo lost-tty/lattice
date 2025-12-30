@@ -79,22 +79,22 @@ impl std::fmt::Display for WatchError {
 
 impl std::error::Error for WatchError {}
 
-/// Commands sent to the store actor
+/// Commands sent to the store actor (all return raw heads)
 pub enum StoreCmd {
     Get {
-        key: Vec<u8>,
-        resp: oneshot::Sender<Result<Option<Vec<u8>>, StateError>>,
-    },
-    GetHeads {
         key: Vec<u8>,
         resp: oneshot::Sender<Result<Vec<Head>, StateError>>,
     },
     List {
-        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StateError>>,
+        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<Head>)>, StateError>>,
     },
     ListByPrefix {
         prefix: Vec<u8>,
-        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<u8>)>, StateError>>,
+        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<Head>)>, StateError>>,
+    },
+    ListByRegex {
+        pattern: String,
+        resp: oneshot::Sender<Result<Vec<(Vec<u8>, Vec<Head>)>, StateError>>,
     },
     Put {
         key: Vec<u8>,
@@ -287,14 +287,14 @@ impl StoreActor {
                 StoreCmd::Get { key, resp } => {
                     let _ = resp.send(self.state.get(&key));
                 }
-                StoreCmd::GetHeads { key, resp } => {
-                    let _ = resp.send(self.state.get_heads(&key));
-                }
                 StoreCmd::List { resp } => {
-                    let _ = resp.send(self.state.list_all());
+                    let _ = resp.send(self.state.list_heads_all());
                 }
                 StoreCmd::ListByPrefix { prefix, resp } => {
-                    let _ = resp.send(self.state.list_by_prefix(&prefix));
+                    let _ = resp.send(self.state.list_heads_by_prefix(&prefix));
+                }
+                StoreCmd::ListByRegex { pattern, resp } => {
+                    let _ = resp.send(self.state.list_heads_by_regex(&pattern));
                 }
                 StoreCmd::Put { key, value, resp } => {
                     let result = self.do_put(&key, &value);
@@ -441,7 +441,7 @@ impl StoreActor {
     fn do_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), StoreActorError> {
         use crate::store::Operation;
         
-        let heads = self.state.get_heads(key)?;
+        let heads = self.state.get(key)?;
         
         // Idempotency check (pure function)
         if !KvStore::needs_put(&heads, value) {
@@ -457,7 +457,7 @@ impl StoreActor {
         self.create_local_entry(parent_hashes, vec![Operation::put(key, value)])?;
         
         // Emit watch event with current heads (after apply)
-        let heads = self.state.get_heads(key)?;
+        let heads = self.state.get(key)?;
         self.emit_watch_event(key, WatchEventKind::Update { heads });
         
         Ok(())
@@ -466,7 +466,7 @@ impl StoreActor {
     fn do_delete(&mut self, key: &[u8]) -> Result<(), StoreActorError> {
         use crate::store::Operation;
         
-        let heads = self.state.get_heads(key)?;
+        let heads = self.state.get(key)?;
         
         // Idempotency check (pure function)
         if !KvStore::needs_delete(&heads) {
@@ -694,7 +694,7 @@ impl StoreActor {
             for op in &kv_payload.ops {
                 match &op.op_type {
                     Some(OpType::Put(put_op)) => {
-                        if let Ok(heads) = self.state.get_heads(&put_op.key) {
+                        if let Ok(heads) = self.state.get(&put_op.key) {
                             self.emit_watch_event(&put_op.key, WatchEventKind::Update { heads });
                         }
                     }
@@ -777,6 +777,7 @@ mod tests {
     use crate::store::Operation;
     use crate::entry::{Entry, ChainTip};
     use crate::types::{Hash, PubKey};
+    use crate::Merge;
     use prost::Message;
     use crate::store::KvPayload;
     
@@ -830,7 +831,7 @@ mod tests {
         assert!(result.is_ok(), "entry2 should be accepted (buffered)");
         
         // Verify /key has no heads yet (entry2 is buffered, not applied)
-        let heads = rt.block_on(handle.get_heads(b"/key")).unwrap();
+        let heads = rt.block_on(handle.get(b"/key")).unwrap();
         assert_eq!(heads.len(), 0, "/key should have no heads while entry2 is buffered");
         
         // Step 2: Ingest entry1 - should apply AND trigger entry2 to apply
@@ -838,13 +839,13 @@ mod tests {
         assert!(result.is_ok(), "entry1 should apply successfully");
         
         // Step 3: Verify /key now has a single head with hash2 (entry2 was applied)
-        let heads = rt.block_on(handle.get_heads(b"/key")).unwrap();
+        let heads = rt.block_on(handle.get(b"/key")).unwrap();
         assert_eq!(heads.len(), 1, "/key should have exactly 1 head");
         assert_eq!(heads[0].hash, hash2, "head should be entry2's hash");
         
         // Verify the value is from entry2
         let value = rt.block_on(handle.get(b"/key")).unwrap();
-        assert_eq!(value, Some(b"value2".to_vec()), "value should be from entry2");
+        assert_eq!(value.lww(), Some(b"value2".to_vec()), "value should be from entry2");
         
         // Shutdown via drop
         drop(handle);
@@ -910,7 +911,7 @@ mod tests {
         assert!(result.is_ok(), "entry_c should be accepted (buffered as DAG orphan)");
         
         // Verify /merged has no heads yet
-        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
+        let heads = rt.block_on(handle.get(b"/merged")).unwrap();
         assert_eq!(heads.len(), 0, "/merged should have no heads");
         
         // Step 2: Ingest entry_b SECOND (harder case: B arrives before A)
@@ -918,7 +919,7 @@ mod tests {
         assert!(result.is_ok(), "entry_b should apply successfully");
         
         // Verify /merged has 1 head (from B) - C is still buffered waiting for A
-        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
+        let heads = rt.block_on(handle.get(b"/merged")).unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head from B (C still waiting for A)");
         assert_eq!(heads[0].hash.as_slice(), hash_b.as_ref());
         
@@ -927,13 +928,13 @@ mod tests {
         assert!(result.is_ok(), "entry_a should apply successfully");
         
         // Verify /merged now has 1 head (C merged A and B)
-        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
+        let heads = rt.block_on(handle.get(b"/merged")).unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head (merged by C)");
         assert_eq!(heads[0].hash.as_slice(), hash_c.as_ref(), "head should be entry_c's hash");
         
         // Verify merged value
         let value = rt.block_on(handle.get(b"/merged")).unwrap();
-        assert_eq!(value, Some(b"merged_value".to_vec()), "value should be merged");
+        assert_eq!(value.lww(), Some(b"merged_value".to_vec()), "value should be merged");
         
         drop(handle);
     }
@@ -994,13 +995,13 @@ mod tests {
         assert!(rt.block_on(handle.ingest_entry(entry_c.clone())).is_ok());
         
         // Verify no heads
-        assert_eq!(rt.block_on(handle.get_heads(b"/merged")).unwrap().len(), 0);
+        assert_eq!(rt.block_on(handle.get(b"/merged")).unwrap().len(), 0);
         
         // Step 2: A arrives -> C wakes, B still missing -> C re-buffered for B
         assert!(rt.block_on(handle.ingest_entry(entry_a.clone())).is_ok());
         
         // Verify 1 head from A (C is re-buffered, not applied)
-        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
+        let heads = rt.block_on(handle.get(b"/merged")).unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head from A (C re-buffered for B)");
         assert_eq!(heads[0].hash.as_slice(), hash_a.as_ref());
         
@@ -1008,12 +1009,12 @@ mod tests {
         assert!(rt.block_on(handle.ingest_entry(entry_b.clone())).is_ok());
         
         // Verify 1 head from C (merged A and B)
-        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
+        let heads = rt.block_on(handle.get(b"/merged")).unwrap();
         assert_eq!(heads.len(), 1, "/merged should have 1 head (merged by C)");
         assert_eq!(heads[0].hash.as_slice(), hash_c.as_ref());
         
         // Verify value
-        assert_eq!(rt.block_on(handle.get(b"/merged")).unwrap(), Some(b"merged_value".to_vec()));
+        assert_eq!(rt.block_on(handle.get(b"/merged")).unwrap().lww(), Some(b"merged_value".to_vec()));
         
         drop(handle);
     }
@@ -1083,7 +1084,7 @@ mod tests {
         assert!(rt.block_on(handle.ingest_entry(entry_b.clone())).is_ok());
         
         // Verify C merged successfully
-        let heads = rt.block_on(handle.get_heads(b"/merged")).unwrap();
+        let heads = rt.block_on(handle.get(b"/merged")).unwrap();
         assert_eq!(heads.len(), 1);
         assert_eq!(heads[0].hash.as_slice(), hash_c.as_ref());
         
@@ -1146,9 +1147,9 @@ mod tests {
         state.apply_entry(&entries[0]).unwrap();
         
         // Verify state only has entry 1
-        assert!(state.get(b"/key1").unwrap().is_some(), "key1 should exist");
-        assert!(state.get(b"/key2").unwrap().is_none(), "key2 should NOT exist (crash before apply)");
-        assert!(state.get(b"/key3").unwrap().is_none(), "key3 should NOT exist (crash before apply)");
+        assert!(state.get(b"/key1").unwrap().lww_head().is_some(), "key1 should exist");
+        assert!(state.get(b"/key2").unwrap().lww_head().is_none(), "key2 should NOT exist (crash before apply)");
+        assert!(state.get(b"/key3").unwrap().lww_head().is_none(), "key3 should NOT exist (crash before apply)");
         
         // Drop everything to simulate crash
         drop(state);
@@ -1175,8 +1176,8 @@ mod tests {
         let key2_value = rt.block_on(handle.get(b"/key2")).unwrap();
         let key3_value = rt.block_on(handle.get(b"/key3")).unwrap();
         
-        assert_eq!(key2_value, Some(b"value2".to_vec()), "key2 should be recovered from log replay");
-        assert_eq!(key3_value, Some(b"value3".to_vec()), "key3 should be recovered from log replay");
+        assert_eq!(key2_value.lww(), Some(b"value2".to_vec()), "key2 should be recovered from log replay");
+        assert_eq!(key3_value.lww(), Some(b"value3".to_vec()), "key3 should be recovered from log replay");
         
         // Shutdown (handle Drop will send shutdown)
         drop(handle);
@@ -1299,7 +1300,7 @@ mod tests {
         state.apply_entry(&entry_h0).unwrap();
         
         // Verify H0 is the only head
-        let heads = state.get_heads(b"/key_a").unwrap();
+        let heads = state.get(b"/key_a").unwrap();
         assert_eq!(heads.len(), 1);
         assert_eq!(heads[0].hash.as_slice(), hash_h0.as_ref());
         
@@ -1317,7 +1318,7 @@ mod tests {
         state.apply_entry(&entry_h1).unwrap();
         
         // Verify H1 is now the only head (H0 was superseded)
-        let heads = state.get_heads(b"/key_a").unwrap();
+        let heads = state.get(b"/key_a").unwrap();
         assert_eq!(heads.len(), 1, "H1 should be the only head");
         assert_eq!(heads[0].hash, hash_h1);
         
@@ -1360,7 +1361,7 @@ mod tests {
         state.apply_entry(&entry_h2).unwrap();
         
         // Verify we now have TWO heads (conflict state)
-        let heads = state.get_heads(b"/key_a").unwrap();
+        let heads = state.get(b"/key_a").unwrap();
         assert_eq!(heads.len(), 2, 
             "Should have 2 heads (conflict) after concurrent offline writes. \
              Got {} heads: {:?}", 
@@ -1439,7 +1440,7 @@ mod tests {
         
         // Verify value is correct
         let value = rt.block_on(handle.get(b"/key")).unwrap();
-        assert_eq!(value, Some(b"value_b".to_vec()));
+        assert_eq!(value.lww(), Some(b"value_b".to_vec()));
         
         // Step 5: Check orphan store is empty
         let orphans = rt.block_on(handle.orphan_list());
@@ -1637,7 +1638,7 @@ mod tests {
         // Verify B has same KV state
         for i in 1u64..=3 {
             let value = rt.block_on(handle_b.get(format!("/key{}", i).as_bytes())).unwrap();
-            assert_eq!(value, Some(format!("value{}", i).into_bytes()));
+            assert_eq!(value.lww(), Some(format!("value{}", i).into_bytes()));
         }
         
         drop(handle_a);
@@ -1718,8 +1719,8 @@ mod tests {
         
         // Both should now have all 4 keys
         for key in ["/a1", "/a2", "/b1", "/b2"] {
-            assert!(rt.block_on(handle_a.get(key.as_bytes())).unwrap().is_some(), "A missing {}", key);
-            assert!(rt.block_on(handle_b.get(key.as_bytes())).unwrap().is_some(), "B missing {}", key);
+            assert!(rt.block_on(handle_a.get(key.as_bytes())).unwrap().lww_head().is_some(), "A missing {}", key);
+            assert!(rt.block_on(handle_b.get(key.as_bytes())).unwrap().lww_head().is_some(), "B missing {}", key);
         }
         
         // Sync states should match
@@ -1822,7 +1823,7 @@ mod tests {
         // All three stores should have all three keys
         for handle in [&handle_a, &handle_b, &handle_c] {
             for key in ["/key_a", "/key_b", "/key_c"] {
-                assert!(rt.block_on(handle.get(key.as_bytes())).unwrap().is_some(), "missing {}", key);
+                assert!(rt.block_on(handle.get(key.as_bytes())).unwrap().lww_head().is_some(), "missing {}", key);
             }
         }
         
@@ -1907,14 +1908,14 @@ mod tests {
         }
         
         // Verify A has 3 heads
-        let heads = rt.block_on(handle_a.get_heads(b"/a")).unwrap();
+        let heads = rt.block_on(handle_a.get(b"/a")).unwrap();
         assert_eq!(heads.len(), 3, "Should have 3 heads before merge");
         
         // Node A merges by doing a Put (which references all current heads)
         rt.block_on(handle_a.put(b"/a", b"merged")).unwrap();
         
         // Verify A now has 1 head
-        let heads = rt.block_on(handle_a.get_heads(b"/a")).unwrap();
+        let heads = rt.block_on(handle_a.get(b"/a")).unwrap();
         assert_eq!(heads.len(), 1, "Should have 1 head after merge");
         assert_eq!(heads[0].value, b"merged");
         
@@ -1932,7 +1933,7 @@ mod tests {
         }
         
         // D should have same state as A (1 head, merged)
-        let heads_d = rt.block_on(handle_d.get_heads(b"/a")).unwrap();
+        let heads_d = rt.block_on(handle_d.get(b"/a")).unwrap();
         assert_eq!(heads_d.len(), 1, "D should have 1 head after sync");
         assert_eq!(heads_d[0].value, b"merged");
         

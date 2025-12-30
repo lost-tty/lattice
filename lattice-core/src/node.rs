@@ -1,7 +1,7 @@
 //! Local Lattice node API with multi-store support
 
 use crate::{
-    DataDir, MetaStore, NodeIdentity, PeerStatus, Uuid,
+    DataDir, Merge, MetaStore, NodeIdentity, PeerStatus, Uuid, WatchEventKind,
     auth::PeerProvider,
     meta_store::MetaStoreError,
     node_identity::NodeError as IdentityError,
@@ -373,48 +373,50 @@ impl Node {
     pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, NodeError> {
         let store = self.root_store()?;
         
-        // Only list keys under /nodes/ prefix
         let nodes = store.list_by_prefix(b"/nodes/").await?;
         
-        // Collect unique pubkeys with status
-        let mut peers_map: std::collections::HashMap<String, PeerStatus> = std::collections::HashMap::new();
-        for (key, value) in &nodes {
+        // Build a map of pubkey -> attributes
+        #[derive(Default)]
+        struct PeerAttrs {
+            status: Option<PeerStatus>,
+            name: Option<String>,
+            added_at: Option<u64>,
+            added_by: Option<String>,
+        }
+        
+        let mut peers_map: std::collections::HashMap<String, PeerAttrs> = std::collections::HashMap::new();
+        
+        for (key, heads) in &nodes {
             let key_str = String::from_utf8_lossy(key);
-            if key_str.ends_with("/status") {
-                if let Some(pubkey) = key_str.strip_prefix("/nodes/").and_then(|s| s.strip_suffix("/status")) {
-                    let status_str = String::from_utf8_lossy(value);
-                    if let Some(status) = PeerStatus::from_str(&status_str) {
-                        peers_map.insert(pubkey.to_string(), status);
-                    }
-                }
+            
+            // Parse key: /nodes/{pubkey}/{attr}
+            let Some(rest) = key_str.strip_prefix("/nodes/") else { continue };
+            let Some((pubkey_hex, attr)) = rest.split_once('/') else { continue };
+            
+            let Some(value) = heads.lww() else { continue };
+            let value_str = String::from_utf8_lossy(&value);
+            
+            let attrs = peers_map.entry(pubkey_hex.to_string()).or_default();
+            match attr {
+                "status" => attrs.status = PeerStatus::from_str(&value_str),
+                "name" => attrs.name = Some(value_str.to_string()),
+                "added_at" => attrs.added_at = value_str.parse().ok(),
+                "added_by" => attrs.added_by = Some(value_str.to_string()),
+                _ => {} // Ignore unknown attributes
             }
         }
         
-        // Build PeerInfo for each peer
+        // Convert to PeerInfo (only peers with a valid status)
         let mut peers = Vec::new();
-        for (pubkey_hex, status) in peers_map {
-            let Ok(pubkey) = PubKey::from_hex(&pubkey_hex) else {
-                continue; // Skip invalid pubkeys
-            };
-            
-            let name_key = format!("/nodes/{}/name", pubkey_hex);
-            let added_at_key = format!("/nodes/{}/added_at", pubkey_hex);
-            let added_by_key = format!("/nodes/{}/added_by", pubkey_hex);
-            
-            let name = store.get(name_key.as_bytes()).await?
-                .map(|b| String::from_utf8_lossy(&b).to_string());
-            
-            let added_at = store.get(added_at_key.as_bytes()).await?
-                .and_then(|b| String::from_utf8_lossy(&b).parse().ok());
-            
-            let added_by = store.get(added_by_key.as_bytes()).await?
-                .map(|b| String::from_utf8_lossy(&b).to_string());
+        for (pubkey_hex, attrs) in peers_map {
+            let Some(status) = attrs.status else { continue };
+            let Ok(pubkey) = PubKey::from_hex(&pubkey_hex) else { continue };
             
             peers.push(PeerInfo {
                 pubkey,
-                name,
-                added_at,
-                added_by,
+                name: attrs.name,
+                added_at: attrs.added_at,
+                added_by: attrs.added_by,
                 status,
             });
         }
@@ -448,7 +450,7 @@ impl Node {
         let pubkey_hex = hex::encode(pubkey);
         let status_key = format!("/nodes/{}/status", pubkey_hex);
         
-        match store.get(status_key.as_bytes()).await? {
+        match store.get(status_key.as_bytes()).await?.lww() {
             Some(bytes) => {
                 let status_str = String::from_utf8_lossy(&bytes);
                 Ok(PeerStatus::from_str(&status_str))
@@ -527,19 +529,21 @@ impl Node {
         // Populate initial cache
         {
             let mut cache = self.peer_cache.write().unwrap();
-            for (key, value) in initial {
+            for (key, heads) in initial {
                 if let Some(pubkey_hex) = parse_peer_status_key(&key) {
                     if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
                         if pubkey_bytes.len() == 32 {
                             let pubkey: PubKey = pubkey_bytes.try_into().unwrap();
-                            let status_str = String::from_utf8_lossy(&value);
-                            if let Some(status) = PeerStatus::from_str(&status_str) {
-                                cache.insert(pubkey, status.clone());
-                                // Emit Added event for initial peers
-                                let _ = self.peer_event_tx.send(crate::auth::PeerEvent::Added { 
-                                    pubkey, 
-                                    status,
-                                });
+                            if let Some(winner) = heads.lww_head() {
+                                let status_str = String::from_utf8_lossy(&winner.value);
+                                if let Some(status) = PeerStatus::from_str(&status_str) {
+                                    cache.insert(pubkey, status.clone());
+                                    // Emit Added event for initial peers
+                                    let _ = self.peer_event_tx.send(crate::auth::PeerEvent::Added { 
+                                        pubkey, 
+                                        status,
+                                    });
+                                }
                             }
                         }
                     }
@@ -553,7 +557,6 @@ impl Node {
         
         // Spawn task to keep cache updated
         tokio::spawn(async move {
-            use crate::{WatchEventKind, Head};
             while let Ok(event) = rx.recv().await {
                 if let Some(pubkey_hex) = parse_peer_status_key(&event.key) {
                     if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
@@ -563,7 +566,7 @@ impl Node {
                             match event.kind {
                                 WatchEventKind::Update { heads } => {
                                     // Use LWW merge to get winner (not just first)
-                                    let value = Head::merge_lww(&heads)
+                                    let value = heads.lww_head()
                                         .map(|h| h.value.as_slice())
                                         .unwrap_or(&[]);
                                     let status_str = String::from_utf8_lossy(value);
@@ -663,7 +666,7 @@ mod tests {
         
         let (handle, _) = node.open_store(store_id).await.expect("Failed to open store");
         handle.put(b"/key", b"value").await.expect("put failed");
-        assert_eq!(handle.get(b"/key").await.unwrap(), Some(b"value".to_vec()));
+        assert_eq!(handle.get(b"/key").await.unwrap().lww(), Some(b"value".to_vec()));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -683,9 +686,9 @@ mod tests {
         handle_a.put(b"/key", b"from A").await.expect("put A");
         
         let (handle_b, _) = node.open_store(store_b).await.expect("open B");
-        assert_eq!(handle_b.get(b"/key").await.unwrap(), None);
+        assert_eq!(handle_b.get(b"/key").await.unwrap().lww(), None);
         
-        assert_eq!(handle_a.get(b"/key").await.unwrap(), Some(b"from A".to_vec()));
+        assert_eq!(handle_a.get(b"/key").await.unwrap().lww(), Some(b"from A".to_vec()));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -803,7 +806,7 @@ mod tests {
         {
             let store = node.root_store();
             let store = store.as_ref().unwrap();
-            let stored_name = store.get(name_key.as_bytes()).await.unwrap();
+            let stored_name = store.get(name_key.as_bytes()).await.unwrap().lww();
             assert_eq!(stored_name, Some(initial_name.as_bytes().to_vec()));
         }
         
@@ -818,7 +821,7 @@ mod tests {
         {
             let store = node.root_store();
             let store = store.as_ref().unwrap();
-            let stored_name = store.get(name_key.as_bytes()).await.unwrap();
+            let stored_name = store.get(name_key.as_bytes()).await.unwrap().lww();
             assert_eq!(stored_name, Some(new_name.as_bytes().to_vec()));
         }
         
@@ -916,8 +919,8 @@ mod tests {
         store_b.put(b"/key", b"from B").await.expect("B put");
         
         // Each store has its own local state (not synced yet)
-        let a_val = store_a.get(b"/key").await.expect("A get").unwrap();
-        let b_val = store_b.get(b"/key").await.expect("B get").unwrap();
+        let a_val = store_a.get(b"/key").await.expect("A get").lww().unwrap();
+        let b_val = store_b.get(b"/key").await.expect("B get").lww().unwrap();
         
         // A sees "from A" (its own write wins locally)
         assert_eq!(a_val, b"from A".to_vec());
@@ -954,7 +957,7 @@ mod tests {
         assert_eq!(event.key, b"/test/key1");
         match event.kind {
             crate::WatchEventKind::Update { heads } => {
-                let value = crate::Head::merge_lww(&heads)
+                let value = heads.lww_head()
                     .map(|h| h.value.as_slice())
                     .unwrap_or(&[]);
                 assert_eq!(value, b"value1");

@@ -21,6 +21,7 @@ pub mod types;
 pub mod head;
 pub mod auth;
 pub mod store_registry;
+pub mod merge;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (16 MB)
@@ -50,3 +51,4 @@ pub use data_dir::DataDir;
 pub use meta_store::MetaStore;
 pub use uuid::Uuid;
 pub use head::Head;
+pub use merge::{Merge, MergeList};
