@@ -2,16 +2,15 @@
 
 use crate::{LatticeEndpoint, ToLattice};
 use super::error::GossipError;
-use lattice_core::{Uuid, Node, PeerStatus, PeerEvent, PubKey};
+use lattice_core::{Uuid, PeerStatus, PeerEvent, PubKey, PeerProvider};
 use lattice_core::store::AuthorizedStore;
-use lattice_core::auth::PeerProvider;
 use lattice_core::proto::storage::PeerSyncInfo;
 use lattice_core::proto::network::GossipMessage;
 use iroh_gossip::Gossip;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
-use std::time::{Instant, Duration};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use prost::Message;
 
@@ -26,7 +25,6 @@ pub fn topic_for_store(store_id: Uuid) -> iroh_gossip::TopicId {
 pub struct GossipManager {
     gossip: Gossip,
     senders: Arc<RwLock<HashMap<Uuid, iroh_gossip::api::GossipSender>>>,
-    online_peers: Arc<RwLock<HashMap<iroh::PublicKey, Instant>>>,
     my_pubkey: iroh::PublicKey,
 }
 
@@ -36,7 +34,6 @@ impl GossipManager {
         Self {
             gossip: Gossip::builder().spawn(endpoint.endpoint().clone()),
             senders: Arc::new(RwLock::new(HashMap::new())),
-            online_peers: Arc::new(RwLock::new(HashMap::new())),
             my_pubkey: endpoint.public_key(),
         }
     }
@@ -46,28 +43,29 @@ impl GossipManager {
         &self.gossip
     }
     
-    /// Setup gossip for a store - uses PeerProvider for bootstrap peers
-    #[tracing::instrument(skip(self, node, store), fields(store_id = %store.id()))]
-    pub async fn setup_for_store(&self, node: std::sync::Arc<Node>, store: AuthorizedStore) -> Result<(), GossipError> {
+    /// Setup gossip for a store - uses supplied PeerManager for auth and SessionTracker for online state
+    #[tracing::instrument(skip(self, pm, sessions, store), fields(store_id = %store.id()))]
+    pub async fn setup_for_store(
+        &self,
+        pm: std::sync::Arc<lattice_core::PeerManager>,
+        sessions: std::sync::Arc<super::session::SessionTracker>,
+        store: AuthorizedStore,
+    ) -> Result<(), GossipError> {
         let store_id = store.id();
         
-        // Get initial peers from peer cache and subscribe to changes
-        let peers = node.list_peers().await
+        // Get initial peers from peer manager and subscribe to changes
+        let peers = pm.list_peers().await
             .map_err(|e| GossipError::Watch(format!("{:?}", e)))?;
-        let rx = node.subscribe_peer_events();
+        let rx = pm.subscribe_peer_events();
         
         tracing::debug!(initial_peers = peers.len(), "Peer list snapshot");
         
         let bootstrap_peers: Vec<iroh::PublicKey> = peers.iter()
             .filter(|p| p.status == PeerStatus::Active)
             .filter_map(|p| iroh::PublicKey::from_bytes(&p.pubkey).ok())
-            .filter(|id| *id != self.my_pubkey)
             .collect();
         
-        for peer in &bootstrap_peers {
-            tracing::debug!(peer = %peer.fmt_short(), "Bootstrap peer");
-        }
-        tracing::info!(bootstrap_peers = bootstrap_peers.len(), "Gossip subscribing");
+        tracing::debug!(active_peers = bootstrap_peers.len(), "Active peers for bootstrap");
         
         // Subscribe to gossip topic (bootstrap_peers used for initial connections)
         let topic = topic_for_store(store_id);
@@ -85,7 +83,8 @@ impl GossipManager {
         let entry_rx = store.subscribe_entries();
         
         // Spawn background tasks - all use AuthorizedStore for security
-        self.spawn_receiver(store.clone(), receiver, node.clone(), self.online_peers.clone(), pending_syncstate.clone());
+        // SessionTracker (network layer) tracks online status, not PeerManager (core layer)
+        self.spawn_receiver(store.clone(), receiver, pm.clone(), sessions, pending_syncstate.clone());
         self.spawn_forwarder(store.clone(), entry_rx, pending_syncstate.clone());
         self.spawn_syncstate_fallback(store, pending_syncstate);
         self.spawn_peer_watcher(store_id, rx);
@@ -93,44 +92,33 @@ impl GossipManager {
         tracing::debug!("Gossip tasks spawned");
         Ok(())
     }
-    
-    /// Get currently connected gossip peers with last-seen time
-    pub async fn online_peers(&self) -> HashMap<iroh::PublicKey, Instant> {
-        let peers = self.online_peers.read().await.clone();
-        tracing::trace!(count = peers.len(), "online_peers() called");
-        for (pk, _) in &peers {
-            tracing::trace!(peer = %pk.fmt_short(), "online_peer entry");
-        }
-        peers
-    }
-    
     fn spawn_receiver(
         &self,
         store: AuthorizedStore,
         mut rx: iroh_gossip::api::GossipReceiver,
-        node: std::sync::Arc<Node>,
-        online_peers: Arc<RwLock<HashMap<iroh::PublicKey, Instant>>>,
+        pm: std::sync::Arc<lattice_core::PeerManager>,
+        sessions: std::sync::Arc<super::session::SessionTracker>,
         pending_syncstate: Arc<AtomicBool>,
     ) {
         let store_id = store.id();
         
         tokio::spawn(async move {
-            // Get initial neighbors and add to online_peers
-            let initial_count = {
-                let mut online = online_peers.write().await;
-                let neighbors: Vec<_> = rx.neighbors().collect();
-                tracing::info!(
-                    store_id = %store_id, 
-                    count = neighbors.len(), 
-                    "Initial gossip neighbors"
-                );
-                for peer in &neighbors {
-                    tracing::debug!(peer = %peer.fmt_short(), "Initial gossip neighbor");
-                    online.insert(*peer, Instant::now());
+            // Get initial neighbors and mark as online in SessionTracker
+            let neighbors: Vec<_> = rx.neighbors().collect();
+            tracing::info!(
+                store_id = %store_id, 
+                count = neighbors.len(), 
+                "Initial gossip neighbors"
+            );
+            for peer in &neighbors {
+                tracing::debug!(peer = %peer.fmt_short(), "Initial gossip neighbor");
+                if let Err(e) = sessions.mark_online(peer.to_lattice()) {
+                    tracing::warn!(store_id = %store_id, error = %e, "Session lock poisoned during init");
+                    // If lock is poisoned this early, we might as well break/return or just continue?
+                    // We can't really "break" the gossip loop here as it hasn't started. 
                 }
-                neighbors.len()
-            };
-            tracing::info!(store_id = %store_id, initial_neighbors = initial_count, "Gossip receiver started");
+            }
+            tracing::info!(store_id = %store_id, initial_neighbors = neighbors.len(), "Gossip receiver started");
             
             while let Some(event) = futures_util::StreamExt::next(&mut rx).await {
                 tracing::debug!(store_id = %store_id, event = ?event, "Gossip event");
@@ -139,19 +127,23 @@ impl GossipManager {
                         // Check if gossip sender is authorized (separate from entry author check)
                         let sender: PubKey = msg.delivered_from.to_lattice();
                         
-                        // Check if this peer is tracked as a neighbor
-                        let is_neighbor = online_peers.read().await.contains_key(&msg.delivered_from);
-                        if !is_neighbor {
-                            tracing::warn!(
-                                store_id = %store_id,
-                                peer = %msg.delivered_from.fmt_short(),
-                                "Received gossip from peer NOT in online_peers (missing NeighborUp?)"
-                            );
-                            // Add them now since they're clearly connected
-                            online_peers.write().await.insert(msg.delivered_from, Instant::now());
+                        // Check if this peer is tracked as online
+                        match sessions.mark_online(sender) {
+                            Ok(true) => {
+                                tracing::warn!(
+                                    store_id = %store_id,
+                                    peer = %msg.delivered_from.fmt_short(),
+                                    "Received gossip from peer NOT marked online (missing NeighborUp?)"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(store_id = %store_id, error = %e, "Session lock poisoned");
+                                break;
+                            }
+                            _ => {}
                         }
                         
-                        if !node.can_connect(&sender) {
+                        if !pm.can_connect(&sender) {
                             tracing::warn!(
                                 store_id = %store_id,
                                 sender = %sender,
@@ -206,11 +198,12 @@ impl GossipManager {
                         }
                     }
                     Ok(iroh_gossip::api::Event::NeighborUp(peer_id)) => {
-                        let count = {
-                            let mut peers = online_peers.write().await;
-                            peers.insert(peer_id, Instant::now());
-                            peers.len()
-                        };
+                        let peer: PubKey = peer_id.to_lattice();
+                        if let Err(e) = sessions.mark_online(peer) {
+                            tracing::error!(store_id = %store_id, error = %e, "Session lock poisoned on NeighborUp");
+                            break;
+                        }
+                        let count = sessions.online_peers().map(|m| m.len()).unwrap_or(0);
                         tracing::info!(
                             store_id = %store_id,
                             peer = %peer_id.fmt_short(), 
@@ -219,11 +212,12 @@ impl GossipManager {
                         );
                     }
                     Ok(iroh_gossip::api::Event::NeighborDown(peer_id)) => {
-                        let count = {
-                            let mut peers = online_peers.write().await;
-                            peers.remove(&peer_id);
-                            peers.len()
-                        };
+                        let peer: PubKey = peer_id.to_lattice();
+                        if let Err(e) = sessions.mark_offline(peer) {
+                            tracing::error!(store_id = %store_id, error = %e, "Session lock poisoned on NeighborDown");
+                            break;
+                        }
+                        let count = sessions.online_peers().map(|m| m.len()).unwrap_or(0);
                         tracing::info!(
                             store_id = %store_id,
                             peer = %peer_id.fmt_short(), 

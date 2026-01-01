@@ -7,11 +7,12 @@ import "storage.proto";
 // 1. Join Protocol
 message JoinRequest {
   bytes node_pubkey = 1;  // Joining node's public key (32 bytes)
+  bytes mesh_id = 2;      // Mesh UUID to join (16 bytes, MANDATORY)
 }
 
 message JoinResponse {
-  bytes store_uuid = 1;      // Root store UUID (16 bytes) for new node to create
-  bytes inviter_pubkey = 2;  // Inviter's public key for verification
+  bytes inviter_pubkey = 1;  // Inviter's public key for verification
+  bytes mesh_id = 2;      // Root store UUID (16 bytes) for new node to create
   repeated bytes authorized_authors = 3;  // All known author pubkeys (for bootstrap sync)
 }
 

@@ -18,12 +18,12 @@ fn temp_data_dir(name: &str) -> lattice_core::DataDir {
 }
 
 /// Helper: Join mesh via node.join() and wait for StoreReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey) -> Option<lattice_core::StoreHandle> {
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: lattice_core::Uuid) -> Option<lattice_core::StoreHandle> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
     
     // Request join
-    if node.join(peer_pubkey).is_err() {
+    if node.join(peer_pubkey, mesh_id).is_err() {
         return None;
     }
     
@@ -80,10 +80,12 @@ async fn test_production_flow_gossip() {
     node_a.invite_peer(node_b.node_id()).await.expect("invite");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
-    sleep(Duration::from_millis(300)).await;
     
-    // === Node B: Joins mesh via event-driven flow ===
-    let store_b = match join_mesh_via_event(&node_b, a_pubkey).await {
+    // Get A's mesh ID (root store ID)
+    let mesh_id = node_a.root_store_id().unwrap().expect("A should have root store");
+    
+    // B joins A via event flow
+    let store_b = match join_mesh_via_event(&node_b, a_pubkey, mesh_id).await {
         Some(s) => s,
         None => {
             eprintln!("Skipping test - no network");
@@ -97,7 +99,7 @@ async fn test_production_flow_gossip() {
     sleep(Duration::from_millis(2000)).await;
     
     // Verify gossip is connected
-    let _a_gossip_peers = server_a.connected_peers().await;
+    let _a_gossip_peers = server_a.connected_peers();
     
     // === Test A → B direction ===
     store_a.put(b"/from_a", b"hello from A").await.expect("put from A");

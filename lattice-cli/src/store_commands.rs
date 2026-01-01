@@ -336,43 +336,95 @@ pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&
 }
 
 pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
-    let store = match store {
-        Some(s) => s,
-        None => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Error: no store selected");
+    let Some(store) = store else {
+        let mut w = writer.clone();
+        let _ = writeln!(w, "Error: no store selected");
+        return CommandResult::Ok;
+    };
+
+    let show_all = args.iter().any(|a| a == "-a");
+    let pubkey_arg = args.iter().find(|a| *a != "-a");
+    
+    // Resolve target author
+    let target = if !show_all {
+        if let Some(hex_str) = pubkey_arg {
+             let clean = hex_str.trim_start_matches("0x");
+             match PubKey::from_hex(clean) {
+                 Ok(pk) => Some(pk),
+                 Err(e) => {
+                     let mut w = writer.clone();
+                     let _ = writeln!(w, "Error: {}", e);
+                     return CommandResult::Ok;
+                 }
+             }
+        } else {
+            Some(node.node_id())
+        }
+    } else {
+        None
+    };
+
+    let mut w = writer.clone();
+    
+    // Fetch data
+    let data = match fetch_author_states(store, target).await {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
             return CommandResult::Ok;
         }
     };
 
-    // Get author: from arg or default to self
-    let author = if args.is_empty() {
-        node.node_id()
-    } else {
-        let hex_str = args[0].trim_start_matches("0x");
-        match PubKey::from_hex(hex_str) {
-            Ok(pk) => pk,
-            Err(e) => {
-                let mut w = writer.clone();
-                let _ = writeln!(w, "Error: {}", e);
-                return CommandResult::Ok;
-            }
+    if data.is_empty() {
+        if show_all {
+            let _ = writeln!(w, "(no authors)");
+        } else {
+             // If specific author requested but not found
+             if let Some(a) = target {
+                 let _ = writeln!(w, "No state for author: {}", hex::encode(a));
+             }
         }
-    };
-
-    let mut w = writer.clone();
-    match store.chain_tip(&author).await {
-        Ok(Some(state)) => {
-            let _ = writeln!(w, "Author: {}", author);
-            let _ = writeln!(w, "  seq: {}", state.seq);
-            let _ = writeln!(w, "  hash: {}", hex::encode(&state.hash));
-        }
-        Ok(None) => {
-            let _ = writeln!(w, "No state for author: {}", author);
-        }
-        Err(e) => { let _ = writeln!(w, "Error: {}", e); }
+        return CommandResult::Ok;
     }
+
+    if show_all {
+        let _ = writeln!(w, "{} author(s):\n", data.len());
+    }
+
+    // Print
+    for (author, seq, hash) in data {
+        if !show_all {
+             let _ = writeln!(w, "Author: {}", hex::encode(author));
+        } else {
+             let _ = writeln!(w, "{}", hex::encode(author));
+        }
+        
+        let _ = writeln!(w, "  seq:  {}", seq);
+        let _ = writeln!(w, "  hash: {}", hex::encode(&hash));
+    }
+    
     CommandResult::Ok
+}
+
+/// Helper to fetch state for one or all authors
+async fn fetch_author_states(store: &StoreHandle, target: Option<PubKey>) -> Result<Vec<(PubKey, u64, Vec<u8>)>, String> {
+    let mut data = Vec::new();
+    
+    if let Some(author) = target {
+        // Single author: check chain tip
+        if let Some(state) = store.chain_tip(&author).await.map_err(|e| e.to_string())? {
+            data.push((author, state.seq, state.hash));
+        }
+    } else {
+        // All authors: check sync state
+        let state = store.sync_state().await.map_err(|e| e.to_string())?;
+        for (author, info) in state.authors() {
+            data.push((*author, info.seq, info.hash.to_vec()));
+        }
+        data.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    
+    Ok(data)
 }
 
 fn format_value(v: &[u8]) -> String {

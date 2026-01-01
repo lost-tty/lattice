@@ -131,12 +131,12 @@ impl NodeIdentity {
 }
 
 /// Peer status values used across the system
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PeerStatus {
-    /// Peer has been invited but hasn't joined yet
-    Invited,
     /// Peer is active and can sync
     Active,
+    /// Peer has been invited but hasn't joined yet
+    Invited,
     /// Peer is temporarily inactive
     Dormant,
     /// Peer has been revoked (banned)

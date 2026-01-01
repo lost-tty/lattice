@@ -22,6 +22,8 @@ pub mod head;
 pub mod auth;
 pub mod store_registry;
 pub mod merge;
+pub mod peer_manager;
+pub mod mesh;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (16 MB)
@@ -31,6 +33,8 @@ pub const MAX_ENTRY_SIZE: usize = 16 * 1024 * 1024;
 pub use node_identity::{NodeIdentity, PeerStatus};
 pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, parse_peer_status_key, PEER_STATUS_PATTERN};
 pub use auth::{PeerProvider, PeerEvent};
+pub use peer_manager::{PeerManager, PeerManagerError, Peer};
+pub use mesh::Mesh;
 
 // Store exports (re-exported from store submodule)
 pub use store::{KvStore, StateError, StoreHandle, WatchEvent, WatchEventKind, WatchError};

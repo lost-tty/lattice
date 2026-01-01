@@ -54,6 +54,11 @@ impl AuthorizedStore {
         self.peer_provider.can_accept_entry(author)
     }
     
+    /// Get list of all acceptable authors (for join bootstrap)
+    pub fn list_acceptable_authors(&self) -> Vec<PubKey> {
+        self.peer_provider.list_acceptable_authors()
+    }
+    
     // ==================== Sync State Methods ====================
     
     /// Get current sync state (vector clocks for all authors)

@@ -11,6 +11,7 @@
 - **Store Refactor**: Directory reorganization (`sigchain/`, `impls/kv/`), `Patch`/`ReadContext` traits, `KvPatch` with `TableOps`, encapsulated `StoreHandle::open()`
 - **Simplified StoreHandle**: Removed generic types and handler traits; KvStore is now the only implementation with direct methods
 - **Heads-Only API**: `get()`, `list()`, `watch()` return raw `Vec<Head>`. `Merge` trait provides `.lww()`, `.fww()`, `.all()`, `MergeList` for lists. See `docs/store-api.md`.
+- **Async Mesh Join**: Non-blocking `mesh join` with `MeshReady` event feedback loop for responsive CLI experience.
 
 ---
 
@@ -53,6 +54,11 @@
 ### 4D: Shared Peer List (Ingest Guard)
 - [ ] All stores use root store peer list for authorization
 - [ ] Check `/nodes/{pubkey}/status` on connect
+
+### 4E: Mesh-Based Join Model
+- [ ] A **mesh** = root store + subordinated stores
+- [ ] JoinRequest always targets the **mesh** (i.e., root store), not individual stores
+- [ ] After joining mesh, node gains access to all declared stores via 4B reconciliation
 
 ---
 
@@ -126,7 +132,7 @@
 - [x] Trait boundaries: `StoreHandle` (user ops) vs `AuthorizedStore` (network ops with peer authorization)
 - [x] **Simplified StoreHandle**: Removed generic types (`StoreHandle<S>`), handler traits, and `StoreOps` enum; KvStore is now the sole implementation with direct methods on handle
 - [x] **Error Propagation Refactor**: Replaced 150+ production `.unwrap()`/`.expect()` with proper error handling
-- [ ] Graceful shutdown with `CancellationToken` for spawned tasks (may fix gossip )
+- [ ] Graceful shutdown with `CancellationToken` for spawned tasks
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
@@ -135,6 +141,8 @@
   - **Status**: **SECURITY NECESSITY** (Required for robust historical protection).
   - **Dependencies**: SigChain.
 - [ ] **Streaming list_by_prefix**: Currently collects entire result into Vec before processing. Redb's `range()` returns an iterator, but we can't return it (lifetime tied to txn). Consider callback API or channels for large datasets.
+- [ ] **Transactions / Batch Writes**: Group multiple store operations into a single sigchain entry for atomicity. Currently `Peer::save()` writes 4 separate keys which could be seen in inconsistent state by readers. A transaction API would bundle writes into one atomic entry.
+- [ ] **Error Handling Review**: Re-evaluate usage of `expect`, `unwrap`, and `unwrap_or_default`. Ensure we are using the right strategy (fail-fast vs fail-safe) in appropriate contexts, particularly in critical paths like lock acquisition and network handlers.
 
 ---
 
@@ -190,11 +198,22 @@ Verify all data read from disk (log files, redb store) via hash/signature checks
 - **Apply to:** `log.rs` entry reads, `Store` operations, `SigChain` validation
 - **Recovery:** Trigger targeted sync for corrupted author/seq ranges
 
+### Sybil Resistance & Gossip Scaling
+Mechanisms to handle millions of nodes and prevent gossip flooding from malicious actors.
+- **Problem:** Unbounded gossip from "millions of nodes" (Sybil attack) overwhelms bandwidth/storage.
+- **Mitigation:** Resource constraints (PoW), Web-of-Trust gossip limits (only gossip for friends-of-friends), or reputation scores.
+
+### Byzantine Fault Tolerance (BFT)
+Ensure system resilience against malicious peers who may lie, omit messages, or attempt to corrupt state (beyond simple forks).
+- **Objective:** Validated consistency without a central authority or global consensus.
+- **Strategy:** Local verification of all data (SigChains), cryptographic prohibition of history rewriting, and detection/rejection of invalid CRDT merges.
+
+
 ---
 
 ## Future
 
-- One-time join tokens: reverse invite flow so guest presents token instead of inviter knowing pubkey upfront. See [one-time-join-tokens.md](one-time-join-tokens.md).
+- **Invite Tokens**: Switch to token-based invites (containing `mesh_id`, `peer_id`, and `iroh_endpoints`) instead of the current pre-authorized pubkey approach. See [one-time-join-tokens.md](one-time-join-tokens.md).
 - TTL expiry for long-lived orphans (received_at timestamp now tracked)
 - Transitive sync across all peers
 - CRDTs: PN-Counters, OR-Sets for peer list
@@ -206,3 +225,5 @@ Verify all data read from disk (log files, redb store) via hash/signature checks
 - Secure storage (Keychain, TPM)
 - FUSE filesystem mount
 - Merkle-ized state (signed root hash, O(1) sync checks)
+- **CLI/Daemon Separation**: Refactor CLI to use gRPC internally (local socket, no network initially) to prepare for daemon/CLI split. Daemon runs as long-lived process, CLI becomes thin gRPC client.
+- **Salted Gossip ALPN**: Use `/config/salt` from root store to salt the gossip ALPN per mesh (improves privacy by isolating mesh traffic).

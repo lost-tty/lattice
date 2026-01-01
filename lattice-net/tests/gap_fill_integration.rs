@@ -15,12 +15,12 @@ fn temp_data_dir(name: &str) -> lattice_core::DataDir {
 }
 
 /// Helper: Join mesh via node.join() and wait for StoreReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey) -> Option<lattice_core::StoreHandle> {
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: lattice_core::Uuid) -> Option<lattice_core::StoreHandle> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
     
     // Request join
-    if node.join(peer_pubkey).is_err() {
+    if node.join(peer_pubkey, mesh_id).is_err() {
         return None;
     }
     
@@ -56,9 +56,6 @@ async fn test_targeted_author_sync() {
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
     
-    // Explicitly register store for network access
-    server_a.register_store(store_a.clone()).await;
-    
     node_a.invite_peer(node_b.node_id()).await.expect("invite");
     
     // B joins via event-driven flow
@@ -67,7 +64,7 @@ async fn test_targeted_author_sync() {
     // Allow some time for mDNS discovery
     sleep(Duration::from_millis(200)).await;
     
-    let store_b = match join_mesh_via_event(&node_b, a_pubkey).await {
+    let store_b = match join_mesh_via_event(&node_b, a_pubkey, store_id).await {
         Some(s) => s,
         None => {
             // Skip test if no network connectivity (CI/isolated environment)
@@ -109,16 +106,13 @@ async fn test_sync_multiple_entries() {
     
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
-    
-    // Explicitly register store for network access
-    server_a.register_store(store_a.clone()).await;
-    
+        
     node_a.invite_peer(node_b.node_id()).await.expect("invite");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     sleep(Duration::from_millis(200)).await;
     
-    let store_b = match join_mesh_via_event(&node_b, a_pubkey).await {
+    let store_b = match join_mesh_via_event(&node_b, a_pubkey, store_id).await {
         Some(s) => s,
         None => {
             eprintln!("Skipping test - no network");

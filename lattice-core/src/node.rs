@@ -1,7 +1,7 @@
 //! Local Lattice node API with multi-store support
 
 use crate::{
-    DataDir, Merge, MetaStore, NodeIdentity, PeerStatus, Uuid, WatchEventKind,
+    DataDir, Merge, MetaStore, NodeIdentity, PeerStatus, Uuid,
     auth::PeerProvider,
     meta_store::MetaStoreError,
     node_identity::NodeError as IdentityError,
@@ -9,7 +9,6 @@ use crate::{
     store_registry::StoreRegistry,
     types::PubKey,
 };
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::RwLock;
 use thiserror::Error;
@@ -76,6 +75,7 @@ pub use crate::store::StoreInfo;
 /// Result of accepting a peer's join request
 pub struct JoinAcceptance {
     pub store_id: Uuid,
+    pub authorized_authors: Vec<PubKey>,
 }
 
 /// Information about a peer in the mesh
@@ -93,12 +93,19 @@ pub struct PeerInfo {
 pub enum NodeEvent {
     /// Store is ready (opened and available) - informational only
     StoreReady(StoreHandle),
-    /// Request to network this store (server should call register_store)
-    NetworkStore(StoreHandle),
+    /// Mesh is fully initialized and ready (store + network + perms)
+    MeshReady(StoreHandle),
+    /// Network store ready (store + peer manager for networking)
+    NetworkStore { 
+        store: StoreHandle, 
+        peer_manager: std::sync::Arc<crate::peer_manager::PeerManager>,
+    },
     /// Sync requested (catch up with peers)
     SyncRequested(Uuid),
     /// Request to join a mesh via peer (server handles network protocol)
-    JoinRequested(PubKey),
+    JoinRequested { peer: PubKey, mesh_id: Uuid },
+    /// Join failed (emitted by network layer)
+    JoinFailed { mesh_id: Uuid, reason: String },
     /// Sync with a specific peer (used after joining to get initial data)
     SyncWithPeer { store_id: Uuid, peer: PubKey },
 }
@@ -134,23 +141,20 @@ impl NodeBuilder {
             let _ = meta.set_name(&hostname);
         }
         
-        // Create event channel
         let (event_tx, _) = broadcast::channel(16);
 
         let node = std::sync::Arc::new(node);
         let meta = std::sync::Arc::new(meta);
         let registry = StoreRegistry::new(self.data_dir.clone(), meta.clone(), node.clone());
-        
-        let (peer_event_tx, _) = broadcast::channel(64);
+
         Ok(Node {
             data_dir: self.data_dir,
             node,
             meta,
             registry,
             event_tx,
-            peer_event_tx,
-            peer_cache: std::sync::Arc::new(RwLock::new(HashMap::new())),
-            bootstrap_authors: std::sync::Arc::new(RwLock::new(std::collections::HashSet::new())),
+            mesh: RwLock::new(None),
+            pending_joins: RwLock::new(std::collections::HashSet::new()),
         })
     }
 }
@@ -166,13 +170,17 @@ pub struct Node {
     meta: std::sync::Arc<MetaStore>,
     registry: StoreRegistry,
     event_tx: broadcast::Sender<NodeEvent>,
-    peer_event_tx: broadcast::Sender<crate::auth::PeerEvent>,
-    peer_cache: std::sync::Arc<RwLock<HashMap<PubKey, PeerStatus>>>,
-    /// Bootstrap authors trusted during initial sync (cleared after first sync)
-    bootstrap_authors: std::sync::Arc<RwLock<std::collections::HashSet<PubKey>>>,
+    /// The active mesh (root store + peer management)
+    mesh: RwLock<Option<crate::mesh::Mesh>>,
+    /// Set of mesh IDs currently being joined
+    pending_joins: RwLock<std::collections::HashSet<Uuid>>,
 }
 
 impl Node {
+    pub fn subscribe(&self) -> broadcast::Receiver<NodeEvent> {
+        self.event_tx.subscribe()
+    }
+
     pub fn info(&self) -> NodeInfo {
         NodeInfo {
             node_id: hex::encode(self.node.public_key()),
@@ -193,19 +201,18 @@ impl Node {
     /// Set bootstrap authors - trusted for initial sync before peer list is synced.
     /// These are provided by the inviting peer in JoinResponse.
     pub fn set_bootstrap_authors(&self, authors: Vec<PubKey>) -> Result<(), NodeError> {
-        let mut bootstrap = self.bootstrap_authors.write()
-            .map_err(|_| NodeError::LockPoisoned)?;
-        bootstrap.clear();
-        bootstrap.extend(authors);
-        Ok(())
+        let mesh = self.mesh()
+            .ok_or_else(|| NodeError::Actor("No mesh available".to_string()))?;
+        mesh.set_bootstrap_authors(authors)
+            .map_err(|e| NodeError::Actor(e.to_string()))
     }
     
     /// Clear bootstrap authors after initial sync completes.
     pub fn clear_bootstrap_authors(&self) -> Result<(), NodeError> {
-        self.bootstrap_authors.write()
-            .map_err(|_| NodeError::LockPoisoned)?
-            .clear();
-        Ok(())
+        let mesh = self.mesh()
+            .ok_or_else(|| NodeError::Actor("No mesh available".to_string()))?;
+        mesh.clear_bootstrap_authors()
+            .map_err(|e| NodeError::Actor(e.to_string()))
     }
 
     /// Get the signing key for Iroh integration (same Ed25519 key).
@@ -241,6 +248,11 @@ impl Node {
         Ok(())
     }
 
+    /// Emit an event (internal use or by network layer)
+    pub fn emit(&self, event: NodeEvent) {
+        let _ = self.event_tx.send(event);
+    }
+
     /// Get the root store ID
     pub fn root_store_id(&self) -> Result<Option<Uuid>, NodeError> {
         Ok(self.meta.root_store()?)
@@ -254,20 +266,33 @@ impl Node {
         let (handle, _) = self.registry.get_or_open(root_id)?;
         Ok(handle)
     }
-    
-    /// Start the node - opens root store if set and emits NetworkStore event.
+    /// Start the node - opens root store and emits NetworkStore event.
+    /// Fails if no root store is configured.
     pub async fn start(&self) -> Result<(), NodeError> {
-        if let Some(id) = self.meta.root_store()? {
-            let (handle, _info) = self.registry.get_or_open(id)?;
-            
-            // Emit events for listeners - NetworkStore triggers server registration
-            let _ = self.event_tx.send(NodeEvent::StoreReady(handle.clone()));
-            let _ = self.event_tx.send(NodeEvent::NetworkStore(handle.clone()));
-            let _ = self.event_tx.send(NodeEvent::SyncRequested(id));
-            
-            // Start watching peer status changes to keep cache updated
-            self.start_peer_cache_watcher().await?;
+        let id = self.meta.root_store()?
+            .ok_or_else(|| NodeError::Actor("No root store configured - run init or join first".to_string()))?;
+        
+        let (handle, _info) = self.registry.get_or_open(id)?;
+        
+        // Create Mesh (handles PeerManager creation internally)
+        let mesh = crate::mesh::Mesh::create(handle.clone(), self.node.public_key()).await
+            .map_err(|e| NodeError::Actor(e.to_string()))?;
+        
+        // Store mesh in node
+        {
+            let mut mesh_guard = self.mesh.write()
+                .map_err(|_| NodeError::Actor("Mesh lock poisoned".to_string()))?;
+            *mesh_guard = Some(mesh.clone());
         }
+        
+        // Emit events for listeners - NetworkStore triggers server registration
+        let _ = self.event_tx.send(NodeEvent::StoreReady(handle.clone()));
+        let _ = self.event_tx.send(NodeEvent::NetworkStore { 
+            store: mesh.root_store().clone(), 
+            peer_manager: mesh.peer_manager().clone(),
+        });
+        let _ = self.event_tx.send(NodeEvent::SyncRequested(id));
+        
         Ok(())
     }
 
@@ -301,24 +326,77 @@ impl Node {
         let status_key = format!("/nodes/{}/status", pubkey_hex);
         handle.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await?;
         
-        // Start watching peer status changes to keep cache updated
-        self.start_peer_cache_watcher().await?;
+        // Create Mesh (handles PeerManager creation internally)
+        let mesh = crate::mesh::Mesh::create(handle, self.node.public_key()).await
+            .map_err(|e| NodeError::Actor(e.to_string()))?;
+        
+        // Store mesh in node
+        {
+            let mut mesh_guard = self.mesh.write()
+                .map_err(|_| NodeError::Actor("Mesh lock poisoned".to_string()))?;
+            *mesh_guard = Some(mesh.clone());
+        }
         
         // Emit NetworkStore event - server will register for networking
-        let _ = self.event_tx.send(NodeEvent::NetworkStore(handle));
+        let _ = self.event_tx.send(NodeEvent::NetworkStore { 
+            store: mesh.root_store().clone(), 
+            peer_manager: mesh.peer_manager().clone(),
+        });
         
         Ok(store_id)
     }
     
     /// Request to join a mesh via the given peer.
     /// Emits JoinRequested event - server handles the network protocol.
-    /// After join completes, StoreReady event will be emitted.
-    pub fn join(&self, peer_id: PubKey) -> Result<(), NodeError> {
+    /// After join completes, MeshReady event will be emitted.
+    pub fn join(&self, peer_id: PubKey, mesh_id: Uuid) -> Result<(), NodeError> {
         if self.meta.root_store()?.is_some() {
             return Err(NodeError::AlreadyInitialized);
         }
-        let _ = self.event_tx.send(NodeEvent::JoinRequested(peer_id));
+        
+        // Check if join is already in progress
+        {
+            let mut pending = self.pending_joins.write()
+                .map_err(|_| NodeError::LockPoisoned)?;
+            if pending.contains(&mesh_id) {
+                return Err(NodeError::Validation(format!("Join for mesh {} is already in progress", mesh_id)));
+            }
+            pending.insert(mesh_id);
+        }
+        
+        let _ = self.event_tx.send(NodeEvent::JoinRequested { peer: peer_id, mesh_id });
         Ok(())
+    }
+    
+    /// Process a JoinResponse from a peer.
+    /// Encapsulates logic for initializing the mesh and processing authorized authors.
+    pub async fn process_join_response(
+        &self, 
+        mesh_id: Uuid, 
+        authorized_authors_bytes: Vec<Vec<u8>>, 
+        via_peer: PubKey
+    ) -> Result<StoreHandle, NodeError> {
+        // 1. Initialize Mesh (must be done first)
+        let handle = self.complete_join(mesh_id, Some(via_peer)).await?;
+        
+        // 2. Set bootstrap authors (now that mesh exists and peer manager is ready)
+        // 2. Set bootstrap authors (now that mesh exists and peer manager is ready)
+        let bootstrap_authors: Vec<PubKey> = authorized_authors_bytes.iter()
+            .filter_map(|b| PubKey::try_from(b.as_slice()).ok())
+            .collect();
+
+        if !bootstrap_authors.is_empty() {
+            self.set_bootstrap_authors(bootstrap_authors)?;
+        }
+        
+        // Clear from pending joins
+        if let Ok(mut pending) = self.pending_joins.write() {
+            pending.remove(&mesh_id);
+        }
+        
+        let _ = self.event_tx.send(NodeEvent::MeshReady(handle.clone()));
+        
+        Ok(handle)
     }
     
     /// Complete joining a mesh - creates store with given UUID, sets as root, caches handle.
@@ -332,8 +410,16 @@ impl Node {
         // Open and cache the handle (registry caches it)
         let (handle, _) = self.registry.get_or_open(store_id)?;
         
-        // Start watching peer status changes to keep cache updated
-        self.start_peer_cache_watcher().await?;
+        // Create Mesh (handles PeerManager creation internally)
+        let mesh = crate::mesh::Mesh::create(handle.clone(), self.node.public_key()).await
+            .map_err(|e| NodeError::Actor(e.to_string()))?;
+        
+        // Store mesh in node
+        {
+            let mut mesh_guard = self.mesh.write()
+                .map_err(|_| NodeError::Actor("Mesh lock poisoned".to_string()))?;
+            *mesh_guard = Some(mesh.clone());
+        }
         
         // Publish our name to the store
         let _ = self.publish_name().await;
@@ -342,7 +428,10 @@ impl Node {
         let _ = self.event_tx.send(NodeEvent::StoreReady(handle.clone()));
         
         // Emit NetworkStore event - server will register for networking
-        let _ = self.event_tx.send(NodeEvent::NetworkStore(handle.clone()));
+        let _ = self.event_tx.send(NodeEvent::NetworkStore { 
+            store: mesh.root_store().clone(), 
+            peer_manager: mesh.peer_manager().clone(),
+        });
         
         // If we joined via a specific peer, emit SyncWithPeer to get initial data
         if let Some(peer) = via_peer {
@@ -482,9 +571,19 @@ impl Node {
     }
     
     /// Accept a peer's join request - verifies they're invited, sets active, returns join info
-    pub async fn accept_join(&self, pubkey: PubKey) -> Result<JoinAcceptance, NodeError> {
-        // Verify peer is invited (via PeerProvider trait)
-        if !PeerProvider::can_join(self, &pubkey) {
+    pub async fn accept_join(&self, pubkey: PubKey, mesh_id: Uuid) -> Result<JoinAcceptance, NodeError> {
+        // Verify mesh_id matches our root store
+        let root_id = self.meta.root_store()?
+            .ok_or_else(|| NodeError::Actor("No root store configured".to_string()))?;
+            
+        if mesh_id != root_id {
+             return Err(NodeError::Validation(format!("Invalid Mesh ID: expected {}, got {}", root_id, mesh_id)));
+        }
+
+        // Verify peer is invited (via PeerManager)
+        let pm = self.peer_manager()
+            .ok_or_else(|| NodeError::Actor("PeerManager not initialized".to_string()))?;
+        if !pm.can_join(&pubkey) {
             return Err(NodeError::Store(crate::store::StateError::Unauthorized(
                 format!("Peer {} is not invited", hex::encode(pubkey))
             )));
@@ -497,7 +596,10 @@ impl Node {
         // Set peer status to active
         self.set_peer_status(pubkey, PeerStatus::Active).await?;
         
-        Ok(JoinAcceptance { store_id })
+        // Get list of authorized authors to send to the joining peer
+        let authorized_authors = pm.list_acceptable_authors();
+        
+        Ok(JoinAcceptance { store_id, authorized_authors })
     }
 
     pub fn list_stores(&self) -> Result<Vec<Uuid>, NodeError> {
@@ -529,129 +631,14 @@ impl Node {
         Ok(self.registry.get_or_open(store_id)?)
     }
     
-    /// Start watching peer status changes and keep cache updated.
-    /// Called after root store opens.
-    async fn start_peer_cache_watcher(&self) -> Result<(), NodeError> {
-        let store = self.root_store()?;
-        
-        // Watch for peer status changes
-        let pattern = r"^/nodes/([a-f0-9]+)/status$";
-        let (initial, mut rx) = store.watch(pattern).await?;
-        
-        // Populate initial cache
-        {
-            let mut cache = self.peer_cache.write()
-                .map_err(|_| NodeError::LockPoisoned)?;
-            for (key, heads) in initial {
-                if let Some(pubkey_hex) = parse_peer_status_key(&key) {
-                    if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
-                        if let Ok(pubkey) = PubKey::try_from(pubkey_bytes) {
-                            if let Some(winner) = heads.lww_head() {
-                                let status_str = String::from_utf8_lossy(&winner.value);
-                                if let Some(status) = PeerStatus::from_str(&status_str) {
-                                    cache.insert(pubkey, status.clone());
-                                    // Emit Added event for initial peers
-                                    let _ = self.peer_event_tx.send(crate::auth::PeerEvent::Added { 
-                                        pubkey, 
-                                        status,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Clone what we need for the spawned task
-        let peer_cache = self.peer_cache.clone();
-        let peer_event_tx = self.peer_event_tx.clone();
-        
-        // Spawn task to keep cache updated
-        tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
-                if let Some(pubkey_hex) = parse_peer_status_key(&event.key) {
-                    if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
-                        let Ok(pubkey) = PubKey::try_from(pubkey_bytes) else { continue };
-                        let Ok(mut cache) = peer_cache.write() else {
-                            eprintln!("[lattice] Peer cache lock poisoned, stopping watcher");
-                            break;
-                        };
-                        match event.kind {
-                            WatchEventKind::Update { heads } => {
-                                // Use LWW merge to get winner (not just first)
-                                let value = heads.lww_head()
-                                    .map(|h| h.value.as_slice())
-                                    .unwrap_or(&[]);
-                                let status_str = String::from_utf8_lossy(value);
-                                if let Some(new_status) = PeerStatus::from_str(&status_str) {
-                                    let old_status = cache.insert(pubkey, new_status.clone());
-                                    // Emit appropriate event
-                                    let event = match old_status {
-                                        Some(old) if old != new_status => {
-                                            crate::auth::PeerEvent::StatusChanged { pubkey, old, new: new_status }
-                                        }
-                                        None => {
-                                            crate::auth::PeerEvent::Added { pubkey, status: new_status }
-                                        }
-                                        _ => continue, // No change
-                                    };
-                                    let _ = peer_event_tx.send(event);
-                                }
-                            }
-                            WatchEventKind::Delete => {
-                                if cache.remove(&pubkey).is_some() {
-                                    let _ = peer_event_tx.send(crate::auth::PeerEvent::Removed { pubkey });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        
-        Ok(())
-    }
-}
-
-impl PeerProvider for Node {
-    fn can_join(&self, peer: &PubKey) -> bool {
-        let Ok(cache) = self.peer_cache.read() else { return false };
-        matches!(cache.get(peer), Some(PeerStatus::Invited))
+    /// Get the PeerManager if mesh is available.
+    pub fn peer_manager(&self) -> Option<std::sync::Arc<crate::peer_manager::PeerManager>> {
+        self.mesh.read().ok()?.as_ref().map(|m| m.peer_manager().clone())
     }
     
-    fn can_connect(&self, peer: &PubKey) -> bool {
-        // Check bootstrap authors first (trusted during initial sync)
-        if self.bootstrap_authors.read().map(|b| b.contains(peer)).unwrap_or(false) {
-            return true;
-        }
-        let Ok(cache) = self.peer_cache.read() else { return false };
-        matches!(cache.get(peer), Some(PeerStatus::Active) | Some(PeerStatus::Dormant))
-    }
-    
-    fn can_accept_entry(&self, author: &PubKey) -> bool {
-        // Check bootstrap authors first (trusted during initial sync)
-        if self.bootstrap_authors.read().map(|b| b.contains(author)).unwrap_or(false) {
-            return true;
-        }
-        let Ok(cache) = self.peer_cache.read() else { return false };
-        matches!(
-            cache.get(author),
-            Some(PeerStatus::Active) | Some(PeerStatus::Dormant) | Some(PeerStatus::Revoked)
-        )
-    }
-    
-    fn list_acceptable_authors(&self) -> Vec<PubKey> {
-        // Return all peers that can accept entries (Active, Dormant, Revoked)
-        let Ok(cache) = self.peer_cache.read() else { return Vec::new() };
-        cache.iter()
-            .filter(|(_, status)| matches!(status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
-            .map(|(pubkey, _)| *pubkey)
-            .collect()
-    }
-    
-    fn subscribe_peer_events(&self) -> broadcast::Receiver<crate::auth::PeerEvent> {
-        self.peer_event_tx.subscribe()
+    /// Get the Mesh if available.
+    pub fn mesh(&self) -> Option<crate::mesh::Mesh> {
+        self.mesh.read().ok()?.clone()
     }
 }
 
@@ -881,7 +868,7 @@ mod tests {
         node.invite_peer(peer_pubkey).await.expect("invite");
         
         // Accept the join
-        let acceptance = node.accept_join(peer_pubkey).await.expect("accept_join");
+        let acceptance = node.accept_join(peer_pubkey, store_id).await.expect("accept_join");
         assert_eq!(acceptance.store_id, store_id);
         
         // Peer should now be Active

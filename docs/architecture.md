@@ -90,10 +90,12 @@ Decouples file count from KV entry count. Instead of 1M files = 1M KV entries, u
 
 ## Terminology
 
-- **Lattice**: A group of nodes sharing a root store (the cluster/mesh they form)
+- **Lattice**: The distributed storage system (this software)
+- **Mesh**: A group of nodes sharing a root store + subordinated stores (the cluster they form)
 - **Node**: A single Lattice instance with its own identity (keypair)
 - **Store**: A replicated key-value store with SigChain entries
-- **Root Store**: The control plane store containing peer list and metadata
+- **Root Store**: The mesh control plane containing peer list and store declarations
+- **Subordinated Store**: Application stores declared in root store, sharing the mesh peer list
 - **MeshNetwork**: The network layer providing sync/gossip/join operations
 - **MeshEngine**: Component handling outbound sync and connection operations
 
@@ -116,6 +118,63 @@ Decouples file count from KV entry count. Instead of 1M files = 1M KV entries, u
 - New peers request a full state snapshot from their first connection.
 - The snapshot allows them to skip replaying the entire log history.
 - After bootstrap, the node receives incremental updates via gossip.
+
+### Direct Store Registration (Network Security Boundary)
+
+The network layer is a **"dumb bouncer"** — it knows nothing about the Node's internal state and only handles stores explicitly registered with it.
+
+**Principle:** If a store isn't registered via `network.register_store()`, the network layer treats requests for it as "Not Found" and rejects them. The network has no access to the Node's full store registry.
+
+**Architecture:**
+
+```
+   Node (Controller)                    MeshNetwork (Service)
+┌─────────────────────┐              ┌─────────────────────────────┐
+│ Private Store A    │              │  HashMap<StoreId, Entry>    │
+│ Private Store B    │── register ─▶│    - StoreX + Auth_MeshA    │
+│ Public StoreX      │              │    - StoreY + Auth_MeshB    │
+└─────────────────────┘              └─────────────────────────────┘
+                                               │
+                                               ▼
+                                     Incoming request for StoreX?
+                                     1. Lookup in HashMap → Found
+                                     2. Get attached PeerProvider
+                                     3. Check: "Is peer allowed?"
+                                     4. If yes → sync. If no → reject.
+                                     
+                                     Request for Private Store A?
+                                     1. Lookup in HashMap → NOT FOUND
+                                     2. Reject ("Go Away")
+```
+
+**Implementation:**
+
+```rust
+// Network layer holds flat registry - no knowledge of Node internals
+type StoresRegistry = Arc<RwLock<HashMap<Uuid, AuthorizedStore>>>;
+
+// Only registered stores are accessible
+async fn lookup_store(stores: &StoresRegistry, id: Uuid) -> Result<AuthorizedStore> {
+    stores.read().await.get(&id).cloned()
+        .ok_or(LatticeNetError::NotFound(id.to_string()))
+}
+```
+
+**Multi-Mesh Support:**
+
+Each registered store carries its own `AuthorizedStore` wrapper containing a `PeerProvider` for that mesh's peer list. Multiple meshes coexist without conflict:
+
+- Mesh A (Work) registers Store X with `Auth_MeshA`
+- Mesh B (Home) registers Store Y with `Auth_MeshB`
+- Request for Store X uses `Auth_MeshA` for peer checks
+- Request for Store Y uses `Auth_MeshB` for peer checks
+
+**Security Benefits:**
+
+- **Isolation**: Network layer cannot enumerate Node's private stores
+- **Explicit opt-in**: Only deliberately registered stores are network-accessible
+- **Per-store authorization**: Each store has its own PeerProvider attachment
+- **Defense in depth**: Network checks complement application-level checks
 
 ### Networking
 

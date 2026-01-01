@@ -18,8 +18,10 @@ pub enum PeerEvent {
     Removed { pubkey: PubKey },
 }
 
-/// Trait for verifying peer authorization.
-/// Implemented by Node, which maintains a cache of peer statuses.
+/// Trait for verifying peer authorization (persistent policy).
+/// 
+/// This trait is only for authorization policy, NOT ephemeral network state.
+/// Session tracking (who is online) belongs in lattice-net's SessionTracker.
 pub trait PeerProvider: Send + Sync {
     /// Can this peer join the mesh? (Invited status)
     /// Used when processing JoinRequest to verify peer was invited.

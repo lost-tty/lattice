@@ -7,46 +7,49 @@ A distributed, offline-first key-value store with Ed25519-signed append-only log
 1. **Initialize the first node**:
    ```bash
    cargo run --package lattice-cli
-   lattice:no-store> node init
+   lattice:no-store> mesh init
    ```
 
 2. **Invite a second node**:
    On the second node, get its public key with `node status`. Then on the first node:
    ```bash
-   lattice:060e0f0d> peer invite <second-node-pubkey>
+   lattice:060e0f0d> mesh invite <second-node-pubkey>
    ```
 
 3. **Join the mesh**:
-   On the second node, join the first node using its Node ID:
+   On the second node, join the first node using its Node ID and the Mesh ID (from `mesh status` on first node):
    ```bash
-   lattice:no-store> node join <first-node-id>
+   lattice:no-store> mesh join <first-node-id> <mesh-id>
    ```
 
 ## CLI Commands
 
 ```
 [node]
-  node init              Create identity & root store
-  node status            Show node info
-  node join <nodeid>     Join a mesh via peer
+  node status            Show local identity info
+
+[mesh]
+  mesh init              Create a new mesh (root store)
+  mesh status            Show mesh info
+  mesh join <nodeid> <meshid>  Join a mesh
+  mesh peers             List peers
+  mesh invite <pubkey>   Invite a peer
+  mesh revoke <pubkey>   Revoke a peer
 
 [store]
-  store create           Create a new store
+  store create           Create a new store (subordinate)
   store use <uuid>       Switch to a store
   store list             List all stores
   store status           Show store info
-
-[peer]
-  peer list              List known peers
-  peer invite <pubkey>   Invite a peer
-  peer remove <pubkey>   Remove a peer
-  peer sync [nodeid]     Sync with peers
+  store sync             Sync with peers
+  store author-state     Show author sync state (use -a for all)
 
 [kv]
   put <key> <value>      Store a value
   get <key>              Retrieve a value  
   delete <key>           Delete a key
   list [prefix]          List keys
+  history [key]          Show key history
 
 [general]
   help                   Show all commands

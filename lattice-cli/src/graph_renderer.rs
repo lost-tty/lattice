@@ -141,6 +141,10 @@ impl Grid {
             (L_D, VER) | (L_U, VER) => VER_L,
             (R_D, VER) | (R_U, VER) => VER_R,
             
+            // Corners meeting corners (vertical branches)
+            (L_D, L_U) | (L_U, L_D) => VER_L,
+            (R_D, R_U) | (R_U, R_D) => VER_R,
+            
             (HOR, L_U) | (HOR, R_U) => HOR_U,
             (HOR, L_D) | (HOR, R_D) => HOR_D,
             (L_U, HOR) | (R_U, HOR) => HOR_U,
@@ -151,6 +155,13 @@ impl Grid {
             (HOR_U, VER) | (HOR_D, VER) => CROSS,
             (HOR, VER_L) | (HOR, VER_R) => CROSS,
             (VER, HOR_U) | (VER, HOR_D) => CROSS,
+            
+            // Preserve complex shapes when overwritten by simple lines
+            (HOR_U, HOR) | (HOR, HOR_U) => HOR_U,
+            (HOR_D, HOR) | (HOR, HOR_D) => HOR_D,
+            (VER_L, VER) | (VER, VER_L) => VER_L,
+            (VER_R, VER) | (VER, VER_R) => VER_R,
+            (CROSS, _) | (_, CROSS) => CROSS, // Cross usually wins everything except explicit overrides
             
             // Default: use persistence
             _ => {
@@ -222,10 +233,10 @@ impl Grid {
             // ╰──●  (R_U at far end to curve up)
             if x1 < x2 {
                 self.set_with_merge(left, y, R_U, persistence);    // ╰ curve up
-                self.set_with_merge(right, y, VER_L, persistence); // ┤ merge point
+                self.set_with_merge(right, y, L_U, persistence);   // ╯ curve up
             } else {
                 self.set_with_merge(right, y, L_U, persistence);   // ╯ curve up
-                self.set_with_merge(left, y, VER_R, persistence);  // ├ merge point
+                self.set_with_merge(left, y, R_U, persistence);    // ╰ curve up
             }
         }
     }
@@ -360,6 +371,8 @@ pub fn render_dag(
     // Track which columns are "in use" (have a line continuing below current row)
     // A column is freed when its last descendant is processed
     let mut active_columns: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut column_tips: HashMap<usize, Hash> = HashMap::new(); // Track who owns the active column
+    let mut last_busy_row: HashMap<usize, usize> = HashMap::new(); // Track when column was last touched
     let mut max_col_used = 0usize;
     
     // For each entry, find the row of its last descendant (to know when column becomes free)
@@ -377,11 +390,25 @@ pub fn render_dag(
     }
     
     // Find leftmost free column
-    fn find_free_column(active: &std::collections::HashSet<usize>, max_used: usize) -> usize {
+    fn find_free_column(
+        active: &std::collections::HashSet<usize>, 
+        last_busy: &HashMap<usize, usize>, 
+        max_used: usize,
+        current_row: usize
+    ) -> usize {
         for col in 0..=max_used {
-            if !active.contains(&col) {
-                return col;
+            if active.contains(&col) {
+                continue;
             }
+            // Check for reuse gap
+            if current_row > 0 {
+                if let Some(&last) = last_busy.get(&col) {
+                    if last >= current_row - 1 {
+                        continue;
+                    }
+                }
+            }
+            return col;
         }
         max_used + 1
     }
@@ -394,13 +421,18 @@ pub fn render_dag(
             .cloned()
             .collect();
         
+        // Define find_free closure to capture strict params
+        let get_free = |max: usize| find_free_column(&active_columns, &last_busy_row, max, row);
+        
         let col = if parents_in_set.is_empty() {
             // Root - find leftmost free column
-            let col = find_free_column(&active_columns, max_col_used);
+            let col = get_free(max_col_used);
             max_col_used = max_col_used.max(col);
             col
         } else if parents_in_set.len() > 1 {
             // MERGE: use leftmost parent's column
+            // We don't check conflicts strictly here because merge connects to multiple branches
+            // But ideally we should pick one that we are the valid tip of
             parents_in_set.iter()
                 .filter_map(|p| hash_to_col.get(p))
                 .min()
@@ -411,21 +443,35 @@ pub fn render_dag(
             let parent = parents_in_set[0];
             if let Some(&parent_col) = hash_to_col.get(&parent) {
                 let siblings = children.get(&parent).map(|s| s.len()).unwrap_or(0);
-                if siblings <= 1 {
-                    parent_col
+                
+                // Check if parent_col is occupied by an unrelated line
+                let is_blocked = active_columns.contains(&parent_col) && 
+                               column_tips.get(&parent_col) != Some(&parent);
+                
+                // Also check reuse gap if it's NOT active (meaning we are trying to reuse a JUST freed column from parent??)
+                // If parent owns it, active_columns should have it. 
+                // If is_blocked is false, we are inheriting. Inheritance is always allowed.
+                
+                if is_blocked {
+                    // Blocked by unrelated line -> new column
+                    let col = get_free(max_col_used);
+                    max_col_used = max_col_used.max(col);
+                    col
+                } else if siblings <= 1 {
+                     parent_col
                 } else {
                     // Fork - first sibling inherits, others get new column
                     let first_sibling = children.get(&parent).and_then(|s| s.first());
                     if first_sibling == Some(hash) {
                         parent_col
                     } else {
-                        let col = find_free_column(&active_columns, max_col_used);
+                        let col = get_free(max_col_used);
                         max_col_used = max_col_used.max(col);
                         col
                     }
                 }
             } else {
-                let col = find_free_column(&active_columns, max_col_used);
+                let col = get_free(max_col_used);
                 max_col_used = max_col_used.max(col);
                 col
             }
@@ -434,16 +480,20 @@ pub fn render_dag(
         hash_to_col.insert(*hash, col);
         
         // A column is active as long as there's a vertical line in it
-        // This happens when an entry has descendants (children or merge children)
-        // The column should stay active until the LAST row that needs it
         let has_descendants = last_descendant_row.get(hash).map(|&r| r > row).unwrap_or(false);
         if has_descendants {
             active_columns.insert(col);
+            column_tips.insert(col, *hash); // Update owner
         } else {
-            // This entry has no more descendants - free its column
-            // But only if we're the one who made it active
             active_columns.remove(&col);
+            column_tips.remove(&col);
         }
+        
+        // Mark active columns + current as busy at this row
+        for c in &active_columns {
+            last_busy_row.insert(*c, row);
+        }
+        last_busy_row.insert(col, row); // Current node is definitely here
         
         // Also need to keep parent columns active until this row if parent is in different column
         // (the vertical line from parent to here blocks that column)
@@ -500,18 +550,9 @@ pub fn render_dag(
         };
         
         // Format with ANSI color: \x1b[{color}m ... \x1b[0m
-        let marker_char = if entry.tombstone { 
-            '✖' 
-        } else if is_root { 
-            '⊙' 
-        } else if entry.is_merge { 
-            '○' 
-        } else { 
-            '●' 
-        };
         labels[row] = format!(
-            "\x1b[{}m{}\x1b[0m [{}] {}={} \x1b[{}m(a:{})\x1b[0m", 
-            color_code, marker_char, hash_short, key_display, val_str, color_code, author_short
+            "\x1b[{}m[{}] {}={} \x1b[{}m(a:{})\x1b[0m", 
+            color_code, hash_short, key_display, val_str, color_code, author_short
         );
         
         // Draw connections to parents (use parents_in_set from above)

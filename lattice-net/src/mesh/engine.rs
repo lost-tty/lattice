@@ -19,7 +19,7 @@ pub struct SyncResult {
     pub entries_sent_by_peer: u64,
 }
 
-/// Type alias for the stores registry
+/// Type alias for the stores registry - simple HashMap, Node is source of truth for root
 pub(super) type StoresRegistry = Arc<RwLock<HashMap<Uuid, AuthorizedStore>>>;
 
 /// MeshEngine handles outbound sync and connection operations.
@@ -41,7 +41,7 @@ impl MeshEngine {
     
     /// Handle JoinRequested event - does network protocol (outbound)
     #[tracing::instrument(skip(self), fields(peer = %peer_id.fmt_short()))]
-    pub async fn handle_join_request_event(&self, peer_id: iroh::PublicKey) -> Result<(), NodeError> {
+    pub async fn handle_join_request_event(&self, peer_id: iroh::PublicKey, mesh_id: Uuid) -> Result<iroh::endpoint::Connection, NodeError> {
         tracing::info!("Join protocol: connecting to peer");
         
         let conn = self.endpoint.connect(peer_id).await
@@ -58,10 +58,11 @@ impl MeshEngine {
         let mut sink = MessageSink::new(send);
         let mut stream = MessageStream::new(recv);
         
-        // Send JoinRequest
+        // Send JoinRequest - mesh_id is mandatory
         let req = PeerMessage {
             message: Some(peer_message::Message::JoinRequest(JoinRequest {
                 node_pubkey: self.node.node_id().to_vec(),
+                mesh_id: mesh_id.as_bytes().to_vec(),
             })),
         };
         sink.send(&req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
@@ -74,30 +75,20 @@ impl MeshEngine {
         
         match msg.message {
             Some(peer_message::Message::JoinResponse(resp)) => {
-                let store_uuid = lattice_core::Uuid::from_slice(&resp.store_uuid)
+                let mesh_id = lattice_core::Uuid::from_slice(&resp.mesh_id)
                     .map_err(|_| NodeError::Actor("Invalid UUID from peer".to_string()))?;
                 
                 // Convert iroh::PublicKey to PubKey for complete_join
                 let via_peer = PubKey::from(*peer_id.as_bytes());
                 
-                // Extract and set bootstrap authors before sync
-                let bootstrap_authors: Vec<PubKey> = resp.authorized_authors.iter()
-                    .filter_map(|bytes| PubKey::try_from(bytes.as_slice()).ok())
-                    .collect();
+                tracing::info!(mesh_id = %mesh_id, "Join protocol: processing join response");
                 
-                if !bootstrap_authors.is_empty() {
-                    tracing::info!(count = bootstrap_authors.len(), "Join protocol: received bootstrap authors");
-                    for author in &bootstrap_authors {
-                        tracing::debug!(author = %author, "Bootstrap author");
-                    }
-                    self.node.set_bootstrap_authors(bootstrap_authors)?;
-                }
+                // Delegate core logic to Node (creates mesh, sets bootstrap authors)
+                self.node.process_join_response(mesh_id, resp.authorized_authors, via_peer).await?;
                 
-                tracing::info!(store_id = %store_uuid, "Join protocol: completing join");
-                let _handle = self.node.complete_join(store_uuid, Some(via_peer)).await?;
                 tracing::info!("Join protocol: complete");
-                
-                Ok(())
+
+                Ok(conn)
             }
             _ => {
                 tracing::error!("Join protocol: unexpected response from peer");

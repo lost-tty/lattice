@@ -1,6 +1,7 @@
 //! Lattice Interactive CLI
 
 mod commands;
+mod mesh_commands;
 mod node_commands;
 mod store_commands;
 mod display_helpers;
@@ -89,19 +90,42 @@ async fn main() {
         }
     };
     
-    // Now start node - this emits StoreReady which server will receive
     if let Err(e) = node.start().await {
         tracing::warn!("Node start: {}", e);
     }
     
     // Show node status (after server so gossip is set up)
-    let _ = node_commands::cmd_node_status(&node, None, mesh.as_deref(), &[], writer.clone()).await;
+    let _ = node_commands::cmd_status(&node, None, mesh.as_deref(), writer.clone()).await;
     
     // Update current store based on root store status
     if let Some(store) = node.root_store().ok() {
         if let Ok(mut guard) = current_store.write() {
             *guard = Some(store);
         }
+    }
+
+    // Start event listener for async feedback (Join success/failure)
+    {
+        let mut rx = node.subscribe();
+        let writer = writer.clone();
+        let current_store = current_store.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = rx.recv().await {
+                match event {
+                    lattice_core::NodeEvent::MeshReady(handle) => {
+                        wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", handle.id());
+                        if let Ok(mut guard) = current_store.write() {
+                            *guard = Some(handle);
+                        }
+                    }
+                    lattice_core::NodeEvent::StoreReady(_) => {}
+                    lattice_core::NodeEvent::JoinFailed { mesh_id, reason } => {
+                        wout!(writer, "\nError: Join failed for mesh {}: {}", mesh_id, reason);
+                    }
+                    _ => {}
+                }
+            }
+        });
     }
 
     loop {
@@ -125,14 +149,14 @@ async fn main() {
                 };
 
                 use clap::Parser;
-                use commands::{LatticeCli, LatticeCommand, NodeSubcommand, StoreSubcommand, handle_command};
+                use commands::{LatticeCli, LatticeCommand, MeshSubcommand, StoreSubcommand, handle_command};
 
                 match LatticeCli::try_parse_from(args) {
                     Ok(cli) => {
                         // Check if this command changes state (needs blocking)
                         let needs_blocking = matches!(
                             &cli.command,
-                            LatticeCommand::Node { subcommand: NodeSubcommand::Init | NodeSubcommand::Join { .. } }
+                            LatticeCommand::Mesh { subcommand: MeshSubcommand::Init }
                             | LatticeCommand::Store { subcommand: StoreSubcommand::Create | StoreSubcommand::Use { .. } }
                             | LatticeCommand::Quit
                         );

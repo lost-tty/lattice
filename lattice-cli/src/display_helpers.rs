@@ -6,6 +6,21 @@
 use owo_colors::OwoColorize;
 use owo_colors::AnsiColors;
 use lattice_core::PubKey;
+use std::time::Duration;
+
+/// Format elapsed time as human-readable "X ago" string
+pub fn format_elapsed(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
 
 /// Get deterministic color for an author (based on first bytes)
 /// Matches graph_renderer ANSI codes: 31-36 = Red, Green, Yellow, Blue, Magenta, Cyan
