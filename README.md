@@ -1,6 +1,43 @@
 # Lattice
 
-A distributed, offline-first key-value store with Ed25519-signed append-only logs.
+_Building a future with clear skies._
+
+Lattice is a local-first, mesh-native key-value store designed for the edge. It is built to replace fragile centralized APIs with rock-solid local infrastructure, providing resilient synchronization and offline-first durability running entirely on localhost.
+
+<p align="center">
+  <img src="docs/mergetree.png" alt="Lattice Merge Tree Visualization">
+  <br>
+  <i>Lattice's DAG visualizer showing concurrent edits merging deterministically.</i>
+</p>
+
+> [!NOTE]
+> **This is an experiment.** Lattice is research software built to explore local-first topology-agnostic data replication. It works, it's fun, but it might not work out in the end. Use at your own risk and enjoy the ride.
+
+## Philosophy
+
+We believe software should be as resilient as the hardware it runs on. Most modern applications are fragile thin clients that break the moment connectivity drops. Lattice inverts this model.
+
+- **Uncompromising Availability**: Reads and writes always happen locally on disk. Zero latency, zero downtime, fully offline-capable by default.
+- **Sovereign Data**: You own your data physically. It lives on your nodes, under your cryptographic control, not merely in a provider's database.
+- **Fluid Topology**: Data flows like water—over local Wi-Fi, Mesh VPNs, or the public Internet—finding the most direct path between peers without central bottlenecks.
+
+## Architecture
+
+### 1. Core Primitives
+| Component | Description |
+|-----------|-------------|
+| **Hybrid Logical Clocks (HLC)** | Provides localized causal ordering without a central time authority. Enables conflict detection across network partitions. |
+| **SigChain Identity** | Identity is a cryptographic log (append-only Signature Chain), not a database row. Trust is transitive and proven via the chain. |
+
+### 2. Data Layer
+- **DAG Model**: History is a Directed Acyclic Graph, allowing localized concurrent edits without global locking.
+- **Storage Engine**: `redb` provides ACID-compliant, embedded, high-performance local storage.
+- **Conflict Resolution**: Deterministic Last-Write-Wins (LWW) by default, extensible to custom CRDTs.
+
+### 3. Network & Sync
+- **Transport**: Built on Iroh, utilizing QUIC for NAT traversal across LAN and Internet.
+- **Reconciliation**: Bidirectional protocol ensures eventual consistency.
+- **Gossip**: Efficient message propagation for real-time updates.
 
 ## Quick Start
 
@@ -58,14 +95,12 @@ A distributed, offline-first key-value store with Ed25519-signed append-only log
 
 ## Project Layout
 
-```
-lattice/
-├── lattice-core/       # Core logic: Node, Store, SigChain, Entry
-├── lattice-net/        # Networking: LatticeServer, Gossip, Sync
-├── lattice-cli/        # Interactive CLI
-├── proto/              # Protocol buffers (entries, messages)
-└── docs/               # Architecture & roadmap
-```
+| Crate | Purpose |
+|-------|---------|
+| `lattice-core` | **The kernel**. Implements Node, SigChain, HLC, and redb storage logic. |
+| `lattice-net` | **The networking layer**. Handles Iroh endpoints, Gossipsub, and Sync protocols. |
+| `lattice-cli` | **Interactive shell** for managing nodes and debugging state. |
+| `proto` | **Protocol Buffers** definitions for wire format and disk storage. |
 
 ## Data Directory
 
@@ -78,8 +113,16 @@ lattice/
     └── state.db        # KV state snapshot
 ```
 
-## Documentation
+## Roadmap & RFCs
 
-- [Architecture](docs/architecture.md) - Design concepts
-- [Roadmap](docs/roadmap.md) - Development progress
-- [KV Store](docs/kvstore.md) - Store design notes
+Lattice is currently a "Kernel" project. The core replication engine is rigorous, but we are looking for contributors to help architect the ecosystem layers:
+
+- **Negentropy (O(1) Reconciliation)**: Implement range-based set reconciliation to scale sync to millions of entries.
+- **Capabilities (ACLs)**: Move beyond "invite-only" meshes to Signed Capability (OCAP) tokens for granular permissions.
+- **CRDT Overlays**: Standardize interfaces for Map/Set/Text CRDTs on top of the KV foundation.
+- **CAS / Shared Network Drive**: Future integration with a Content-Addressable Storage (CAS) layer (or Garage sidecar) to enable a fully decentralized, local-first shared network drive.
+
+## License
+
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. We believe infrastructure for the common good should remain open. If you modify Lattice and provide it over a network, you must share your improvements.
+
