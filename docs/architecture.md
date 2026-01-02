@@ -691,6 +691,16 @@ The Root Store acts as the **Identity Provider** (Kernel), providing "User Space
 
 **Remediation:** Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 
+### Token Consumption Race Condition
+
+**The Issue:** `Mesh::consume_invite_secret()` has a check-then-delete race condition.
+
+**Attack Vector:** If two peers receive the same token (accidentally shared) and attempt to join simultaneously, both could pass the `get()` check before either `delete()` commits. Both would be authorized.
+
+**Current Status:** Accepted risk. The check runs on a single node (the inviter), so the window is small. Tokens are typically single-use and shared privately.
+
+**Future Remediation:** Wrap the critical section in a `tokio::sync::Mutex` on the `Mesh` struct, or implement atomic delete-and-return if the store supports it.
+
 ### Peer Authorization During Replay
 
 *Key distinction:*

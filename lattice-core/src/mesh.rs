@@ -14,16 +14,17 @@ use crate::{
     peer_manager::{PeerManager, PeerManagerError},
     store::StoreHandle,
     types::PubKey,
+    token::Invite,
+    merge::Merge,
     PeerInfo, Uuid, NodeIdentity,
 };
+use rand::RngCore;
 use std::sync::Arc;
 
 /// A Mesh represents a group of nodes sharing a root store and peer list.
 ///
-/// Hierarchy: Store < Mesh < Lattice (software)
-///
-/// The Mesh owns:
-/// - The root store (control plane with `/nodes/*` peer list)
+/// The Mesh acts as a high-level controller for:
+/// - The Root Store (data storage)
 /// - The PeerManager (peer cache + operations)
 ///
 /// Use `mesh.root_store()` for data operations on the control plane.
@@ -65,19 +66,56 @@ impl Mesh {
     
     // ==================== Peer Management ====================
     
-    /// Invite a peer to the mesh.
-    pub async fn invite_peer(&self, pubkey: PubKey) -> Result<(), PeerManagerError> {
-        self.peer_manager.invite_peer(pubkey).await
-    }
+    // invite_peer removed
     
     /// List all peers in the mesh.
     pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
         self.peer_manager.list_peers().await
     }
     
-    /// Revoke a peer from the mesh.
+    /// Revoke a peer's access.
     pub async fn revoke_peer(&self, pubkey: PubKey) -> Result<(), PeerManagerError> {
         self.peer_manager.revoke_peer(pubkey).await
+    }
+    
+    /// Create a one-time join token.
+    /// 
+    /// Generates a random secret, stores its hash, and returns a Base58Check encoded token
+    /// containing (Inviter PubKey, Mesh ID, Secret).
+    pub async fn create_invite(&self, inviter: PubKey) -> Result<String, String> {
+        // 1. Generate Secret
+        let mut secret = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut secret);
+        
+        // 2. Store Hash
+        let hash = blake3::hash(&secret);
+        let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
+        self.root.put(key.as_bytes(), b"valid").await.map_err(|e| e.to_string())?;
+        
+        // 3. Create Token
+        let invite = Invite::new(
+            inviter,
+            self.id(),
+            secret.to_vec(),
+        );
+        
+        // 4. Encode
+        Ok(invite.to_string())
+    }
+    
+    /// Validate and consume an invite secret.
+    /// Returns true if valid and consumed, false otherwise.
+    pub async fn consume_invite_secret(&self, secret: &[u8]) -> Result<bool, String> {
+        let hash = blake3::hash(secret);
+        let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
+        
+        if let Ok(Some(_)) = self.root.get(key.as_bytes()).await.map(|h| h.lww()) {
+            // Valid! Delete it (one-time use)
+            self.root.delete(key.as_bytes()).await.map_err(|e| e.to_string())?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
     
     /// Activate a peer (set status to Active).

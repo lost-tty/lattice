@@ -1,6 +1,6 @@
 //! Integration tests for gap filling between networked peers
 
-use lattice_core::{Merge, NodeBuilder, NodeEvent, PubKey};
+use lattice_core::{Merge, NodeBuilder, NodeEvent, PubKey, Invite};
 use lattice_core::Node;
 use lattice_net::MeshNetwork;
 use std::sync::Arc;
@@ -15,12 +15,12 @@ fn temp_data_dir(name: &str) -> lattice_core::DataDir {
 }
 
 /// Helper: Join mesh via node.join() and wait for StoreReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: lattice_core::Uuid) -> Option<lattice_core::StoreHandle> {
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: lattice_core::Uuid, secret: Vec<u8>) -> Option<lattice_core::StoreHandle> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
     
-    // Request join
-    if node.join(peer_pubkey, mesh_id).is_err() {
+    // Request join with secret from token
+    if node.join(peer_pubkey, mesh_id, secret).is_err() {
         return None;
     }
     
@@ -52,19 +52,20 @@ async fn test_targeted_author_sync() {
     let server_a = MeshNetwork::new_from_node(node_a.clone()).await.expect("server a");
     let server_b = MeshNetwork::new_from_node(node_b.clone()).await.expect("server b");
     
-    // Node A inits and invites B
+    // Node A inits and creates invite token
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
     
-    node_a.get_mesh().expect("mesh").invite_peer(node_b.node_id()).await.expect("invite");
+    let token_string = node_a.get_mesh().expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
+    let invite = Invite::parse(&token_string).expect("parse token");
     
-    // B joins via event-driven flow
+    // B joins via event-driven flow with secret
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     
     // Allow some time for mDNS discovery
     sleep(Duration::from_millis(200)).await;
     
-    let store_b = match join_mesh_via_event(&node_b, a_pubkey, store_id).await {
+    let store_b = match join_mesh_via_event(&node_b, a_pubkey, store_id, invite.secret).await {
         Some(s) => s,
         None => {
             // Skip test if no network connectivity (CI/isolated environment)
@@ -106,13 +107,14 @@ async fn test_sync_multiple_entries() {
     
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
-        
-    node_a.get_mesh().expect("mesh").invite_peer(node_b.node_id()).await.expect("invite");
+    
+    let token_string = node_a.get_mesh().expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
+    let invite = Invite::parse(&token_string).expect("parse token");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     sleep(Duration::from_millis(200)).await;
     
-    let store_b = match join_mesh_via_event(&node_b, a_pubkey, store_id).await {
+    let store_b = match join_mesh_via_event(&node_b, a_pubkey, store_id, invite.secret).await {
         Some(s) => s,
         None => {
             eprintln!("Skipping test - no network");

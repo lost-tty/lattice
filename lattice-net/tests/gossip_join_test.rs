@@ -3,7 +3,7 @@
 //! These tests replicate PRODUCTION usage exactly - no manual gossip setup.
 //! They rely purely on the event-driven flow that happens in the CLI.
 
-use lattice_core::{Merge, NodeBuilder, NodeEvent, PubKey};
+use lattice_core::{Merge, NodeBuilder, NodeEvent, PubKey, Invite};
 use lattice_core::Node;
 use lattice_net::MeshNetwork;
 use std::sync::Arc;
@@ -18,12 +18,12 @@ fn temp_data_dir(name: &str) -> lattice_core::DataDir {
 }
 
 /// Helper: Join mesh via node.join() and wait for StoreReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: lattice_core::Uuid) -> Option<lattice_core::StoreHandle> {
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: lattice_core::Uuid, secret: Vec<u8>) -> Option<lattice_core::StoreHandle> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
     
-    // Request join
-    if node.join(peer_pubkey, mesh_id).is_err() {
+    // Request join with secret from token
+    if node.join(peer_pubkey, mesh_id, secret).is_err() {
         return None;
     }
     
@@ -76,16 +76,17 @@ async fn test_production_flow_gossip() {
     let node_b = Arc::new(NodeBuilder { data_dir: data_b.clone() }.build().expect("node b"));
     let _server_b = MeshNetwork::new_from_node(node_b.clone()).await.expect("server b");
     
-    // === Node A: Invites B ===
-    node_a.get_mesh().expect("mesh").invite_peer(node_b.node_id()).await.expect("invite");
+    // === Node A: Creates invite token for B ===
+    let token_string = node_a.get_mesh().expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
+    let invite = Invite::parse(&token_string).expect("parse token");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     
     // Get A's mesh ID (root store ID)
     let mesh_id = node_a.root_store_id().unwrap().expect("A should have root store");
     
-    // B joins A via event flow
-    let store_b = match join_mesh_via_event(&node_b, a_pubkey, mesh_id).await {
+    // B joins A via event flow with secret
+    let store_b = match join_mesh_via_event(&node_b, a_pubkey, mesh_id, invite.secret).await {
         Some(s) => s,
         None => {
             eprintln!("Skipping test - no network");

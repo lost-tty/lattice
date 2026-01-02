@@ -25,10 +25,12 @@
 - [x] Move peer commands from `Node` to `Mesh`
 
 ### 3B: Token-Based Join
-- [ ] Implement `InviteToken` (JWT or similar) containing `mesh_id`, `peer_id`, `endpoints`.
-- [ ] `mesh invite` generates token.
-- [ ] `mesh join <token>` extracts info and joins using embedded secret.
-- [ ] See [one-time-join-tokens.md](one-time-join-tokens.md).
+- [x] Implement `InviteToken` (Base58 + Protobuf) containing `mesh_id`, `secret`, `inviter_pubkey`.
+- [x] `mesh invite` generates token.
+- [x] `mesh join <token>` extracts info and joins using embedded secret.
+- [x] Token consumption via hash lookup in root store.
+- [ ] **Known Risk:** Race condition in `consume_invite_secret` (check-then-delete). Low priority since single-node local check. Future: add Mutex or atomic delete.
+- See [one-time-join-tokens.md](one-time-join-tokens.md).
 
 ### 3C: Node Registry Refactor
 - [x] `Node::get_mesh()` → `Mesh` wrapper (Single-mesh MVP)

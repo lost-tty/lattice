@@ -110,14 +110,14 @@ impl MeshNetwork {
     async fn run_event_handler(server: Arc<Self>, mut event_rx: tokio::sync::broadcast::Receiver<NodeEvent>) {
         while let Ok(event) = event_rx.recv().await {
             match event {
-                NodeEvent::JoinRequested { peer, mesh_id } => {
+                NodeEvent::JoinRequested { peer, mesh_id, secret } => {
                     let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
                         tracing::error!(peer = %lattice_core::PubKey::from(peer), "JoinRequested: invalid PubKey");
                         continue;
                     };
                     tracing::info!(peer = %iroh_peer_id.fmt_short(), mesh = %mesh_id, "Event: JoinRequested → starting join protocol");
                     
-                    match server.engine.handle_join_request_event(iroh_peer_id, mesh_id).await {
+                    match server.engine.handle_join_request_event(iroh_peer_id, mesh_id, secret).await {
                         Ok(conn) => {
                              // Keep connection alive by upgrading it to a full mesh session
                              tracing::info!(peer = %iroh_peer_id.fmt_short(), "Join successful, keeping connection active");
@@ -523,8 +523,8 @@ async fn handle_join_request(
     let mesh_id = Uuid::from_slice(&req.mesh_id)
         .map_err(|_| LatticeNetError::Connection("Invalid mesh_id in JoinRequest".into()))?;
 
-    // Accept the join - verifies invited, checks mesh_id matches, sets active, returns store ID & authors
-    let acceptance = node.accept_join(*remote_pubkey, mesh_id).await?;
+    // Accept the join - verifies token, checks mesh_id matches, sets active, returns store ID & authors
+    let acceptance = node.accept_join(*remote_pubkey, mesh_id, &req.invite_secret).await?;
     
     let authorized_authors: Vec<Vec<u8>> = acceptance.authorized_authors
         .into_iter()

@@ -6,7 +6,7 @@
 
 use crate::commands::{CommandResult, Writer, MeshSubcommand};
 use crate::display_helpers::format_elapsed;
-use lattice_core::{Node, StoreHandle, PeerStatus, PubKey, Uuid, Mesh};
+use lattice_core::{Node, StoreHandle, PeerStatus, PubKey, Uuid, Mesh, token::Invite};
 use lattice_net::MeshNetwork;
 use chrono::DateTime;
 use owo_colors::OwoColorize;
@@ -29,16 +29,9 @@ pub async fn handle_command(
              CommandResult::Ok
         }
         MeshSubcommand::Status => cmd_status(mesh, writer).await,
-        MeshSubcommand::Join { node_id: _, mesh_id: _ } => {
-             // Join also needs Node.join... wait. 
-             // cmd_join currently uses Node.join.
-             // If we decouple, who calls Node.join?
-             let mut w = writer;
-             let _ = writeln!(w, "Error: 'mesh join' requires node access (not yet refactored).");
-             CommandResult::Ok
-        }
+        MeshSubcommand::Join { token } => cmd_join(node, &token, writer).await,
         MeshSubcommand::Peers => cmd_peers(node, mesh, network, writer).await,
-        MeshSubcommand::Invite { pubkey } => cmd_invite(node, mesh, pubkey.as_str(), writer).await,
+        MeshSubcommand::Invite => cmd_invite(node, mesh, writer).await,
         MeshSubcommand::Revoke { pubkey } => cmd_revoke(mesh, pubkey.as_str(), writer).await,
     }
 }
@@ -91,52 +84,38 @@ pub async fn cmd_status(mesh: Option<&Mesh>, writer: Writer) -> CommandResult {
     CommandResult::Ok
 }
 
-/// Join an existing mesh
-pub async fn cmd_join(node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, node_id: &str, mesh_id: &str, writer: Writer) -> CommandResult {
+/// Join an existing mesh using an invite token
+pub async fn cmd_join(node: &Node, token: &str, writer: Writer) -> CommandResult {
     // Check if already in a mesh
-    if store.is_some() {
+    if node.root_store().is_ok() {
         let mut w = writer.clone();
         let _ = writeln!(w, "Error: Node already initialized or part of a mesh");
         return CommandResult::Ok;
     }
 
-    // Parse peer ID (inviter)
-    let peer_id = match PubKey::from_hex(node_id) {
-        Ok(pk) => pk,
+    // Parse token using core library
+    let invite = match Invite::parse(token) {
+        Ok(i) => i,
         Err(e) => {
-             let mut w = writer.clone();
-             let _ = writeln!(w, "Invalid node ID: {}", e);
-             return CommandResult::Ok;
-        }
-    };
-
-    // Parse Mesh ID
-    let mesh_uuid = match Uuid::parse_str(mesh_id) {
-        Ok(u) => u,
-        Err(e) => {
-             let mut w = writer.clone();
-             let _ = writeln!(w, "Invalid mesh ID: {}", e);
-             return CommandResult::Ok;
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Invalid token: {}", e);
+            let _ = writeln!(w, "\nUsage: mesh join <token>");
+            return CommandResult::Ok;
         }
     };
     
     {
         let mut w = writer.clone();
-        let _ = writeln!(w, "Joining mesh {} via {}...", mesh_uuid, &node_id[..12.min(node_id.len())]);
+        let _ = writeln!(w, "Joining mesh {} via token...", invite.mesh_id);
     }
     
-
-    
     // Request join - emits JoinRequested event
-    // Server event handler does network protocol and calls complete_join
-    if let Err(e) = node.join(peer_id, mesh_uuid) {
+    if let Err(e) = node.join(invite.inviter, invite.mesh_id, invite.secret) {
         let mut w = writer.clone();
         let _ = writeln!(w, "Join failed: {}", e);
         return CommandResult::Ok;
     }
     
-    // For async join, we don't wait here.
-    // The global event listener in main.rs will handle MeshReady/JoinFailed feedback.
     let mut w = writer.clone();
     let _ = writeln!(w, "Join request sent. You will be notified when connection is established.");
     CommandResult::Ok
@@ -219,8 +198,8 @@ pub async fn cmd_peers(node: &Node, mesh: Option<&Mesh>, network: Option<&MeshNe
     CommandResult::Ok
 }
 
-/// Invite a peer to the mesh
-pub async fn cmd_invite(node: &Node, mesh: Option<&Mesh>, pubkey: &str, writer: Writer) -> CommandResult {
+/// Generate an invite token
+pub async fn cmd_invite(node: &Node, mesh: Option<&Mesh>, writer: Writer) -> CommandResult {
     let mesh = match mesh {
         Some(m) => m,
         None => {
@@ -230,28 +209,20 @@ pub async fn cmd_invite(node: &Node, mesh: Option<&Mesh>, pubkey: &str, writer: 
         }
     };
 
-    let pk = match PubKey::from_hex(pubkey) {
-        Ok(pk) => pk,
-        Err(e) => {
+    // Generate token
+    match mesh.create_invite(node.node_id()).await {
+        Ok(token) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "Invalid pubkey: {}", e);
-            return CommandResult::Ok;
-        }
-    };
-    
-    match mesh.invite_peer(pk).await {
-        Ok(()) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Invited peer: {}", pk);
-            let _ = writeln!(w, "  Status: {} (will become active after sync)", PeerStatus::Invited.as_str());
-            let _ = writeln!(w, "\nFor the invited peer to join, run:");
-            let _ = writeln!(w, "  mesh join {} {}", hex::encode(node.node_id()), mesh.id());
+            let _ = writeln!(w, "Generated one-time join token:");
+            let _ = writeln!(w, "{}", token.green().bold());
+            let _ = writeln!(w, "Share this token securely. It can be used once to join this mesh.");
         }
         Err(e) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "Error: {}", e);
+            let _ = writeln!(w, "Error creating token: {}", e);
         }
     }
+    
     CommandResult::Ok
 }
 

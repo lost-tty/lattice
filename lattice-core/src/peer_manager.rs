@@ -213,11 +213,7 @@ impl PeerManager {
     
     // ==================== Peer Operations ====================
     
-    /// Invite a peer to the mesh. Writes their info with status = invited.
-    pub async fn invite_peer(&self, pubkey: PubKey) -> Result<(), PeerManagerError> {
-        let peer = Peer::new_invited(pubkey, self.identity.public_key());
-        peer.save(&self.store).await
-    }
+    // invite_peer removed - use token-based invites instead
     
     /// Set a peer's name.
     pub async fn set_peer_name(&self, pubkey: PubKey, name: &str) -> Result<(), PeerManagerError> {

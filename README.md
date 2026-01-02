@@ -47,16 +47,15 @@ We believe software should be as resilient as the hardware it runs on. Most mode
    lattice:no-store> mesh init
    ```
 
-2. **Invite a second node**:
-   On the second node, get its public key with `node status`. Then on the first node:
+2. **Generate an invite token**:
    ```bash
-   lattice:060e0f0d> mesh invite <second-node-pubkey>
+   lattice:060e0f0d> mesh invite
+   # Outputs: 2aWDipfQ...
    ```
 
-3. **Join the mesh**:
-   On the second node, join the first node using its Node ID and the Mesh ID (from `mesh status` on first node):
+3. **Join the mesh** (on second node):
    ```bash
-   lattice:no-store> mesh join <first-node-id> <mesh-id>
+   lattice:no-store> mesh join <token>
    ```
 
 ## CLI Commands
@@ -68,9 +67,9 @@ We believe software should be as resilient as the hardware it runs on. Most mode
 [mesh]
   mesh init              Create a new mesh (root store)
   mesh status            Show mesh info
-  mesh join <nodeid> <meshid>  Join a mesh
+  mesh invite            Generate a one-time invite token
+  mesh join <token>      Join a mesh using invite token
   mesh peers             List peers
-  mesh invite <pubkey>   Invite a peer
   mesh revoke <pubkey>   Revoke a peer
 
 [store]

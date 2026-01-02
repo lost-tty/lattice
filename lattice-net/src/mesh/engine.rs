@@ -40,8 +40,8 @@ impl MeshEngine {
     }
     
     /// Handle JoinRequested event - does network protocol (outbound)
-    #[tracing::instrument(skip(self), fields(peer = %peer_id.fmt_short()))]
-    pub async fn handle_join_request_event(&self, peer_id: iroh::PublicKey, mesh_id: Uuid) -> Result<iroh::endpoint::Connection, NodeError> {
+    #[tracing::instrument(skip(self, secret), fields(peer = %peer_id.fmt_short()))]
+    pub async fn handle_join_request_event(&self, peer_id: iroh::PublicKey, mesh_id: Uuid, secret: Vec<u8>) -> Result<iroh::endpoint::Connection, NodeError> {
         tracing::info!("Join protocol: connecting to peer");
         
         let conn = self.endpoint.connect(peer_id).await
@@ -58,11 +58,12 @@ impl MeshEngine {
         let mut sink = MessageSink::new(send);
         let mut stream = MessageStream::new(recv);
         
-        // Send JoinRequest - mesh_id is mandatory
+        // Send JoinRequest - all fields mandatory
         let req = PeerMessage {
             message: Some(peer_message::Message::JoinRequest(JoinRequest {
                 node_pubkey: self.node.node_id().to_vec(),
                 mesh_id: mesh_id.as_bytes().to_vec(),
+                invite_secret: secret,
             })),
         };
         sink.send(&req).await.map_err(|e| NodeError::Actor(e.to_string()))?;

@@ -1,4 +1,4 @@
-use lattice_core::{NodeBuilder, PeerStatus, PubKey};
+use lattice_core::{NodeBuilder, PeerStatus, PubKey, Invite};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -14,18 +14,13 @@ async fn test_node_to_mesh_delegation() -> Result<(), Box<dyn std::error::Error>
     let _ = node.init().await?;
     let mesh = node.get_mesh()?;
 
-    // 3. Invite Peer via Mesh
-    mesh.invite_peer(peer_pubkey).await?;
+    // 3. Create invite token
+    let token_string = mesh.create_invite(node.node_id()).await?;
+    let invite = Invite::parse(&token_string)?;
 
-    // 4. List Peers via Mesh
-    let peers = mesh.list_peers().await?;
-    let invited = peers.iter().find(|p| p.pubkey == peer_pubkey).expect("peer not found");
-    assert_eq!(invited.status, PeerStatus::Invited);
-
-    // 5. Accept Join via Node Facade
-    // Note: Node::accept_join requires the correct mesh_id
+    // 4. Accept Join via Node Facade with secret from token
     let mesh_id = node.root_store_id()?.unwrap();
-    let acceptance = node.accept_join(peer_pubkey, mesh_id).await?;
+    let acceptance = node.accept_join(peer_pubkey, mesh_id, &invite.secret).await?;
     assert_eq!(acceptance.store_id, mesh_id);
 
     // Verify status is Active
@@ -33,7 +28,7 @@ async fn test_node_to_mesh_delegation() -> Result<(), Box<dyn std::error::Error>
     let active = peers.iter().find(|p| p.pubkey == peer_pubkey).expect("peer not found");
     assert_eq!(active.status, PeerStatus::Active);
 
-    // 6. Revoke Peer via Mesh
+    // 5. Revoke Peer via Mesh
     mesh.revoke_peer(peer_pubkey).await?;
     let peers = mesh.list_peers().await?;
     let revoked = peers.iter().find(|p| p.pubkey == peer_pubkey).expect("peer not found");

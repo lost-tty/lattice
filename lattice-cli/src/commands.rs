@@ -153,19 +153,15 @@ pub enum MeshSubcommand {
     Init,
     /// Show mesh status (ID, peer counts)
     Status,
-    /// Join an existing mesh
+    /// Join an existing mesh using an invite token
     Join {
-        /// Node ID of inviter
-        node_id: String,
-        /// Mesh ID to join
-        mesh_id: String,
+        /// Invite token
+        token: String,
     },
     /// List all peers (authorization + online status)
     Peers,
-    /// Invite a peer to the mesh
-    Invite {
-        pubkey: String,
-    },
+    /// Generate a one-time invite token
+    Invite,
     /// Revoke a peer from the mesh
     Revoke {
         pubkey: String,
@@ -233,7 +229,7 @@ pub async fn handle_command(
         },
         LatticeCommand::Mesh { subcommand } => match subcommand {
             MeshSubcommand::Init => mesh_commands::cmd_init(node, store, mesh_network.as_deref(), writer).await,
-            MeshSubcommand::Join { node_id, mesh_id } => mesh_commands::cmd_join(node, store, mesh_network.as_deref(), &node_id, &mesh_id, writer).await,
+            MeshSubcommand::Join { token } => mesh_commands::cmd_join(node, &token, writer).await,
             other => {
                 // Use passed Mesh (context-aware)
                 mesh_commands::handle_command(node, mesh, mesh_network.as_deref(), other, writer).await

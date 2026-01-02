@@ -107,8 +107,8 @@ pub enum NodeEvent {
     },
     /// Sync requested (catch up with peers)
     SyncRequested(Uuid),
-    /// Request to join a mesh via peer (server handles network protocol)
-    JoinRequested { peer: PubKey, mesh_id: Uuid },
+    /// Request to join a mesh
+    JoinRequested { peer: PubKey, mesh_id: Uuid, secret: Vec<u8> },
     /// Join failed (emitted by network layer)
     JoinFailed { mesh_id: Uuid, reason: String },
     /// Sync with a specific peer (used after joining to get initial data)
@@ -359,7 +359,7 @@ impl Node {
     /// Request to join a mesh via the given peer.
     /// Emits JoinRequested event - server handles the network protocol.
     /// After join completes, MeshReady event will be emitted.
-    pub fn join(&self, peer_id: PubKey, mesh_id: Uuid) -> Result<(), NodeError> {
+    pub fn join(&self, peer_id: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Result<(), NodeError> {
         if self.meta.root_store()?.is_some() {
             return Err(NodeError::AlreadyInitialized);
         }
@@ -374,7 +374,7 @@ impl Node {
             pending.insert(mesh_id);
         }
         
-        let _ = self.event_tx.send(NodeEvent::JoinRequested { peer: peer_id, mesh_id });
+        let _ = self.event_tx.send(NodeEvent::JoinRequested { peer: peer_id, mesh_id, secret });
         Ok(())
     }
     
@@ -455,7 +455,10 @@ impl Node {
     /// Accept a peer's join request - verifies they're invited, sets active, returns join info
     /// 
     /// Note: This remains on Node as a facade for the network layer, which may not yet have a Mesh reference
-    pub async fn accept_join(&self, pubkey: PubKey, mesh_id: Uuid) -> Result<JoinAcceptance, NodeError> {
+    /// Accept a peer's join request - verifies they're invited, sets active, returns join info
+    /// 
+    /// Note: This remains on Node as a facade for the network layer, which may not yet have a Mesh reference
+    pub async fn accept_join(&self, pubkey: PubKey, mesh_id: Uuid, secret: &[u8]) -> Result<JoinAcceptance, NodeError> {
         // Verify mesh_id matches our root store
         let root_id = self.meta.root_store()?
             .ok_or_else(|| NodeError::Actor("No root store configured".to_string()))?;
@@ -467,14 +470,23 @@ impl Node {
         // Delegate to Mesh
         let mesh = self.get_mesh()?;
         
-        // Check invite
-        if !mesh.peer_manager().can_join(&pubkey) {
+        // Check invite token
+        let valid_token = match mesh.consume_invite_secret(secret).await {
+            Ok(v) => v,
+            Err(_) => false, // Token validation failed
+        };
+        
+        // If token invalid, check if already active (re-join)
+        // We use can_join which checks for Active status (Invited status is no longer used)
+        let is_already_authorized = !valid_token && mesh.peer_manager().can_join(&pubkey);
+        
+        if !valid_token && !is_already_authorized {
             return Err(NodeError::Store(StateError::Unauthorized(
-                format!("Peer {} is not invited", hex::encode(pubkey))
+                format!("Peer {} provided invalid token and is not already authorized", hex::encode(pubkey))
             )));
         }
         
-        // Activate peer
+        // Activate peer (idempotent)
         mesh.activate_peer(pubkey).await?;
         
         // Get list of authorized authors to send to the joining peer
@@ -717,7 +729,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_invite_peer() {
+    async fn test_create_invite_token() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         let node = NodeBuilder { data_dir: data_dir.clone() }
@@ -727,15 +739,16 @@ mod tests {
         // Init first
         node.init().await.expect("init");
         
-        // Invite a peer
-        let peer_pubkey = PubKey::from([0u8; 32]); // Dummy pubkey
-        node.get_mesh().unwrap().invite_peer(peer_pubkey).await.expect("invite");
+        // Create an invite token
+        let token = node.get_mesh().unwrap().create_invite(node.node_id()).await.expect("create invite");
         
-        // Verify peer is Invited
-        let peers = node.get_mesh().unwrap().list_peers().await.expect("list_peers");
-        let invited = peers.iter().find(|p| p.pubkey == peer_pubkey);
-        assert!(invited.is_some(), "Should find invited peer");
-        assert_eq!(invited.unwrap().status, PeerStatus::Invited);
+        // Verify token format
+        assert!(token.starts_with("lattice:"), "Token should start with lattice: prefix");
+        
+        // Parse the token
+        let invite = crate::token::Invite::parse(&token).expect("parse token");
+        assert_eq!(invite.mesh_id, node.root_store_id().unwrap().unwrap());
+        assert_eq!(invite.inviter, node.node_id());
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -751,12 +764,13 @@ mod tests {
         // Init first
         let store_id = node.init().await.expect("init");
         
-        // Invite a peer
-        let peer_pubkey = PubKey::from([1u8; 32]); // Dummy pubkey
-        node.get_mesh().unwrap().invite_peer(peer_pubkey).await.expect("invite");
+        // Create an invite token
+        let token_string = node.get_mesh().unwrap().create_invite(node.node_id()).await.expect("create invite");
+        let invite = crate::token::Invite::parse(&token_string).expect("parse token");
         
-        // Accept the join
-        let acceptance = node.accept_join(peer_pubkey, store_id).await.expect("accept_join");
+        // Accept the join with the secret
+        let peer_pubkey = PubKey::from([1u8; 32]); // Dummy pubkey (as if joiner provided it)
+        let acceptance = node.accept_join(peer_pubkey, store_id, &invite.secret).await.expect("accept_join");
         assert_eq!(acceptance.store_id, store_id);
         
         // Peer should now be Active
@@ -787,23 +801,28 @@ mod tests {
         let store_id = node_a.init().await.expect("A init");
         let store_a = node_a.root_store().expect("A has root store");
         
-        // Step 2: A invites B
-        node_a.get_mesh().unwrap().invite_peer(node_b.node_id()).await.expect("invite B");
+        // Step 2: A creates invite token for B
+        let token_string = node_a.get_mesh().unwrap().create_invite(node_a.node_id()).await.expect("create invite");
         
-        // Verify B is invited
-        let peers = node_a.get_mesh().unwrap().list_peers().await.expect("list peers");
-        assert!(peers.iter().any(|p| p.status == PeerStatus::Invited));
+        // Step 3: B parses the token (as joiner would)
+        let invite = crate::token::Invite::parse(&token_string).expect("parse token");
+        assert_eq!(invite.inviter, node_a.node_id(), "Token should contain A's pubkey");
+        assert_eq!(invite.mesh_id, store_id, "Token should contain mesh ID");
         
-        // Step 3: B "joins" (complete_join simulates receiving JoinResponse)
-        let store_b = node_b.complete_join(store_id, None).await.expect("B join");
+        // Step 4: A accepts B's join request using values from the token
+        let acceptance = node_a.accept_join(node_b.node_id(), invite.mesh_id, &invite.secret).await.expect("accept join");
+        assert_eq!(acceptance.store_id, invite.mesh_id);
+        
+        // Step 5: B completes join (simulates receiving JoinResponse)
+        let store_b = node_b.complete_join(invite.mesh_id, None).await.expect("B join");
         
         // Verify B has the same store ID
-        assert_eq!(store_b.id(), store_id);
+        assert_eq!(store_b.id(), invite.mesh_id);
         
-        // Step 4: A writes data
+        // Step 6: A writes data
         store_a.put(b"/key", b"from A").await.expect("A put");
         
-        // Step 5: B writes data independently
+        // Step 7: B writes data independently
         store_b.put(b"/key", b"from B").await.expect("B put");
         
         // Each store has its own local state (not synced yet)
