@@ -24,12 +24,24 @@ pub fn format_elapsed(elapsed: Duration) -> String {
 
 /// Get deterministic color for an author (based on first bytes)
 /// Matches graph_renderer ANSI codes: 31-36 = Red, Green, Yellow, Blue, Magenta, Cyan
-pub fn author_color(author: &PubKey) -> owo_colors::AnsiColors {
-    const COLORS: [AnsiColors; 6] = [
+pub fn author_color(author: &PubKey) -> AnsiColors {
+    // 12 Safe colors (skipping Black, White, and Gray to ensure readability)
+    const COLORS: [AnsiColors; 12] = [
+        // Standard
         AnsiColors::Red, AnsiColors::Green, AnsiColors::Yellow,
         AnsiColors::Blue, AnsiColors::Magenta, AnsiColors::Cyan,
+        // Bright / Bold variants
+        AnsiColors::BrightRed, AnsiColors::BrightGreen, AnsiColors::BrightYellow,
+        AnsiColors::BrightBlue, AnsiColors::BrightMagenta, AnsiColors::BrightCyan,
     ];
-    COLORS[author[0] as usize % COLORS.len()]
+
+    // Mix the first 4 bytes to prevent "clumping" if keys share prefixes
+    let hash = author[0] as usize 
+             ^ author[1] as usize 
+             ^ author[2] as usize 
+             ^ author[3] as usize;
+
+    COLORS[hash % COLORS.len()]
 }
 
 /// Format author ID with deterministic color, right-aligned to given width
@@ -241,7 +253,11 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &StoreHandle
     let _ = writeln!(w);
     
     // Get peer names
-    let known_peers = node.list_peers().await.unwrap_or_default();
+    let known_peers = if let Some(mesh) = node.mesh() {
+        mesh.list_peers().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let peer_names: std::collections::HashMap<PubKey, Option<String>> = known_peers.iter()
         .map(|p| (p.pubkey, p.name.clone()))
         .collect();

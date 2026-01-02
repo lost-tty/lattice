@@ -14,7 +14,7 @@ use crate::{
     peer_manager::{PeerManager, PeerManagerError},
     store::StoreHandle,
     types::PubKey,
-    PeerInfo, Uuid,
+    PeerInfo, Uuid, NodeIdentity,
 };
 use std::sync::Arc;
 
@@ -37,8 +37,8 @@ pub struct Mesh {
 impl Mesh {
     /// Create a new Mesh for a store, initializing PeerManager.
     /// This is the preferred constructor for creating a mesh from a store.
-    pub async fn create(root: StoreHandle, my_pubkey: crate::types::PubKey) -> Result<Self, PeerManagerError> {
-        let peer_manager = PeerManager::new(root.clone(), my_pubkey).await?;
+    pub async fn create(root: StoreHandle, identity: &NodeIdentity) -> Result<Self, PeerManagerError> {
+        let peer_manager = PeerManager::new(root.clone(), identity).await?;
         Ok(Self::new(root, peer_manager))
     }
     

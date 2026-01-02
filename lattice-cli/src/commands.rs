@@ -1,7 +1,7 @@
 //! CLI command handlers
 
 use crate::{mesh_commands, node_commands, store_commands};
-use lattice_core::{Node, StoreHandle};
+use lattice_core::{Node, StoreHandle, Mesh};
 use lattice_net::MeshNetwork;
 use clap::{Parser, Subcommand, CommandFactory};
 use rustyline_async::SharedWriter;
@@ -212,7 +212,8 @@ pub enum StoreSubcommand {
 pub async fn handle_command(
     node: &Node,
     store: Option<&StoreHandle>,
-    mesh: Option<Arc<MeshNetwork>>,
+    mesh_network: Option<Arc<MeshNetwork>>,
+    mesh: Option<&Mesh>,
     cli: LatticeCli,
     writer: Writer,
 ) -> CommandResult {
@@ -227,47 +228,47 @@ pub async fn handle_command(
             CommandResult::Ok
         }
         LatticeCommand::Node { subcommand } => match subcommand {
-            NodeSubcommand::Status => node_commands::cmd_status(node, store, mesh.as_deref(), writer).await,
-            NodeSubcommand::SetName { name } => node_commands::cmd_set_name(node, store, mesh.as_deref(), &name, writer).await,
+            NodeSubcommand::Status => node_commands::cmd_status(node, store, mesh_network.as_deref(), writer).await,
+            NodeSubcommand::SetName { name } => node_commands::cmd_set_name(node, store, mesh_network.as_deref(), &name, writer).await,
         },
         LatticeCommand::Mesh { subcommand } => match subcommand {
-            MeshSubcommand::Init => mesh_commands::cmd_init(node, store, mesh.as_deref(), writer).await,
-            MeshSubcommand::Status => mesh_commands::cmd_status(node, store, mesh.as_deref(), writer).await,
-            MeshSubcommand::Join { node_id, mesh_id } => mesh_commands::cmd_join(node, store, mesh.as_deref(), &node_id, &mesh_id, writer).await,
-            MeshSubcommand::Peers => mesh_commands::cmd_peers(node, store, mesh.as_deref(), writer).await,
-            MeshSubcommand::Invite { pubkey } => mesh_commands::cmd_invite(node, store, mesh.as_deref(), &pubkey, writer).await,
-            MeshSubcommand::Revoke { pubkey } => mesh_commands::cmd_revoke(node, store, mesh.as_deref(), &pubkey, writer).await,
+            MeshSubcommand::Init => mesh_commands::cmd_init(node, store, mesh_network.as_deref(), writer).await,
+            MeshSubcommand::Join { node_id, mesh_id } => mesh_commands::cmd_join(node, store, mesh_network.as_deref(), &node_id, &mesh_id, writer).await,
+            other => {
+                // Use passed Mesh (context-aware)
+                mesh_commands::handle_command(node, mesh, mesh_network.as_deref(), other, writer).await
+            }
         },
         LatticeCommand::Store { subcommand } => match subcommand {
-            StoreSubcommand::Create => mesh_commands::cmd_create_store(node, store, mesh.as_deref(), writer).await,
-            StoreSubcommand::Use { uuid } => mesh_commands::cmd_use_store(node, store, mesh.as_deref(), &uuid, writer).await,
-            StoreSubcommand::List => mesh_commands::cmd_list_stores(node, store, mesh.as_deref(), writer).await,
+            StoreSubcommand::Create => mesh_commands::cmd_create_store(node, store, mesh_network.as_deref(), writer).await,
+            StoreSubcommand::Use { uuid } => mesh_commands::cmd_use_store(node, store, mesh_network.as_deref(), &uuid, writer).await,
+            StoreSubcommand::List => mesh_commands::cmd_list_stores(node, store, mesh_network.as_deref(), writer).await,
             StoreSubcommand::Status { verbose } => {
                 let args: Vec<String> = if verbose { vec!["-v".to_string()] } else { vec![] };
-                store_commands::cmd_store_status(node, store, mesh.as_deref(), &args, writer).await
+                store_commands::cmd_store_status(node, store, mesh_network.as_deref(), &args, writer).await
             },
-            StoreSubcommand::Debug => store_commands::cmd_store_debug(node, store, mesh.as_deref(), &[], writer).await,
-            StoreSubcommand::OrphanCleanup => store_commands::cmd_orphan_cleanup(node, store, mesh.as_deref(), &[], writer).await,
+            StoreSubcommand::Debug => store_commands::cmd_store_debug(node, store, mesh_network.as_deref(), &[], writer).await,
+            StoreSubcommand::OrphanCleanup => store_commands::cmd_orphan_cleanup(node, store, mesh_network.as_deref(), &[], writer).await,
             StoreSubcommand::History { key } => {
                 let args: Vec<String> = key.into_iter().collect();
-                store_commands::cmd_key_history(node, store, mesh.as_deref(), &args, writer).await
+                store_commands::cmd_key_history(node, store, mesh_network.as_deref(), &args, writer).await
             },
             StoreSubcommand::AuthorState { pubkey, all } => {
                 let mut args = pubkey.map(|p| vec![p]).unwrap_or_default();
                 if all { args.push("-a".to_string()); }
-                store_commands::cmd_author_state(node, store, mesh.as_deref(), &args, writer).await
+                store_commands::cmd_author_state(node, store, mesh_network.as_deref(), &args, writer).await
             },
-            StoreSubcommand::Sync => store_commands::cmd_store_sync(node, store, mesh.clone(), &[], writer).await,
+            StoreSubcommand::Sync => store_commands::cmd_store_sync(node, store, mesh_network.clone(), &[], writer).await,
         },
-        LatticeCommand::Put { key, value } => store_commands::cmd_put(node, store, mesh.as_deref(), &[key, value], writer).await,
+        LatticeCommand::Put { key, value } => store_commands::cmd_put(node, store, mesh_network.as_deref(), &[key, value], writer).await,
         LatticeCommand::Get { key, verbose } => {
             let mut args = vec![key];
             if verbose {
                 args.push("-v".to_string());
             }
-            store_commands::cmd_get(node, store, mesh.as_deref(), &args, writer).await
+            store_commands::cmd_get(node, store, mesh_network.as_deref(), &args, writer).await
         },
-        LatticeCommand::Delete { key } => store_commands::cmd_delete(node, store, mesh.as_deref(), &[key], writer).await,
+        LatticeCommand::Delete { key } => store_commands::cmd_delete(node, store, mesh_network.as_deref(), &[key], writer).await,
         LatticeCommand::List { prefix, verbose } => {
             let mut args = Vec::new();
             if let Some(p) = prefix {
@@ -276,7 +277,7 @@ pub async fn handle_command(
             if verbose {
                 args.push("-v".to_string());
             }
-            store_commands::cmd_list(node, store, mesh.as_deref(), &args, writer).await
+            store_commands::cmd_list(node, store, mesh_network.as_deref(), &args, writer).await
         },
         LatticeCommand::Quit => {
             let mut w = writer.clone();

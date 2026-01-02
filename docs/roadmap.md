@@ -12,23 +12,33 @@
 - **Simplified StoreHandle**: Removed generic types and handler traits; KvStore is now the only implementation with direct methods
 - **Heads-Only API**: `get()`, `list()`, `watch()` return raw `Vec<Head>`. `Merge` trait provides `.lww()`, `.fww()`, `.all()`, `MergeList` for lists. See `docs/store-api.md`.
 - **Async Mesh Join**: Non-blocking `mesh join` with `MeshReady` event feedback loop for responsive CLI experience.
+- **CLI Mesh Context**: Refactored CLI to use event-driven `Mesh` context, decoupling commands from `Node` and ensuring direct `Mesh` usage.
 
 ---
 
 ## Milestone 3: Mesh API Refactor
 
-**Goal:** Type-safe API for mesh management. See [architecture.md](architecture.md#mesh-api-facade-pattern-future).
+**Goal:** Type-safe API for mesh management, multiple meshes per node, and improved join experience. See [architecture.md](architecture.md#mesh-api-facade-pattern-future).
 
 ### 3A: Mesh Wrapper Type
-- [ ] Create `Mesh` struct wrapping root `StoreHandle` + `PeerProvider`
-- [ ] Move peer commands from `Node` to `Mesh`
+- [x] Create `Mesh` struct wrapping root `StoreHandle` + `PeerProvider`
+- [x] Move peer commands from `Node` to `Mesh`
 
-### 3B: Node Registry Refactor
-- [ ] `Node::get_mesh(id)` → `Mesh` wrapper
-- [ ] `Node::get_store(id)` → raw `StoreHandle`
+### 3B: Token-Based Join
+- [ ] Implement `InviteToken` (JWT or similar) containing `mesh_id`, `peer_id`, `endpoints`.
+- [ ] `mesh invite` generates token.
+- [ ] `mesh join <token>` extracts info and joins using embedded secret.
+- [ ] See [one-time-join-tokens.md](one-time-join-tokens.md).
 
-### 3C: CLI Context Switching
-- [ ] `mesh init`, `mesh list`, `mesh switch` commands
+### 3C: Node Registry Refactor
+- [x] `Node::get_mesh()` → `Mesh` wrapper (Single-mesh MVP)
+- [x] `Node::get_store()` → raw `StoreHandle`
+
+### 3D: CLI Context Switching
+- [ ] `mesh init`, `mesh list`
+- [ ] `mesh switch`: change active CLI context (target for subsequent commands)
+- [ ] `mesh up <id>`, `mesh down <id>` to start/stop specific meshes
+- [ ] Support concurrent active meshes (node participates in multiple meshes simultaneously)
 
 ---
 
@@ -213,7 +223,7 @@ Ensure system resilience against malicious peers who may lie, omit messages, or 
 
 ## Future
 
-- **Invite Tokens**: Switch to token-based invites (containing `mesh_id`, `peer_id`, and `iroh_endpoints`) instead of the current pre-authorized pubkey approach. See [one-time-join-tokens.md](one-time-join-tokens.md).
+
 - TTL expiry for long-lived orphans (received_at timestamp now tracked)
 - Transitive sync across all peers
 - CRDTs: PN-Counters, OR-Sets for peer list

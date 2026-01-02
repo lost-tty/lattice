@@ -140,9 +140,9 @@ impl MeshEngine {
     pub async fn status_all(&self, store_id: Uuid, our_sync_state: Option<lattice_core::proto::storage::SyncState>) 
         -> HashMap<iroh::PublicKey, Result<(u64, Option<lattice_core::proto::storage::SyncState>), String>> 
     {
-        let peers = match self.node.list_peers().await {
-            Ok(p) => p,
-            Err(_) => return HashMap::new(),
+        let peers = match self.node.mesh() {
+            Some(m) => m.list_peers().await.unwrap_or_default(),
+            None => return HashMap::new(),
         };
         
         let active_peers: Vec<_> = peers.iter()
@@ -197,7 +197,10 @@ impl MeshEngine {
     
     /// Get active peer IDs (excluding self)
     async fn active_peer_ids(&self) -> Result<Vec<iroh::PublicKey>, NodeError> {
-        let peers = self.node.list_peers().await?;
+        let peers = self.node.mesh()
+            .ok_or_else(|| NodeError::Actor("No mesh initialized".into()))?
+            .list_peers().await
+            .map_err(NodeError::PeerManager)?;
         let my_pubkey = self.endpoint.public_key();
         
         Ok(peers.into_iter()

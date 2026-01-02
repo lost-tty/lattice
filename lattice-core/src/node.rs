@@ -1,13 +1,15 @@
 //! Local Lattice node API with multi-store support
 
 use crate::{
-    DataDir, Merge, MetaStore, NodeIdentity, PeerStatus, Uuid,
+    DataDir, MetaStore, NodeIdentity, PeerStatus, Uuid,
     auth::PeerProvider,
     meta_store::MetaStoreError,
     node_identity::NodeError as IdentityError,
     store::{StateError, StoreHandle, LogError},
     store_registry::StoreRegistry,
     types::PubKey,
+    mesh::Mesh,
+    peer_manager::{PeerManager, PeerManagerError},
 };
 use std::path::Path;
 use std::sync::RwLock;
@@ -61,6 +63,9 @@ pub enum NodeError {
     
     #[error("Lock poisoned")]
     LockPoisoned,
+
+    #[error("PeerManager error: {0}")]
+    PeerManager(#[from] PeerManagerError),
 }
 
 pub struct NodeInfo {
@@ -94,11 +99,11 @@ pub enum NodeEvent {
     /// Store is ready (opened and available) - informational only
     StoreReady(StoreHandle),
     /// Mesh is fully initialized and ready (store + network + perms)
-    MeshReady(StoreHandle),
+    MeshReady(Mesh),
     /// Network store ready (store + peer manager for networking)
     NetworkStore { 
         store: StoreHandle, 
-        peer_manager: std::sync::Arc<crate::peer_manager::PeerManager>,
+        peer_manager: std::sync::Arc<PeerManager>,
     },
     /// Sync requested (catch up with peers)
     SyncRequested(Uuid),
@@ -117,6 +122,11 @@ pub struct NodeBuilder {
 impl NodeBuilder {
     pub fn new() -> Self {
         Self { data_dir: DataDir::default() }
+    }
+    
+    pub fn with_data_dir<P: AsRef<Path>>(mut self, path: P) -> Self {
+        self.data_dir = DataDir::new(path.as_ref().to_path_buf());
+        self
     }
 
     pub fn build(self) -> Result<Node, NodeError> {
@@ -171,7 +181,7 @@ pub struct Node {
     registry: StoreRegistry,
     event_tx: broadcast::Sender<NodeEvent>,
     /// The active mesh (root store + peer management)
-    mesh: RwLock<Option<crate::mesh::Mesh>>,
+    mesh: RwLock<Option<Mesh>>,
     /// Set of mesh IDs currently being joined
     pending_joins: RwLock<std::collections::HashSet<Uuid>>,
 }
@@ -275,7 +285,7 @@ impl Node {
         let (handle, _info) = self.registry.get_or_open(id)?;
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = crate::mesh::Mesh::create(handle.clone(), self.node.public_key()).await
+        let mesh = Mesh::create(handle.clone(), &self.node).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node
@@ -327,7 +337,7 @@ impl Node {
         handle.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await?;
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = crate::mesh::Mesh::create(handle, self.node.public_key()).await
+        let mesh = Mesh::create(handle, &self.node).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node
@@ -394,7 +404,8 @@ impl Node {
             pending.remove(&mesh_id);
         }
         
-        let _ = self.event_tx.send(NodeEvent::MeshReady(handle.clone()));
+        let mesh = self.mesh().expect("mesh initialized");
+        let _ = self.event_tx.send(NodeEvent::MeshReady(mesh));
         
         Ok(handle)
     }
@@ -411,7 +422,7 @@ impl Node {
         let (handle, _) = self.registry.get_or_open(store_id)?;
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = crate::mesh::Mesh::create(handle.clone(), self.node.public_key()).await
+        let mesh = Mesh::create(handle.clone(), &self.node).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node
@@ -441,136 +452,9 @@ impl Node {
         Ok(handle)
     }
     
-    // --- Peer Management ---
-    
-    /// Invite a peer to the mesh. Writes their info with status = invited.
-    pub async fn invite_peer(&self, pubkey: crate::types::PubKey) -> Result<(), NodeError> {
-        let store = self.root_store()?;
-        
-        let pubkey_hex = format!("{:x}", pubkey);
-        let my_pubkey_hex = format!("{:x}", self.node.public_key());
-        
-        let added_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        
-        // Write added_by
-        let added_by_key = format!("/nodes/{}/added_by", pubkey_hex);
-        store.put(added_by_key.as_bytes(), my_pubkey_hex.as_bytes()).await?;
-        
-        // Write added_at
-        let added_at_key = format!("/nodes/{}/added_at", pubkey_hex);
-        store.put(added_at_key.as_bytes(), added_at.to_string().as_bytes()).await?;
-        
-        // Write status = invited
-        let status_key = format!("/nodes/{}/status", pubkey_hex);
-        store.put(status_key.as_bytes(), PeerStatus::Invited.as_str().as_bytes()).await?;
-        
-        Ok(())
-    }
-    
-    /// List all peers in the mesh with their info
-    pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, NodeError> {
-        let store = self.root_store()?;
-        
-        let nodes = store.list_by_prefix(b"/nodes/").await?;
-        
-        // Build a map of pubkey -> attributes
-        #[derive(Default)]
-        struct PeerAttrs {
-            status: Option<PeerStatus>,
-            name: Option<String>,
-            added_at: Option<u64>,
-            added_by: Option<String>,
-        }
-        
-        let mut peers_map: std::collections::HashMap<String, PeerAttrs> = std::collections::HashMap::new();
-        
-        for (key, heads) in &nodes {
-            let key_str = String::from_utf8_lossy(key);
-            
-            // Parse key: /nodes/{pubkey}/{attr}
-            let Some(rest) = key_str.strip_prefix("/nodes/") else { continue };
-            let Some((pubkey_hex, attr)) = rest.split_once('/') else { continue };
-            
-            let Some(value) = heads.lww() else { continue };
-            let value_str = String::from_utf8_lossy(&value);
-            
-            let attrs = peers_map.entry(pubkey_hex.to_string()).or_default();
-            match attr {
-                "status" => attrs.status = PeerStatus::from_str(&value_str),
-                "name" => attrs.name = Some(value_str.to_string()),
-                "added_at" => attrs.added_at = value_str.parse().ok(),
-                "added_by" => attrs.added_by = Some(value_str.to_string()),
-                _ => {} // Ignore unknown attributes
-            }
-        }
-        
-        // Convert to PeerInfo (only peers with a valid status)
-        let mut peers = Vec::new();
-        for (pubkey_hex, attrs) in peers_map {
-            let Some(status) = attrs.status else { continue };
-            let Ok(pubkey) = PubKey::from_hex(&pubkey_hex) else { continue };
-            
-            peers.push(PeerInfo {
-                pubkey,
-                name: attrs.name,
-                added_at: attrs.added_at,
-                added_by: attrs.added_by,
-                status,
-            });
-        }
-        
-        Ok(peers)
-    }
-
-    /// Revoke a peer (sets status to Revoked)
-    pub async fn revoke_peer(&self, pubkey: PubKey) -> Result<(), NodeError> {
-        // Verify root store is available
-        let _ = self.root_store()?;
-        
-        // Prevent self-revocation
-        if pubkey == self.node.public_key() {
-            return Err(NodeError::Actor("Cannot revoke yourself".to_string()));
-        }
-        
-        // Verify peer exists (by checking if we can get its status or finding keys)
-        // Simple check: get_peer_status returns Ok(None) if not found
-        if self.get_peer_status(pubkey).await?.is_none() {
-             return Err(NodeError::Actor("Peer not found".to_string()));
-        }
-
-        self.set_peer_status(pubkey, PeerStatus::Revoked).await
-    }
-    
-    /// Get a peer's status
-    pub async fn get_peer_status(&self, pubkey: PubKey) -> Result<Option<PeerStatus>, NodeError> {
-        let store = self.root_store()?;
-        
-        let pubkey_hex = hex::encode(pubkey);
-        let status_key = format!("/nodes/{}/status", pubkey_hex);
-        
-        match store.get(status_key.as_bytes()).await?.lww() {
-            Some(bytes) => {
-                let status_str = String::from_utf8_lossy(&bytes);
-                Ok(PeerStatus::from_str(&status_str))
-            }
-            None => Ok(None),
-        }
-    }
-    
-    /// Set a peer's status
-    pub async fn set_peer_status(&self, pubkey: PubKey, status: PeerStatus) -> Result<(), NodeError> {
-        let store = self.root_store()?;
-        
-        let pubkey_hex = hex::encode(pubkey);
-        let status_key = format!("/nodes/{}/status", pubkey_hex);
-        store.put(status_key.as_bytes(), status.as_str().as_bytes()).await?;
-        Ok(())
-    }
-    
     /// Accept a peer's join request - verifies they're invited, sets active, returns join info
+    /// 
+    /// Note: This remains on Node as a facade for the network layer, which may not yet have a Mesh reference
     pub async fn accept_join(&self, pubkey: PubKey, mesh_id: Uuid) -> Result<JoinAcceptance, NodeError> {
         // Verify mesh_id matches our root store
         let root_id = self.meta.root_store()?
@@ -580,26 +464,23 @@ impl Node {
              return Err(NodeError::Validation(format!("Invalid Mesh ID: expected {}, got {}", root_id, mesh_id)));
         }
 
-        // Verify peer is invited (via PeerManager)
-        let pm = self.peer_manager()
-            .ok_or_else(|| NodeError::Actor("PeerManager not initialized".to_string()))?;
-        if !pm.can_join(&pubkey) {
-            return Err(NodeError::Store(crate::store::StateError::Unauthorized(
+        // Delegate to Mesh
+        let mesh = self.get_mesh()?;
+        
+        // Check invite
+        if !mesh.peer_manager().can_join(&pubkey) {
+            return Err(NodeError::Store(StateError::Unauthorized(
                 format!("Peer {} is not invited", hex::encode(pubkey))
             )));
         }
         
-        // Get root store ID
-        let store_id = self.meta.root_store()?
-            .ok_or_else(|| NodeError::Actor("No root store configured".to_string()))?;
-        
-        // Set peer status to active
-        self.set_peer_status(pubkey, PeerStatus::Active).await?;
+        // Activate peer
+        mesh.activate_peer(pubkey).await?;
         
         // Get list of authorized authors to send to the joining peer
-        let authorized_authors = pm.list_acceptable_authors();
+        let authorized_authors = mesh.peer_manager().list_acceptable_authors();
         
-        Ok(JoinAcceptance { store_id, authorized_authors })
+        Ok(JoinAcceptance { store_id: root_id, authorized_authors })
     }
 
     pub fn list_stores(&self) -> Result<Vec<Uuid>, NodeError> {
@@ -632,13 +513,19 @@ impl Node {
     }
     
     /// Get the PeerManager if mesh is available.
-    pub fn peer_manager(&self) -> Option<std::sync::Arc<crate::peer_manager::PeerManager>> {
+    pub fn peer_manager(&self) -> Option<std::sync::Arc<PeerManager>> {
         self.mesh.read().ok()?.as_ref().map(|m| m.peer_manager().clone())
     }
     
     /// Get the Mesh if available.
-    pub fn mesh(&self) -> Option<crate::mesh::Mesh> {
+    pub fn mesh(&self) -> Option<Mesh> {
         self.mesh.read().ok()?.clone()
+    }
+    
+    /// Get the Mesh or return error if not available (helper for commands)
+    pub fn get_mesh(&self) -> Result<Mesh, NodeError> {
+        self.mesh()
+            .ok_or_else(|| NodeError::Actor("No mesh available - join or init first".to_string()))
     }
 }
 
@@ -646,6 +533,7 @@ impl Node {
 mod tests {
     use super::*;
     use crate::types::PubKey;
+    use crate::{Merge, WatchEventKind};
 
     #[tokio::test]
     async fn test_create_and_open_store() {
@@ -841,10 +729,10 @@ mod tests {
         
         // Invite a peer
         let peer_pubkey = PubKey::from([0u8; 32]); // Dummy pubkey
-        node.invite_peer(peer_pubkey).await.expect("invite");
+        node.get_mesh().unwrap().invite_peer(peer_pubkey).await.expect("invite");
         
         // Verify peer is Invited
-        let peers = node.list_peers().await.expect("list_peers");
+        let peers = node.get_mesh().unwrap().list_peers().await.expect("list_peers");
         let invited = peers.iter().find(|p| p.pubkey == peer_pubkey);
         assert!(invited.is_some(), "Should find invited peer");
         assert_eq!(invited.unwrap().status, PeerStatus::Invited);
@@ -865,14 +753,14 @@ mod tests {
         
         // Invite a peer
         let peer_pubkey = PubKey::from([1u8; 32]); // Dummy pubkey
-        node.invite_peer(peer_pubkey).await.expect("invite");
+        node.get_mesh().unwrap().invite_peer(peer_pubkey).await.expect("invite");
         
         // Accept the join
         let acceptance = node.accept_join(peer_pubkey, store_id).await.expect("accept_join");
         assert_eq!(acceptance.store_id, store_id);
         
         // Peer should now be Active
-        let peers = node.list_peers().await.expect("list_peers");
+        let peers = node.get_mesh().unwrap().list_peers().await.expect("list_peers");
         let peer = peers.iter().find(|p| p.pubkey == peer_pubkey);
         assert!(peer.is_some(), "Should find peer");
         assert_eq!(peer.unwrap().status, PeerStatus::Active);
@@ -900,10 +788,10 @@ mod tests {
         let store_a = node_a.root_store().expect("A has root store");
         
         // Step 2: A invites B
-        node_a.invite_peer(node_b.node_id()).await.expect("invite B");
+        node_a.get_mesh().unwrap().invite_peer(node_b.node_id()).await.expect("invite B");
         
         // Verify B is invited
-        let peers = node_a.list_peers().await.expect("list peers");
+        let peers = node_a.get_mesh().unwrap().list_peers().await.expect("list peers");
         assert!(peers.iter().any(|p| p.status == PeerStatus::Invited));
         
         // Step 3: B "joins" (complete_join simulates receiving JoinResponse)
@@ -956,7 +844,7 @@ mod tests {
         let event = rx.recv().await.expect("recv");
         assert_eq!(event.key, b"/test/key1");
         match event.kind {
-            crate::WatchEventKind::Update { heads } => {
+            WatchEventKind::Update { heads } => {
                 let value = heads.lww_head()
                     .map(|h| h.value.as_slice())
                     .unwrap_or(&[]);
@@ -989,7 +877,7 @@ mod tests {
         // Should receive delete event
         let event = rx.recv().await.expect("recv");
         assert_eq!(event.key, b"/test/key");
-        assert!(matches!(event.kind, crate::WatchEventKind::Delete));
+        assert!(matches!(event.kind, WatchEventKind::Delete));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }

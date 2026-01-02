@@ -77,7 +77,7 @@ async fn test_production_flow_gossip() {
     let _server_b = MeshNetwork::new_from_node(node_b.clone()).await.expect("server b");
     
     // === Node A: Invites B ===
-    node_a.invite_peer(node_b.node_id()).await.expect("invite");
+    node_a.get_mesh().expect("mesh").invite_peer(node_b.node_id()).await.expect("invite");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     

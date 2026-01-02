@@ -4,14 +4,44 @@
 //! - Policy (persistent): Who is authorized? Stored in CRDT/DB
 //! - State (ephemeral): Who is online? Stored in network layer RAM
 
-use crate::commands::{CommandResult, Writer};
+use crate::commands::{CommandResult, Writer, MeshSubcommand};
 use crate::display_helpers::format_elapsed;
-use lattice_core::{Node, StoreHandle, PeerStatus, PubKey, Uuid};
+use lattice_core::{Node, StoreHandle, PeerStatus, PubKey, Uuid, Mesh};
 use lattice_net::MeshNetwork;
 use chrono::DateTime;
 use owo_colors::OwoColorize;
 use std::time::Instant;
 use std::io::Write;
+
+pub async fn handle_command(
+    node: &Node,
+    mesh: Option<&Mesh>,
+    network: Option<&MeshNetwork>,
+    cmd: MeshSubcommand,
+    writer: Writer,
+) -> CommandResult {
+    match cmd {
+        MeshSubcommand::Init => {
+            // Need node for init - this command might need special handling
+            // For now, let's error if we try to init from here as it requires node access
+             let mut w = writer;
+             let _ = writeln!(w, "Error: 'mesh init' must be handled by node, not mesh handler.");
+             CommandResult::Ok
+        }
+        MeshSubcommand::Status => cmd_status(mesh, writer).await,
+        MeshSubcommand::Join { node_id: _, mesh_id: _ } => {
+             // Join also needs Node.join... wait. 
+             // cmd_join currently uses Node.join.
+             // If we decouple, who calls Node.join?
+             let mut w = writer;
+             let _ = writeln!(w, "Error: 'mesh join' requires node access (not yet refactored).");
+             CommandResult::Ok
+        }
+        MeshSubcommand::Peers => cmd_peers(node, mesh, network, writer).await,
+        MeshSubcommand::Invite { pubkey } => cmd_invite(node, mesh, pubkey.as_str(), writer).await,
+        MeshSubcommand::Revoke { pubkey } => cmd_revoke(mesh, pubkey.as_str(), writer).await,
+    }
+}
 
 // ==================== Mesh Commands ====================
 
@@ -38,25 +68,21 @@ pub async fn cmd_init(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&
 }
 
 /// Show mesh status (ID, peer counts)
-pub async fn cmd_status(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
+pub async fn cmd_status(mesh: Option<&Mesh>, writer: Writer) -> CommandResult {
     let mut w = writer.clone();
     
-    match node.root_store_id() {
-        Ok(Some(id)) => { 
-            let _ = writeln!(w, "Mesh ID:  {}", id);
-        }
-        Ok(None) => { 
+    let mesh = match mesh {
+        Some(m) => m,
+        None => {
             let _ = writeln!(w, "Mesh:     (not initialized)");
             return CommandResult::Ok;
         }
-        Err(_) => { 
-            let _ = writeln!(w, "Mesh:     (error)");
-            return CommandResult::Ok;
-        }
-    }
+    };
+    
+    let _ = writeln!(w, "Mesh ID:  {}", mesh.id());
     
     // Peer counts
-    if let Ok(peers) = node.list_peers().await {
+    if let Ok(peers) = mesh.list_peers().await {
         let active = peers.iter().filter(|p| p.status == PeerStatus::Active).count();
         let invited = peers.iter().filter(|p| p.status == PeerStatus::Invited).count();
         let _ = writeln!(w, "Peers:    {} active, {} invited", active, invited);
@@ -117,13 +143,18 @@ pub async fn cmd_join(node: &Node, store: Option<&StoreHandle>, _mesh: Option<&M
 }
 
 /// List all peers with authorization status + online state
-/// 
-/// Properly separates:
-/// - Policy (PeerManager): Who is authorized? (Active, Invited, Revoked)
-/// - State (SessionTracker): Who is currently online?
-pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
+pub async fn cmd_peers(node: &Node, mesh: Option<&Mesh>, network: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
     // 1. Get POLICY from PeerManager (Who is authorized?)
-    let mut peers = match node.list_peers().await {
+    let mesh = match mesh {
+        Some(m) => m,
+        None => {
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Error: No active mesh.");
+            return CommandResult::Ok;
+        }
+    };
+
+    let mut peers = match mesh.list_peers().await {
         Ok(p) => p,
         Err(e) => {
             let mut w = writer.clone();
@@ -142,7 +173,7 @@ pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, mesh: Option<&
     }
     
     // 2. Get STATE from SessionTracker (Who is online?)
-    let online_peers: std::collections::HashMap<PubKey, Instant> = mesh
+    let online_peers: std::collections::HashMap<PubKey, Instant> = network
         .map(|m| m.connected_peers().unwrap_or_default())
         .unwrap_or_default();
     
@@ -189,7 +220,16 @@ pub async fn cmd_peers(node: &Node, _store: Option<&StoreHandle>, mesh: Option<&
 }
 
 /// Invite a peer to the mesh
-pub async fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, pubkey: &str, writer: Writer) -> CommandResult {
+pub async fn cmd_invite(node: &Node, mesh: Option<&Mesh>, pubkey: &str, writer: Writer) -> CommandResult {
+    let mesh = match mesh {
+        Some(m) => m,
+        None => {
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Error: No active mesh.");
+            return CommandResult::Ok;
+        }
+    };
+
     let pk = match PubKey::from_hex(pubkey) {
         Ok(pk) => pk,
         Err(e) => {
@@ -199,14 +239,13 @@ pub async fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _mesh: Option
         }
     };
     
-    match node.invite_peer(pk).await {
+    match mesh.invite_peer(pk).await {
         Ok(()) => {
             let mut w = writer.clone();
             let _ = writeln!(w, "Invited peer: {}", pk);
             let _ = writeln!(w, "  Status: {} (will become active after sync)", PeerStatus::Invited.as_str());
             let _ = writeln!(w, "\nFor the invited peer to join, run:");
-            let mesh_id = node.root_store_id().ok().flatten().map(|u| u.to_string()).unwrap_or_else(|| "MISSING_MESH_ID".to_string());
-            let _ = writeln!(w, "  mesh join {} {}", node.info().node_id, mesh_id);
+            let _ = writeln!(w, "  mesh join {} {}", hex::encode(node.node_id()), mesh.id());
         }
         Err(e) => {
             let mut w = writer.clone();
@@ -217,7 +256,16 @@ pub async fn cmd_invite(node: &Node, _store: Option<&StoreHandle>, _mesh: Option
 }
 
 /// Revoke a peer from the mesh
-pub async fn cmd_revoke(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, pubkey: &str, writer: Writer) -> CommandResult {
+pub async fn cmd_revoke(mesh: Option<&Mesh>, pubkey: &str, writer: Writer) -> CommandResult {
+    let mesh = match mesh {
+        Some(m) => m,
+        None => {
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Error: No active mesh.");
+            return CommandResult::Ok;
+        }
+    };
+
     let pk = match PubKey::from_hex(pubkey) {
         Ok(pk) => pk,
         Err(e) => {
@@ -227,7 +275,7 @@ pub async fn cmd_revoke(node: &Node, _store: Option<&StoreHandle>, _mesh: Option
         }
     };
     
-    match node.revoke_peer(pk).await {
+    match mesh.revoke_peer(pk).await {
         Ok(()) => {
             let mut w = writer.clone();
             let _ = writeln!(w, "Revoked peer: {}", pk);

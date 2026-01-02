@@ -11,6 +11,7 @@ mod tracing_writer;
 use lattice_net::MeshNetwork;
 use commands::CommandResult;
 use lattice_core::NodeBuilder;
+use lattice_core::mesh::Mesh;
 use rustyline_async::{Readline, ReadlineEvent};
 use std::io::Write;
 use std::sync::{Arc, RwLock};
@@ -77,9 +78,10 @@ async fn main() {
     };
 
     let current_store = Arc::new(RwLock::new(None));
+    let current_mesh: Arc<RwLock<Option<Mesh>>> = Arc::new(RwLock::new(None));
     
     // Create server FIRST so it can receive StoreReady event from node.start()
-    let mesh: Option<Arc<MeshNetwork>> = match MeshNetwork::new_from_node(node.clone()).await {
+    let mesh_network: Option<Arc<MeshNetwork>> = match MeshNetwork::new_from_node(node.clone()).await {
         Ok(s) => {
             tracing::info!("Iroh: {} (listening)", s.endpoint().public_key().fmt_short());
             Some(s)
@@ -95,12 +97,17 @@ async fn main() {
     }
     
     // Show node status (after server so gossip is set up)
-    let _ = node_commands::cmd_status(&node, None, mesh.as_deref(), writer.clone()).await;
+    let _ = node_commands::cmd_status(&node, None, mesh_network.as_deref(), writer.clone()).await;
     
     // Update current store based on root store status
     if let Some(store) = node.root_store().ok() {
         if let Ok(mut guard) = current_store.write() {
             *guard = Some(store);
+        }
+    }
+    if let Some(m) = node.mesh() {
+        if let Ok(mut guard) = current_mesh.write() {
+            *guard = Some(m);
         }
     }
 
@@ -109,13 +116,17 @@ async fn main() {
         let mut rx = node.subscribe();
         let writer = writer.clone();
         let current_store = current_store.clone();
+        let current_mesh = current_mesh.clone();
         tokio::spawn(async move {
             while let Ok(event) = rx.recv().await {
                 match event {
-                    lattice_core::NodeEvent::MeshReady(handle) => {
-                        wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", handle.id());
+                    lattice_core::NodeEvent::MeshReady(mesh) => {
+                        wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.root_store().id());
                         if let Ok(mut guard) = current_store.write() {
-                            *guard = Some(handle);
+                            *guard = Some(mesh.root_store().clone());
+                        }
+                        if let Ok(mut guard) = current_mesh.write() {
+                            *guard = Some(mesh);
                         }
                     }
                     lattice_core::NodeEvent::StoreReady(_) => {}
@@ -164,10 +175,12 @@ async fn main() {
                         if needs_blocking {
                             // State-changing commands: await result inline
                             let Ok(store_guard) = current_store.read() else { continue };
+                            let Ok(mesh_guard) = current_mesh.read() else { continue };
                             let result = handle_command(
                                 &node, 
                                 store_guard.as_ref(), 
-                                mesh.clone(), 
+                                mesh_network.clone(),
+                                mesh_guard.as_ref(), // mesh
                                 cli,
                                 writer.clone(),
                             ).await;
@@ -186,7 +199,8 @@ async fn main() {
                             // Non-state-changing commands: spawn in background
                             let node = node.clone();
                             let store = current_store.read().ok().and_then(|g| g.clone());
-                            let server = mesh.clone();
+                            let mesh = current_mesh.read().ok().and_then(|g| g.clone());
+                            let server = mesh_network.clone();
                             let writer = writer.clone();
                             
                             tokio::spawn(async move {
@@ -194,6 +208,7 @@ async fn main() {
                                     &node, 
                                     store.as_ref(), 
                                     server, 
+                                    mesh.as_ref(),
                                     cli,
                                     writer,
                                 ).await;

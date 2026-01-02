@@ -56,7 +56,7 @@ async fn test_targeted_author_sync() {
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
     
-    node_a.invite_peer(node_b.node_id()).await.expect("invite");
+    node_a.get_mesh().expect("mesh").invite_peer(node_b.node_id()).await.expect("invite");
     
     // B joins via event-driven flow
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
@@ -107,7 +107,7 @@ async fn test_sync_multiple_entries() {
     let store_id = node_a.init().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
         
-    node_a.invite_peer(node_b.node_id()).await.expect("invite");
+    node_a.get_mesh().expect("mesh").invite_peer(node_b.node_id()).await.expect("invite");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     sleep(Duration::from_millis(200)).await;

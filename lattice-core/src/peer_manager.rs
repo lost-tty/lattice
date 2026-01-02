@@ -11,7 +11,7 @@ use crate::{
     auth::{PeerEvent, PeerProvider},
     node::parse_peer_status_key,
     Merge, PeerInfo, PeerStatus, StoreHandle, WatchEventKind,
-    types::PubKey,
+    types::PubKey, NodeIdentity,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -177,16 +177,15 @@ pub struct PeerManager {
     bootstrap_authors: Arc<RwLock<HashSet<PubKey>>>,
     /// Reference to the store being watched
     store: StoreHandle,
-    /// Our own public key (for added_by field)
-    my_pubkey: PubKey,
+    /// Our own identity
+    identity: NodeIdentity,
 }
 
 impl std::fmt::Debug for PeerManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PeerManager")
-            .field("my_pubkey", &hex::encode(self.my_pubkey))
-            .field("store_id", &self.store.id())
-            .finish_non_exhaustive()
+            .field("my_pubkey", &self.identity.public_key())
+            .finish()
     }
 }
 
@@ -195,7 +194,7 @@ impl PeerManager {
     /// 
     /// This initializes the peer cache from the current store state and spawns a
     /// background task to keep it updated.
-    pub async fn new(store: StoreHandle, my_pubkey: PubKey) -> Result<Arc<Self>, PeerManagerError> {
+    pub async fn new(store: StoreHandle, identity: &NodeIdentity) -> Result<Arc<Self>, PeerManagerError> {
         let (peer_event_tx, _) = broadcast::channel(64);
         
         let manager = Arc::new(Self {
@@ -203,7 +202,7 @@ impl PeerManager {
             peer_event_tx,
             bootstrap_authors: Arc::new(RwLock::new(HashSet::new())),
             store,
-            my_pubkey,
+            identity: identity.clone(),
         });
         
         // Start watching peer status changes
@@ -216,7 +215,7 @@ impl PeerManager {
     
     /// Invite a peer to the mesh. Writes their info with status = invited.
     pub async fn invite_peer(&self, pubkey: PubKey) -> Result<(), PeerManagerError> {
-        let peer = Peer::new_invited(pubkey, self.my_pubkey);
+        let peer = Peer::new_invited(pubkey, self.identity.public_key());
         peer.save(&self.store).await
     }
     
