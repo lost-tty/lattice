@@ -36,8 +36,11 @@ impl Invite {
     pub fn parse(input: &str) -> Result<Self, String> {
         let bytes = bs58::decode(input).with_check(Some(TOKEN_VERSION)).into_vec()
             .map_err(|e| format!("Invalid token: {}", e))?;
+        
+        // Skip version byte (first byte) when decoding protobuf
+        let proto_bytes = bytes.get(1..).ok_or("Token too short")?;
             
-        let token = InviteToken::decode(bytes.as_slice())
+        let token = InviteToken::decode(proto_bytes)
             .map_err(|e| format!("Protobuf decode failed: {}", e))?;
             
         let inviter = PubKey::try_from(token.inviter_pubkey.as_slice())
