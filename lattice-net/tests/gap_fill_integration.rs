@@ -53,10 +53,10 @@ async fn test_targeted_author_sync() {
     let server_b = MeshNetwork::new_from_node(node_b.clone()).await.expect("server b");
     
     // Node A inits and creates invite token
-    let store_id = node_a.init().await.expect("init a");
+    let store_id = node_a.create_mesh().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
     
-    let token_string = node_a.get_mesh().expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
+    let token_string = node_a.mesh_by_id(store_id).expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");
     
     // B joins via event-driven flow with secret
@@ -105,10 +105,10 @@ async fn test_sync_multiple_entries() {
     let server_a = MeshNetwork::new_from_node(node_a.clone()).await.expect("server a");
     let server_b = MeshNetwork::new_from_node(node_b.clone()).await.expect("server b");
     
-    let store_id = node_a.init().await.expect("init a");
+    let store_id = node_a.create_mesh().await.expect("init a");
     let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
     
-    let token_string = node_a.get_mesh().expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
+    let token_string = node_a.mesh_by_id(store_id).expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());

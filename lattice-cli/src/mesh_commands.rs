@@ -6,7 +6,7 @@
 
 use crate::commands::{CommandResult, Writer, MeshSubcommand};
 use crate::display_helpers::format_elapsed;
-use lattice_core::{Node, StoreHandle, PeerStatus, PubKey, Uuid, Mesh, token::Invite};
+use lattice_core::{Node, StoreHandle, PeerStatus, PubKey, Mesh, token::Invite};
 use lattice_net::MeshNetwork;
 use chrono::DateTime;
 use owo_colors::OwoColorize;
@@ -21,13 +21,15 @@ pub async fn handle_command(
     writer: Writer,
 ) -> CommandResult {
     match cmd {
-        MeshSubcommand::Init => {
-            // Need node for init - this command might need special handling
-            // For now, let's error if we try to init from here as it requires node access
+        MeshSubcommand::Create => {
+            // Need node for create - this command might need special handling
+            // For now, let's error if we try to create from here as it requires node access
              let mut w = writer;
-             let _ = writeln!(w, "Error: 'mesh init' must be handled by node, not mesh handler.");
+             let _ = writeln!(w, "Error: 'mesh create' must be handled by node, not mesh handler.");
              CommandResult::Ok
         }
+        MeshSubcommand::List => cmd_list(node, writer).await,
+        MeshSubcommand::Use { mesh_id } => cmd_use(node, &mesh_id, writer).await,
         MeshSubcommand::Status => cmd_status(mesh, writer).await,
         MeshSubcommand::Join { token } => cmd_join(node, &token, writer).await,
         MeshSubcommand::Peers => cmd_peers(node, mesh, network, writer).await,
@@ -38,23 +40,95 @@ pub async fn handle_command(
 
 // ==================== Mesh Commands ====================
 
-/// Initialize a new mesh (creates root store)
-pub async fn cmd_init(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
-    match node.init().await {
+/// Create a new mesh
+pub async fn cmd_create(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
+    match node.create_mesh().await {
         Ok(store_id) => {
             let mut w = writer.clone();
-            let _ = writeln!(w, "Mesh initialized.");
-            let _ = writeln!(w, "Mesh ID (root store): {}", store_id);
-            let _ = writeln!(w, "Node ID: {}", hex::encode(node.node_id()));
+            let _ = writeln!(w, "Mesh created.");
+            let _ = writeln!(w, "Mesh ID: {}", store_id);
             drop(w);
-            match node.root_store().ok() {
-                Some(h) => CommandResult::SwitchTo(h),
+            // Use the created mesh
+            match node.mesh_by_id(store_id) {
+                Some(mesh) => CommandResult::SwitchTo(mesh.root_store().clone()),
                 None => CommandResult::Ok,
             }
         }
         Err(e) => {
             let mut w = writer.clone();
             let _ = writeln!(w, "Error: {}", e);
+            CommandResult::Ok
+        }
+    }
+}
+
+/// List all meshes this node is part of
+pub async fn cmd_list(node: &Node, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    match node.meta().list_meshes() {
+        Ok(meshes) => {
+            if meshes.is_empty() {
+                let _ = writeln!(w, "No meshes. Use 'mesh create' or 'mesh join <token>' to get started.");
+            } else {
+                let _ = writeln!(w, "Meshes ({}):", meshes.len());
+                for (mesh_id, info) in meshes {
+                    let role = if info.is_creator { "creator" } else { "member" };
+                    let _ = writeln!(w, "  {} ({})", mesh_id, role);
+                }
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error listing meshes: {}", e);
+        }
+    }
+    
+    CommandResult::Ok
+}
+
+/// Switch to a different mesh by ID (supports partial UUID match)
+pub async fn cmd_use(node: &Node, mesh_id_prefix: &str, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    // Find matching mesh
+    let meshes = match node.meta().list_meshes() {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+            return CommandResult::Ok;
+        }
+    };
+    
+    // Find meshes that start with the given prefix
+    let matches: Vec<_> = meshes.iter()
+        .filter(|(id, _)| id.to_string().starts_with(mesh_id_prefix))
+        .collect();
+    
+    match matches.len() {
+        0 => {
+            let _ = writeln!(w, "No mesh found matching '{}'", mesh_id_prefix);
+            let _ = writeln!(w, "Use 'mesh list' to see available meshes.");
+            CommandResult::Ok
+        }
+        1 => {
+            let (mesh_id, _) = matches[0];
+            // Get store handle for this mesh
+            match node.mesh_by_id(*mesh_id) {
+                Some(mesh) => {
+                    let _ = writeln!(w, "Switched to mesh {}", mesh_id);
+                    CommandResult::SwitchTo(mesh.root_store().clone())
+                }
+                None => {
+                    let _ = writeln!(w, "Mesh {} not loaded. Run 'node start' first.", mesh_id);
+                    CommandResult::Ok
+                }
+            }
+        }
+        _ => {
+            let _ = writeln!(w, "Ambiguous mesh ID '{}'. Matches:", mesh_id_prefix);
+            for (id, _) in matches {
+                let _ = writeln!(w, "  {}", id);
+            }
             CommandResult::Ok
         }
     }
@@ -86,12 +160,8 @@ pub async fn cmd_status(mesh: Option<&Mesh>, writer: Writer) -> CommandResult {
 
 /// Join an existing mesh using an invite token
 pub async fn cmd_join(node: &Node, token: &str, writer: Writer) -> CommandResult {
-    // Check if already in a mesh
-    if node.root_store().is_ok() {
-        let mut w = writer.clone();
-        let _ = writeln!(w, "Error: Node already initialized or part of a mesh");
-        return CommandResult::Ok;
-    }
+    // Multi-mesh: allow joining additional meshes
+    // (Previously blocked if already in a mesh)
 
     // Parse token using core library
     let invite = match Invite::parse(token) {
@@ -254,90 +324,6 @@ pub async fn cmd_revoke(mesh: Option<&Mesh>, pubkey: &str, writer: Writer) -> Co
         Err(e) => {
             let mut w = writer.clone();
             let _ = writeln!(w, "Error: {}", e);
-        }
-    }
-    CommandResult::Ok
-}
-
-// ==================== Store Commands (moved from node_commands) ====================
-
-/// Create a new store
-pub async fn cmd_create_store(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
-    match node.create_store() {
-        Ok(store_id) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Created store: {}", store_id);
-            drop(w);
-            match node.open_store(store_id).await {
-                Ok((handle, _)) => {
-                    let mut w = writer.clone();
-                    let _ = writeln!(w, "Switched to new store");
-                    CommandResult::SwitchTo(handle)
-                }
-                Err(e) => {
-                    let mut w = writer.clone();
-                    let _ = writeln!(w, "Warning: {}", e);
-                    CommandResult::Ok
-                }
-            }
-        }
-        Err(e) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Error: {}", e);
-            CommandResult::Ok
-        }
-    }
-}
-
-/// Switch to a store by UUID
-pub async fn cmd_use_store(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, uuid: &str, writer: Writer) -> CommandResult {
-    let store_id = match Uuid::parse_str(uuid) {
-        Ok(id) => id,
-        Err(_) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Error: invalid UUID '{}'", uuid);
-            return CommandResult::Ok;
-        }
-    };
-    
-    let start = Instant::now();
-    match node.open_store(store_id).await {
-        Ok((handle, info)) => {
-            let mut w = writer.clone();
-            if info.entries_replayed > 0 {
-                let _ = writeln!(w, "Replayed {} entries ({:.2?})", info.entries_replayed, start.elapsed());
-            } else {
-                let _ = writeln!(w, "Switched to store {}", store_id);
-            }
-            CommandResult::SwitchTo(handle)
-        }
-        Err(e) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Error: {}", e);
-            CommandResult::Ok
-        }
-    }
-}
-
-/// List all stores
-pub async fn cmd_list_stores(node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
-    let stores = match node.list_stores() {
-        Ok(s) => s,
-        Err(e) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Error: {}", e);
-            return CommandResult::Ok;
-        }
-    };
-    let current_id = store.map(|s| s.id());
-    
-    let mut w = writer.clone();
-    if stores.is_empty() {
-        let _ = writeln!(w, "No stores. Use 'mesh init' or 'store create'.");
-    } else {
-        for store_id in stores {
-            let marker = if Some(store_id) == current_id { " *" } else { "" };
-            let _ = writeln!(w, "{}{}", store_id, marker);
         }
     }
     CommandResult::Ok

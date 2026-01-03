@@ -1,18 +1,21 @@
 //! MetaStore - global node metadata in meta.db
 //!
 //! Tables:
-//! - stores: UUID → created_at (Unix ms)
-//! - meta: "root_store" → UUID (auto-opened on startup)
+//! - stores: UUID → StoreMetadata protobuf (mesh_id, created_at)
+//! - meshes: UUID → MeshInfo protobuf
+//! - meta: key → value bytes
 
 use redb::{Database, ReadableTable, TableDefinition};
 use std::path::Path;
 use thiserror::Error;
 use uuid::Uuid;
+use prost::Message;
+use crate::proto::storage::{MeshInfo, StoreMetadata};
 
-const STORES_TABLE: TableDefinition<&[u8], u64> = TableDefinition::new("stores");
+const STORES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("stores");
+const MESHES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meshes");
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
-const META_ROOT_STORE: &str = "root_store";
 const META_NAME: &str = "name";
 
 #[derive(Error, Debug)]
@@ -47,6 +50,7 @@ impl MetaStore {
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(STORES_TABLE)?;
+            let _ = write_txn.open_table(MESHES_TABLE)?;
             let _ = write_txn.open_table(META_TABLE)?;
         }
         write_txn.commit()?;
@@ -54,58 +58,101 @@ impl MetaStore {
         Ok(Self { db })
     }
 
-    /// Register a new store
-    pub fn add_store(&self, store_id: Uuid) -> Result<(), MetaStoreError> {
+    // ==================== Mesh Operations ====================
+    
+    /// Register a mesh this node is part of
+    pub fn add_mesh(&self, mesh_id: Uuid, info: &MeshInfo) -> Result<(), MetaStoreError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(MESHES_TABLE)?;
+            let bytes = info.encode_to_vec();
+            table.insert(mesh_id.as_bytes().as_slice(), bytes.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+    
+    /// Remove a mesh
+    pub fn remove_mesh(&self, mesh_id: Uuid) -> Result<(), MetaStoreError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(MESHES_TABLE)?;
+            table.remove(mesh_id.as_bytes().as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+    
+    /// List all meshes this node is part of
+    pub fn list_meshes(&self) -> Result<Vec<(Uuid, MeshInfo)>, MetaStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(MESHES_TABLE)?;
+        
+        let mut meshes = Vec::new();
+        for result in table.iter()? {
+            let (key, value) = result?;
+            let bytes: [u8; 16] = key.value().try_into().unwrap_or([0; 16]);
+            let mesh_id = Uuid::from_bytes(bytes);
+            if let Ok(info) = MeshInfo::decode(value.value()) {
+                meshes.push((mesh_id, info));
+            }
+        }
+        Ok(meshes)
+    }
+    
+    /// Get a specific mesh's info
+    pub fn get_mesh(&self, mesh_id: Uuid) -> Result<Option<MeshInfo>, MetaStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(MESHES_TABLE)?;
+        
+        match table.get(mesh_id.as_bytes().as_slice())? {
+            Some(value) => Ok(MeshInfo::decode(value.value()).ok()),
+            None => Ok(None),
+        }
+    }
+
+    // ==================== Store Operations ====================
+
+    /// Register a new store with its mesh association
+    pub fn add_store_with_mesh(&self, store_id: Uuid, mesh_id: Uuid) -> Result<(), MetaStoreError> {
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(STORES_TABLE)?;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default() // TODO: handle error
+                .unwrap_or_default()
                 .as_millis() as u64;
-            table.insert(store_id.as_bytes().as_slice(), now)?;
+            let info = StoreMetadata {
+                mesh_id: mesh_id.as_bytes().to_vec(),
+                created_at: now,
+            };
+            let bytes = info.encode_to_vec();
+            table.insert(store_id.as_bytes().as_slice(), bytes.as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
     }
+    
+    /// Register a store (legacy - uses store_id as mesh_id for mesh root stores)
+    pub fn add_store(&self, store_id: Uuid) -> Result<(), MetaStoreError> {
+        self.add_store_with_mesh(store_id, store_id)
+    }
 
-    /// List all registered stores
-    pub fn list_stores(&self) -> Result<Vec<Uuid>, MetaStoreError> {
+    /// List all registered stores with their info
+    pub fn list_stores(&self) -> Result<Vec<(Uuid, StoreMetadata)>, MetaStoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(STORES_TABLE)?;
         
         let mut stores = Vec::new();
         for result in table.iter()? {
-            let (key, _created_at) = result?;
+            let (key, value) = result?;
             let bytes: [u8; 16] = key.value().try_into().unwrap_or([0; 16]);
-            stores.push(Uuid::from_bytes(bytes));
+            let store_id = Uuid::from_bytes(bytes);
+            if let Ok(info) = StoreMetadata::decode(value.value()) {
+                stores.push((store_id, info));
+            }
         }
         Ok(stores)
-    }
-
-    /// Get the root store ID (auto-opened on startup)
-    pub fn root_store(&self) -> Result<Option<Uuid>, MetaStoreError> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(META_TABLE)?;
-        
-        match table.get(META_ROOT_STORE)? {
-            Some(value) => {
-                let bytes: [u8; 16] = value.value().try_into().unwrap_or([0; 16]);
-                Ok(Some(Uuid::from_bytes(bytes)))
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Set the root store ID
-    pub fn set_root_store(&self, store_id: Uuid) -> Result<(), MetaStoreError> {
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut table = write_txn.open_table(META_TABLE)?;
-            table.insert(META_ROOT_STORE, store_id.as_bytes().as_slice())?;
-        }
-        write_txn.commit()?;
-        Ok(())
     }
     
     /// Get the node's display name
@@ -149,27 +196,32 @@ mod tests {
         meta.add_store(id2).unwrap();
         
         let stores = meta.list_stores().unwrap();
-        assert_eq!(stores.len(), 2);
-        assert!(stores.contains(&id1));
-        assert!(stores.contains(&id2));
+        let store_ids: Vec<Uuid> = stores.iter().map(|(id, _)| *id).collect();
+        assert_eq!(store_ids.len(), 2);
+        assert!(store_ids.contains(&id1));
+        assert!(store_ids.contains(&id2));
         
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn test_root_store() {
-        let path = tempfile::tempdir().expect("tempdir").keep().join("meta_store_root.db");
+    fn test_meshes() {
+        let path = tempfile::tempdir().expect("tempdir").keep().join("meta_store_meshes.db");
         let _ = std::fs::remove_file(&path);
         
         let meta = MetaStore::open(&path).unwrap();
         
-        // Initially no root store
-        assert_eq!(meta.root_store().unwrap(), None);
+        // Initially no meshes
+        assert!(meta.list_meshes().unwrap().is_empty());
         
-        let root = Uuid::new_v4();
-        meta.set_root_store(root).unwrap();
+        let mesh1 = Uuid::new_v4();
+        let info1 = MeshInfo { joined_at: 1000, is_creator: true };
+        meta.add_mesh(mesh1, &info1).unwrap();
         
-        assert_eq!(meta.root_store().unwrap(), Some(root));
+        let meshes = meta.list_meshes().unwrap();
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(meshes[0].0, mesh1);
+        assert!(meshes[0].1.is_creator);
         
         let _ = std::fs::remove_file(&path);
     }

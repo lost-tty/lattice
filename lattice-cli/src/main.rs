@@ -17,19 +17,33 @@ use std::io::Write;
 use std::sync::{Arc, RwLock};
 use tracing_subscriber::EnvFilter;
 
-fn make_prompt(store: Option<&lattice_core::StoreHandle>) -> String {
+fn make_prompt(mesh: Option<&Mesh>, store: Option<&lattice_core::StoreHandle>) -> String {
     use owo_colors::OwoColorize;
     
-    match store {
-        Some(h) => format!("{}:{}> ", "lattice".cyan(), h.id().to_string()[..8].to_string().green()),
-        None => format!("{}:{}> ", "lattice".cyan(), "no-store".yellow()),
+    match (mesh, store) {
+        (Some(m), Some(s)) => {
+            let mesh_str = m.id().to_string();
+            let store_str = s.id().to_string();
+            let mesh_id = &mesh_str[..8];
+            let store_id = &store_str[..8];
+            if mesh_id == store_id {
+                // Mesh root store - just show mesh ID
+                format!("{}:{}> ", "lattice".cyan(), mesh_id.to_string().green())
+            } else {
+                // Subordinate store within mesh
+                format!("{}:{}/{}> ", "lattice".cyan(), mesh_id.to_string().green(), store_id.to_string().yellow())
+            }
+        }
+        (Some(m), None) => format!("{}:{}> ", "lattice".cyan(), m.id().to_string()[..8].to_string().green()),
+        (None, Some(s)) => format!("{}:{}> ", "lattice".cyan(), s.id().to_string()[..8].to_string().yellow()),
+        (None, None) => format!("{}:{}> ", "lattice".cyan(), "no-mesh".yellow()),
     }
 }
 
 #[tokio::main]
 async fn main() {
     // Create readline first so we can use the async writer for all output
-    let initial_prompt = "lattice:no-store> ".to_string();
+    let initial_prompt = make_prompt(None, None);
     
     let (mut rl, mut writer) = match Readline::new(initial_prompt) {
         Ok(r) => r,
@@ -99,15 +113,18 @@ async fn main() {
     // Show node status (after server so gossip is set up)
     let _ = node_commands::cmd_status(&node, None, mesh_network.as_deref(), writer.clone()).await;
     
-    // Update current store based on root store status
-    if let Some(store) = node.root_store().ok() {
-        if let Ok(mut guard) = current_store.write() {
-            *guard = Some(store);
-        }
-    }
-    if let Some(m) = node.mesh() {
-        if let Ok(mut guard) = current_mesh.write() {
-            *guard = Some(m);
+    // Update current store/mesh based on oldest mesh (deterministic)
+    if let Ok(meshes) = node.meta().list_meshes() {
+        // Pick oldest mesh by joined_at timestamp
+        if let Some((mesh_id, _)) = meshes.into_iter().min_by_key(|(_, info)| info.joined_at) {
+            if let Some(mesh) = node.mesh_by_id(mesh_id) {
+                if let Ok(mut guard) = current_store.write() {
+                    *guard = Some(mesh.root_store().clone());
+                }
+                if let Ok(mut guard) = current_mesh.write() {
+                    *guard = Some(mesh);
+                }
+            }
         }
     }
 
@@ -140,9 +157,14 @@ async fn main() {
     }
 
     loop {
-        let prompt = current_store.read()
-            .map(|guard| make_prompt(guard.as_ref()))
-            .unwrap_or_else(|_| "lattice:error> ".to_string());
+        let prompt = {
+            let mesh_guard = current_mesh.read().ok();
+            let store_guard = current_store.read().ok();
+            make_prompt(
+                mesh_guard.as_ref().and_then(|g| g.as_ref()),
+                store_guard.as_ref().and_then(|g| g.as_ref())
+            )
+        };
         let _ = rl.update_prompt(&prompt);
         
         match rl.readline().await {
@@ -160,15 +182,14 @@ async fn main() {
                 };
 
                 use clap::Parser;
-                use commands::{LatticeCli, LatticeCommand, MeshSubcommand, StoreSubcommand, handle_command};
+                use commands::{LatticeCli, LatticeCommand, MeshSubcommand, handle_command};
 
                 match LatticeCli::try_parse_from(args) {
                     Ok(cli) => {
                         // Check if this command changes state (needs blocking)
                         let needs_blocking = matches!(
                             &cli.command,
-                            LatticeCommand::Mesh { subcommand: MeshSubcommand::Init }
-                            | LatticeCommand::Store { subcommand: StoreSubcommand::Create | StoreSubcommand::Use { .. } }
+                            LatticeCommand::Mesh { subcommand: MeshSubcommand::Create | MeshSubcommand::Use { .. } }
                             | LatticeCommand::Quit
                         );
                         
@@ -189,8 +210,16 @@ async fn main() {
                                 CommandResult::Ok => {}
                                 CommandResult::SwitchTo(h) => {
                                     drop(store_guard);
+                                    drop(mesh_guard);
+                                    // Update current store
                                     if let Ok(mut guard) = current_store.write() {
-                                        *guard = Some(h);
+                                        *guard = Some(h.clone());
+                                    }
+                                    // Update current mesh to match the store's mesh
+                                    if let Some(mesh) = node.mesh_by_id(h.id()) {
+                                        if let Ok(mut guard) = current_mesh.write() {
+                                            *guard = Some(mesh);
+                                        }
                                     }
                                 }
                                 CommandResult::Quit => break,

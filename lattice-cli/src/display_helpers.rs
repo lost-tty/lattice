@@ -252,8 +252,8 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &StoreHandle
     
     let _ = writeln!(w);
     
-    // Get peer names
-    let known_peers = if let Some(mesh) = node.mesh() {
+    // Get peer names from the mesh for this store
+    let known_peers = if let Some(mesh) = node.mesh_by_id(h.id()) {
         mesh.list_peers().await.unwrap_or_default()
     } else {
         Vec::new()

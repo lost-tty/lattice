@@ -149,8 +149,15 @@ pub enum NodeSubcommand {
 
 #[derive(Subcommand)]
 pub enum MeshSubcommand {
-    /// Initialize a new mesh (creates root store)
-    Init,
+    /// Create a new mesh (can create multiple)
+    Create,
+    /// List all meshes this node is part of
+    List,
+    /// Switch to a different mesh
+    Use {
+        /// Mesh ID (UUID, can be partial)
+        mesh_id: String,
+    },
     /// Show mesh status (ID, peer counts)
     Status,
     /// Join an existing mesh using an invite token
@@ -170,14 +177,6 @@ pub enum MeshSubcommand {
 
 #[derive(Subcommand)]
 pub enum StoreSubcommand {
-    /// Create a new store
-    Create,
-    /// Switch to a store
-    Use {
-        uuid: String,
-    },
-    /// List all stores
-    List,
     /// Show current store info
     Status {
         /// Show detailed file info
@@ -228,7 +227,7 @@ pub async fn handle_command(
             NodeSubcommand::SetName { name } => node_commands::cmd_set_name(node, store, mesh_network.as_deref(), &name, writer).await,
         },
         LatticeCommand::Mesh { subcommand } => match subcommand {
-            MeshSubcommand::Init => mesh_commands::cmd_init(node, store, mesh_network.as_deref(), writer).await,
+            MeshSubcommand::Create => mesh_commands::cmd_create(node, store, mesh_network.as_deref(), writer).await,
             MeshSubcommand::Join { token } => mesh_commands::cmd_join(node, &token, writer).await,
             other => {
                 // Use passed Mesh (context-aware)
@@ -236,9 +235,6 @@ pub async fn handle_command(
             }
         },
         LatticeCommand::Store { subcommand } => match subcommand {
-            StoreSubcommand::Create => mesh_commands::cmd_create_store(node, store, mesh_network.as_deref(), writer).await,
-            StoreSubcommand::Use { uuid } => mesh_commands::cmd_use_store(node, store, mesh_network.as_deref(), &uuid, writer).await,
-            StoreSubcommand::List => mesh_commands::cmd_list_stores(node, store, mesh_network.as_deref(), writer).await,
             StoreSubcommand::Status { verbose } => {
                 let args: Vec<String> = if verbose { vec!["-v".to_string()] } else { vec![] };
                 store_commands::cmd_store_status(node, store, mesh_network.as_deref(), &args, writer).await

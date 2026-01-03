@@ -54,9 +54,10 @@ async fn test_production_flow_gossip() {
     let data_b = temp_data_dir("prod_flow_b");
     
     // === Session 1: Node A runs `lattice init` ===
+    let mesh_id;
     {
         let node_a = Arc::new(NodeBuilder { data_dir: data_a.clone() }.build().expect("node a"));
-        node_a.init().await.expect("init a");
+        mesh_id = node_a.create_mesh().await.expect("init a");
         // Node A exits after init - no daemon running
     }
     
@@ -69,21 +70,19 @@ async fn test_production_flow_gossip() {
     
     sleep(Duration::from_millis(1000)).await;
     
-    // Verify A's root store is accessible
-    let store_a = node_a.root_store().expect("A should have root store after start");
+    // Verify A's mesh is accessible
+    let mesh_a = node_a.mesh_by_id(mesh_id).expect("A should have mesh after start");
+    let store_a = mesh_a.root_store().clone();
     
     // Node B: not yet initialized
     let node_b = Arc::new(NodeBuilder { data_dir: data_b.clone() }.build().expect("node b"));
     let _server_b = MeshNetwork::new_from_node(node_b.clone()).await.expect("server b");
     
     // === Node A: Creates invite token for B ===
-    let token_string = node_a.get_mesh().expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
+    let token_string = mesh_a.create_invite(node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
-    
-    // Get A's mesh ID (root store ID)
-    let mesh_id = node_a.root_store_id().unwrap().expect("A should have root store");
     
     // B joins A via event flow with secret
     let store_b = match join_mesh_via_event(&node_b, a_pubkey, mesh_id, invite.secret).await {

@@ -26,7 +26,7 @@ pub async fn cmd_set_name(node: &Node, _store: Option<&StoreHandle>, _mesh: Opti
     }
     
     let _ = writeln!(w, "Name set to '{}'", name);
-    if node.peer_manager().is_some() {
+    if !node.list_mesh_ids().is_empty() {
         let _ = writeln!(w, "Name propagated to mesh.");
     } else {
         let _ = writeln!(w, "Note: Name updated locally. Will publish to mesh after joining/init.");

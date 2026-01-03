@@ -75,7 +75,11 @@ impl StoreRegistry {
     
     /// List all registered store IDs
     pub fn list(&self) -> Vec<Uuid> {
-        self.meta.list_stores().unwrap_or_default()
+        self.meta.list_stores()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     }
     
     /// Check if a store is cached (has an open handle)

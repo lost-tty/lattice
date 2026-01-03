@@ -7,19 +7,18 @@ async fn test_node_to_mesh_delegation() -> Result<(), Box<dyn std::error::Error>
     let node = Arc::new(NodeBuilder::new().with_data_dir(temp_dir.path()).build()?);
     let peer_pubkey = PubKey::from([2u8; 32]);
 
-    // 1. Before init, get_mesh should fail
-    assert!(node.get_mesh().is_err());
+    // 1. Before init, no meshes should exist
+    assert!(node.list_mesh_ids().is_empty());
 
-    // 2. Init
-    let _ = node.init().await?;
-    let mesh = node.get_mesh()?;
+    // 2. Init creates a mesh
+    let mesh_id = node.create_mesh().await?;
+    let mesh = node.mesh_by_id(mesh_id).expect("mesh should exist");
 
     // 3. Create invite token
     let token_string = mesh.create_invite(node.node_id()).await?;
     let invite = Invite::parse(&token_string)?;
 
     // 4. Accept Join via Node Facade with secret from token
-    let mesh_id = node.root_store_id()?.unwrap();
     let acceptance = node.accept_join(peer_pubkey, mesh_id, &invite.secret).await?;
     assert_eq!(acceptance.store_id, mesh_id);
 

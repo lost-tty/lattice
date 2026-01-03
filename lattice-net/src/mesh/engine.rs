@@ -141,7 +141,7 @@ impl MeshEngine {
     pub async fn status_all(&self, store_id: Uuid, our_sync_state: Option<lattice_core::proto::storage::SyncState>) 
         -> HashMap<iroh::PublicKey, Result<(u64, Option<lattice_core::proto::storage::SyncState>), String>> 
     {
-        let peers = match self.node.mesh() {
+        let peers = match self.node.mesh_by_id(store_id) {
             Some(m) => m.list_peers().await.unwrap_or_default(),
             None => return HashMap::new(),
         };
@@ -196,10 +196,10 @@ impl MeshEngine {
         })
     }
     
-    /// Get active peer IDs (excluding self)
-    async fn active_peer_ids(&self) -> Result<Vec<iroh::PublicKey>, NodeError> {
-        let peers = self.node.mesh()
-            .ok_or_else(|| NodeError::Actor("No mesh initialized".into()))?
+    /// Get active peer IDs for a store (excluding self)
+    async fn active_peer_ids(&self, store_id: Uuid) -> Result<Vec<iroh::PublicKey>, NodeError> {
+        let peers = self.node.mesh_by_id(store_id)
+            .ok_or_else(|| NodeError::Actor(format!("Mesh {} not initialized", store_id)))?
             .list_peers().await
             .map_err(NodeError::PeerManager)?;
         let my_pubkey = self.endpoint.public_key();
@@ -241,7 +241,7 @@ impl MeshEngine {
     
     /// Sync a specific author with all active peers (for gap filling)
     pub async fn sync_author_all(&self, store: &AuthorizedStore, author: PubKey) -> Result<u64, NodeError> {
-        let peer_ids = self.active_peer_ids().await?;
+        let peer_ids = self.active_peer_ids(store.id()).await?;
         if peer_ids.is_empty() {
             return Ok(0);
         }
@@ -252,7 +252,7 @@ impl MeshEngine {
     
     /// Sync with all active peers in parallel
     pub async fn sync_all(&self, store: &AuthorizedStore) -> Result<Vec<SyncResult>, NodeError> {
-        let peer_ids = self.active_peer_ids().await?;
+        let peer_ids = self.active_peer_ids(store.id()).await?;
         if peer_ids.is_empty() {
             tracing::debug!("[Sync] No active peers");
             return Ok(Vec::new());

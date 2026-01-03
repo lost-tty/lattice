@@ -41,10 +41,10 @@ We believe software should be as resilient as the hardware it runs on. Most mode
 
 ## Quick Start
 
-1. **Initialize the first node**:
+1. **Create a mesh on the first node**:
    ```bash
    cargo run --package lattice-cli
-   lattice:no-store> mesh init
+   lattice:no-store> mesh create
    ```
 
 2. **Generate an invite token**:
@@ -65,8 +65,10 @@ We believe software should be as resilient as the hardware it runs on. Most mode
   node status            Show local identity info
 
 [mesh]
-  mesh init              Create a new mesh (root store)
-  mesh status            Show mesh info
+  mesh create            Create a new mesh (can create multiple)
+  mesh list              List all meshes
+  mesh use <id>          Switch to a mesh (partial ID supported)
+  mesh status            Show current mesh info
   mesh invite            Generate a one-time invite token
   mesh join <token>      Join a mesh using invite token
   mesh peers             List peers
