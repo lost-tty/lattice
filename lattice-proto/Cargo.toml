@@ -1,0 +1,15 @@
+[package]
+name = "lattice-proto"
+description = "Generated Protobuf definitions for Lattice (Generic)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+prost = { workspace = true }
+prost-types = { workspace = true }
+bytes = { workspace = true }
+lattice-model = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }

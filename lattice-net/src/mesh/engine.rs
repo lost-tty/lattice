@@ -6,7 +6,8 @@
 //! - Sync operations
 
 use crate::{MessageSink, MessageStream, LatticeNetError, LatticeEndpoint, ToLattice};
-use lattice_core::{Node, NodeError, PeerStatus, Uuid, PubKey};
+use lattice_core::{Node, NodeError, PeerStatus, Uuid};
+use lattice_model::types::PubKey;
 use lattice_core::store::AuthorizedStore;
 use lattice_core::proto::network::{PeerMessage, peer_message, JoinRequest, StatusRequest};
 use std::sync::Arc;
@@ -182,7 +183,7 @@ impl MeshEngine {
         let mut sink = MessageSink::new(send);
         let mut stream = MessageStream::new(recv);
         
-        let peer_pubkey: lattice_core::PubKey = peer_id.to_lattice();
+        let peer_pubkey: PubKey = peer_id.to_lattice();
         let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_pubkey);
         let result = session.run_as_initiator().await?;
         

@@ -3,7 +3,7 @@
 //! SessionTracker manages volatile online/offline state for connected peers.
 //! This is network-layer state (reset on restart) - NOT persisted to CRDT store.
 
-use lattice_core::PubKey;
+use lattice_model::types::PubKey;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Instant;

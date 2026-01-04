@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 use crate::clock::{Clock, SystemClock};
-use crate::proto::storage::Hlc as ProtoHlc;
+
 
 /// Default maximum drift allowed before clamping (1 hour in ms)
 pub const DEFAULT_MAX_DRIFT_MS: u64 = 60 * 60 * 1000;
@@ -128,22 +128,7 @@ impl Default for HLC {
     }
 }
 
-// Proto conversions
-impl From<ProtoHlc> for HLC {
-    fn from(proto: ProtoHlc) -> Self {
-        HLC::new(proto.wall_time, proto.counter)
-    }
-}
-
-impl From<HLC> for ProtoHlc {
-    fn from(hlc: HLC) -> Self {
-        ProtoHlc {
-            wall_time: hlc.wall_time,
-            counter: hlc.counter,
-        }
-    }
-}
-
+// Tuple conversions
 impl From<(u64, u32)> for HLC {
     fn from((wall_time, counter): (u64, u32)) -> Self {
         HLC::new(wall_time, counter)
@@ -155,6 +140,7 @@ impl From<HLC> for (u64, u32) {
         (hlc.wall_time, hlc.counter)
     }
 }
+
 
 #[cfg(test)]
 mod tests {

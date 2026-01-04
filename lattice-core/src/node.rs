@@ -7,10 +7,10 @@ use crate::{
     node_identity::NodeError as IdentityError,
     store::{StateError, StoreHandle, LogError},
     store_registry::StoreRegistry,
-    types::PubKey,
     mesh::Mesh,
     peer_manager::{PeerManager, PeerManagerError},
 };
+use lattice_model::types::PubKey;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::RwLock;
@@ -543,7 +543,7 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::PubKey;
+    use lattice_model::types::PubKey;
     use crate::{Merge, WatchEventKind};
 
     #[tokio::test]

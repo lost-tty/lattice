@@ -5,7 +5,7 @@
 
 use owo_colors::OwoColorize;
 use owo_colors::AnsiColors;
-use lattice_core::PubKey;
+use lattice_model::types::PubKey;
 use std::time::Duration;
 
 /// Format elapsed time as human-readable "X ago" string
@@ -82,14 +82,14 @@ pub struct PeerSyncRow {
     pub pubkey: PubKey,
     pub label: String,
     pub frontiers: std::collections::HashMap<PubKey, u64>,
-    pub common_hlc: Option<lattice_core::hlc::HLC>,  // Min of max HLCs across all authors
+    pub common_hlc: Option<lattice_model::hlc::HLC>,  // Min of max HLCs across all authors
 }
 
 /// Render the peer sync state matrix to a string
 pub fn render_peer_sync_matrix(
     my_pubkey: PubKey,
     our_authors: &std::collections::HashMap<PubKey, u64>,
-    our_common_hlc: Option<lattice_core::hlc::HLC>,
+    our_common_hlc: Option<lattice_model::hlc::HLC>,
     peers: &[PeerSyncRow],
 ) -> String {
     use std::fmt::Write;
@@ -284,7 +284,7 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &StoreHandle
                         Some((author, seq))
                     }).collect();
                     // Use pre-computed common_hlc from proto
-                    let hlc = ss.common_hlc.as_ref().map(|h| lattice_core::hlc::HLC::from(h.clone()));
+                    let hlc = ss.common_hlc.as_ref().map(|h| lattice_model::hlc::HLC::from(h.clone()));
                     (frs, hlc)
                 })
                 .unwrap_or_default();

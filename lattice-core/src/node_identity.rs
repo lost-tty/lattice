@@ -96,8 +96,8 @@ impl NodeIdentity {
     }
 
     /// Get the node's public key (identity) as a strong type.
-    pub fn public_key(&self) -> crate::types::PubKey {
-        crate::types::PubKey::from(self.signing_key.verifying_key().to_bytes())
+    pub fn public_key(&self) -> lattice_model::types::PubKey {
+        lattice_model::types::PubKey::from(self.signing_key.verifying_key().to_bytes())
     }
 
     /// Get the signing key for creating signatures and Iroh integration.

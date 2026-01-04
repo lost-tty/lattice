@@ -13,11 +13,11 @@
 use crate::{
     peer_manager::{PeerManager, PeerManagerError},
     store::StoreHandle,
-    types::PubKey,
     token::Invite,
     merge::Merge,
     PeerInfo, Uuid, NodeIdentity,
 };
+use lattice_model::types::PubKey;
 use rand::RngCore;
 use std::sync::Arc;
 

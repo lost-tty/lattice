@@ -1,6 +1,7 @@
 //! Integration tests for gap filling between networked peers
 
-use lattice_core::{Merge, NodeBuilder, NodeEvent, PubKey, Invite};
+use lattice_core::{Merge, NodeBuilder, NodeEvent, Invite};
+use lattice_model::types::PubKey;
 use lattice_core::Node;
 use lattice_net::MeshNetwork;
 use std::sync::Arc;

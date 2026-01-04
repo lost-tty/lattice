@@ -107,8 +107,8 @@ impl MergeList for Vec<(Vec<u8>, Vec<Head>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Hash, PubKey};
-    use crate::hlc::HLC;
+    use lattice_model::types::{Hash, PubKey};
+    use lattice_model::hlc::HLC;
 
     fn make_head(hlc: u64, value: &[u8], tombstone: bool) -> Head {
         Head {

@@ -23,6 +23,10 @@ We believe software should be as resilient as the hardware it runs on. Most mode
 
 ## Architecture
 
+<p align="center">
+  <img src="docs/Lattice Architecture.png" alt="Lattice Architecture">
+</p>
+
 ### 1. Core Primitives
 | Component | Description |
 |-----------|-------------|

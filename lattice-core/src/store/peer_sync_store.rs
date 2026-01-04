@@ -1,5 +1,5 @@
 use redb::{Database, ReadableTable, TableDefinition};
-use crate::types::PubKey;
+use lattice_model::types::PubKey;
 use crate::proto::storage::PeerSyncInfo;
 use crate::store::StateError;
 

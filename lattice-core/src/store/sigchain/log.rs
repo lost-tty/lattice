@@ -5,7 +5,7 @@
 
 use crate::proto::storage::{LogRecord, SignedEntry as ProtoSignedEntry};
 use crate::entry::{SignedEntry, EntryError};
-use crate::types::Hash;
+use lattice_model::types::Hash;
 use crate::MAX_ENTRY_SIZE;
 use prost::Message;
 use std::fs::{File, OpenOptions};
@@ -281,8 +281,8 @@ fn read_length_delimited_bytes<R: Read>(reader: &mut R) -> Result<Vec<u8>, LogEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::MockClock;
-    use crate::hlc::HLC;
+    use lattice_model::clock::MockClock;
+    use lattice_model::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::store::{Operation, KvPayload};
     use crate::entry::EntryBuilder;

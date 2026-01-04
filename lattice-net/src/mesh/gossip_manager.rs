@@ -2,7 +2,8 @@
 
 use crate::{LatticeEndpoint, ToLattice};
 use super::error::GossipError;
-use lattice_core::{Uuid, PeerStatus, PeerEvent, PubKey, PeerProvider};
+use lattice_core::{Uuid, PeerStatus, PeerEvent, PeerProvider};
+use lattice_model::types::PubKey;
 use lattice_core::store::AuthorizedStore;
 use lattice_core::proto::storage::PeerSyncInfo;
 use lattice_core::proto::network::GossipMessage;

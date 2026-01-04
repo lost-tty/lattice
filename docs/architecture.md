@@ -105,13 +105,39 @@ Decouples file count from KV entry count. Instead of 1M files = 1M KV entries, u
 - Multi-Mesh: A node can participate in multiple meshes (clusters). Each mesh is a group of nodes sharing data.
 - Manifest Store: Joining a mesh means joining a special KV store of type "manifest" that defines the mesh membership. The manifest contains node info (`/nodes/{pubkey}/...`).
 
-## Stack
+## Crate Architecture
 
-- rust
-- iroh
-- prost protocol buffers
-- redb (embedded KV store)
-- rustyline (interactive CLI)
+The system is composed of strictly layered crates to separate concerns:
+
+### 1. `lattice-model` (Base)
+- **Responsibility**: Pure data types and traits.
+- **Content**: `HLC`, `Hash`, `PubKey`, `StateMachine` trait.
+- **Dependencies**: None (pure Rust).
+
+### 2. `lattice-replica` (The Engine)
+- **Responsibility**: Replication logic, Consistency, and Log Management.
+- **Components**:
+    - **SigChainManager**: Validates signatures, sequences, and hash chains. Manages append-only log files.
+    - **DAG/Causality**: Ensures operations are applied in causal order. Handles "deps" (parent hashes).
+    - **Driver**: Feeds validated operations into the `StateMachine`.
+- **Dependencies**: `lattice-model`. **Peer-agnostic**.
+
+### 3. `lattice-kvstate` (The State)
+- **Responsibility**: Concrete implementation of a Key-Value store.
+- **Content**: `KvStore` struct implementing `StateMachine`.
+- **Storage**: Uses `redb` for persistent local state.
+- **Logic**: Handles KV-specific conflicts (LWW, Tombstones).
+- **Dependencies**: `lattice-model`, `lattice-proto`.
+
+### 4. `lattice-net` (The Wire)
+- **Responsibility**: P2P Networking and Gossip.
+- **Content**: `GossipManager`, `SyncAgent`.
+- **Dependencies**: `lattice-proto`, `iroh`.
+
+### 5. `lattice-node` (The Glue)
+- **Responsibility**: Runtime composition.
+- **Action**: Instantiates `Replica`, `KvStore`, and `Network`. Connects them via an Actor/Controller.
+- **Dependencies**: All above.
 
 ### Bootstrap
 
@@ -597,6 +623,29 @@ message MergeOp {
 
 Recommendation: Use Put/Delete for 90% of data. Add CRDT primitives only when needed (concurrent counters, lists) rather than a scripting language.
 
+## Worker Pattern: Remote StateMachines
+
+**Concept**: Decoupling the `ReplicaController` (P2P/Logs) from the `StateMachine` (Logic) allows for **Headless Workers**.
+
+A Worker Node is a compute unit that does not run the full P2P stack. It connects to a Gateway Node via RPC and implements only the `StateMachine` interface.
+
+**Architecture**:
+
+1.  **Gateway Node (Lattice Core)**:
+    - Runs P2P, SigChains, Gossip.
+    - Instead of a local `KvStore`, it holds a `GrpcClientStateMachine` (or similar RPC client).
+    - Forwards validated `apply(entry)` calls to the Worker.
+
+2.  **Worker Node (Compute)**:
+    - Lightweight process (Python/Go/Rust/JS).
+    - Implements simple RPC: `apply(entry) -> Result`.
+    - Maintains its own specialized state (e.g., SQL DB, Vector Store, ML Model).
+
+**Benefits**:
+- **Polyglot Logic**: Write business logic in Python/JS without binding to Rust Core.
+- **Independent Scaling**: Scale compute (workers) separately from networking (gateways).
+- **Security**: Workers can run in isolated environments (containers/Lambdas).
+
 ## Open Questions
 
 ### Two-Layer Security Model
@@ -783,3 +832,30 @@ The Root Store acts as the **Identity Provider** (Kernel), providing "User Space
    - Recommended for rigorous verification
 
 *Current behavior:* Signature verified in `apply_ingested_entry`, peer status checked via `PeerProvider` (reads from cache populated by root store watcher).
+
+## Module Architecture (Deep Decoupling)
+To ensure the `StateMachine` is truly independent of the replication log (enabling lightweight workers and alternate backends), the system is split into three layers:
+
+1.  **`lattice-model`** (Data Types):
+    - Pure data types: `HLC`, `PubKey`, `Hash`.
+    - **StateMachine Trait**:
+      ```rust
+      trait StateMachine {
+          fn apply(&self, op_id: &Hash, deps: &[Hash], payload: &[u8], author: &PubKey, ts: &HLC);
+          fn state_identity(&self) -> Hash;
+          fn applied_chaintips(&self) -> Vec<(PubKey, Hash)>;
+      }
+      ```
+    - No dependencies on network, storage, or logs.
+
+2.  **`lattice-core`** (Replication Engine):
+    - Depends on `lattice-model`.
+    - **ReplicaController**: Manages `SigChain` (logs), `Gossip`, and P2P sync.
+    - Decodes `SignedEntry` -> calls `StateMachine::apply()`.
+
+3.  **`lattice-kvstate`** (State Implementation):
+    - Depends on `lattice-model`.
+    - **KvState**: Implements `StateMachine` using `redb`.
+    - **Isolation**: Does not import `lattice-core` or `Entry` protobufs. Purely materializes state from payload bytes.
+
+This strict layering prevents "leakage" of log-specific concerns (like seq numbers or signatures) into the business logic.

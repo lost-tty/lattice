@@ -18,6 +18,7 @@ pub use framing::{MessageSink, MessageStream};
 pub use lattice_core::proto::storage::SyncState;
 pub use lattice_core::proto::network::{StatusRequest, StatusResponse, FetchRequest, FetchResponse, AuthorRange};
 pub use mesh::{MeshNetwork, SyncResult};
+pub use lattice_model::types::PubKey;
 
 /// Parse a PublicKey (NodeId) from hex or base32 string
 pub fn parse_node_id(s: &str) -> Result<PublicKey, LatticeNetError> {
@@ -30,17 +31,17 @@ pub trait ToIroh {
 }
 
 pub trait ToLattice {
-    fn to_lattice(&self) -> lattice_core::PubKey;
+    fn to_lattice(&self) -> PubKey;
 }
 
-impl ToIroh for lattice_core::PubKey {
+impl ToIroh for PubKey {
     fn to_iroh(&self) -> Result<PublicKey, LatticeNetError> {
         PublicKey::from_bytes(&**self).map_err(|e| LatticeNetError::Validation(format!("Invalid Iroh key: {}", e)))
     }
 }
 
 impl ToLattice for PublicKey {
-    fn to_lattice(&self) -> lattice_core::PubKey {
-        lattice_core::PubKey::from(*self.as_bytes())
+    fn to_lattice(&self) -> PubKey {
+        PubKey::from(*self.as_bytes())
     }
 }

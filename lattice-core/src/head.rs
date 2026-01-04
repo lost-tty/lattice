@@ -1,7 +1,7 @@
 //! Head - internal strong-typed representation of a KV history head
 
-use crate::types::{Hash, PubKey};
-use crate::hlc::HLC;
+use lattice_model::types::{Hash, PubKey};
+use lattice_model::hlc::HLC;
 use crate::proto::storage::HeadInfo as ProtoHeadInfo;
 use thiserror::Error;
 

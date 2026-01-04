@@ -1,4 +1,4 @@
-use crate::types::PubKey;
+use lattice_model::types::PubKey;
 use crate::Uuid;
 use crate::proto::network::InviteToken;
 use prost::Message;

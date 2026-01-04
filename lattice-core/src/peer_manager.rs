@@ -11,8 +11,9 @@ use crate::{
     auth::{PeerEvent, PeerProvider},
     node::parse_peer_status_key,
     Merge, PeerInfo, PeerStatus, StoreHandle, WatchEventKind,
-    types::PubKey, NodeIdentity,
+    NodeIdentity,
 };
+use lattice_model::types::PubKey;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;

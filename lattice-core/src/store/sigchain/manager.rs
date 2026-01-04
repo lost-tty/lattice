@@ -7,7 +7,7 @@ use super::log::{Log, LogError};
 use crate::entry::{Entry, SignedEntry, ChainTip};
 use super::orphan_store::{GapInfo, OrphanStore, OrphanInfo};
 use super::sync_state::SyncState;
-use crate::types::{Hash, PubKey};
+use lattice_model::types::{Hash, PubKey};
 use crate::node_identity::NodeIdentity;
 
 use std::path::{Path, PathBuf};
@@ -603,8 +603,8 @@ impl SigChainManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::MockClock;
-    use crate::hlc::HLC;
+    use lattice_model::clock::MockClock;
+    use lattice_model::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::store::{Operation, KvPayload};
     use crate::entry::{Entry, ChainTip};

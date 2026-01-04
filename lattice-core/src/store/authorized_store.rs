@@ -11,10 +11,10 @@ use crate::{
     auth::PeerProvider,
     node::NodeError,
     store::{StateError, StoreHandle, SyncState, SyncDiscrepancy, SyncNeeded, GapInfo},
-    types::PubKey,
     Uuid,
     proto::storage::PeerSyncInfo,
 };
+use lattice_model::types::PubKey;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 

@@ -5,7 +5,8 @@
 //! After initial handshake, both run identical exchange logic.
 
 use crate::{MessageSink, MessageStream};
-use lattice_core::{NodeError, SyncState, PubKey};
+use lattice_core::{NodeError, SyncState};
+use lattice_model::types::PubKey;
 use lattice_core::store::AuthorizedStore;
 use lattice_core::proto::storage::SignedEntry;
 use lattice_core::proto::network::{PeerMessage, peer_message, AuthorRange, FetchRequest, FetchResponse, StatusRequest, StatusResponse};

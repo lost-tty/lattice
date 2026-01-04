@@ -55,8 +55,12 @@
 ### 4B: Architectural Pivot (Decoupling)
 
 - [ ] **Rename Core Components**: `StoreActor` → `ReplicaController`, `StoreHandle` → `Replica`, `KvStore` → `KvState`
-- [ ] **Define StateMachine Trait**: `apply(&SignedEntry)`, `snapshot() -> Vec<u8>`, `restore(&[u8])`
-- [ ] **Make Controller Generic**: `ReplicaController<S: StateMachine>` instead of hardcoded KvStore
+- [ ] **Extract lattice-model Crate**: Move `HLC`, `PubKey`, `Hash` to new `lattice-model` crate.
+- [ ] **Define Log-Agnostic StateMachine**: `trait StateMachine { apply(payload, author, ts) }` in `lattice-model`.
+- [ ] **Create lattice-kvstate Crate**: Move `KvStore` to new crate depending ONLY on `lattice-model`.
+- [ ] **Refactor lattice-core**: `ReplicaController` uses `StateMachine` trait (injected).
+- [ ] **Decouple StoreHandle**: `StoreHandle` reads directly from `KvState`.
+- [ ] **Remote StateMachine Pattern**: Enable worker nodes via RPC StateMachine.
 
 ### 4C: Protocol Evolution (Type Agnosticism)
 

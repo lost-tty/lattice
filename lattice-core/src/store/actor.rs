@@ -1,11 +1,12 @@
 //! Store Actor - dedicated thread that owns Store and processes commands via channel
 
 use crate::{
-    NodeIdentity, Uuid, PubKey, Head,
+    NodeIdentity, Uuid, Head,
     proto::storage::ChainTip,
     store::Operation,
     entry::SignedEntry,
 };
+use lattice_model::types::PubKey;
 use crate::store::{
     KvStore, StateError, ParentValidationError,
     sigchain::{
@@ -17,7 +18,7 @@ use crate::store::{
     peer_sync_store::PeerSyncStore,
 };
 use crate::proto::storage::PeerSyncInfo;
-use crate::types::Hash;
+use lattice_model::types::Hash;
 
 use tokio::sync::{mpsc, oneshot, broadcast};
 use std::collections::HashMap;
@@ -774,12 +775,12 @@ impl StoreActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::MockClock;
-    use crate::hlc::HLC;
+    use lattice_model::clock::MockClock;
+    use lattice_model::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::store::Operation;
     use crate::entry::{Entry, ChainTip};
-    use crate::types::{Hash, PubKey};
+    use lattice_model::types::{Hash, PubKey};
     use crate::Merge;
     use prost::Message;
     use crate::store::KvPayload;
@@ -1127,7 +1128,7 @@ mod tests {
         
         // Write 3 entries to sigchain log directly (simulating commits)
         let log_path = sigchain_dir.join(format!("{}.log", hex::encode(author)));
-        let mut sigchain = SigChain::new(&log_path, TEST_STORE, crate::types::PubKey::from(*author)).unwrap();
+        let mut sigchain = SigChain::new(&log_path, TEST_STORE, PubKey::from(*author)).unwrap();
         
         let mut entries = Vec::new();
         for i in 1u64..=3 {
@@ -1234,7 +1235,7 @@ mod tests {
         let result_b = manager.validate_entry(&entry_b).unwrap();
         match result_b {
             crate::store::sigchain::SigchainValidation::Orphan { gap, prev_hash } => {
-                manager.buffer_sigchain_orphan(&entry_b, gap.author, crate::types::Hash::from(prev_hash), gap.to_seq, gap.from_seq, gap.last_known_hash.unwrap_or(crate::types::Hash::ZERO)).unwrap();
+                manager.buffer_sigchain_orphan(&entry_b, gap.author, Hash::from(prev_hash), gap.to_seq, gap.from_seq, gap.last_known_hash.unwrap_or(Hash::ZERO)).unwrap();
             }
             _ => panic!("Expected B to be orphaned"),
         }

@@ -14,7 +14,7 @@
 
 use crate::proto::storage::{OrphanedEntry, SignedEntry as ProtoSignedEntry};
 use crate::entry::SignedEntry;
-use crate::types::{Hash, PubKey};
+use lattice_model::types::{Hash, PubKey};
 use prost::Message;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
@@ -418,7 +418,7 @@ pub(crate) mod tests {
         // Create a minimal SignedEntry for testing
         // We need a valid signed entry structure now (internal type)
         use crate::entry::Entry;
-        use crate::hlc::HLC;
+        use lattice_model::hlc::HLC;
         use crate::node_identity::NodeIdentity;
         use crate::store::{Operation, KvPayload};
 
@@ -440,20 +440,20 @@ pub(crate) mod tests {
         let entry_hash = entry.hash();
         
         // Insert with seq
-        store.insert(&crate::types::PubKey::from(author), &Hash::from(prev_hash), &entry_hash, seq, &entry).unwrap();
+        store.insert(&PubKey::from(author), &Hash::from(prev_hash), &entry_hash, seq, &entry).unwrap();
         
         // Find - returns (seq, entry, hash)
-        let found = store.find_by_prev_hash(&crate::types::PubKey::from(author), &Hash::from(prev_hash)).unwrap();
+        let found = store.find_by_prev_hash(&PubKey::from(author), &Hash::from(prev_hash)).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, seq);  // seq
-        assert_eq!(found[0].1.author_id, crate::types::PubKey::from(author));  // entry
+        assert_eq!(found[0].1.author_id, PubKey::from(author));  // entry
         assert_eq!(found[0].2, Hash::from(entry_hash));  // hash
         
         // Delete
-        store.delete(&crate::types::PubKey::from(author), &Hash::from(prev_hash), &entry_hash).unwrap();
+        store.delete(&PubKey::from(author), &Hash::from(prev_hash), &entry_hash).unwrap();
         
         // Should be empty now
-        let found = store.find_by_prev_hash(&crate::types::PubKey::from(author), &Hash::from(prev_hash)).unwrap();
+        let found = store.find_by_prev_hash(&PubKey::from(author), &Hash::from(prev_hash)).unwrap();
         assert_eq!(found.len(), 0);
         
         let _ = std::fs::remove_file(&path);

@@ -2,7 +2,8 @@
 
 use crate::commands::{CommandResult, Writer};
 use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
-use lattice_core::{Merge, Node, StoreHandle, PubKey};
+use lattice_core::{Merge, Node, StoreHandle};
+use lattice_model::types::{PubKey, Hash};
 use lattice_net::MeshNetwork;
 use std::time::Instant;
 use std::io::Write;
@@ -439,7 +440,7 @@ struct HistoryEntry {
     hlc: u64,
     value: Vec<u8>,
     tombstone: bool,
-    parent_hashes: Vec<lattice_core::Hash>,
+    parent_hashes: Vec<Hash>,
 }
 
 pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
@@ -463,7 +464,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: O
     };
     
     // Collect entries (all or filtered by key)
-    let mut entries: std::collections::HashMap<lattice_core::Hash, HistoryEntry> = std::collections::HashMap::new();
+    let mut entries: std::collections::HashMap<Hash, HistoryEntry> = std::collections::HashMap::new();
     
     for (author, _info) in sync_state.authors() {
         // Stream entries for this author
@@ -489,7 +490,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: O
                 
                 // Include if: no key filter OR key matches
                 if key.is_none() || key == Some(op_key.as_slice()) {
-                    let hash = lattice_core::Hash::from(entry.hash());
+                    let hash = Hash::from(entry.hash());
                     let hlc = (decoded.timestamp.wall_time << 16) | decoded.timestamp.counter as u64;
                     let parent_hashes = decoded.parent_hashes.clone();
                     
@@ -513,7 +514,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: O
     }
     
     // Convert to RenderEntry format for the grid renderer
-    let render_entries: std::collections::HashMap<lattice_core::Hash, crate::graph_renderer::RenderEntry> = entries
+    let render_entries: std::collections::HashMap<Hash, crate::graph_renderer::RenderEntry> = entries
         .into_iter()
         .map(|(hash, e)| {
             let is_merge = e.parent_hashes.len() > 1;

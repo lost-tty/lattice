@@ -1,11 +1,12 @@
 //! StoreHandle - Handle to a specific store, wraps channel to actor thread
 
 use crate::{
-    Uuid, PubKey,
+    Uuid,
     node::NodeError,
     node_identity::NodeIdentity,
 
 };
+use lattice_model::types::PubKey;
 use crate::entry::SignedEntry;
 use super::actor::{StoreCmd, StoreActor};
 use crate::store::KvStore;

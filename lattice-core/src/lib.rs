@@ -11,13 +11,10 @@
 pub mod node_identity;
 pub mod node;
 pub mod entry;
-pub mod hlc;
-pub mod clock;
 pub mod proto;
 pub mod data_dir;
 pub mod meta_store;
 pub mod store;
-pub mod types;
 pub mod head;
 pub mod auth;
 pub mod store_registry;
@@ -45,14 +42,9 @@ pub use store::{LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
 // Proto exports
 pub use proto::storage::HeadInfo;
 
-// Type exports
-pub use types::{Hash, PubKey, Signature};
-pub use ed25519_dalek::SigningKey;
-
 // Other exports
+pub use ed25519_dalek::SigningKey;
 pub use entry::{Entry, SignedEntry};
-pub use hlc::HLC;
-pub use clock::{Clock, SystemClock, MockClock};
 pub use data_dir::DataDir;
 pub use meta_store::MetaStore;
 pub use uuid::Uuid;

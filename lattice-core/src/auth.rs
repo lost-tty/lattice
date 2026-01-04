@@ -3,7 +3,7 @@
 //! Provides the `PeerProvider` trait that allows StoreActor to verify
 //! peer status without direct access to Node (avoiding circular deps).
 
-use crate::types::PubKey;
+use lattice_model::types::PubKey;
 use crate::PeerStatus;
 use tokio::sync::broadcast;
 

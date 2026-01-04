@@ -1,4 +1,5 @@
-use lattice_core::{NodeBuilder, PeerStatus, PubKey, Invite};
+use lattice_core::{NodeBuilder, PeerStatus, Invite};
+use lattice_model::types::PubKey;
 use std::sync::Arc;
 
 #[tokio::test]

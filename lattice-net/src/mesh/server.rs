@@ -1,7 +1,8 @@
 //! Server - MeshNetwork for mesh networking
 
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
-use lattice_core::{Node, NodeEvent, Uuid, StoreHandle, PubKey};
+use lattice_core::{Node, NodeEvent, Uuid, StoreHandle};
+use lattice_model::types::PubKey;
 use lattice_core::store::AuthorizedStore;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
@@ -112,7 +113,7 @@ impl MeshNetwork {
             match event {
                 NodeEvent::JoinRequested { peer, mesh_id, secret } => {
                     let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
-                        tracing::error!(peer = %lattice_core::PubKey::from(peer), "JoinRequested: invalid PubKey");
+                        tracing::error!(peer = %PubKey::from(peer), "JoinRequested: invalid PubKey");
                         continue;
                     };
                     tracing::info!(peer = %iroh_peer_id.fmt_short(), mesh = %mesh_id, "Event: JoinRequested → starting join protocol");
@@ -231,7 +232,7 @@ impl MeshNetwork {
             
             use std::collections::HashSet;
             use tokio::sync::broadcast::error::RecvError;
-            let syncing = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::<lattice_core::PubKey>::new()));
+            let syncing = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::<PubKey>::new()));
             
             loop {
                 match gap_rx.recv().await {
@@ -421,7 +422,7 @@ impl MeshNetwork {
     }
     
     /// Get currently connected peers with last-seen timestamp.
-    pub fn connected_peers(&self) -> Result<std::collections::HashMap<lattice_core::PubKey, std::time::Instant>, String> {
+    pub fn connected_peers(&self) -> Result<std::collections::HashMap<PubKey, std::time::Instant>, String> {
         self.sessions.online_peers()
     }
     
@@ -446,7 +447,7 @@ pub(crate) async fn handle_connection(
     let remote_id = conn.remote_id();
     tracing::debug!("[Incoming] {} (ALPN: {})", remote_id.fmt_short(), String::from_utf8_lossy(conn.alpn()));
     
-    let remote_pubkey: lattice_core::PubKey = remote_id.to_lattice();
+    let remote_pubkey: PubKey = remote_id.to_lattice();
 
     loop {
         match conn.accept_bi().await {
@@ -472,7 +473,7 @@ pub(crate) async fn handle_connection(
 async fn handle_stream(
     node: Arc<Node>,
     stores: StoresRegistry,
-    remote_pubkey: lattice_core::PubKey,
+    remote_pubkey: PubKey,
     send: iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
 ) -> Result<(), LatticeNetError> {
@@ -513,7 +514,7 @@ async fn handle_stream(
 /// Handle a join request from an invited peer
 async fn handle_join_request(
     node: &Node,
-    remote_pubkey: &lattice_core::PubKey,
+    remote_pubkey: &PubKey,
     req: lattice_core::proto::network::JoinRequest,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
@@ -549,7 +550,7 @@ async fn handle_join_request(
 /// Handle an incoming status request using symmetric SyncSession
 async fn handle_status_request(
     stores: StoresRegistry,
-    remote_pubkey: &lattice_core::PubKey,
+    remote_pubkey: &PubKey,
     req: StatusRequest,
     sink: &mut MessageSink,
     stream: &mut MessageStream,
@@ -584,7 +585,7 @@ async fn handle_status_request(
 /// Handle a FetchRequest - streams entries in chunks
 async fn handle_fetch_request(
     stores: StoresRegistry,
-    remote_pubkey: &lattice_core::PubKey,
+    remote_pubkey: &PubKey,
     req: lattice_core::proto::network::FetchRequest,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
@@ -621,7 +622,7 @@ async fn stream_entries_to_sink(
     
     for range in ranges {
         if let Ok(author_bytes) = <PubKey>::try_from(range.author_id.as_slice()) {
-            let author = lattice_core::PubKey::from(author_bytes);
+            let author = PubKey::from(author_bytes);
             if let Ok(mut rx) = store.stream_entries_in_range(&author, range.from_seq, range.to_seq).await {
                 while let Some(entry) = rx.recv().await {
                     chunk.push(entry.into());

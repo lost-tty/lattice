@@ -12,8 +12,8 @@ use super::error::{StateError, ParentValidationError};
 use super::LogError;
 use crate::entry::{SignedEntry, ChainTip};
 use crate::proto::storage::{HeadInfo as ProtoHeadInfo, HeadList};
-use crate::types::{Hash, PubKey};
-use crate::hlc::HLC;
+use lattice_model::types::{Hash, PubKey};
+use lattice_model::hlc::HLC;
 use crate::head::Head;
 use crate::merge::Merge;
 use prost::Message;
@@ -458,8 +458,8 @@ impl KvStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::MockClock;
-    use crate::hlc::HLC;
+    use lattice_model::clock::MockClock;
+    use lattice_model::hlc::HLC;
     use crate::node_identity::NodeIdentity;
     use crate::entry::{Entry, SignedEntry, ChainTip};
     use crate::proto::storage::{Entry as ProtoEntry, SignedEntry as ProtoSignedEntry};

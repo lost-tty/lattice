@@ -1,0 +1,13 @@
+[package]
+name = "lattice-model"
+description = "Core data models and types for Lattice (Log-Agnostic)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hex = { workspace = true }
+thiserror = { workspace = true }
+# No prost, no tokio, no redb! Pure types.
+
+[dev-dependencies]

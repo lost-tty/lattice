@@ -1,10 +1,10 @@
 //! Log entries (atomic operations) with strong typing
 
-use crate::hlc::HLC;
+use lattice_model::hlc::HLC;
 use crate::proto::storage::{Entry as ProtoEntry, SignedEntry as ProtoSignedEntry, ChainTip as ProtoChainTip};
 
 use crate::node_identity::{NodeIdentity, NodeError};
-use crate::types::{Hash, PubKey, Signature as Sig};
+use lattice_model::types::{Hash, PubKey, Signature as Sig};
 use ed25519_dalek::{Signature, VerifyingKey};
 use prost::Message;
 use thiserror::Error;

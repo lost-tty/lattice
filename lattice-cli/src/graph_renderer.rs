@@ -4,7 +4,7 @@
 //! Design inspired by git-graph: https://github.com/mlange-42/git-graph (MIT)
 
 use std::fmt::Write;
-use lattice_core::PubKey;
+use lattice_model::types::{PubKey, Hash};
 
 // Character codes for grid cells
 pub const SPACE: u8 = 0;
@@ -279,17 +279,17 @@ pub struct RenderEntry {
     pub hlc: u64,
     pub value: Vec<u8>,
     pub tombstone: bool,
-    pub parent_hashes: Vec<lattice_core::Hash>,
+    pub parent_hashes: Vec<Hash>,
     pub is_merge: bool,
 }
 
 /// Render a DAG of entries to a grid-based graph
 pub fn render_dag(
-    entries: &std::collections::HashMap<lattice_core::Hash, RenderEntry>,
+    entries: &std::collections::HashMap<Hash, RenderEntry>,
     _key: &[u8],
 ) -> String {
     use std::collections::{HashMap, HashSet};
-    use lattice_core::Hash;
+    use Hash;
     
     if entries.is_empty() {
         return "(no history found)\n".to_string();

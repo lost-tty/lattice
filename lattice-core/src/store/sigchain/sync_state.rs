@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 use crate::entry::ChainTip;
-use crate::hlc::HLC;
+use lattice_model::hlc::HLC;
 use crate::proto::storage::{SyncState as ProtoSyncState, SyncAuthor as ProtoSyncAuthor, ChainTip as ProtoChainTip};
-use crate::types::{Hash, PubKey};
+use lattice_model::types::{Hash, PubKey};
 
 /// Sync state tracking per-author sequence numbers and head hashes.
 ///

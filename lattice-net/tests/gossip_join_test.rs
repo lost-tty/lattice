@@ -3,7 +3,8 @@
 //! These tests replicate PRODUCTION usage exactly - no manual gossip setup.
 //! They rely purely on the event-driven flow that happens in the CLI.
 
-use lattice_core::{Merge, NodeBuilder, NodeEvent, PubKey, Invite};
+use lattice_core::{Merge, NodeBuilder, NodeEvent, Invite};
+use lattice_model::types::PubKey;
 use lattice_core::Node;
 use lattice_net::MeshNetwork;
 use std::sync::Arc;

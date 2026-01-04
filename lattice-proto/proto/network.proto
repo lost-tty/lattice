@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package lattice.network;
+
+import "storage.proto";
+
+// 1. Join Protocol
+message JoinRequest {
+  bytes node_pubkey = 1;  // Joining node's public key (32 bytes)
+  bytes mesh_id = 2;      // Mesh UUID to join (16 bytes, MANDATORY)
+  bytes invite_secret = 3;  // Secret from invite token (MANDATORY)
+}
+
+message InviteToken {
+    bytes mesh_id = 1;
+    bytes secret = 2;
+    bytes inviter_pubkey = 3;
+}
+
+message JoinResponse {
+  bytes inviter_pubkey = 1;  // Inviter's public key for verification
+  bytes mesh_id = 2;      // Root store UUID (16 bytes) for new node to create
+  repeated bytes authorized_authors = 3;  // All known author pubkeys (for bootstrap sync)
+}
+
+// 2. Peer Message Wrapper (unicast RPC)
+message PeerMessage {
+  oneof message {
+    JoinRequest join_request = 1;
+    JoinResponse join_response = 2;
+    StatusRequest status_request = 3;
+    StatusResponse status_response = 4;
+    FetchRequest fetch_request = 5;
+    FetchResponse fetch_response = 6;
+  }
+}
+
+// 3. Status Protocol
+message StatusRequest {
+  bytes store_id = 1;                      // Store UUID (16 bytes)
+  lattice.storage.SyncState sync_state = 2;  // Sender's current sync state
+}
+
+message StatusResponse {
+  bytes store_id = 1;                      // Store UUID (16 bytes)
+  lattice.storage.SyncState sync_state = 2;  // Responder's current sync state
+}
+
+// 4. Fetch Protocol
+message AuthorRange {
+  bytes author_id = 1;  // Author public key (32 bytes)
+  uint64 from_seq = 2;  // Inclusive start sequence
+  uint64 to_seq = 3;    // Inclusive end sequence (0 = to latest)
+}
+
+message FetchRequest {
+  bytes store_id = 1;             // Store UUID (16 bytes)
+  repeated AuthorRange ranges = 2;  // Ranges to fetch
+}
+
+message FetchResponse {
+  bytes store_id = 1;                              // Store UUID (16 bytes)
+  uint32 status = 2;                               // HTTP-like: 200=OK, 206=Partial, 401=Unauthorized, 404=NotFound
+  bool done = 3;                                   // true = last chunk (stream complete)
+  repeated lattice.storage.SignedEntry entries = 4;  // Chunk of entries
+}
+
+// 5. Gossip Protocol
+message GossipMessage {
+  optional lattice.storage.SignedEntry entry = 1;       // Entry broadcast (if any)
+  optional lattice.storage.SyncState sender_state = 2;  // Sender's sync state (piggybacked)
+}
+
+message SyncStateAnnounce {
+  bytes store_id = 1;                      // Store UUID (16 bytes)
+  lattice.storage.SyncState sync_state = 2;  // Sender's current sync state
+}

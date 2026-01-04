@@ -4,6 +4,7 @@ members = [
     "lattice-core",
     "lattice-net",
     "lattice-cli",
+    "lattice-model",
 ]
 
 [workspace.package]
@@ -16,6 +17,7 @@ license = "MIT"
 lattice-core = { path = "lattice-core" }
 lattice-net = { path = "lattice-net" }
 lattice-cli = { path = "lattice-cli" }
+lattice-model = { path = "lattice-model" }
 
 # CLI
 rustyline = "17"

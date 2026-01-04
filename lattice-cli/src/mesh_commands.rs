@@ -6,7 +6,8 @@
 
 use crate::commands::{CommandResult, Writer, MeshSubcommand};
 use crate::display_helpers::format_elapsed;
-use lattice_core::{Node, StoreHandle, PeerStatus, PubKey, Mesh, token::Invite};
+use lattice_core::{Node, StoreHandle, PeerStatus, Mesh, token::Invite};
+use lattice_model::types::PubKey;
 use lattice_net::MeshNetwork;
 use chrono::DateTime;
 use owo_colors::OwoColorize;

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 lattice-core = { workspace = true }
 lattice-net = { workspace = true }
+lattice-model = { workspace = true }
 rustyline-async = "0.4"
 hex = { workspace = true }
 thiserror = { workspace = true }
