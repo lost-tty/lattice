@@ -599,26 +599,80 @@ Recommendation: Use Put/Delete for 90% of data. Add CRDT primitives only when ne
 
 ## Open Questions
 
-### Permissions
+### Two-Layer Security Model
 
-Write permissions are enforceable cryptographically:
-- Every entry is signed by author
-- Nodes verify signature before accepting
-- Manifest defines allowed writers: `/nodes/{pubkey}/role` = `writer` | `reader`
-- Entries from non-writers are rejected
+Since the Core (Network/Log) doesn't understand the Data (State), security splits into two layers:
 
-Read permissions are not enforceable:
-- Sharing a store = granting read access
-- Encryption adds a layer but doesn't solve revocation (once you have the key, you can read past data)
-- True revocation is impossible — you can't "unread" data
+| Layer | Question | Enforced By | Mechanism | Action |
+|-------|----------|-------------|-----------|--------|
+| **1. Gatekeeper** | Can this user write to the mesh at all? | ReplicaController (Core) | Root Store `/acl/writers/{pubkey}` | Drop packet, don't log |
+| **2. Validator** | Can this user perform THIS operation? | `StateMachine::apply()` | App-specific ACLs | No-op (keep entry, no state change) |
 
-Practical model:
-- Share store = grant read
-- Write access defined in manifest
+#### Layer 1: Network Gatekeeping (Root Store)
+
+The Mesh Root is the source of truth for membership. Every ingest checks:
+
+```rust
+fn ingest(&mut self, entry: SignedEntry) -> Result<(), Error> {
+    entry.verify()?;                              // Crypto valid?
+    if !self.root_store.can_write(&entry.author_id) {  // Gatekeeper check
+        return Err(Error::Unauthorized);
+    }
+    self.log.append(entry)?;                      // Commit to log
+}
+```
+
+**Root Store ACL Schema:**
+- `/acl/writers/{pubkey}` = `true` (allowed to write)
+- `/acl/admins/{pubkey}` = `true` (can modify ACLs)
+
+**Purpose:** Prevents DoS/storage exhaustion. Strangers can't fill your disk.
+
+#### Layer 2: Granular ACLs (StateMachine)
+
+Once past the Gatekeeper, the StateMachine enforces business logic:
+
+```rust
+impl StateMachine for FileSystemState {
+    fn apply(&self, entry: &SignedEntry) {
+        match parse_op(&entry.payload) {
+            Op::Grant { path, user } => {
+                if self.is_owner(entry.author_id, &path) {
+                    self.acls.get_mut(&path).insert(user);
+                }
+            },
+            Op::Write { path, data } => {
+                if self.can_write(entry.author_id, &path) {
+                    self.files.insert(path, data);
+                } else {
+                    // NO-OP: Entry logged but produces no state change
+                }
+            }
+        }
+    }
+}
+```
+
+**Critical Concept: Causal ACLs** — Check permissions against causal history, not wall clock:
+1. Alice grants Bob access (processed first)
+2. Bob writes (checked against ACL state after Alice's grant)
+
+#### The "Reject" Paradox
+
+**Q:** If StateMachine rejects a write, shouldn't we delete it from the log?
+
+**A:** No. In a DAG system, future valid operations may causally depend on that entry. Deleting creates orphans.
+
+**Correct Approach:** 
+- Entry stays in log (cryptographically valid, causally linked)
+- StateMachine renders it invisible (consumes space, produces no state)
+
+#### Read Permissions
+
+Read permissions are not cryptographically enforceable:
+- Sharing a replica = granting read access
+- Encryption adds a layer but doesn't solve revocation
 - Read-only nodes replicate and verify but can't contribute entries
-
-Future:
-- Capability-based permissions: Explore finer-grained write access (e.g., per-key or per-prefix permissions) via capabilities. Exact mechanism TBD.
 
 ### Zero-Knowledge of Peer Authorization (ACLs) - IMPLEMENTED
 

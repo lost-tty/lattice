@@ -42,78 +42,108 @@
 
 ---
 
-## Milestone 4: Multi-Store
+## Milestone 4: Replicated State Machine Platform
 
-**Goal:** Root store as control plane for declaring/managing additional stores.
+**Goal:** Transform lattice from a specific Key-Value store into a generic Replicated State Machine platform.
 
-### 4A: Store Declarations in Root Store
-- [ ] Root store keys: `/stores/{uuid}/name`, `/stores/{uuid}/created_at`
-- [ ] CLI: `store create [name]`, `store delete <uuid>`, `store list`
+### 4A: Reliability & Consistency (Pre-Pivot Cleanup)
 
-### 4B: Store Watcher ("Cluster Manager")
+- [x] **Transactional Atomicity**: Ensure disk write (Log) and DB update (State) use WAL pattern. Prevents inconsistent states after crash.
+- [ ] **Refactor Orphan Resolution**: Move recursive dependency logic from `StoreActor` into `SigChainManager`. Actor receives "Ready Entries", doesn't manage work_queues.
+- [ ] **Unify Store Registries**: Remove `StoresRegistry` from lattice-net. Make `Node` single source of truth for active replicas.
 
-- [ ] `app_stores: RwLock<HashMap<Uuid, StoreHandle>>` in `Node`
-- [ ] Initial Reconciliation: On startup, process `/stores/` snapshot
-- [ ] Live Reconciliation: Background task watching `/stores/` prefix
-- [ ] On Put: open new store; On Delete: close/archive store
+### 4B: Architectural Pivot (Decoupling)
 
-### 4C: Multi-Store Gossip
-- [ ] `setup_for_store` called for each active store
-- [ ] Per-store gossip topics, verify store-id before applying
+- [ ] **Rename Core Components**: `StoreActor` → `ReplicaController`, `StoreHandle` → `Replica`, `KvStore` → `KvState`
+- [ ] **Define StateMachine Trait**: `apply(&SignedEntry)`, `snapshot() -> Vec<u8>`, `restore(&[u8])`
+- [ ] **Make Controller Generic**: `ReplicaController<S: StateMachine>` instead of hardcoded KvStore
 
-### 4D: Shared Peer List (Ingest Guard)
-- [ ] All stores use root store peer list for authorization
-- [ ] Check `/nodes/{pubkey}/status` on connect
+### 4C: Protocol Evolution (Type Agnosticism)
 
-### 4E: Mesh-Based Join Model
-- [ ] A **mesh** = root store + subordinated stores
-- [ ] JoinRequest always targets the **mesh** (i.e., root store), not individual stores
-- [ ] After joining mesh, node gains access to all declared stores via 4B reconciliation
+- [ ] **Update Protobuf Schema**: Deprecate `Operation` oneof. Add `topic` field for DAG grouping. Payload becomes opaque bytes.
+- [ ] **Refactor Dependency Logic**: Use `Entry.topic` for DAG dependencies, not payload decoding
+- [ ] **Refactor KvState as Plugin**: Move Put/Delete decoding inside `KvState::apply()`. Core agnostic to data type.
+
+### 4D: Lifecycle & Optimization
+
+- [ ] **Snapshotting Protocol**: `state.snapshot()` when log grows large. Store in `snapshot.db`.
+- [ ] **Waterlevel Pruning**: Calculate stability frontier (min seq seen by all peers). `truncate_prefix(seq)` for old logs.
+- [ ] **Typed Replica API**: `node.open_replica::<MyCustomCRDT>(uuid).await?`
 
 ---
 
-## Milestone 5: HTTP API
+## Milestone 5: Multi-Replica
 
-**Goal:** External access to stores via REST.
+**Goal:** Root store as control plane for declaring/managing additional replicas.
 
-### 5A: Access Tokens
-- [ ] Token storage: `/tokens/{id}/store_id`, `/tokens/{id}/secret_hash`
+### 5A: Replica Declarations in Root Store
+- [ ] Root store keys: `/replicas/{uuid}/name`, `/replicas/{uuid}/created_at`
+- [ ] CLI: `replica create [name]`, `replica delete <uuid>`, `replica list`
+
+### 5B: Replica Watcher ("Cluster Manager")
+
+- [ ] `app_replicas: RwLock<HashMap<Uuid, Replica>>` in `Node`
+- [ ] Initial Reconciliation: On startup, process `/replicas/` snapshot
+- [ ] Live Reconciliation: Background task watching `/replicas/` prefix
+- [ ] On Put: open new replica; On Delete: close/archive replica
+
+### 5C: Multi-Replica Gossip
+- [ ] `setup_for_replica` called for each active replica
+- [ ] Per-replica gossip topics, verify replica-id before applying
+
+### 5D: Shared Peer List (Ingest Guard)
+- [ ] All replicas use root store peer list for authorization
+- [ ] Check `/nodes/{pubkey}/status` on connect
+
+### 5E: Mesh-Based Join Model
+- [ ] A **mesh** = root store + subordinated replicas
+- [ ] JoinRequest always targets the **mesh** (i.e., root store), not individual replicas
+- [ ] After joining mesh, node gains access to all declared replicas via 5B reconciliation
+
+---
+
+## Milestone 6: HTTP API
+
+**Goal:** External access to replicas via REST.
+
+### 6A: Access Tokens
+- [ ] Token storage: `/tokens/{id}/replica_id`, `/tokens/{id}/secret_hash`
 - [ ] CLI: `token create`, `token list`, `token revoke`
 
-### 5B: HTTP Server (lattice-http crate)
-- [ ] REST endpoints: `GET/PUT/DELETE /stores/{uuid}/keys/{key}`
+### 6B: HTTP Server (lattice-http crate)
+- [ ] REST endpoints: `GET/PUT/DELETE /replicas/{uuid}/keys/{key}`
 - [ ] Auth via `Authorization: Bearer {token_id}:{secret}`
 
 ---
 
-## Milestone 6: Counter Datatype
+## Milestone 7: Counter Datatype
 
-**Goal:** Add PN-Counter as a module on top of raw KV APIs. See [pn-counter.md](pn-counter.md).
+**Goal:** Add PN-Counter as a StateMachine implementation. See [pn-counter.md](pn-counter.md).
 
-### 6A: Counter Module
+### 7A: Counter Module
 - [ ] Add `CounterState` proto message
-- [ ] Create `counter.rs` with `Counter` struct
+- [ ] Create `counter.rs` implementing `StateMachine`
 - [ ] Implement merge and `incr(delta)`
 
-### 6B: CLI
+### 7B: CLI
 - [ ] `incr <key> [delta]`, `decr <key> [delta]`
 - [ ] `get -v <key>` shows per-node breakdown
 
 ---
 
-## Milestone 7: Content-Addressable Store (CAS) via Garage
+## Milestone 8: Content-Addressable Store (CAS) via Garage
 
 **Goal:** Blob storage using Garage as S3-compatible sidecar.
 
-### 7A: Garage Integration
+### 8A: Garage Integration
 - [ ] S3 client wrapper in `lattice-cas` crate
 - [ ] `put_blob(data) -> hash`, `get_blob(hash) -> data`
 
-### 7B: Metadata & Pinning
+### 8B: Metadata & Pinning
 - [ ] `/cas/pins/{node_id}/{hash}` in root store
 - [ ] Pin reconciler: watch pins, trigger Garage fetch
 
-### 7C: CLI
+### 8C: CLI
 - [ ] `cas put`, `cas get`, `cas pin`, `cas ls`
 
 ---
