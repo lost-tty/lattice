@@ -37,10 +37,8 @@
 - [x] `Node::get_store()` → raw `StoreHandle`
 
 ### 3D: CLI Context Switching
-- [ ] `mesh init`, `mesh list`
-- [ ] `mesh switch`: change active CLI context (target for subsequent commands)
-- [ ] `mesh up <id>`, `mesh down <id>` to start/stop specific meshes
-- [ ] Support concurrent active meshes (node participates in multiple meshes simultaneously)
+- [x] `mesh create`, `mesh list`, `mesh use`
+- [x] Deterministic default mesh selection (oldest by join time)
 
 ---
 
@@ -155,6 +153,9 @@
 - [ ] **Streaming list_by_prefix**: Currently collects entire result into Vec before processing. Redb's `range()` returns an iterator, but we can't return it (lifetime tied to txn). Consider callback API or channels for large datasets.
 - [ ] **Transactions / Batch Writes**: Group multiple store operations into a single sigchain entry for atomicity. Currently `Peer::save()` writes 4 separate keys which could be seen in inconsistent state by readers. A transaction API would bundle writes into one atomic entry.
 - [ ] **Error Handling Review**: Re-evaluate usage of `expect`, `unwrap`, and `unwrap_or_default`. Ensure we are using the right strategy (fail-fast vs fail-safe) in appropriate contexts, particularly in critical paths like lock acquisition and network handlers.
+- [ ] **Transactional Atomicity (Dual Commit Problem)**: `StoreActor::commit_entry` writes to two storage mediums (filesystem log via `SigChainManager`, redb via `KvStore`) without unified transaction. If log succeeds but state fails, runtime inconsistency until restart. Solutions: (1) Store ChainTips in redb within same transaction as KV updates, (2) Enforce strict WAL pattern where file log is single source of truth, (3) Don't update state.db until file flush confirms success.
+- [ ] **Encapsulation of Orphan Resolution Logic**: `StoreActor` contains complex domain logic for resolving recursive dependencies (`work_queue`, `OrphanMeta` tuple management). This leaks orphan storage implementation details into the Actor which should focus on concurrency/dispatch. Solutions: (1) Create `SigChainManager::ingest_and_resolve(entry)` that handles recursion internally, (2) Return `TransactionResult` struct with side effects (entries applied, orphans deleted), (3) Remove `work_queue` and manual orphan deletion from `StoreActor`.
+- [ ] **Duplicate Store Registries (Race Conditions)**: `Node` and `MeshNetwork` maintain separate registries of active stores, synced via `NodeEvent::NetworkStore`. Event-driven sync introduces race conditions during startup or rapid mesh creation/deletion. Solutions: (1) Make `Node` the single source of truth, (2) Remove `StoresRegistry` from `MeshNetwork`/`MeshEngine`, (3) Query `Node` directly via `node.mesh_by_id(uuid)` when requests arrive, (4) Create `AuthorizedStore` on-the-fly or cache within `Node`.
 
 ---
 

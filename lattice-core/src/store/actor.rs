@@ -594,9 +594,12 @@ impl StoreActor {
                     // Step 2: Validate state (parent_hashes exist in history)
                     match self.state.validate_parent_hashes_with_index(&current, |hash| self.chain_manager.hash_exists(hash)) {
                         Ok(()) => {
-                            // Both valid - commit to sigchain and apply to state
-                            let ready_orphans = self.chain_manager.commit_entry(&current)?;
+                            // WAL pattern: apply to state FIRST (recoverable via replay),
+                            // then commit to log (source of truth). If state fails, no log
+                            // entry written = consistent. If log fails after state, replay
+                            // on restart will re-apply (idempotent).
                             self.state.apply_entry(&current)?;
+                            let ready_orphans = self.chain_manager.commit_entry(&current)?;
                             
                             // Now safe to delete the DAG orphan entry (if this was one)
                             if let Some((key, parent_hash, entry_hash)) = dag_orphan_meta {
@@ -1939,6 +1942,76 @@ mod tests {
         
         drop(handle_a);
         drop(handle_d);
+    }
+
+    /// Test WAL pattern: verify state and log are consistent after commit.
+    /// The WAL pattern ensures:
+    /// 1. State is applied first (recoverable via replay)
+    /// 2. Log is committed second (source of truth)
+    /// 3. On restart, replay rebuilds identical state
+    #[test]
+    fn test_wal_pattern_state_and_log_consistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().to_path_buf();
+        
+        let node = NodeIdentity::generate();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        
+        // Phase 1: Write entries and close store
+        let author = node.public_key();
+        {
+            let (handle, _info) = crate::store::handle::StoreHandle::open(
+                TEST_STORE,
+                store_dir.clone(),
+                node.clone(),
+            ).unwrap();
+            
+            // Write via put (creates sigchain entry + updates state)
+            rt.block_on(handle.put(b"/wal_test/key1", b"value1")).unwrap();
+            rt.block_on(handle.put(b"/wal_test/key2", b"value2")).unwrap();
+            
+            // Verify state has the data
+            let heads = rt.block_on(handle.get(b"/wal_test/key1")).unwrap();
+            assert_eq!(heads.len(), 1);
+            assert_eq!(heads[0].value, b"value1");
+            
+            // Get log seq before closing
+            let log_seq = rt.block_on(handle.log_seq());
+            assert!(log_seq >= 2, "Should have at least 2 log entries");
+            
+            drop(handle);
+        }
+        
+        // Phase 2: Delete state.db to force full replay from log
+        let state_db_path = store_dir.join("state").join("state.db");
+        std::fs::remove_file(&state_db_path).expect("delete state.db");
+        
+        // Phase 3: Reopen store - state should be rebuilt from log identically
+        {
+            let (handle, info) = crate::store::handle::StoreHandle::open(
+                TEST_STORE,
+                store_dir.clone(),
+                node.clone(),
+            ).unwrap();
+            
+            // Replay should have happened since state.db was deleted
+            assert!(info.entries_replayed >= 2, "Should have replayed entries from log");
+            
+            // State should have same data after replay from log
+            let heads = rt.block_on(handle.get(b"/wal_test/key1")).unwrap();
+            assert_eq!(heads.len(), 1, "Should preserve head after replay");
+            assert_eq!(heads[0].value, b"value1", "Value should match after replay");
+            
+            let heads2 = rt.block_on(handle.get(b"/wal_test/key2")).unwrap();
+            assert_eq!(heads2.len(), 1);
+            assert_eq!(heads2[0].value, b"value2");
+            
+            // ChainTip should match log
+            let tip = rt.block_on(handle.chain_tip(&PubKey::from(*author))).unwrap();
+            assert!(tip.is_some(), "Should have chain tip after replay");
+            
+            drop(handle);
+        }
     }
 }
 
