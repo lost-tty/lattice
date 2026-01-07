@@ -31,7 +31,7 @@ pub trait Merge {
     /// FWW returning full Head.
     fn fww_head(&self) -> Option<&Head>;
     
-    /// All heads sorted by HLC (newest first), excluding tombstones.
+    /// All heads sorted by HLC (newest first), INCLUDING tombstones.
     fn all_heads(&self) -> Vec<&Head>;
 }
 
@@ -45,23 +45,37 @@ impl Merge for [Head] {
     }
     
     fn all(&self) -> Vec<Vec<u8>> {
-        self.all_heads().into_iter().map(|h| h.value.clone()).collect()
+        self.all_heads().into_iter()
+            .filter(|h| !h.tombstone)
+            .map(|h| h.value.clone())
+            .collect()
     }
     
     fn lww_head(&self) -> Option<&Head> {
-        self.iter()
-            .filter(|h| !h.tombstone)
-            .max_by(|a, b| a.hlc.cmp(&b.hlc).then_with(|| a.author.cmp(&b.author)))
+        let winner = self.iter()
+            .max_by(|a, b| a.hlc.cmp(&b.hlc).then_with(|| a.author.cmp(&b.author)))?;
+            
+        if winner.tombstone {
+            None
+        } else {
+            Some(winner)
+        }
     }
     
     fn fww_head(&self) -> Option<&Head> {
-        self.iter()
-            .filter(|h| !h.tombstone)
-            .min_by(|a, b| a.hlc.cmp(&b.hlc).then_with(|| a.author.cmp(&b.author)))
+        let winner = self.iter()
+            .min_by(|a, b| a.hlc.cmp(&b.hlc).then_with(|| a.author.cmp(&b.author)))?;
+            
+        if winner.tombstone {
+            None
+        } else {
+            Some(winner)
+        }
     }
     
     fn all_heads(&self) -> Vec<&Head> {
-        let mut sorted: Vec<_> = self.iter().filter(|h| !h.tombstone).collect();
+        let mut sorted: Vec<_> = self.iter().collect();
+        // Newest HLC first
         sorted.sort_by(|a, b| b.hlc.cmp(&a.hlc).then_with(|| b.author.cmp(&a.author)));
         sorted
     }
@@ -131,12 +145,39 @@ mod tests {
     }
 
     #[test]
-    fn test_lww_skips_tombstones() {
+    fn test_tombstone_wins_if_newer() {
         let heads = vec![
             make_head(100, b"old", false),
             make_head(200, b"deleted", true),
         ];
-        assert_eq!(heads.lww(), Some(b"old".to_vec()));
+        // Should return None because head(200) > head(100) and it is a tombstone.
+        assert_eq!(heads.lww(), None);
+    }
+
+    #[test]
+    fn test_fww_respects_early_tombstone() {
+        let heads = vec![
+            make_head(100, b"deleted", true),
+            make_head(200, b"newer_value", false),
+        ];
+        // FWW: Oldest is 100 (tombstone). Should return None.
+        assert_eq!(heads.fww(), None);
+    }
+
+    #[test]
+    fn test_all_heads_includes_tombstones() {
+        let heads = vec![
+            make_head(100, b"old", false),
+            make_head(200, b"deleted", true),
+        ];
+        let all = heads.all_heads(); // Should include tombstone
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].hlc.wall_time, 200); // Sorted newest first
+        assert!(all[0].tombstone);
+        
+        let valid = heads.all(); // Should filter tombstone
+        assert_eq!(valid.len(), 1);
+        assert_eq!(valid[0], b"old");
     }
 
     #[test]

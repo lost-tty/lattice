@@ -138,8 +138,8 @@ impl MeshNetwork {
                     }
                 }
                 NodeEvent::NetworkStore { store, peer_manager } => {
-                    tracing::info!(store_id = %store.writer().id(), "Event: NetworkStore → registering store");
-                    server.register_store(store.writer().clone(), peer_manager).await;
+                    tracing::info!(store_id = %store.id(), "Event: NetworkStore → registering store");
+                    server.register_store(store.clone(), peer_manager).await;
                 }
                 NodeEvent::SyncWithPeer { store_id, peer } => {
                     let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {

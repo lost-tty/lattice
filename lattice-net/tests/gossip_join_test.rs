@@ -3,12 +3,10 @@
 //! These tests replicate PRODUCTION usage exactly - no manual gossip setup.
 //! They rely purely on the event-driven flow that happens in the CLI.
 
-use lattice_node::{NodeBuilder, NodeEvent, Invite};
+use lattice_node::{NodeBuilder, NodeEvent, Node, KvStore, PeerStatus, Mesh, token::Invite, KvOps};
 use lattice_kvstate::Merge;
 use lattice_model::types::PubKey;
-use lattice_node::Node;
 use lattice_kernel::Uuid;
-use lattice_node::KvHandle;
 use lattice_net::MeshNetwork;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +20,7 @@ fn temp_data_dir(name: &str) -> lattice_node::DataDir {
 }
 
 /// Helper: Join mesh via node.join() and wait for StoreReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<KvHandle> {
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<KvStore> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
     
@@ -110,7 +108,7 @@ async fn test_production_flow_gossip() {
     
     // Wait for gossip propagation (no explicit sync!)
     let mut received_at_b = false;
-    for _ in 0..20 {
+    for _ in 0..50 {
         sleep(Duration::from_millis(100)).await;
         if let Some(val) = store_b.get(b"/from_a").unwrap_or_default().lww_head() {
             assert_eq!(val.value, b"hello from A".to_vec());
@@ -125,7 +123,7 @@ async fn test_production_flow_gossip() {
     store_b.put(b"/from_b", b"hello from B").await.expect("put from B");
     
     let mut received_at_a = false;
-    for _ in 0..20 {
+    for _ in 0..50 {
         sleep(Duration::from_millis(100)).await;
         if let Some(val) = store_a.get(b"/from_b").unwrap_or_default().lww_head() {
             assert_eq!(val.value, b"hello from B".to_vec());

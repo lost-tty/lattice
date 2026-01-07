@@ -1,7 +1,7 @@
 //! Local Lattice node API with multi-store support
 
 use crate::{
-    DataDir, MetaStore,
+    DataDir, MetaStore, KvOps,
     auth::PeerProvider,
     meta_store::MetaStoreError,
     store_registry::StoreRegistry,
@@ -12,7 +12,7 @@ use lattice_kernel::{
     NodeIdentity, NodeError as IdentityError, PeerStatus, Uuid,
     store::{StateError, Store, LogError},
 };
-use crate::KvHandle;
+use crate::KvStore;
 use lattice_kvstate::{KvState, KvHandleError};
 use lattice_model::types::PubKey;
 use std::collections::HashMap;
@@ -111,12 +111,12 @@ pub struct PeerInfo {
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
     /// Store is ready (opened and available) - informational only
-    StoreReady(KvHandle),
+    StoreReady(KvStore),
     /// Mesh is fully initialized and ready (store + network + perms)
     MeshReady(Mesh),
-    /// Network store ready (store + peer manager for networking)
+    /// Network store opened
     NetworkStore { 
-        store: KvHandle, 
+        store: KvStore, 
         peer_manager: std::sync::Arc<PeerManager>,
     },
     /// Sync requested (catch up with peers)
@@ -293,10 +293,10 @@ impl Node {
         }
         
         for (mesh_id, _info) in meshes {
-            let (handle, _) = self.registry.get_or_open(mesh_id)?;
+            let (store, _) = self.registry.get_or_open(mesh_id)?;
             
             // Create Mesh (handles PeerManager creation internally)
-            let mesh = Mesh::create(handle.clone(), &self.node).await
+            let mesh = Mesh::create(store.clone(), &self.node).await
                 .map_err(|e| NodeError::Actor(e.to_string()))?;
             
             // Store mesh in node
@@ -335,8 +335,8 @@ impl Node {
         self.meta.add_mesh(store_id, &mesh_info)?;
         
         // Open the store and write our node info as separate keys
-        let (replica, _) = self.registry.get_or_open(store_id)?;
-        let kv = crate::KvHandle::new(replica.state_arc(), replica.clone());
+        let (store, _) = self.registry.get_or_open(store_id)?;
+        let kv = store.clone();
         let pubkey_hex = hex::encode(self.node.public_key());
         
         // Store node metadata as separate keys
@@ -351,13 +351,11 @@ impl Node {
             .unwrap_or(0);
         let added_at_key = format!("/nodes/{}/added_at", pubkey_hex);
         kv.put(added_at_key.as_bytes(), added_at.to_string().as_bytes()).await?;
-        
-        // Write status = active
         let status_key = format!("/nodes/{}/status", pubkey_hex);
         let _ = kv.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await;
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = Mesh::create(replica, &self.node).await
+        let mesh = Mesh::create(store, &self.node).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node
@@ -406,11 +404,10 @@ impl Node {
         mesh_id: Uuid, 
         authorized_authors_bytes: Vec<Vec<u8>>, 
         via_peer: PubKey
-    ) -> Result<KvHandle, NodeError> {
+    ) -> Result<KvStore, NodeError> {
         // 1. Initialize Mesh (must be done first)
-        let handle = self.complete_join(mesh_id, Some(via_peer)).await?;
+        let store = self.complete_join(mesh_id, Some(via_peer)).await?;
         
-        // 2. Set bootstrap authors (now that mesh exists and peer manager is ready)
         // 2. Set bootstrap authors (now that mesh exists and peer manager is ready)
         let bootstrap_authors: Vec<PubKey> = authorized_authors_bytes.iter()
             .filter_map(|b| PubKey::try_from(b.as_slice()).ok())
@@ -428,13 +425,13 @@ impl Node {
         let mesh = self.mesh_by_id(mesh_id).expect("mesh initialized");
         let _ = self.event_tx.send(NodeEvent::MeshReady(mesh));
         
-        Ok(handle)
+        Ok(store)
     }
     
     /// Complete joining a mesh - creates store with given UUID, caches handle.
     /// Called after receiving store_id from peer's JoinResponse.
     /// If `via_peer` is provided, server will sync with that peer after registration.
-    pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<KvHandle, NodeError> {
+    pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<KvStore, NodeError> {
         // Create local store with that UUID
         self.registry.create(store_id)?;
         
@@ -450,10 +447,10 @@ impl Node {
         self.meta.add_mesh(store_id, &mesh_info)?;
         
         // Open and cache the handle (registry caches it)
-        let (handle, _) = self.registry.get_or_open(store_id)?;
+        let (store, _) = self.registry.get_or_open(store_id)?;
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = Mesh::create(handle.clone(), &self.node).await
+        let mesh = Mesh::create(store.clone(), &self.node).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node
@@ -467,8 +464,7 @@ impl Node {
         let _ = self.publish_name_to(store_id).await;
         
         // Emit StoreReady for listeners waiting on join completion (like CLI)
-        let store_handle = KvHandle::new(handle.state_arc(), handle.clone());
-        let _ = self.event_tx.send(NodeEvent::StoreReady(store_handle.clone()));
+        let _ = self.event_tx.send(NodeEvent::StoreReady(store.clone()));
         
         // Emit NetworkStore event - server will register for networking
         let _ = self.event_tx.send(NodeEvent::NetworkStore { 
@@ -481,8 +477,7 @@ impl Node {
             let _ = self.event_tx.send(NodeEvent::SyncWithPeer { store_id, peer });
         }
         
-        let store_handle = KvHandle::new(handle.state_arc(), handle);
-        Ok(store_handle)
+        Ok(store)
     }
     
     /// Accept a peer's join request - verifies they're invited, sets active, returns join info
@@ -533,10 +528,8 @@ impl Node {
         Ok(store_id)
     }
 
-    pub async fn open_store(&self, store_id: Uuid) -> Result<(KvHandle, StoreInfo), NodeError> {
-        let (handle, info) = self.registry.get_or_open(store_id)?;
-        let kv_handle = KvHandle::new(handle.state_arc(), handle);
-        Ok((kv_handle, info))
+    pub async fn open_store(&self, store_id: Uuid) -> Result<(KvStore, StoreInfo), NodeError> {
+        Ok(self.registry.get_or_open(store_id)?)
     }
     
     /// Get PeerManager for a specific mesh
@@ -682,21 +675,21 @@ mod tests {
         let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
         
         // Get baseline seq after init
-        let baseline = store.writer().log_seq().await;
+        let baseline = store.log_seq().await;
         
         // Put twice with same value - second should be idempotent
         store.put(b"/key", b"value").await.expect("put 1");
-        assert_eq!(store.writer().log_seq().await, baseline + 1);
+        assert_eq!(store.log_seq().await, baseline + 1);
         
         store.put(b"/key", b"value").await.expect("put 2");
-        assert_eq!(store.writer().log_seq().await, baseline + 1, "Second put should be idempotent (no new entry)");
+        assert_eq!(store.log_seq().await, baseline + 1, "Second put should be idempotent (no new entry)");
         
         // Delete twice - second should be idempotent  
         store.delete(b"/key").await.expect("delete 1");
-        assert_eq!(store.writer().log_seq().await, baseline + 2);
+        assert_eq!(store.log_seq().await, baseline + 2);
         
         store.delete(b"/key").await.expect("delete 2");
-        assert_eq!(store.writer().log_seq().await, baseline + 2, "Second delete should be idempotent (no new entry)");
+        assert_eq!(store.log_seq().await, baseline + 2, "Second delete should be idempotent (no new entry)");
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -828,7 +821,7 @@ mod tests {
         let store_b = node_b.complete_join(invite.mesh_id, None).await.expect("B join");
         
         // Verify B has the same store ID
-        assert_eq!(store_b.writer().id(), invite.mesh_id);
+        assert_eq!(store_b.id(), invite.mesh_id);
         
         // Step 6: A writes data
         store_a.put(b"/key", b"from A").await.expect("A put");

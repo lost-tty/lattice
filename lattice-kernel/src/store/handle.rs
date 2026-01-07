@@ -12,6 +12,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use tokio::sync::{broadcast, mpsc};
+use tokio_stream::wrappers::BroadcastStream;
+use futures_util::StreamExt;
+use lattice_model::replication::EntryStreamProvider;
+use prost::Message;
+
+/// Handle to the store actor thread
+pub type StoreActorHandle = std::thread::JoinHandle<()>;
 
 /// Information about a store open operation
 #[derive(Debug, Clone)]
@@ -131,6 +138,10 @@ impl<S: StateMachine> Store<S> {
     /// Get a cloned Arc to the state machine.
     pub fn state_arc(&self) -> Arc<S> {
         self.state.clone()
+    }
+
+    pub fn actor_handle(&self) -> Option<&StoreActorHandle> {
+        self.actor_handle.as_ref()
     }
 
     /// Subscribe to receive entries as they're committed locally
@@ -375,6 +386,14 @@ impl<S: StateMachine> Store<S> {
 use lattice_model::types::Hash;
 use lattice_model::{StateWriter, StateWriterError};
 
+// ==================== AsRef implementation ====================
+
+impl<S> AsRef<S> for Store<S> {
+    fn as_ref(&self) -> &S {
+        &self.state
+    }
+}
+
 impl<S: StateMachine> StateWriter for Store<S> {
     fn submit(
         &self,
@@ -486,11 +505,6 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
     }
 }
 // ==================== EntryStreamProvider implementation ====================
-
-use lattice_model::replication::EntryStreamProvider;
-use tokio_stream::wrappers::BroadcastStream;
-use futures_util::StreamExt;
-use prost::Message;
 
 impl<S: StateMachine + Send + Sync + 'static> EntryStreamProvider for Store<S> {
     fn subscribe_entries(&self) -> Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + Unpin> {

@@ -16,6 +16,7 @@ regex-syntax = "0.8"
 blake3 = { workspace = true }
 tokio = { workspace = true }
 futures-util.workspace = true
+tokio-stream = { version = "0.1.18", features = ["sync"] }
 
 [build-dependencies]
 prost-build = { workspace = true }

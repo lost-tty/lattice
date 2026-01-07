@@ -185,26 +185,26 @@ pub fn render_peer_sync_matrix(
 // --- Store Status Writers ---
 
 use crate::commands::Writer;
-use lattice_node::{Node, KvHandle};
+use lattice_node::{Node, KvStore};
 use std::io::Write;
 
 /// Write basic store summary (ID, seq, keys, logs, orphans, common HLC)
-pub async fn write_store_summary(w: &mut Writer, h: &KvHandle) {
-    let _ = writeln!(w, "Store ID: {}", h.writer().id());
-    let _ = writeln!(w, "Log Seq:  {}", h.writer().log_seq().await);
-    let _ = writeln!(w, "Applied:  {}", h.writer().applied_seq().await.unwrap_or(0));
+pub async fn write_store_summary(w: &mut Writer, h: &KvStore) {
+    let _ = writeln!(w, "Store ID: {}", h.id());
+    let _ = writeln!(w, "Log Seq:  {}", h.log_seq().await);
+    let _ = writeln!(w, "Applied:  {}", h.applied_seq().await.unwrap_or(0));
     
     let all = h.state().list_heads_all().unwrap_or_default();
     let _ = writeln!(w, "Keys:     {}", all.len());
     
     // Display common HLC (min of max HLCs across all authors)
-    if let Ok(sync_state) = h.writer().sync_state().await {
+    if let Ok(sync_state) = h.sync_state().await {
         if let Some(hlc) = sync_state.common_hlc() {
             let _ = writeln!(w, "HLC:      {}", hlc);
         }
     }
     
-    let (file_count, total_size, orphan_count) = h.writer().log_stats().await;
+    let (file_count, total_size, orphan_count) = h.log_stats().await;
     if file_count > 0 {
         let _ = writeln!(w, "Logs:     {} files, {} bytes", file_count, total_size);
     }
@@ -214,24 +214,24 @@ pub async fn write_store_summary(w: &mut Writer, h: &KvHandle) {
 }
 
 /// Write log file details
-pub async fn write_log_files(w: &mut Writer, h: &KvHandle) {
-    let (file_count, _, _) = h.writer().log_stats().await;
+pub async fn write_log_files(w: &mut Writer, h: &KvStore) {
+    let (file_count, _, _) = h.log_stats().await;
     if file_count > 0 {
         let _ = writeln!(w);
         let _ = writeln!(w, "Log Files:");
-        for (name, size, checksum) in h.writer().log_stats_detailed().await {
+        for (name, size, checksum) in h.log_stats_detailed().await {
             let _ = writeln!(w, "  {} {:>10} bytes  {}", checksum, size, name);
         }
     }
 }
 
 /// Write orphan entry details
-pub async fn write_orphan_details(w: &mut Writer, h: &KvHandle) {
-    let (_, _, orphan_count) = h.writer().log_stats().await;
+pub async fn write_orphan_details(w: &mut Writer, h: &KvStore) {
+    let (_, _, orphan_count) = h.log_stats().await;
     if orphan_count > 0 {
         let _ = writeln!(w);
         let _ = writeln!(w, "Orphaned Entries:");
-        for orphan in h.writer().orphan_list().await {
+        for orphan in h.orphan_list().await {
             use chrono::{DateTime, Utc};
             let received = DateTime::<Utc>::from_timestamp(orphan.received_at as i64, 0)
                 .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
@@ -244,8 +244,8 @@ pub async fn write_orphan_details(w: &mut Writer, h: &KvHandle) {
 }
 
 /// Write peer sync state matrix
-pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &KvHandle) {
-    let peer_states = h.writer().list_peer_sync_states().await;
+pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &KvStore) {
+    let peer_states = h.list_peer_sync_states().await;
     if peer_states.is_empty() {
         return;
     }
@@ -253,7 +253,7 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &KvHandle) {
     let _ = writeln!(w);
     
     // Get peer names from the mesh for this store
-    let known_peers = if let Some(mesh) = node.mesh_by_id(h.writer().id()) {
+    let known_peers = if let Some(mesh) = node.mesh_by_id(h.id()) {
         mesh.list_peers().await.unwrap_or_default()
     } else {
         Vec::new()
@@ -263,7 +263,7 @@ pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &KvHandle) {
         .collect();
     
     // Build our_authors map from our sync state
-    let our_state = h.writer().sync_state().await.ok();
+    let our_state = h.sync_state().await.ok();
     let our_authors: std::collections::HashMap<PubKey, u64> = our_state.as_ref()
         .map(|s| s.authors().iter().map(|(k, v)| (*k, v.seq)).collect())
         .unwrap_or_default();

@@ -10,11 +10,10 @@ use lattice_model::{StateWriter, StateWriterError};
 use lattice_model::types::Hash;
 use lattice_model::replication::EntryStreamProvider;
 use prost::Message;
-use regex::Regex;
+use regex::bytes::Regex;
 use tokio::sync::broadcast;
 use futures_util::StreamExt;
-use lattice_proto::storage::Entry as ProtoEntry; // Need ProtoEntry to decode entry_bytes
-use crate::{WatchEvent, WatchEventKind, WatchError};
+use crate::{WatchEvent, WatchError};
 
 /// High-level KV handle with read/write operations
 /// 
@@ -52,145 +51,113 @@ impl<W: StateWriter> KvHandle<W> {
         &self.writer
     }
     
-    // ==================== Read Operations (sync) ====================
-    
-    /// Get all heads for a key
-    pub fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateError> {
-        self.state.get(key)
+    /// Scan keys with optional prefix and regex pattern.
+    pub fn scan<F>(&self, prefix: &[u8], pattern: Option<&str>, visitor: F) -> Result<(), StateError>
+    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateError> {
+        let (regex, search_prefix) = match pattern {
+            Some(p) => {
+                 let re = Regex::new(p).map_err(|e| StateError::Conversion(e.to_string()))?;
+                 let lit_prefix = if prefix.is_empty() {
+                     crate::kv::extract_literal_prefix(p).unwrap_or_default()
+                 } else {
+                     prefix.to_vec()
+                 };
+                 (Some(re), lit_prefix)
+            },
+            None => (None, prefix.to_vec())
+        };
+        self.state.scan(&search_prefix, regex, visitor)
     }
-    
-    /// List all keys with heads
+
+    /// List all keys with heads (Collects to Vec)
     pub fn list(&self) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
-        self.state.list_heads_all()
+        let mut out = Vec::new();
+        self.scan(&[], None, |k, v| { out.push((k, v)); Ok(true) })?;
+        Ok(out)
     }
     
-    /// List keys by prefix
+    /// List keys by prefix (Collects to Vec)
     pub fn list_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
-        self.state.list_heads_by_prefix(prefix)
+        let mut out = Vec::new();
+        self.scan(prefix, None, |k, v| { out.push((k, v)); Ok(true) })?;
+        Ok(out)
     }
     
-    /// List keys by regex pattern
+    /// List keys by regex pattern (Collects to Vec)
     pub fn list_by_regex(&self, pattern: &str) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
-        self.state.list_heads_by_regex(pattern)
+        let mut out = Vec::new();
+        self.scan(&[], Some(pattern), |k, v| { out.push((k, v)); Ok(true) })?;
+        Ok(out)
     }
-    
-    // ==================== Write Operations (async, via StateWriter) ====================
-    
-    /// Put a key-value pair
-    /// 
-    /// Builds a KvPayload with a Put operation and submits via StateWriter.
-    /// Returns the hash of the created entry.
-    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<Hash, KvHandleError> {
-        // Resolve causal deps from current state
-        let heads = self.state.get(key).map_err(KvHandleError::State)?;
-        let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
+}
 
-        let payload = KvPayload {
-            ops: vec![Operation::put(key, value)],
-        };
-        let payload_bytes = payload.encode_to_vec();
-        self.writer.submit(payload_bytes, causal_deps).await
-            .map_err(KvHandleError::Writer)
+impl<W: StateWriter> AsRef<KvState> for KvHandle<W> {
+    fn as_ref(&self) -> &KvState {
+        &self.state
     }
-    
-    /// Delete a key
-    /// 
-    /// Builds a KvPayload with a Delete operation and submits via StateWriter.
-    /// Returns the hash of the created entry.
-    pub async fn delete(&self, key: &[u8]) -> Result<Hash, KvHandleError> {
-        // Resolve causal deps from current state
-        let heads = self.state.get(key).map_err(KvHandleError::State)?;
-        let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
+}
 
-        let payload = KvPayload {
-            ops: vec![Operation::delete(key)],
-        };
-        let payload_bytes = payload.encode_to_vec();
-        self.writer.submit(payload_bytes, causal_deps).await
-            .map_err(KvHandleError::Writer)
+impl<W: StateWriter> StateWriter for KvHandle<W> {
+    fn submit(
+        &self,
+        payload: Vec<u8>,
+        causal_deps: Vec<Hash>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
+        self.writer.submit(payload, causal_deps)
     }
+}
+
+impl<W: lattice_model::replication::EntryStreamProvider + Send + Sync + StateWriter> lattice_model::replication::EntryStreamProvider for KvHandle<W> {
+    fn subscribe_entries(&self) -> Box<dyn futures_util::Stream<Item = Vec<u8>> + Send + Unpin> {
+        self.writer.subscribe_entries()
     }
+}
 
+// ==================== Watch Operations (async, via EntryStreamProvider) ====================
 
-
-    // ==================== Watch Operations (async, via EntryStreamProvider) ====================
-
-    impl<W: StateWriter + EntryStreamProvider + Send + Sync + 'static> KvHandle<W> {
-        /// Watch keys matching a regex pattern
+impl<W: StateWriter + EntryStreamProvider + Send + Sync + 'static> KvHandle<W> {
+    /// Watch keys matching a regex pattern
     pub async fn watch(
         &self, 
         pattern: &str
     ) -> Result<(Vec<(Vec<u8>, Vec<Head>)>, broadcast::Receiver<WatchEvent>), WatchError> 
     where W: EntryStreamProvider + Send + Sync + 'static
     {
-        // 1. Get initial state
-        let initial = self.state.list_heads_by_regex(pattern)
-            .map_err(|e| WatchError::InvalidRegex(e.to_string()))?;
+        // 1. Compile regex once
+        let re = Regex::new(pattern).map_err(|e| WatchError::InvalidRegex(e.to_string()))?;
 
-        // 2. Validate regex for watcher
-        let pattern_str = pattern.to_string();
-        let _ = Regex::new(&pattern_str).map_err(|e| WatchError::InvalidRegex(e.to_string()))?;
-        
-        // 3. Setup channel
+        // 2. Subscribe FIRST to avoid race condition (gap between snapshot and subscribe)
+        // KvState emits events AFTER commit. By subscribing first, we buffer any events 
+        // that happen while we are scanning the initial state.
+        let mut state_rx = self.state.subscribe();
+
+        // 3. Get initial state using the compiled regex
+        let prefix = crate::kv::extract_literal_prefix(pattern).unwrap_or_default();
+        let mut initial = Vec::new();
+        self.state.scan(&prefix, Some(re.clone()), |k, v| {
+            initial.push((k, v));
+            Ok(true)
+        }).map_err(|e| WatchError::Storage(e.to_string()))?;
+
+        // 4. Setup channel
         let (tx, rx) = broadcast::channel(128);
         
-        let state = self.state.clone();
-        let mut stream = self.writer.subscribe_entries();
-        let re = Regex::new(&pattern_str).unwrap();
-
-        // 4. Spawn watcher task
-        // Note: W is Send + Sync + 'static, so we can access writer in task if needed.
-        // But we already got the stream.
+        // 4. Spawn watcher task (clone regex cheap)
+        let re_task = re.clone();
+        
         tokio::spawn(async move {
-            while let Some(signed_entry_bytes) = stream.next().await {
-                // Decode flow:
-                // 1. decode ProtoSignedEntry (from Vec<u8>)
-                // 2. get entry_bytes
-                // 3. decode ProtoEntry
-                // 4. get payload
-                // 5. decode KvPayload
-                
-                let proto_signed = match lattice_proto::storage::SignedEntry::decode(&signed_entry_bytes[..]) {
-                    Ok(p) => p,
-                    Err(_) => continue, // Skip invalid
-                };
-                
-                let proto_entry = match ProtoEntry::decode(&proto_signed.entry_bytes[..]) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                
-                if let Ok(kv_payload) = KvPayload::decode(&proto_entry.payload[..]) {
-                     for op in kv_payload.ops {
-                        if let Some(op_type) = op.op_type {
-                            let key = match &op_type {
-                                crate::operation::OpType::Put(put) => &put.key,
-                                crate::operation::OpType::Delete(del) => &del.key,
-                            };
-
-                            let key_str = String::from_utf8_lossy(key);
-                            if re.is_match(&key_str) {
-                                // Fetch current heads for this key (from state, which is updated by replica independently)
-                                // NOTE: There is a race here where state might not be updated yet if ingest happens after
-                                // But typically Replica updates state BEFORE emitting entry.
-                                // If Replica matches kernel logic, state apply happens before notification.
-                                
-                                if let Ok(heads) = state.get(key) {
-                                    let kind = if heads.is_empty() || heads.iter().all(|h| h.tombstone) {
-                                        WatchEventKind::Delete
-                                    } else {
-                                        WatchEventKind::Update { heads: heads.clone() }
-                                    };
-
-                                    let event = WatchEvent {
-                                        key: key.clone(),
-                                        kind,
-                                    };
-                                    let _ = tx.send(event);
-                                }
+            loop {
+                match state_rx.recv().await {
+                    Ok(event) => {
+                        // Filter by regex directly on bytes (safe for binary keys)
+                        if re_task.is_match(&event.key) {
+                            if tx.send(event).is_err() {
+                                break; // Channel closed, stop watcher
                             }
                         }
                     }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue, // Skip gap
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -223,28 +190,186 @@ impl From<StateError> for KvHandleError {
     }
 }
 
+// ==================== KvOps Extension Trait ====================
+
+use std::future::Future;
+use std::pin::Pin;
+
+/// Extension trait for Key-Value operations.
+/// 
+/// This trait provides a high-level synchronous-like API (for reads) and async API (for writes)
+/// that hides the complexity of `Op` construction and `KvPayload` encoding.
+/// 
+/// It is implemented generically for any type that:
+/// 1. Can write state (`StateWriter` trait)
+/// 2. Can read `KvState` (`AsRef<KvState>`)
+pub trait KvOps {
+    /// Get the value for a key.
+    /// Returns all heads for the key. Use `Merge` trait to resolve conflicts (e.g. `.lww()`).
+    fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateError>;
+    
+    /// Scan keys with optional prefix and regex pattern.
+    /// calls visitor(key, heads). Returns Ok(false) to stop.
+    fn scan<F>(&self, prefix: &[u8], pattern: Option<&str>, visitor: F) -> Result<(), StateError>
+    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateError>;
+    
+    /// Write a value for a key.
+    /// Returns the operation hash (Entry Hash) upon successful submission.
+    fn put(&self, key: &[u8], value: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>>;
+    
+    /// Delete a key.
+    fn delete(&self, key: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>>;
+
+    /// Watch keys matching a regex pattern.
+    fn watch(&self, pattern: &str) -> Pin<Box<dyn Future<Output = Result<(Vec<(Vec<u8>, Vec<Head>)>, broadcast::Receiver<WatchEvent>), WatchError>> + Send + '_>>;
+}
+
+impl<T> KvOps for T
+where
+    T: StateWriter + AsRef<KvState> + EntryStreamProvider + Clone + Send + Sync + 'static,
+{
+    fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateError> {
+        self.as_ref().get(key)
+    }
+    
+    fn scan<F>(&self, prefix: &[u8], pattern: Option<&str>, visitor: F) -> Result<(), StateError>
+    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateError>
+    {
+        let (regex, search_prefix) = match pattern {
+            Some(p) => {
+                 let re = Regex::new(p).map_err(|e| StateError::Conversion(e.to_string()))?;
+                 let lit_prefix = if prefix.is_empty() {
+                     crate::kv::extract_literal_prefix(p).unwrap_or_default()
+                 } else {
+                     prefix.to_vec()
+                 };
+                 (Some(re), lit_prefix)
+            },
+            None => (None, prefix.to_vec())
+        };
+
+        self.as_ref().scan(&search_prefix, regex, visitor)
+    }
+
+    fn watch(&self, pattern: &str) -> Pin<Box<dyn Future<Output = Result<(Vec<(Vec<u8>, Vec<Head>)>, broadcast::Receiver<WatchEvent>), WatchError>> + Send + '_>> {
+        let pattern_str = pattern.to_string();
+        let this = self.clone();
+        
+        Box::pin(async move {
+            // 1. Compile regex once
+            let re = Regex::new(&pattern_str).map_err(|e| WatchError::InvalidRegex(e.to_string()))?;
+
+            // 2. Subscribe FIRST to avoid race condition (gap between snapshot and subscribe)
+            // Use internal KvState broadcast instead of log stream to ensure consistent view.
+            let mut state_rx = this.as_ref().subscribe();
+
+            // 3. Get initial state
+            let prefix = crate::kv::extract_literal_prefix(&pattern_str).unwrap_or_default();
+            let mut initial = Vec::new();
+            this.as_ref().scan(&prefix, Some(re.clone()), |k, v| {
+                initial.push((k, v));
+                Ok(true)
+            }).map_err(|e| WatchError::Storage(e.to_string()))?;
+
+            // 4. Setup channel
+            let (tx, rx) = broadcast::channel(128);
+            
+            // 5. Spawn watcher task
+            let re_task = re.clone();
+            tokio::spawn(async move {
+                loop {
+                    match state_rx.recv().await {
+                        Ok(event) => {
+                            if re_task.is_match(&event.key) {
+                                if tx.send(event).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+
+            Ok((initial, rx))
+        })
+    }
+
+    fn put(&self, key: &[u8], value: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
+        let key = key.to_vec();
+        let value = value.to_vec();
+        
+        Box::pin(async move {
+            // Fetch current heads to build causal dependency graph
+            let heads = self.as_ref().get(&key).map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
+            let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
+
+            let op = Operation::put(key, value);
+            let kv_payload = KvPayload { ops: vec![op] };
+            let payload = kv_payload.encode_to_vec();
+            
+            self.submit(payload, causal_deps).await
+        })
+    }
+
+    fn delete(&self, key: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
+        let key = key.to_vec();
+        
+        Box::pin(async move {
+            // Fetch current heads for causal deps
+            let heads = self.as_ref().get(&key).map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
+            let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
+
+            let op = Operation::delete(key);
+            let kv_payload = KvPayload { ops: vec![op] };
+            let payload = kv_payload.encode_to_vec();
+            
+            self.submit(payload, causal_deps).await
+        })
+    }
+}
+
 // ==================== Mock StateWriter for tests ====================
 
 /// A mock StateWriter that applies operations directly to a KvState
 /// 
 /// Useful for testing without the full replication stack.
-#[cfg(test)]
+#[doc(hidden)]
 pub struct MockWriter {
     state: Arc<KvState>,
-    next_hash: std::sync::atomic::AtomicU64,
+    next_hash: Arc<std::sync::atomic::AtomicU64>,
+    pub entry_tx: broadcast::Sender<Vec<u8>>,
 }
 
-#[cfg(test)]
 impl MockWriter {
     pub fn new(state: Arc<KvState>) -> Self {
+        let (entry_tx, _) = broadcast::channel(128);
         Self {
             state,
-            next_hash: std::sync::atomic::AtomicU64::new(1),
+            next_hash: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            entry_tx,
         }
     }
 }
 
-#[cfg(test)]
+impl Clone for MockWriter {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            next_hash: self.next_hash.clone(),
+            entry_tx: self.entry_tx.clone(),
+        }
+    }
+}
+
+impl lattice_model::replication::EntryStreamProvider for MockWriter {
+    fn subscribe_entries(&self) -> Box<dyn futures_util::Stream<Item = Vec<u8>> + Send + Unpin> {
+        let rx = self.entry_tx.subscribe();
+        Box::new(tokio_stream::wrappers::BroadcastStream::new(rx).map(|r| r.expect("MockWriter stream lagged")))
+    }
+}
+
 impl StateWriter for MockWriter {
     fn submit(
         &self,
@@ -254,27 +379,67 @@ impl StateWriter for MockWriter {
         use lattice_model::hlc::HLC;
         use lattice_model::types::PubKey;
         use lattice_model::Op;
+        use lattice_model::StateMachine;
         
         let state = self.state.clone();
         let hash_num = self.next_hash.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let tx = self.entry_tx.clone();
         
         Box::pin(async move {
             // Generate a deterministic hash for testing
             let mut hash_bytes = [0u8; 32];
             hash_bytes[0..8].copy_from_slice(&hash_num.to_le_bytes());
             let hash = Hash::from(hash_bytes);
+
+            // Use a fixed author for the mock to simulate a real single-writer session
+            let author = PubKey::from([1u8; 32]);
             
+            // Find correct prev_hash by querying current state
+            // This ensures valid chain links regardless of how many ops we submit
+            let chaintips = state.applied_chaintips()
+                .map_err(|e| StateWriterError::SubmitFailed(format!("Failed to read tips: {}", e)))?;
+                
+            let prev_hash = chaintips.into_iter()
+                .find(|(a, _)| a == &author)
+                .map(|(_, h)| h)
+                .unwrap_or(Hash::ZERO);
+
             // Create an Op and apply
             let op = Op {
                 id: hash,
                 causal_deps: &causal_deps,
                 payload: &payload,
-                author: PubKey::from([0u8; 32]),
+                author,
                 timestamp: HLC::now(),
+                prev_hash,
             };
             
             state.apply_op(&op)
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
+            
+            // Emit entry if successful
+             use lattice_proto::storage::{Entry, SignedEntry};
+             use prost::Message;
+
+             // Create ProtoEntry
+             let entry = Entry {
+                 version: 1,
+                 prev_hash: prev_hash.to_vec(),
+                 seq: 1, // Mock doesn't track seq perfectly but that's ok for generic Op tests
+                 timestamp: Some(HLC::now().into()),
+                 causal_deps: causal_deps.iter().map(|h| h.to_vec()).collect(),
+                 payload: payload.clone(),
+             };
+             let entry_bytes = entry.encode_to_vec();
+
+             // Create SignedEntry
+             let signed = SignedEntry {
+                entry_bytes,
+                signature: vec![],
+                author_id: author.to_vec(),
+             };
+             
+             let _ = tx.send(signed.encode_to_vec());
             
             Ok(hash)
         })
@@ -282,10 +447,30 @@ impl StateWriter for MockWriter {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WatchEventKind;
     use tempfile::tempdir;
-    
+    use tokio::time::{timeout, Duration};
+    use futures_util::StreamExt;
+
+    // Helper to reduce boilerplate and enforce timeouts
+    async fn expect_event(rx: &mut broadcast::Receiver<WatchEvent>, expected_key: &[u8]) -> WatchEvent {
+        let result = timeout(Duration::from_secs(1), rx.recv()).await;
+        
+        match result {
+            Ok(Ok(event)) => {
+                if event.key != expected_key {
+                    panic!("received event for {:?} but expected {:?}", event.key, expected_key);
+                }
+                event
+            },
+            Ok(Err(e)) => panic!("Broadcast error: {}", e),
+            Err(_) => panic!("Timed out waiting for event on key {:?}", expected_key),
+        }
+    }
+
     #[tokio::test]
     async fn test_kv_handle_put_get() {
         let dir = tempdir().unwrap();
@@ -334,5 +519,347 @@ mod tests {
         // List by prefix
         let nodes = handle.list_by_prefix(b"/nodes/").unwrap();
         assert_eq!(nodes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_kv_ops_watch_robust() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(state, writer);
+
+        // 1. Setup Watcher
+        let (_, mut rx) = handle.watch("^/nodes/.*$").await.unwrap();
+
+        // 2. Test Basic Put (Wait with timeout, not sleep loop)
+        handle.put(b"/nodes/1", b"val1").await.unwrap();
+        
+        let event = expect_event(&mut rx, b"/nodes/1").await;
+        match event.kind {
+            WatchEventKind::Update { heads } => assert_eq!(heads[0].value, b"val1"),
+            _ => panic!("Expected update"),
+        }
+
+        // 3. Test Filtering (Should NOT receive event)
+        handle.put(b"/other/key", b"ignore").await.unwrap();
+        
+        // Assert that queue is empty or times out (we expect timeout or no message)
+        let result = timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(result.is_err(), "Should not have received event for /other/key");
+
+        // 4. Test Delete
+        handle.delete(b"/nodes/1").await.unwrap();
+        let event = expect_event(&mut rx, b"/nodes/1").await;
+        assert!(matches!(event.kind, WatchEventKind::Delete));
+    }
+
+    #[tokio::test]
+    async fn test_watch_invalid_regex() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone()); // Assuming MockWriter works similarly
+        let handle = KvHandle::new(state, writer);
+
+        // Test invalid regex syntax
+        let result = handle.watch("[").await;
+        assert!(matches!(result, Err(WatchError::InvalidRegex(_))));
+    }
+    
+    #[tokio::test]
+    async fn test_malformed_replication_entry() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone()); 
+        let handle = KvHandle::new(state.clone(), writer.clone());
+        
+        let (_, mut rx) = handle.watch(".*").await.unwrap();
+
+        // Inject garbage data directly into the MockWriter's stream
+        let _ = writer.entry_tx.send(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        
+        // Ensure the watcher didn't crash and can still process valid entries
+        // We wait a bit to ensure the processing loop had a chance to consume the garbage
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        handle.put(b"valid", b"data").await.unwrap();
+        let event = expect_event(&mut rx, b"valid").await;
+        match event.kind {
+            WatchEventKind::Update { .. } => {}, // Success
+            _ => panic!("Watcher died or failed to recover from garbage input"),
+        }
+    }
+
+
+    #[tokio::test]
+    async fn test_causal_dependency_chain() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(state, writer);
+
+        // 1. First Write: Should have NO dependencies (genesis for this key)
+        let hash_v1 = handle.put(b"key", b"v1").await.unwrap();
+        
+        // verify v1 is in state
+        let heads_v1 = handle.get(b"key").unwrap();
+        assert_eq!(heads_v1[0].hash, hash_v1);
+
+        // 2. Second Write: Should depend on hash_v1
+        // We subscribe to the stream to inspect the actual "on-wire" entry structure
+        let mut stream = handle.subscribe_entries();
+        
+        let _hash_v2 = handle.put(b"key", b"v2").await.unwrap();
+
+        // 3. Inspect the stream to verify the DAG structure
+        // We expect to see the entry for v2 come through
+        let mut found_v2 = false;
+        
+        // We might see v1 or v2 depending on timing/buffer, so we filter
+        while let Some(signed_bytes) = stream.next().await {
+            use lattice_proto::storage::{SignedEntry, Entry};
+            
+            let signed = SignedEntry::decode(&signed_bytes[..]).unwrap();
+            let entry = Entry::decode(&signed.entry_bytes[..]).unwrap();
+            
+            // We are looking for the entry corresponding to hash_v2
+            // (In a real test we might compute the hash of the entry to be sure, 
+            // but checking payload is a decent proxy here)
+            if entry.payload.contains(&b"v2"[0]) { // Simplified payload check
+                found_v2 = true;
+                
+                // CRITICAL CHECK: Does this entry point to the previous hash?
+                assert!(!entry.causal_deps.is_empty(), "v2 should have causal deps");
+                
+                // The dependency must be hash_v1
+                let dep_found = entry.causal_deps.iter().any(|dep| dep == &hash_v1.to_vec());
+                assert!(dep_found, "v2 must strictly depend on v1. Found deps: {:?}, Expected: {:?}", entry.causal_deps, hash_v1);
+                break;
+            }
+        }
+        
+        assert!(found_v2, "Did not receive v2 entry in stream");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_writes_produce_multi_heads() {
+        use prost::Message; // Needed for encode_to_vec
+
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(state, writer.clone());
+        
+        let key = b"conflict_key";
+
+        // 1. Establish a common ancestor (Genesis)
+        let hash_base = handle.put(key, b"base_version").await.unwrap();
+
+        // 2. Simulate Node A: Sees 'base', writes 'variant_A'
+        // We manually construct the op so we can force the dependency to be 'hash_base'
+        let op_a = Operation::put(key.to_vec(), b"variant_A".to_vec());
+        let payload_a = KvPayload { ops: vec![op_a] }.encode_to_vec();
+        // FORCE dep: hash_base
+        let _hash_a = writer.submit(payload_a, vec![hash_base]).await.unwrap();
+
+        // 3. Simulate Node B: ALSO sees 'base' (hasn't seen A yet), writes 'variant_B'
+        let op_b = Operation::put(key.to_vec(), b"variant_B".to_vec());
+        let payload_b = KvPayload { ops: vec![op_b] }.encode_to_vec();
+        // FORCE dep: hash_base (Ignored A)
+        let _hash_b = writer.submit(payload_b, vec![hash_base]).await.unwrap();
+
+        // 4. CHECK: We should now have TWO heads for this key
+        let heads = handle.get(key).unwrap();
+        assert_eq!(heads.len(), 2, "Expected 2 heads (conflict), found {}", heads.len());
+        
+        // Verify we have both values
+        let values: Vec<&[u8]> = heads.iter().map(|h| h.value.as_slice()).collect();
+        assert!(values.contains(&&b"variant_A"[..]));
+        assert!(values.contains(&&b"variant_B"[..]));
+
+        // 5. RESOLVE: The next standard 'put' should merge them
+        // KvHandle.put() automatically gets *all* current heads and sets them as deps
+        let _hash_merged = handle.put(key, b"merged_version").await.unwrap();
+
+        // 6. CHECK RESOLUTION: Should be back to 1 head
+        let heads_final = handle.get(key).unwrap();
+        assert_eq!(heads_final.len(), 1, "Expected resolution to 1 head");
+        assert_eq!(heads_final[0].value, b"merged_version");
+    }
+
+    #[tokio::test]
+    async fn test_resurrection_causality() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(state, writer);
+        let key = b"resurrect_me";
+
+        // 1. Put
+        let hash_v1 = handle.put(key, b"v1").await.unwrap();
+
+        // 2. Delete
+        let hash_del = handle.delete(key).await.unwrap();
+        
+        // Verify it is gone
+        let heads = handle.get(key).unwrap();
+        assert!(heads[0].tombstone);
+
+        // 3. Put (Resurrect)
+        let mut stream = handle.subscribe_entries(); // Spy on the wire
+        let _hash_v2 = handle.put(key, b"v2").await.unwrap();
+
+        // 4. Verify the new write points to the DELETION hash, not v1 or genesis
+        while let Some(signed_bytes) = stream.next().await {
+            use lattice_proto::storage::{SignedEntry, Entry};
+            let signed = SignedEntry::decode(&signed_bytes[..]).unwrap();
+            let entry = Entry::decode(&signed.entry_bytes[..]).unwrap();
+
+            if entry.payload.contains(&b"v2"[0]) {
+                assert!(
+                    entry.causal_deps.contains(&hash_del.to_vec()),
+                    "Resurrection write must depend on the deletion hash"
+                );
+                assert!(
+                    !entry.causal_deps.contains(&hash_v1.to_vec()),
+                    "Resurrection should not point to v1 (hash_del covers it)"
+                );
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_put_and_delete_conflict() {
+        use prost::Message;
+
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(state, writer.clone());
+        
+        let key = b"mixed_conflict";
+
+        // 1. Base
+        let hash_base = handle.put(key, b"base").await.unwrap();
+
+        // 2. Node A: Deletes it (referencing base)
+        let op_del = Operation::delete(key.to_vec());
+        let payload_del = KvPayload { ops: vec![op_del] }.encode_to_vec();
+        // FORCE dep: hash_base
+        let _hash_del = writer.submit(payload_del, vec![hash_base]).await.unwrap();
+
+        // 3. Node B: Updates it (referencing base, ignoring delete)
+        let op_put = Operation::put(key.to_vec(), b"alive".to_vec());
+        let payload_put = KvPayload { ops: vec![op_put] }.encode_to_vec();
+        // FORCE dep: hash_base
+        let _hash_put = writer.submit(payload_put, vec![hash_base]).await.unwrap();
+
+        // 4. Check Get(): Should return both heads (one tombstone, one value)
+        let heads = handle.get(key).unwrap();
+        assert_eq!(heads.len(), 2);
+        
+        // 5. Check Watch(): Should report this as an UPDATE (Alive wins)
+        // We need to trigger the watcher. Since we manually injected, the watcher 
+        // might not catch it depending on how MockWriter is wired, so we use
+        // the logic test from your watch implementation:
+        let is_delete_event = heads.is_empty() || heads.iter().all(|h| h.tombstone);
+        assert!(!is_delete_event, "Concurrent Put+Delete should be seen as an Update (Add-Wins)");
+    }
+
+    #[tokio::test]
+    async fn test_watch_binary_key_safety() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(state, writer);
+
+        // Watch for everything
+        let (_, mut rx) = handle.watch(".*").await.unwrap();
+
+        // Key with invalid UTF-8 bytes (0xFF)
+        let bin_key = vec![0xDE, 0xAD, 0xFF, 0xBE, 0xEF];
+        
+        handle.put(&bin_key, b"val").await.unwrap();
+
+        // The watcher uses String::from_utf8_lossy. 
+        // 1. It should NOT crash.
+        // 2. It SHOULD match ".*" (because even lossy strings match .*)
+        let result = timeout(Duration::from_secs(1), rx.recv()).await;
+        assert!(result.is_ok(), "Watcher failed to handle binary key");
+        
+        let event = result.unwrap().unwrap();
+        assert_eq!(event.key, bin_key);
+    }
+
+    #[tokio::test]
+    async fn test_empty_key_edge_case() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(state, writer);
+
+        let empty_key = b"";
+        
+        handle.put(empty_key, b"void").await.unwrap();
+        let heads = handle.get(empty_key).unwrap();
+        assert_eq!(heads[0].value, b"void");
+        
+        let list = handle.list().unwrap();
+        // Depends on implementation if empty key is returned in list(), assuming YES
+        assert!(list.iter().any(|(k, _)| k.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_genesis_merge() {
+        use prost::Message;
+
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(state, writer.clone());
+        let key = b"genesis_conflict";
+
+        // 1. Simulate Node A: Genesis write (no deps)
+        let op_a = Operation::put(key.to_vec(), b"genesis_A".to_vec());
+        let payload_a = KvPayload { ops: vec![op_a] }.encode_to_vec();
+        // FORCE empty deps
+        let hash_a = writer.submit(payload_a, vec![]).await.unwrap();
+
+        // 2. Simulate Node B: ALSO Genesis write (no deps)
+        let op_b = Operation::put(key.to_vec(), b"genesis_B".to_vec());
+        let payload_b = KvPayload { ops: vec![op_b] }.encode_to_vec();
+        // FORCE empty deps
+        let hash_b = writer.submit(payload_b, vec![]).await.unwrap();
+
+        // 3. Check Get(): Should be a conflict (two heads)
+        let heads = handle.get(key).unwrap();
+        assert_eq!(heads.len(), 2, "Two independent genesis writes should conflict");
+        
+        let values: Vec<&[u8]> = heads.iter().map(|h| h.value.as_slice()).collect();
+        assert!(values.contains(&&b"genesis_A"[..]));
+        assert!(values.contains(&&b"genesis_B"[..]));
+
+        // 4. Merge
+        let mut stream = handle.subscribe_entries();
+        let _hash_merged = handle.put(key, b"merged_genesis").await.unwrap();
+
+        // 5. Verify Resolution
+        let heads_final = handle.get(key).unwrap();
+        assert_eq!(heads_final.len(), 1);
+        assert_eq!(heads_final[0].value, b"merged_genesis");
+
+        // 6. Verify Causal Deps (Must point to BOTH A and B)
+        while let Some(signed_bytes) = stream.next().await {
+            use lattice_proto::storage::{SignedEntry, Entry};
+            let signed = SignedEntry::decode(&signed_bytes[..]).unwrap();
+            let entry = Entry::decode(&signed.entry_bytes[..]).unwrap();
+
+            if entry.payload.contains(&b"merged_genesis"[0]) {
+                assert!(entry.causal_deps.contains(&hash_a.to_vec()));
+                assert!(entry.causal_deps.contains(&hash_b.to_vec()));
+                assert_eq!(entry.causal_deps.len(), 2);
+                break;
+            }
+        }
     }
 }

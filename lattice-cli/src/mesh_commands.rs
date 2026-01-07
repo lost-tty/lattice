@@ -6,7 +6,7 @@
 
 use crate::commands::{CommandResult, Writer, MeshSubcommand};
 use crate::display_helpers::format_elapsed;
-use lattice_node::{Node, KvHandle, PeerStatus, Mesh, token::Invite};
+use lattice_node::{Node, KvStore, PeerStatus, Mesh, token::Invite};
 use lattice_model::types::PubKey;
 use lattice_net::MeshNetwork;
 use chrono::DateTime;
@@ -42,7 +42,7 @@ pub async fn handle_command(
 // ==================== Mesh Commands ====================
 
 /// Create a new mesh
-pub async fn cmd_create(node: &Node, _store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
+pub async fn cmd_create(node: &Node, _store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
     match node.create_mesh().await {
         Ok(store_id) => {
             let mut w = writer.clone();

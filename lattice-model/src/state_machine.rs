@@ -16,6 +16,8 @@ pub struct Op<'a> {
     pub author: PubKey,
     /// Logical timestamp (for conflict resolution)
     pub timestamp: HLC,
+    /// Previous operation hash in the author's chain (for integrity validation)
+    pub prev_hash: Hash,
 }
 
 /// A StateMachine applies ordered operations to materialize a state.

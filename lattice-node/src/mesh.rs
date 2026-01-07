@@ -19,57 +19,72 @@ use lattice_kernel::{NodeIdentity, Uuid, store::Store};
 use lattice_model::types::PubKey;
 use lattice_kvstate::{KvState, Merge};
 use rand::RngCore;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use crate::KvHandle;
+use crate::KvOps;
+use crate::KvStore;
+
+/// Error type for Mesh operations
+#[derive(Debug, thiserror::Error)]
+pub enum MeshError {
+    #[error("Store error: {0}")]
+    Store(String),
+    #[error("Actor error: {0}")]
+    Actor(String),
+}
 
 /// A Mesh represents a group of nodes sharing a root store and peer list.
 ///
 /// The Mesh acts as a high-level controller for:
-/// - The Root Store (KvHandle for KV ops, .writer() for replication ops)
+/// - The Root Store (KvStore for KV ops)
 /// - The PeerManager (peer cache + operations)
 ///
 /// Use `mesh.kv()` for KV data operations.
-/// Use `mesh.kv().writer()` for replication operations (id, sync_state, etc).
+/// Use `mesh.store()` for replication operations (id, sync_state, etc).
 /// Use `mesh.peer_manager()` for network layer integration.
 #[derive(Clone)]
 pub struct Mesh {
-    kv: KvHandle,
-    peer_manager: Arc<PeerManager>,
+    store: KvStore,
+    node: std::sync::Arc<NodeIdentity>,
+    peer_manager: std::sync::Arc<PeerManager>,
+    invite_token: Arc<RwLock<Option<String>>>,
+    root_store_id: Uuid,
 }
 
 impl Mesh {
-    /// Create a new Mesh for a store, initializing PeerManager.
-    /// This is the preferred constructor for creating a mesh from a store.
-    pub async fn create(store: Store<KvState>, identity: &NodeIdentity) -> Result<Self, PeerManagerError> {
-        let peer_manager = PeerManager::new(store.clone(), identity).await?;
-        Ok(Self::new(store, peer_manager))
-    }
-    
-    /// Create a Mesh from existing components (internal use).
-    pub(crate) fn new(store: Store<KvState>, peer_manager: Arc<PeerManager>) -> Self {
-        let kv = KvHandle::new(store.state_arc(), store);
-        Self { kv, peer_manager }
+    /// Create a new Mesh from an open store handle
+    pub async fn create(store: KvStore, node: &std::sync::Arc<NodeIdentity>) -> Result<Self, MeshError> {
+        let root_store_id = store.id();
+        let peer_manager = PeerManager::new(store.clone(), node)
+            .await.map_err(|e| MeshError::Actor(e.to_string()))?;
+            
+        Ok(Self {
+            store,
+            node: node.clone(),
+            peer_manager,
+            invite_token: Arc::new(RwLock::new(None)),
+            root_store_id,
+        })
     }
     
     /// Get the mesh ID (root store UUID).
     pub fn id(&self) -> Uuid {
-        self.kv.writer().id()
+        self.root_store_id
     }
     
     /// Get the KvHandle for KV data operations and replication access.
-    pub fn kv(&self) -> &KvHandle {
-        &self.kv
+    pub fn kv(&self) -> &KvStore {
+        &self.store
     }
     
-    /// Get the raw Replica for replication operations (shorthand for kv().writer()).
+    /// Get the raw Store for replication operations.
     pub fn store(&self) -> &Store<KvState> {
-        self.kv.writer()
+        &self.store
     }
 
-    /// Get the root store handle (alias for kv(), used by tests)
-    pub fn root_store(&self) -> &KvHandle {
-        &self.kv
+    /// Get a handle to the root store
+    pub fn root_store(&self) -> &KvStore {
+        &self.store
     }
     
     /// Get peer manager for network layer integration.
@@ -101,7 +116,7 @@ impl Mesh {
         // 2. Store Hash
         let hash = blake3::hash(&secret);
         let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
-        self.kv.put(key.as_bytes(), b"valid").await.map_err(|e| e.to_string())?;
+        self.store.put(key.as_bytes(), b"valid").await.map_err(|e| e.to_string())?;
         
         // 3. Create Token
         let invite = Invite::new(
@@ -120,9 +135,9 @@ impl Mesh {
         let hash = blake3::hash(secret);
         let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
         
-        if let Ok(Some(_)) = self.kv.get(key.as_bytes()).map(|h| h.lww()) {
+        if let Ok(Some(_)) = self.store.get(key.as_bytes()).map(|h| h.lww()) {
             // Valid! Delete it (one-time use)
-            self.kv.delete(key.as_bytes()).await.map_err(|e| e.to_string())?;
+            self.store.delete(key.as_bytes()).await.map_err(|e| e.to_string())?;
             Ok(true)
         } else {
             Ok(false)

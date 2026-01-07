@@ -430,6 +430,7 @@ impl<S: StateMachine> ReplicatedState<S> {
                         payload: &current.entry.payload,
                         author: current.author(),
                         timestamp: current.entry.timestamp,
+                        prev_hash: Hash::try_from(current.entry.prev_hash.as_slice()).unwrap_or(Hash::ZERO),
                     };
 
                     self.state

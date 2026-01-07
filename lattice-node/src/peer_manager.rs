@@ -12,8 +12,9 @@ use crate::{
     node::parse_peer_status_key,
     PeerInfo,
 };
-use lattice_kernel::{NodeIdentity, PeerStatus, store::Store};
-use lattice_kvstate::{KvState, KvHandle, Merge};
+use lattice_kernel::{NodeIdentity, PeerStatus};
+use lattice_kvstate::{KvState, Merge, KvOps};
+use crate::KvStore;
 use lattice_model::types::PubKey;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -93,7 +94,7 @@ impl Peer {
     }
     
     /// Load a Peer from the store (atomic read via list_by_prefix).
-    pub async fn load(kv: &KvHandle<Store<KvState>>, pubkey: PubKey) -> Result<Option<Self>, PeerManagerError> {
+    pub async fn load(kv: &KvStore, pubkey: PubKey) -> Result<Option<Self>, PeerManagerError> {
         let pubkey_hex = hex::encode(pubkey);
         let prefix = format!("/nodes/{}/", pubkey_hex);
         
@@ -120,7 +121,7 @@ impl Peer {
     }
     
     /// Save a Peer to the store (multi-key write).
-    pub async fn save(&self, kv: &KvHandle<Store<KvState>>) -> Result<(), PeerManagerError> {
+    pub async fn save(&self, kv: &KvStore) -> Result<(), PeerManagerError> {
         let pubkey_hex = hex::encode(self.pubkey);
         
         // Write status
@@ -178,7 +179,7 @@ pub struct PeerManager {
     /// Bootstrap authors trusted during initial sync (cleared after first sync)
     bootstrap_authors: Arc<RwLock<HashSet<PubKey>>>,
     /// KV handle for reads and writes (uses StateWriter for writes)
-    kv: KvHandle<Store<KvState>>,
+    kv: KvStore,
     /// Our own identity
     identity: NodeIdentity,
 }
@@ -196,18 +197,14 @@ impl PeerManager {
     /// 
     /// This initializes the peer cache from the current store state and spawns a
     /// background task to keep it updated.
-    pub async fn new(store: Store<KvState>, identity: &NodeIdentity) -> Result<Arc<Self>, PeerManagerError> {
+    pub async fn new(store: KvStore, identity: &NodeIdentity) -> Result<Arc<Self>, PeerManagerError> {
         let (peer_event_tx, _) = broadcast::channel(64);
-        
-        // Create KvHandle from store (Store implements StateWriter)
-        let state = store.state_arc();
-        let kv = KvHandle::new(state, store);
         
         let manager = Arc::new(Self {
             peers: Arc::new(RwLock::new(HashMap::new())),
             peer_event_tx,
             bootstrap_authors: Arc::new(RwLock::new(HashSet::new())),
-            kv,
+            kv: store.clone(),
             identity: identity.clone(),
         });
         

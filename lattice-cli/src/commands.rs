@@ -1,7 +1,7 @@
 //! CLI command handlers
 
 use crate::{mesh_commands, node_commands, store_commands};
-use lattice_node::{Node, KvHandle, Mesh};
+use lattice_node::{Node, KvStore, Mesh, KvOps};
 use lattice_net::MeshNetwork;
 use clap::{Parser, Subcommand, CommandFactory};
 use rustyline_async::SharedWriter;
@@ -26,7 +26,7 @@ pub enum CommandResult {
     /// No store change
     Ok,
     /// Switch to this store
-    SwitchTo(KvHandle),
+    SwitchTo(KvStore),
     /// Exit the CLI
     Quit,
 }
@@ -206,7 +206,7 @@ pub enum StoreSubcommand {
 
 pub async fn handle_command(
     node: &Node,
-    store: Option<&KvHandle>,
+    store: Option<&KvStore>,
     mesh_network: Option<Arc<MeshNetwork>>,
     mesh: Option<&Mesh>,
     cli: LatticeCli,

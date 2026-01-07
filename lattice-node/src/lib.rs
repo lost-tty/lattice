@@ -42,11 +42,7 @@ pub use meta_store::MetaStore;
 // Re-export from lattice-kvstate
 use lattice_kvstate::KvState;
 pub use lattice_kvstate::Head;
-
-/// Type alias for KvHandle using Store as the StateWriter.
-/// This is the primary user-facing handle type for KV replicas.
-/// - Use `.get()`, `.put()`, `.delete()` for KV operations
-pub type KvHandle = lattice_kvstate::KvHandle<Store<KvState>>;
+pub use lattice_kvstate::KvOps;
 
 /// Type alias for the bare Store with KvState state machine.
 /// Used by network layer for AuthorizedStore wrapping.

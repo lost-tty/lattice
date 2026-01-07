@@ -10,6 +10,8 @@ mod tracing_writer;
 
 use lattice_net::MeshNetwork;
 use commands::CommandResult;
+use lattice_node::KvOps;
+use lattice_node::KvStore;
 use lattice_node::NodeBuilder;
 use lattice_node::mesh::Mesh;
 use rustyline_async::{Readline, ReadlineEvent};
@@ -17,13 +19,13 @@ use std::io::Write;
 use std::sync::{Arc, RwLock};
 use tracing_subscriber::EnvFilter;
 
-fn make_prompt(mesh: Option<&Mesh>, store: Option<&lattice_node::KvHandle>) -> String {
+fn make_prompt(mesh: Option<&Mesh>, store: Option<&KvStore>) -> String {
     use owo_colors::OwoColorize;
     
     match (mesh, store) {
         (Some(m), Some(s)) => {
             let mesh_str = m.id().to_string();
-            let store_str = s.writer().id().to_string();
+            let store_str = s.id().to_string();
             let mesh_id = &mesh_str[..8];
             let store_id = &store_str[..8];
             if mesh_id == store_id {
@@ -35,7 +37,7 @@ fn make_prompt(mesh: Option<&Mesh>, store: Option<&lattice_node::KvHandle>) -> S
             }
         }
         (Some(m), None) => format!("{}:{}> ", "lattice".cyan(), m.id().to_string()[..8].to_string().green()),
-        (None, Some(s)) => format!("{}:{}> ", "lattice".cyan(), s.writer().id().to_string()[..8].to_string().yellow()),
+        (None, Some(s)) => format!("{}:{}> ", "lattice".cyan(), s.id().to_string()[..8].to_string().yellow()),
         (None, None) => format!("{}:{}> ", "lattice".cyan(), "no-mesh".yellow()),
     }
 }
@@ -138,7 +140,7 @@ async fn main() {
             while let Ok(event) = rx.recv().await {
                 match event {
                     lattice_node::NodeEvent::MeshReady(mesh) => {
-                        wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.kv().writer().id());
+                        wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.kv().id());
                         if let Ok(mut guard) = current_store.write() {
                             *guard = Some(mesh.kv().clone());
                         }
@@ -216,7 +218,7 @@ async fn main() {
                                         *guard = Some(h.clone());
                                     }
                                     // Update current mesh to match the store's mesh
-                                    if let Some(mesh) = node.mesh_by_id(h.writer().id()) {
+                                    if let Some(mesh) = node.mesh_by_id(h.id()) {
                                         if let Ok(mut guard) = current_mesh.write() {
                                             *guard = Some(mesh);
                                         }

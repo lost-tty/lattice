@@ -1,12 +1,10 @@
 //! Integration tests for gap filling between networked peers
 
-use lattice_node::{NodeBuilder, NodeEvent, Invite};
+use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, KvOps, KvStore};
 use lattice_kvstate::Merge;
 use lattice_model::types::PubKey;
-use lattice_node::Node;
 use lattice_net::MeshNetwork;
 use lattice_kernel::Uuid;
-use lattice_node::KvHandle;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -19,7 +17,7 @@ fn temp_data_dir(name: &str) -> lattice_node::DataDir {
 }
 
 /// Helper: Join mesh via node.join() and wait for StoreReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<KvHandle> {
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<KvStore> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
     
@@ -87,7 +85,7 @@ async fn test_targeted_author_sync() {
     
     // B syncs specifically for A's author
     let author = PubKey::from(*node_a.node_id());
-    let _applied = server_b.engine().sync_author_all_by_id(store_b.writer().id(), author).await.expect("sync author");
+    let _applied = server_b.engine().sync_author_all_by_id(store_b.id(), author).await.expect("sync author");
     
     // Verify entry arrived after sync
     let val = store_b.get(b"/data").expect("get").lww();
@@ -136,7 +134,7 @@ async fn test_sync_multiple_entries() {
     }
     
     // B syncs to get the new entries
-    let _results = server_b.engine().sync_all_by_id(store_b.writer().id()).await.expect("sync");
+    let _results = server_b.engine().sync_all_by_id(store_b.id()).await.expect("sync");
     
     // Verify all entries synced
     for i in 1..=5 {
