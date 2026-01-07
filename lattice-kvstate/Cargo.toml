@@ -1,0 +1,24 @@
+[package]
+name = "lattice-kvstate"
+description = "KV state layer for Lattice - implements StateMachine for key-value storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-model = { workspace = true }
+lattice-proto = { workspace = true }
+redb = { workspace = true }
+prost = { workspace = true }
+thiserror = { workspace = true }
+regex = "1"
+regex-syntax = "0.8"
+blake3 = { workspace = true }
+tokio = { workspace = true }
+futures-util.workspace = true
+
+[build-dependencies]
+prost-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -15,10 +15,10 @@ pub enum LatticeNetError {
     ParseNodeId(String),
     
     #[error("Store error: {0}")]
-    Store(#[from] lattice_core::node::NodeError),
+    Store(#[from] lattice_node::NodeError),
     
     #[error("State error: {0}")]
-    State(#[from] lattice_core::store::StateError),
+    State(#[from] lattice_kernel::store::StateError),
     
     #[error("Connection error: {0}")]
     Connection(String),

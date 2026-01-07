@@ -111,23 +111,24 @@ The system is composed of strictly layered crates to separate concerns:
 
 ### 1. `lattice-model` (Base)
 - **Responsibility**: Pure data types and traits.
-- **Content**: `HLC`, `Hash`, `PubKey`, `StateMachine` trait.
+- **Content**: `HLC`, `Hash`, `PubKey`, `Op`, `StateMachine` trait, `LogEntry` trait, `LogManager` trait.
 - **Dependencies**: None (pure Rust).
 
-### 2. `lattice-replica` (The Engine)
-- **Responsibility**: Replication logic, Consistency, and Log Management.
+### 2. `lattice-kvstate` (State Machine)
+- **Responsibility**: Concrete Key-Value state machine implementation.
+- **Content**: `KvState` implementing `StateMachine`, `KvStateActor`, `KvStateHandle`.
+- **Client API**: `get()`, `list()`, `put()`, `delete()`, `watch()` - clients interact directly.
+- **Storage**: Uses `redb` for persistent local state.
+- **Logic**: Handles KV-specific conflicts (LWW, Tombstones, DAG resolution).
+- **Dependencies**: `lattice-model`, `lattice-proto`.
+
+### 3. `lattice-core` (Replication Engine)
+- **Responsibility**: Replication, log management, sync protocol.
 - **Components**:
     - **SigChainManager**: Validates signatures, sequences, and hash chains. Manages append-only log files.
-    - **DAG/Causality**: Ensures operations are applied in causal order. Handles "deps" (parent hashes).
-    - **Driver**: Feeds validated operations into the `StateMachine`.
-- **Dependencies**: `lattice-model`. **Peer-agnostic**.
-
-### 3. `lattice-kvstate` (The State)
-- **Responsibility**: Concrete implementation of a Key-Value store.
-- **Content**: `KvStore` struct implementing `StateMachine`.
-- **Storage**: Uses `redb` for persistent local state.
-- **Logic**: Handles KV-specific conflicts (LWW, Tombstones).
-- **Dependencies**: `lattice-model`, `lattice-proto`.
+    - **ReplicationEngine**: The core replication logic - signs entries, maintains log, broadcasts to peers.
+- **Key Principle**: Generic over `S: StateMachine`. NO KV-specific commands.
+- **Dependencies**: `lattice-model`. **State-machine agnostic**.
 
 ### 4. `lattice-net` (The Wire)
 - **Responsibility**: P2P Networking and Gossip.
@@ -136,8 +137,62 @@ The system is composed of strictly layered crates to separate concerns:
 
 ### 5. `lattice-node` (The Glue)
 - **Responsibility**: Runtime composition.
-- **Action**: Instantiates `Replica`, `KvStore`, and `Network`. Connects them via an Actor/Controller.
+- **Action**: Instantiates `ReplicatedState<KvState>`, connects to `Network`.
 - **Dependencies**: All above.
+
+### Compositional Pattern: ReplicatedState
+
+The combined runtime unit is **`ReplicatedState<S: StateMachine>`**:
+
+```
+┌─────────────────────────────────────────────────┐
+│        ReplicatedState<S: StateMachine>         │
+│                                                 │
+│  ┌─────────────────┐    ┌──────────────────┐   │
+│  │ReplicationEngine│───▶│   StateMachine   │   │
+│  │                 │    │   (e.g. KvState) │   │
+│  │ - submit()      │    │                  │   │
+│  │ - ingest()      │    │ - apply(op)      │   │
+│  │ - sync_state()  │    │ - get() [KV]     │   │
+│  │ - subscribe()   │    │ - list() [KV]    │   │
+│  └─────────────────┘    └──────────────────┘   │
+│                                                 │
+│  Exposes: ReplicationEngine + S-specific APIs   │
+└─────────────────────────────────────────────────┘
+```
+
+**Type aliases for convenience:**
+```rust
+type KvReplica = ReplicatedState<KvState>;      // KV store
+type CounterReplica = ReplicatedState<Counter>; // Ephemeral counter
+```
+
+**Key traits (in `lattice-model`):**
+- **`StateMachine`**: `apply(op)` - applies operation to state
+- **`ReplicationEngine`**: `submit(payload)`, `ingest(entry)`, `sync_state()`
+
+The ReplicationEngine doesn't care what the StateMachine is - it just signs, logs, broadcasts, and calls `state.apply(op)` when entries arrive.
+
+### Data Flow
+
+**Client Read (KV-specific):**
+```
+CLI → KvState.get(key) → local redb read → Vec<Head>
+```
+
+**Client Write:**
+```
+CLI → KvState.put(key, value) → Replica.submit(payload) 
+    → SigChain.sign() → log commit → gossip broadcast
+    → Replica calls KvState.apply(&Op)
+```
+
+**Ingest (from network):**
+```
+Network → Replica.ingest(entry) → validate → log commit 
+    → Replica calls KvState.apply(&Op)
+```
+
 
 ### Bootstrap
 
@@ -216,7 +271,7 @@ Networking modes:
 
 ### Store/Network Boundary
 
-The store module exposes `StoreHandle` to the network layer. Internal types (`KvStore`, `SigChain`, `StoreActor`, `Entry`) are hidden.
+The store module exposes `StoreHandle` to the network layer. Internal types (`KvState`, `SigChain`, `StoreActor`, `Entry`) are hidden.
 
 `StoreHandle` provides a simple, non-generic API with direct methods for all operations:
 
@@ -369,14 +424,14 @@ Each node stores logs as one file per author:
 │   └── {store_uuid}/
 │       ├── sigchain/                       # SigChainManager owns
 │       │   └── {author_id_hex}.log         # Append-only SignedEntry stream
-│       ├── state/                          # Backend owns (KvStore creates state.db)
+│       ├── state/                          # Backend owns (KvState creates state.db)
 │       │   └── state.db                    # redb: KV snapshot + frontiers
 │       └── sync/                           # Sync metadata
 └── meta.db                                 # redb: global metadata (known stores, peers)
 ```
 
 - Sigchain: Append-only binary files per `(store, author)`, containing serialized `SignedEntry` messages.
-- State: Backend-specific storage. For `KvStore`, creates `state.db` (redb) with KV state and frontiers.
+- State: Backend-specific storage. For `KvState`, creates `state.db` (redb) with KV state and frontiers.
 
 #### state.db Tables (per store, redb)
 
@@ -633,7 +688,7 @@ A Worker Node is a compute unit that does not run the full P2P stack. It connect
 
 1.  **Gateway Node (Lattice Core)**:
     - Runs P2P, SigChains, Gossip.
-    - Instead of a local `KvStore`, it holds a `GrpcClientStateMachine` (or similar RPC client).
+    - Instead of a local `KvState`, it holds a `GrpcClientStateMachine` (or similar RPC client).
     - Forwards validated `apply(entry)` calls to the Worker.
 
 2.  **Worker Node (Compute)**:

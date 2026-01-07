@@ -1,0 +1,40 @@
+syntax = "proto3";
+package lattice.kv_store;
+
+import "storage.proto";
+
+
+// Operation Types
+message PutOp {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message DeleteOp {
+  bytes key = 1;
+}
+
+message Operation {
+    oneof op_type {
+        PutOp put = 1;
+        DeleteOp delete = 2;
+    }
+}
+
+// KV Store Payload
+message KvPayload {
+  repeated Operation ops = 1;
+}
+
+// Multi-head DAG storage
+message HeadInfo {
+  bytes value = 1;       // The value at this head
+  lattice.storage.HLC hlc = 2;           // HLC for ordering
+  bytes author = 3;      // Author's public key (32 bytes)
+  bytes hash = 4;        // Hash of the SignedEntry that created this head
+  bool tombstone = 5;    // True if this head represents a delete
+}
+
+message HeadList {
+  repeated HeadInfo heads = 1;
+}

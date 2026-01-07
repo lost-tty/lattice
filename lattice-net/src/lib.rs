@@ -15,8 +15,8 @@ pub mod mesh;
 pub use endpoint::{LatticeEndpoint, PublicKey, LATTICE_ALPN};
 pub use error::LatticeNetError;
 pub use framing::{MessageSink, MessageStream};
-pub use lattice_core::proto::storage::SyncState;
-pub use lattice_core::proto::network::{StatusRequest, StatusResponse, FetchRequest, FetchResponse, AuthorRange};
+pub use lattice_kernel::proto::storage::SyncState;
+pub use lattice_kernel::proto::network::{StatusRequest, StatusResponse, FetchRequest, FetchResponse, AuthorRange};
 pub use mesh::{MeshNetwork, SyncResult};
 pub use lattice_model::types::PubKey;
 

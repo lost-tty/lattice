@@ -2,13 +2,14 @@
 
 use crate::commands::{CommandResult, Writer};
 use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
-use lattice_core::{Merge, Node, StoreHandle};
+use lattice_node::{Node, KvHandle};
+use lattice_kvstate::Merge;
 use lattice_model::types::{PubKey, Hash};
 use lattice_net::MeshNetwork;
 use std::time::Instant;
 use std::io::Write;
 
-pub async fn cmd_store_status(node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_status(node: &Node, store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -24,7 +25,7 @@ pub async fn cmd_store_status(node: &Node, store: Option<&StoreHandle>, _mesh: O
     CommandResult::Ok
 }
 
-pub async fn cmd_store_sync(_node: &Node, store: Option<&StoreHandle>, mesh: Option<std::sync::Arc<MeshNetwork>>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_sync(_node: &Node, store: Option<&KvHandle>, mesh: Option<std::sync::Arc<MeshNetwork>>, _args: &[String], writer: Writer) -> CommandResult {
     let mesh = match mesh {
         Some(s) => s,
         None => {
@@ -43,7 +44,7 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&StoreHandle>, mesh: Opt
         }
     };
     
-    let store_id = store.id();
+    let store_id = store.writer().id();
     
     {
         let mut w = writer.clone();
@@ -72,7 +73,7 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&StoreHandle>, mesh: Opt
     CommandResult::Ok
 }
 
-pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -80,7 +81,7 @@ pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&StoreHandle>, _mesh
     };
     
     let mut w = writer.clone();
-    let removed = h.orphan_cleanup().await;
+    let removed = h.writer().orphan_cleanup().await;
     if removed > 0 {
         let _ = writeln!(w, "Cleaned up {} stale orphan(s)", removed);
     } else {
@@ -90,7 +91,7 @@ pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&StoreHandle>, _mesh
     CommandResult::Ok
 }
 
-pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_debug(_node: &Node, store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -100,7 +101,7 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _mesh: O
     let mut w = writer.clone();
     
     // Get sync state to find all authors
-    let sync_state = match h.sync_state().await {
+    let sync_state = match h.writer().sync_state().await {
         Ok(s) => s,
         Err(e) => {
             let _ = writeln!(w, "Error getting sync state: {}", e);
@@ -109,7 +110,7 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _mesh: O
     };
     
     let authors = sync_state.authors();
-    let _ = writeln!(w, "Store {} - {} authors\n", h.id(), authors.len());
+    let _ = writeln!(w, "Store {} - {} authors\n", h.writer().id(), authors.len());
     
     // Sort authors by their hex-encoded key for consistent output
     let mut sorted_authors: Vec<_> = authors.into_iter().collect();
@@ -121,7 +122,7 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _mesh: O
         let _ = writeln!(w, "Author {} (seq: {}, hash: {})", author_short, info.seq, hash_short);
         
         // Stream entries for this author
-        let mut rx = match h.stream_entries_in_range(&author, 1, 0).await {
+        let mut rx = match h.writer().stream_entries_in_range(&author, 1, 0).await {
             Ok(rx) => rx,
             Err(e) => {
                 let _ = writeln!(w, "  Error reading entries: {}", e);
@@ -141,10 +142,10 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _mesh: O
             // Format ops
             // Format ops
             use prost::Message;
-            use lattice_core::store::KvPayload;
+            use lattice_kvstate::KvPayload;
             let kv_payload = KvPayload::decode(&e.payload[..]).unwrap_or_default();
             let ops_str: Vec<String> = kv_payload.ops.iter().filter_map(|op| {
-                use lattice_core::store::operation::OpType;
+                use lattice_kvstate::operation::OpType;
                 match &op.op_type {
                     Some(OpType::Put(p)) => {
                         let key = String::from_utf8_lossy(&p.key);
@@ -160,11 +161,11 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _mesh: O
                 }
             }).collect();
             
-            // Format parent_hashes
-            let parents_str = if e.parent_hashes.is_empty() {
+            // Format causal_deps
+            let parents_str = if e.causal_deps.is_empty() {
                 String::new()
             } else {
-                let ps: Vec<String> = e.parent_hashes.iter()
+                let ps: Vec<String> = e.causal_deps.iter()
                     .map(|h| hex::encode(&h[..8]))
                     .collect();
                 format!(" parents:[{}]", ps.join(","))
@@ -178,7 +179,7 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&StoreHandle>, _mesh: O
     CommandResult::Ok
 }
 
-pub async fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_put(_node: &Node, store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -186,7 +187,7 @@ pub async fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&M
     };
     let start = Instant::now();
     match h.put(args[0].as_bytes(), args[1].as_bytes()).await {
-        Ok(()) => {
+        Ok(_) => {
             let mut w = writer.clone();
             let _ = writeln!(w, "OK ({:.2?})", start.elapsed());
         }
@@ -198,7 +199,7 @@ pub async fn cmd_put(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&M
     CommandResult::Ok
 }
 
-pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_get(_node: &Node, store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -209,7 +210,7 @@ pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&M
     let key = args[0].as_bytes();
     
     let mut w = writer.clone();
-    match h.get(key).await {
+    match h.get(key) {
         Ok(heads) if heads.is_empty() => { let _ = writeln!(w, "(nil)"); }
         Ok(heads) => {
             if verbose {
@@ -250,7 +251,7 @@ pub async fn cmd_get(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&M
     CommandResult::Ok
 }
 
-pub async fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_delete(_node: &Node, store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -258,7 +259,7 @@ pub async fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _mesh: Option
     };
     let start = Instant::now();
     match h.delete(args[0].as_bytes()).await {
-        Ok(()) => {
+        Ok(_) => {
             let mut w = writer.clone();
             let _ = writeln!(w, "OK ({:.2?})", start.elapsed());
         }
@@ -270,7 +271,7 @@ pub async fn cmd_delete(_node: &Node, store: Option<&StoreHandle>, _mesh: Option
     CommandResult::Ok
 }
 
-pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_list(_node: &Node, store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -283,9 +284,9 @@ pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&
     
     let start = Instant::now();
     let result = if let Some(p) = &prefix {
-        h.list_by_prefix(p.as_bytes()).await
+        h.state().list_heads_by_prefix(p.as_bytes())
     } else {
-        h.list().await
+        h.state().list_heads_all()
     };
     
     let mut w = writer.clone();
@@ -336,7 +337,7 @@ pub async fn cmd_list(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&
     CommandResult::Ok
 }
 
-pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_author_state(node: &Node, store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(store) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "Error: no store selected");
@@ -408,17 +409,17 @@ pub async fn cmd_author_state(node: &Node, store: Option<&StoreHandle>, _mesh: O
 }
 
 /// Helper to fetch state for one or all authors
-async fn fetch_author_states(store: &StoreHandle, target: Option<PubKey>) -> Result<Vec<(PubKey, u64, Vec<u8>)>, String> {
+async fn fetch_author_states(store: &KvHandle, target: Option<PubKey>) -> Result<Vec<(PubKey, u64, Vec<u8>)>, String> {
     let mut data = Vec::new();
     
     if let Some(author) = target {
         // Single author: check chain tip
-        if let Some(state) = store.chain_tip(&author).await.map_err(|e| e.to_string())? {
+        if let Some(state) = store.writer().chain_tip(&author).await.map_err(|e| e.to_string())? {
             data.push((author, state.seq, state.hash));
         }
     } else {
         // All authors: check sync state
-        let state = store.sync_state().await.map_err(|e| e.to_string())?;
+        let state = store.writer().sync_state().await.map_err(|e| e.to_string())?;
         for (author, info) in state.authors() {
             data.push((*author, info.seq, info.hash.to_vec()));
         }
@@ -440,10 +441,10 @@ struct HistoryEntry {
     hlc: u64,
     value: Vec<u8>,
     tombstone: bool,
-    parent_hashes: Vec<Hash>,
+    causal_deps: Vec<Hash>,
 }
 
-pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_key_history(_node: &Node, store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -455,7 +456,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: O
     let mut w = writer.clone();
     
     // Get sync state to find all authors
-    let sync_state = match h.sync_state().await {
+    let sync_state = match h.writer().sync_state().await {
         Ok(s) => s,
         Err(e) => {
             let _ = writeln!(w, "Error getting sync state: {}", e);
@@ -468,7 +469,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: O
     
     for (author, _info) in sync_state.authors() {
         // Stream entries for this author
-        let mut rx = match h.stream_entries_in_range(&author, 1, 0).await {
+        let mut rx = match h.writer().stream_entries_in_range(&author, 1, 0).await {
             Ok(rx) => rx,
             Err(_) => continue,
         };
@@ -478,10 +479,10 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: O
             
             // Check if this entry should be included
             use prost::Message;
-            use lattice_core::store::KvPayload;
+            use lattice_kvstate::KvPayload;
             let kv_payload = KvPayload::decode(&decoded.payload[..]).unwrap_or_default();
             for op in &kv_payload.ops {
-                use lattice_core::store::operation::OpType;
+                use lattice_kvstate::operation::OpType;
                 let (op_key, value, tombstone) = match &op.op_type {
                     Some(OpType::Put(p)) => (&p.key, &p.value, false),
                     Some(OpType::Delete(d)) => (&d.key, &vec![], true),
@@ -492,7 +493,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: O
                 if key.is_none() || key == Some(op_key.as_slice()) {
                     let hash = Hash::from(entry.hash());
                     let hlc = (decoded.timestamp.wall_time << 16) | decoded.timestamp.counter as u64;
-                    let parent_hashes = decoded.parent_hashes.clone();
+                    let causal_deps = decoded.causal_deps.clone();
                     
                     entries.insert(hash, HistoryEntry {
                         key: op_key.clone(),
@@ -500,7 +501,7 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: O
                         hlc,
                         value: value.clone(),
                         tombstone,
-                        parent_hashes,
+                        causal_deps,
                     });
                     break;
                 }
@@ -517,14 +518,14 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&StoreHandle>, _mesh: O
     let render_entries: std::collections::HashMap<Hash, crate::graph_renderer::RenderEntry> = entries
         .into_iter()
         .map(|(hash, e)| {
-            let is_merge = e.parent_hashes.len() > 1;
+            let is_merge = e.causal_deps.len() > 1;
             (hash, crate::graph_renderer::RenderEntry {
                 key: e.key,
                 author: e.author,
                 hlc: e.hlc,
                 value: e.value,
                 tombstone: e.tombstone,
-                parent_hashes: e.parent_hashes,
+                causal_deps: e.causal_deps,
                 is_merge,
             })
         })

@@ -18,25 +18,11 @@ message SignedEntry {
 // 2. The Log Entry (The Atomic Unit)
 message Entry {
   uint32 version = 1;             // Format version for future evolution
-  bytes store_id = 6;             // Store this entry belongs to (16-byte UUID)
   bytes prev_hash = 2;            // Link to previous sigchain entry (32 bytes)
   uint64 seq = 3;                 // Monotonic sequence number
   HLC timestamp = 4;              // Hybrid Logical Clock
-  repeated bytes parent_hashes = 7;  // DAG ancestry: hashes of entries this supersedes
+  repeated bytes causal_deps = 7;  // DAG ancestry: hashes of entries this supersedes
   bytes payload = 5;              // Opaque payload (Store implementation determines format)
-}
-
-// 4. Multi-head DAG storage (state.db)
-message HeadInfo {
-  bytes value = 1;       // The value at this head
-  HLC hlc = 2;           // HLC for ordering
-  bytes author = 3;      // Author's public key (32 bytes)
-  bytes hash = 4;        // Hash of the SignedEntry that created this head
-  bool tombstone = 5;    // True if this head represents a delete
-}
-
-message HeadList {
-  repeated HeadInfo heads = 1;
 }
 
 // 5. Per-author state (DB and wire)

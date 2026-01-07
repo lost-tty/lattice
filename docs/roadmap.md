@@ -9,7 +9,7 @@
 - **Stability**: Gossip join reliability, bidirectional sync fix, diagnostics, orphan timestamps
 - **Sync Reliability**: Common HLC in SyncState, auto-sync on discrepancy with deferred check
 - **Store Refactor**: Directory reorganization (`sigchain/`, `impls/kv/`), `Patch`/`ReadContext` traits, `KvPatch` with `TableOps`, encapsulated `StoreHandle::open()`
-- **Simplified StoreHandle**: Removed generic types and handler traits; KvStore is now the only implementation with direct methods
+- **Simplified StoreHandle**: Removed generic types and handler traits; KvState is now the only implementation with direct methods
 - **Heads-Only API**: `get()`, `list()`, `watch()` return raw `Vec<Head>`. `Merge` trait provides `.lww()`, `.fww()`, `.all()`, `MergeList` for lists. See `docs/store-api.md`.
 - **Async Mesh Join**: Non-blocking `mesh join` with `MeshReady` event feedback loop for responsive CLI experience.
 - **CLI Mesh Context**: Refactored CLI to use event-driven `Mesh` context, decoupling commands from `Node` and ensuring direct `Mesh` usage.
@@ -54,13 +54,42 @@
 
 ### 4B: Architectural Pivot (Decoupling)
 
-- [ ] **Rename Core Components**: `StoreActor` → `ReplicaController`, `StoreHandle` → `Replica`, `KvStore` → `KvState`
-- [ ] **Extract lattice-model Crate**: Move `HLC`, `PubKey`, `Hash` to new `lattice-model` crate.
-- [ ] **Define Log-Agnostic StateMachine**: `trait StateMachine { apply(payload, author, ts) }` in `lattice-model`.
-- [ ] **Create lattice-kvstate Crate**: Move `KvStore` to new crate depending ONLY on `lattice-model`.
-- [ ] **Refactor lattice-core**: `ReplicaController` uses `StateMachine` trait (injected).
-- [ ] **Decouple StoreHandle**: `StoreHandle` reads directly from `KvState`.
-- [ ] **Remote StateMachine Pattern**: Enable worker nodes via RPC StateMachine.
+**Goal:** Clients use `StateMachine` (e.g., KvState) directly for reads/writes. Replication engine handles only log/sync operations.
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                        Client (CLI)                             │
+└──────────────────────────┬─────────────────────────────────────┘
+                           │ read/write directly
+                           ▼
+┌────────────────────────────────────────────────────────────────┐
+│                   lattice-kvstate                              │
+│  KvState implementing StateMachine                             │
+│  - get(key) → Vec<Head>       (local read, no network)        │
+│  - put(key, value) → submits payload to ReplicationEngine     │
+│  - list() → local read                                        │
+│  - apply(&Op) ← receives from ReplicationEngine               │
+└──────────────────────────┬─────────────────────────────────────┘
+                           │ submit(payload) / apply(Op)
+                           ▼
+┌────────────────────────────────────────────────────────────────┐
+│                   lattice-core (ReplicationEngine)             │
+│  - submit(payload) → signs entry, commits to log, broadcasts  │
+│  - ingest(entry) → validates, commits, calls S::apply()       │
+│  - sync_state() → meta-operation for reconciliation           │
+│  - NO get/list/watch commands (state machine specific)        │
+└────────────────────────────────────────────────────────────────┘
+```
+
+- [x] **Extract lattice-model Crate**: `HLC`, `PubKey`, `Hash`, `Op`, `StateMachine` trait.
+- [x] **Create lattice-kvstate Crate**: `KvState` implementing `StateMachine`, with KV-specific read/write methods.
+- [ ] **Rename Core Components**: `StoreActor` → `ReplicationController`, `StoreHandle` → `Replica`.
+- [ ] **Generify ReplicationController**: Works with `S: StateMachine`, handles only log/sync.
+- [ ] **Direct Client Access**: Clients call `KvState.get()` directly (no actor channel).
+- [ ] **StateWriter Trait Update**: Update `submit(payload)` to `submit(payload, parent_hashes)` to support DAG causality.
+- [ ] **Submit Path**: `KvHandle.put()` → `Replica.submit(payload, parents)` → signs, logs, broadcasts.
+- [ ] **Apply Path**: `Replica` receives entries → validates → calls `StateMachine::apply()`.
+
 
 ### 4C: Protocol Evolution (Type Agnosticism)
 
@@ -154,6 +183,10 @@
 
 ## Technical Debt
 
+- [ ] **[CRITICAL] Refactor DAG Orphan Storage**: `OrphanStore` logic is currently coupled to specific Key types (legacy leakage), breaking the generic kernel architecture. `lattice-kernel` cannot buffer DAG orphans because it lacks key info.
+  - **Impact**: Causal Delivery is bypassed; child operations may be applied before parents, leading to incorrect state (concurrent heads instead of merges).
+  - **Fix**: Remove `key` dependency from `OrphanStore` (store by `entry_hash` only). Make logic purely hash-based.
+- [ ] **Terminology**: Rename `parent_hashes` to `deps` (or `causal_deps`) to distinguish from `prev_hash` (log parent). Match `LogEntry::deps()` trait.
 - [x] Proto: Change `HeadInfo.hlc` to proper `HLC` message type
 - [x] Proto: Change `HLC.counter` from `uint32` to `uint16`
 - [x] rename `history` command to `store history`
@@ -174,7 +207,7 @@
 - [x] **Zero-Knowledge of Peer Authorization (ACLs)**: `PeerProvider` trait with `can_join`, `can_connect`, `can_accept_entry`, `list_acceptable_authors`. Bootstrap authors from `JoinResponse` trusted during initial sync. Signature verification in `AuthorizedStore::ingest_entry`. Network layer checks peer status on gossip/RPC.
 - [x] **Mesh Bootstrapping**: `JoinResponse` includes `authorized_authors` (all acceptable authors from inviter) so new nodes can accept entries during initial sync. Bootstrap authors cleared after sync completes.
 - [x] Trait boundaries: `StoreHandle` (user ops) vs `AuthorizedStore` (network ops with peer authorization)
-- [x] **Simplified StoreHandle**: Removed generic types (`StoreHandle<S>`), handler traits, and `StoreOps` enum; KvStore is now the sole implementation with direct methods on handle
+- [x] **Simplified StoreHandle**: Removed generic types (`StoreHandle<S>`), handler traits, and `StoreOps` enum; KvState is now the sole implementation with direct methods on handle
 - [x] **Error Propagation Refactor**: Replaced 150+ production `.unwrap()`/`.expect()` with proper error handling
 - [ ] Graceful shutdown with `CancellationToken` for spawned tasks
 - [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` crate for proper RPC semantics
@@ -187,9 +220,10 @@
 - [ ] **Streaming list_by_prefix**: Currently collects entire result into Vec before processing. Redb's `range()` returns an iterator, but we can't return it (lifetime tied to txn). Consider callback API or channels for large datasets.
 - [ ] **Transactions / Batch Writes**: Group multiple store operations into a single sigchain entry for atomicity. Currently `Peer::save()` writes 4 separate keys which could be seen in inconsistent state by readers. A transaction API would bundle writes into one atomic entry.
 - [ ] **Error Handling Review**: Re-evaluate usage of `expect`, `unwrap`, and `unwrap_or_default`. Ensure we are using the right strategy (fail-fast vs fail-safe) in appropriate contexts, particularly in critical paths like lock acquisition and network handlers.
-- [ ] **Transactional Atomicity (Dual Commit Problem)**: `StoreActor::commit_entry` writes to two storage mediums (filesystem log via `SigChainManager`, redb via `KvStore`) without unified transaction. If log succeeds but state fails, runtime inconsistency until restart. Solutions: (1) Store ChainTips in redb within same transaction as KV updates, (2) Enforce strict WAL pattern where file log is single source of truth, (3) Don't update state.db until file flush confirms success.
+- [ ] **Transactional Atomicity (Dual Commit Problem)**: `StoreActor::commit_entry` writes to two storage mediums (filesystem log via `SigChainManager`, redb via `KvState`) without unified transaction. If log succeeds but state fails, runtime inconsistency until restart. Solutions: (1) Store ChainTips in redb within same transaction as KV updates, (2) Enforce strict WAL pattern where file log is single source of truth, (3) Don't update state.db until file flush confirms success.
 - [ ] **Encapsulation of Orphan Resolution Logic**: `StoreActor` contains complex domain logic for resolving recursive dependencies (`work_queue`, `OrphanMeta` tuple management). This leaks orphan storage implementation details into the Actor which should focus on concurrency/dispatch. Solutions: (1) Create `SigChainManager::ingest_and_resolve(entry)` that handles recursion internally, (2) Return `TransactionResult` struct with side effects (entries applied, orphans deleted), (3) Remove `work_queue` and manual orphan deletion from `StoreActor`.
 - [ ] **Duplicate Store Registries (Race Conditions)**: `Node` and `MeshNetwork` maintain separate registries of active stores, synced via `NodeEvent::NetworkStore`. Event-driven sync introduces race conditions during startup or rapid mesh creation/deletion. Solutions: (1) Make `Node` the single source of truth, (2) Remove `StoresRegistry` from `MeshNetwork`/`MeshEngine`, (3) Query `Node` directly via `node.mesh_by_id(uuid)` when requests arrive, (4) Create `AuthorizedStore` on-the-fly or cache within `Node`.
+- [ ] **Re-implement Watch Feature**: During the Replica/KvHandle refactor, the `watch()` functionality in `PeerManager::start_watching()` was stubbed out. Need to re-add watch support to `KvHandle` or add a watch mechanism to the KV state layer for reactive cache updates.
 
 ---
 
@@ -260,7 +294,7 @@ Ensure system resilience against malicious peers who may lie, omit messages, or 
 
 ## Future
 
-
+- **Split lattice-core**: Extract `lattice-node` (application/orchestration logic) and `lattice-kernel` (pure replication engine with SigChain, log, sync protocols). Kernel becomes embeddable library with minimal dependencies.
 - TTL expiry for long-lived orphans (received_at timestamp now tracked)
 - Transitive sync across all peers
 - CRDTs: PN-Counters, OR-Sets for peer list

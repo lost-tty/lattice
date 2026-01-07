@@ -1,12 +1,12 @@
 //! Node commands - local identity operations
 
 use crate::commands::{CommandResult, Writer};
-use lattice_core::{Node, StoreHandle};
+use lattice_node::{Node, KvHandle};
 use lattice_net::MeshNetwork;
 use std::io::Write;
 
 /// Show node status (local identity only)
-pub async fn cmd_status(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
+pub async fn cmd_status(node: &Node, _store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
     let mut w = writer.clone();
     let _ = writeln!(w, "Node ID:  {}", hex::encode(node.node_id()));
     if let Some(name) = node.name() {
@@ -17,7 +17,7 @@ pub async fn cmd_status(node: &Node, _store: Option<&StoreHandle>, _mesh: Option
 }
 
 /// Set display name for this node
-pub async fn cmd_set_name(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, name: &str, writer: Writer) -> CommandResult {
+pub async fn cmd_set_name(node: &Node, _store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, name: &str, writer: Writer) -> CommandResult {
     let mut w = writer.clone();
     
     if let Err(e) = node.set_name(name).await {

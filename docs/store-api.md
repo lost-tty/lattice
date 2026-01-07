@@ -5,7 +5,7 @@ The `StoreHandle` is the primary interface for interacting with a Lattice store.
 ## Architecture
 
 ```
-StoreHandle → StoreCmd → StoreActor → { SigChain (log), KvStore (heads) }
+StoreHandle → StoreCmd → StoreActor → { SigChain (log), KvState (heads) }
 ```
 
 **Heads-Only:** All read methods return `Vec<Head>`. Use `Merge` trait for resolution.

@@ -6,7 +6,7 @@
 
 use crate::commands::{CommandResult, Writer, MeshSubcommand};
 use crate::display_helpers::format_elapsed;
-use lattice_core::{Node, StoreHandle, PeerStatus, Mesh, token::Invite};
+use lattice_node::{Node, KvHandle, PeerStatus, Mesh, token::Invite};
 use lattice_model::types::PubKey;
 use lattice_net::MeshNetwork;
 use chrono::DateTime;
@@ -42,7 +42,7 @@ pub async fn handle_command(
 // ==================== Mesh Commands ====================
 
 /// Create a new mesh
-pub async fn cmd_create(node: &Node, _store: Option<&StoreHandle>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
+pub async fn cmd_create(node: &Node, _store: Option<&KvHandle>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
     match node.create_mesh().await {
         Ok(store_id) => {
             let mut w = writer.clone();
@@ -51,7 +51,7 @@ pub async fn cmd_create(node: &Node, _store: Option<&StoreHandle>, _mesh: Option
             drop(w);
             // Use the created mesh
             match node.mesh_by_id(store_id) {
-                Some(mesh) => CommandResult::SwitchTo(mesh.root_store().clone()),
+                Some(mesh) => CommandResult::SwitchTo(mesh.kv().clone()),
                 None => CommandResult::Ok,
             }
         }
@@ -117,7 +117,7 @@ pub async fn cmd_use(node: &Node, mesh_id_prefix: &str, writer: Writer) -> Comma
             match node.mesh_by_id(*mesh_id) {
                 Some(mesh) => {
                     let _ = writeln!(w, "Switched to mesh {}", mesh_id);
-                    CommandResult::SwitchTo(mesh.root_store().clone())
+                    CommandResult::SwitchTo(mesh.kv().clone())
                 }
                 None => {
                     let _ = writeln!(w, "Mesh {} not loaded. Run 'node start' first.", mesh_id);

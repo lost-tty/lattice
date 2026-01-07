@@ -6,10 +6,11 @@
 //! - Sync operations
 
 use crate::{MessageSink, MessageStream, LatticeNetError, LatticeEndpoint, ToLattice};
-use lattice_core::{Node, NodeError, PeerStatus, Uuid};
+use lattice_node::{Node, NodeError, PeerStatus};
+use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
-use lattice_core::store::AuthorizedStore;
-use lattice_core::proto::network::{PeerMessage, peer_message, JoinRequest, StatusRequest};
+use lattice_node::AuthorizedStore;
+use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinRequest, StatusRequest};
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
@@ -77,7 +78,7 @@ impl MeshEngine {
         
         match msg.message {
             Some(peer_message::Message::JoinResponse(resp)) => {
-                let mesh_id = lattice_core::Uuid::from_slice(&resp.mesh_id)
+                let mesh_id = lattice_kernel::Uuid::from_slice(&resp.mesh_id)
                     .map_err(|_| NodeError::Actor("Invalid UUID from peer".to_string()))?;
                 
                 // Convert iroh::PublicKey to PubKey for complete_join
@@ -100,8 +101,8 @@ impl MeshEngine {
     }
     
     /// Request status from a single peer
-    pub async fn status_peer(&self, peer_id: iroh::PublicKey, store_id: Uuid, our_sync_state: Option<lattice_core::proto::storage::SyncState>) 
-        -> Result<(u64, Option<lattice_core::proto::storage::SyncState>), LatticeNetError> 
+    pub async fn status_peer(&self, peer_id: iroh::PublicKey, store_id: Uuid, our_sync_state: Option<lattice_kernel::proto::storage::SyncState>) 
+        -> Result<(u64, Option<lattice_kernel::proto::storage::SyncState>), LatticeNetError> 
     {
         let start = std::time::Instant::now();
         
@@ -139,8 +140,8 @@ impl MeshEngine {
     }
     
     /// Request status from all known active peers
-    pub async fn status_all(&self, store_id: Uuid, our_sync_state: Option<lattice_core::proto::storage::SyncState>) 
-        -> HashMap<iroh::PublicKey, Result<(u64, Option<lattice_core::proto::storage::SyncState>), String>> 
+    pub async fn status_all(&self, store_id: Uuid, our_sync_state: Option<lattice_kernel::proto::storage::SyncState>) 
+        -> HashMap<iroh::PublicKey, Result<(u64, Option<lattice_kernel::proto::storage::SyncState>), String>> 
     {
         let peers = match self.node.mesh_by_id(store_id) {
             Some(m) => m.list_peers().await.unwrap_or_default(),
@@ -148,7 +149,7 @@ impl MeshEngine {
         };
         
         let active_peers: Vec<_> = peers.iter()
-            .filter(|p| p.status == lattice_core::PeerStatus::Active && p.pubkey != self.node.node_id())
+            .filter(|p| p.status == lattice_node::PeerStatus::Active && p.pubkey != self.node.node_id())
             .filter_map(|p| iroh::PublicKey::from_bytes(&p.pubkey).ok())
             .collect();
         

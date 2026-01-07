@@ -29,15 +29,20 @@ pub const MAX_ENTRY_SIZE: usize = 16 * 1024 * 1024;
 
 // Node-level exports
 pub use node_identity::{NodeIdentity, PeerStatus};
-pub use node::{Node, NodeBuilder, NodeInfo, StoreInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, parse_peer_status_key, PEER_STATUS_PATTERN};
+pub use node::{Node, NodeBuilder, NodeInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, parse_peer_status_key, PEER_STATUS_PATTERN};
 pub use auth::{PeerProvider, PeerEvent};
 pub use peer_manager::{PeerManager, PeerManagerError, Peer};
 pub use mesh::Mesh;
 pub use token::Invite;
 
 // Store exports (re-exported from store submodule)
-pub use store::{KvStore, StateError, StoreHandle, WatchEvent, WatchEventKind, WatchError};
+pub use store::{StateError, Replica, ReplicaInfo, OpenedReplica};
+pub use store::{ReplicatedState, ReplicatedStateCmd, ReplicatedStateError};
 pub use store::{LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded};
+
+/// Type alias for KvHandle using Replica as the StateWriter.
+/// Cleaner than writing `KvHandle<Store<KvState>>` everywhere.
+pub type KvReplica = lattice_kvstate::KvHandle<Store<lattice_kvstate::KvState>>;
 
 // Proto exports
 pub use proto::storage::HeadInfo;

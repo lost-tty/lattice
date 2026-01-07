@@ -5,11 +5,12 @@
 //! After initial handshake, both run identical exchange logic.
 
 use crate::{MessageSink, MessageStream};
-use lattice_core::{NodeError, SyncState};
+use lattice_node::NodeError;
+use lattice_kernel::SyncState;
 use lattice_model::types::PubKey;
-use lattice_core::store::AuthorizedStore;
-use lattice_core::proto::storage::SignedEntry;
-use lattice_core::proto::network::{PeerMessage, peer_message, AuthorRange, FetchRequest, FetchResponse, StatusRequest, StatusResponse};
+use lattice_node::AuthorizedStore;
+use lattice_kernel::proto::storage::SignedEntry;
+use lattice_kernel::proto::network::{PeerMessage, peer_message, AuthorRange, FetchRequest, FetchResponse, StatusRequest, StatusResponse};
 
 /// Result of a sync session
 #[derive(Debug, Default)]
@@ -111,7 +112,7 @@ impl<'a> SyncSession<'a> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let info = lattice_core::proto::storage::PeerSyncInfo {
+        let info = lattice_kernel::proto::storage::PeerSyncInfo {
             sync_state: Some(state.to_proto()),
             updated_at: now,
         };
@@ -162,7 +163,7 @@ impl<'a> SyncSession<'a> {
                 }
                 Some(peer_message::Message::FetchResponse(resp)) => {
                     for entry in resp.entries {
-                        let internal: lattice_core::entry::SignedEntry = match entry.try_into() {
+                        let internal: lattice_kernel::SignedEntry = match entry.try_into() {
                             Ok(e) => e,
                             Err(_) => continue,
                         };

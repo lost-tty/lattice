@@ -37,12 +37,12 @@ message PeerMessage {
 
 // 3. Status Protocol
 message StatusRequest {
-  bytes store_id = 1;                      // Store UUID (16 bytes)
+  bytes replica_id = 1;                      // Store UUID (16 bytes)
   lattice.storage.SyncState sync_state = 2;  // Sender's current sync state
 }
 
 message StatusResponse {
-  bytes store_id = 1;                      // Store UUID (16 bytes)
+  bytes replica_id = 1;                      // Store UUID (16 bytes)
   lattice.storage.SyncState sync_state = 2;  // Responder's current sync state
 }
 
@@ -54,12 +54,12 @@ message AuthorRange {
 }
 
 message FetchRequest {
-  bytes store_id = 1;             // Store UUID (16 bytes)
+  bytes replica_id = 1;             // Store UUID (16 bytes)
   repeated AuthorRange ranges = 2;  // Ranges to fetch
 }
 
 message FetchResponse {
-  bytes store_id = 1;                              // Store UUID (16 bytes)
+  bytes replica_id = 1;                              // Store UUID (16 bytes)
   uint32 status = 2;                               // HTTP-like: 200=OK, 206=Partial, 401=Unauthorized, 404=NotFound
   bool done = 3;                                   // true = last chunk (stream complete)
   repeated lattice.storage.SignedEntry entries = 4;  // Chunk of entries
@@ -72,6 +72,6 @@ message GossipMessage {
 }
 
 message SyncStateAnnounce {
-  bytes store_id = 1;                      // Store UUID (16 bytes)
+  bytes replica_id = 1;                      // Store UUID (16 bytes)
   lattice.storage.SyncState sync_state = 2;  // Sender's current sync state
 }

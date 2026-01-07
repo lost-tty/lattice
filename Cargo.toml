@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "lattice-core",
+    "lattice-kernel",
+    "lattice-node",
     "lattice-net",
     "lattice-cli",
     "lattice-model",
+    "lattice-kvstate",
 ]
 
 [workspace.package]
@@ -14,10 +16,13 @@ license = "MIT"
 
 [workspace.dependencies]
 # Workspace crates
-lattice-core = { path = "lattice-core" }
+lattice-kernel = { path = "lattice-kernel" }
+lattice-node = { path = "lattice-node" }
 lattice-net = { path = "lattice-net" }
 lattice-cli = { path = "lattice-cli" }
 lattice-model = { path = "lattice-model" }
+lattice-kvstate = { path = "lattice-kvstate" }
+lattice-proto = { path = "lattice-proto" }
 
 # CLI
 rustyline = "17"

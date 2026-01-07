@@ -1,0 +1,56 @@
+//! Lattice Node
+//!
+//! Application layer for Lattice distributed mesh:
+//! - **Node**: Orchestrates identity, meshes, and stores
+//! - **Mesh**: High-level mesh management facade
+//! - **PeerManager**: Peer cache and status tracking
+//! - **DataDir**: Platform-specific data directory paths
+//! - **MetaStore**: Node metadata storage
+
+pub mod node;
+pub mod mesh;
+pub mod peer_manager;
+pub mod auth;
+pub mod store_registry;
+pub mod meta_store;
+pub mod data_dir;
+pub mod token;
+pub mod authorized_store;
+pub use token::Invite;
+
+// Re-export from lattice-kernel (replication engine)
+pub use lattice_kernel::{
+    NodeIdentity, PeerStatus,
+    Entry, SignedEntry,
+    StateError, Store, StoreInfo, OpenedStore,
+    ReplicatedState, ReplicatedStateCmd, ReplicatedStateError,
+    LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded,
+    Uuid, SigningKey,
+    MAX_ENTRY_SIZE,
+};
+
+// Node-level exports
+pub use node::{Node, NodeBuilder, NodeInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, parse_peer_status_key, PEER_STATUS_PATTERN};
+pub use auth::{PeerProvider, PeerEvent};
+pub use peer_manager::{PeerManager, PeerManagerError, Peer};
+pub use mesh::Mesh;
+
+// Other exports
+pub use data_dir::DataDir;
+pub use meta_store::MetaStore;
+
+// Re-export from lattice-kvstate
+use lattice_kvstate::KvState;
+pub use lattice_kvstate::Head;
+
+/// Type alias for KvHandle using Store as the StateWriter.
+/// This is the primary user-facing handle type for KV replicas.
+/// - Use `.get()`, `.put()`, `.delete()` for KV operations
+pub type KvHandle = lattice_kvstate::KvHandle<Store<KvState>>;
+
+/// Type alias for the bare Store with KvState state machine.
+/// Used by network layer for AuthorizedStore wrapping.
+pub type KvStore = Store<KvState>;
+
+// Export AuthorizedStore
+pub use authorized_store::AuthorizedStore;

@@ -10,7 +10,7 @@
     ├── sigchain/             # SigChainManager owns this directory
     │   └── {author}.log      # Append-only SignedEntry stream
     ├── state/                # Backend owns this directory
-    │   └── state.db          # Per-store KV state (redb, for KvStore)
+    │   └── state.db          # Per-store KV state (redb, for KvState)
     └── sync/                 # Sync metadata
 ```
 

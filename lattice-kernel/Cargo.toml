@@ -1,0 +1,37 @@
+[package]
+name = "lattice-kernel"
+description = "Replication engine: Replica, SigChain, Entry, Sync protocols"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-model = { workspace = true }
+lattice-proto = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+prost = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+dirs = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+redb = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+hostname = "0.4"
+serde_json = "1"
+regex = "1"
+regex-syntax = "0.8"
+zeroize = "1.8.2"
+bs58 = { version = "0.5", features = ["check"] }
+tokio-stream = { version = "0.1.18", features = ["sync"] }
+futures-core = "0.3.31"
+futures-util.workspace = true
+
+[build-dependencies]
+prost-build = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = "3"

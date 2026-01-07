@@ -10,7 +10,9 @@ name = "lattice"
 path = "src/main.rs"
 
 [dependencies]
-lattice-core = { workspace = true }
+lattice-node = { workspace = true }
+lattice-kernel = { workspace = true }
+lattice-kvstate = { workspace = true }
 lattice-net = { workspace = true }
 lattice-model = { workspace = true }
 rustyline-async = "0.4"

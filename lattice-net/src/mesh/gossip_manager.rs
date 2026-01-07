@@ -2,11 +2,12 @@
 
 use crate::{LatticeEndpoint, ToLattice};
 use super::error::GossipError;
-use lattice_core::{Uuid, PeerStatus, PeerEvent, PeerProvider};
+use lattice_node::{PeerStatus, PeerEvent, PeerProvider};
+use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
-use lattice_core::store::AuthorizedStore;
-use lattice_core::proto::storage::PeerSyncInfo;
-use lattice_core::proto::network::GossipMessage;
+use lattice_node::AuthorizedStore;
+use lattice_kernel::proto::storage::PeerSyncInfo;
+use lattice_kernel::proto::network::GossipMessage;
 use iroh_gossip::Gossip;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,7 +49,7 @@ impl GossipManager {
     #[tracing::instrument(skip(self, pm, sessions, store), fields(store_id = %store.id()))]
     pub async fn setup_for_store(
         &self,
-        pm: std::sync::Arc<lattice_core::PeerManager>,
+        pm: std::sync::Arc<lattice_node::PeerManager>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
         store: AuthorizedStore,
     ) -> Result<(), GossipError> {
@@ -97,7 +98,7 @@ impl GossipManager {
         &self,
         store: AuthorizedStore,
         mut rx: iroh_gossip::api::GossipReceiver,
-        pm: std::sync::Arc<lattice_core::PeerManager>,
+        pm: std::sync::Arc<lattice_node::PeerManager>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
         pending_syncstate: Arc<AtomicBool>,
     ) {
@@ -165,7 +166,7 @@ impl GossipManager {
                         // Handle entry (if present) - AuthorizedStore checks entry author
                         if let Some(entry) = gossip_msg.entry {
                             tracing::debug!(store_id = %store_id, from = %msg.delivered_from.fmt_short(), "Gossip entry received");
-                            let internal: Result<lattice_core::entry::SignedEntry, _> = entry.try_into();
+                            let internal: Result<lattice_kernel::SignedEntry, _> = entry.try_into();
                             if let Ok(internal_entry) = internal {
                                 let _ = store.ingest_entry(internal_entry).await;
                             }
@@ -241,7 +242,7 @@ impl GossipManager {
     fn spawn_forwarder(
         &self,
         store: AuthorizedStore,
-        mut entry_rx: tokio::sync::broadcast::Receiver<lattice_core::entry::SignedEntry>,
+        mut entry_rx: tokio::sync::broadcast::Receiver<lattice_kernel::SignedEntry>,
         pending_syncstate: Arc<AtomicBool>,
     ) {
         let senders = self.senders.clone();
@@ -257,7 +258,7 @@ impl GossipManager {
                     if let Some(sender) = senders.read().await.get(&store_id) {
                         // Always piggyback SyncState on local writes
                         let sender_state = store.sync_state().await.ok().map(|s| s.to_proto());
-                            let proto_entry: lattice_core::proto::storage::SignedEntry = entry.into();
+                            let proto_entry: lattice_kernel::proto::storage::SignedEntry = entry.into();
                             let msg = GossipMessage {
                                 entry: Some(proto_entry),
                                 sender_state,
@@ -368,7 +369,7 @@ impl GossipManager {
 }
 
 /// Helper to format SyncState for logging (hex authors/hashes/hlc)
-fn format_sync_state(state: &lattice_core::proto::storage::SyncState) -> String {
+fn format_sync_state(state: &lattice_kernel::proto::storage::SyncState) -> String {
     let mut parts = Vec::new();
     for sync_author in &state.authors {
         let author = hex::encode(&sync_author.author_id).chars().take(8).collect::<String>();

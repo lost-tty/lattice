@@ -279,7 +279,7 @@ pub struct RenderEntry {
     pub hlc: u64,
     pub value: Vec<u8>,
     pub tombstone: bool,
-    pub parent_hashes: Vec<Hash>,
+    pub causal_deps: Vec<Hash>,
     pub is_merge: bool,
 }
 
@@ -302,7 +302,7 @@ pub fn render_dag(
     let mut children: HashMap<Hash, Vec<Hash>> = HashMap::new();
     
     for (hash, entry) in entries {
-        for parent in &entry.parent_hashes {
+        for parent in &entry.causal_deps {
             if entry_hashes.contains(parent) {
                 children.entry(*parent).or_default().push(*hash);
             }
@@ -317,7 +317,7 @@ pub fn render_dag(
     let mut in_degree: HashMap<Hash, usize> = HashMap::new();
     for hash in entries.keys() {
         let Some(entry) = entries.get(hash) else { continue };
-        let parents_in_set = entry.parent_hashes.iter()
+        let parents_in_set = entry.causal_deps.iter()
             .filter(|p| entry_hashes.contains(*p))
             .count();
         in_degree.insert(*hash, parents_in_set);
@@ -381,7 +381,7 @@ pub fn render_dag(
         let Some(entry) = entries.get(hash) else { continue };
         let my_row = hash_to_row[hash];
         // Update each parent's last descendant
-        for parent in &entry.parent_hashes {
+        for parent in &entry.causal_deps {
             if entry_hashes.contains(parent) {
                 let current = last_descendant_row.get(parent).copied().unwrap_or(0);
                 last_descendant_row.insert(*parent, current.max(my_row));
@@ -416,7 +416,7 @@ pub fn render_dag(
     // Assign columns with reuse
     for (row, hash) in order.iter().enumerate() {
         let Some(entry) = entries.get(hash) else { continue };
-        let parents_in_set: Vec<Hash> = entry.parent_hashes.iter()
+        let parents_in_set: Vec<Hash> = entry.causal_deps.iter()
             .filter(|p| entry_hashes.contains(*p))
             .cloned()
             .collect();
@@ -520,7 +520,7 @@ pub fn render_dag(
         let color_code = 31 + (entry.author[0] % 6); // 31-36: red, green, yellow, blue, magenta, cyan
         
         // Count parents in our entry set (not all parents may be in filtered history)
-        let parents_in_set: Vec<Hash> = entry.parent_hashes.iter()
+        let parents_in_set: Vec<Hash> = entry.causal_deps.iter()
             .filter(|p| entry_hashes.contains(*p))
             .cloned()
             .collect();

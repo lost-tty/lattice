@@ -12,7 +12,7 @@ pub enum ServerError {
     Gossip(#[from] GossipError),
     
     #[error("node: {0}")]
-    Node(#[from] lattice_core::NodeError),
+    Node(#[from] lattice_node::NodeError),
 }
 
 /// Gossip subsystem errors
@@ -28,5 +28,5 @@ pub enum GossipError {
     Broadcast(String),
     
     #[error("no sender for store {0}")]
-    NoSender(lattice_core::Uuid),
+    NoSender(lattice_kernel::Uuid),
 }

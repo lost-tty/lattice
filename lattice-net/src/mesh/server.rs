@@ -1,15 +1,16 @@
 //! Server - MeshNetwork for mesh networking
 
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
-use lattice_core::{Node, NodeEvent, Uuid, StoreHandle};
+use lattice_node::{Node, NodeEvent};
+use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
-use lattice_core::store::AuthorizedStore;
+use lattice_node::AuthorizedStore;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
-use lattice_core::proto::network::{PeerMessage, peer_message, JoinResponse, StatusRequest};
+use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinResponse, StatusRequest};
 
 // Re-export from engine
 pub use super::engine::{SyncResult, MeshEngine};
@@ -137,8 +138,8 @@ impl MeshNetwork {
                     }
                 }
                 NodeEvent::NetworkStore { store, peer_manager } => {
-                    tracing::info!(store_id = %store.id(), "Event: NetworkStore → registering store");
-                    server.register_store(store, peer_manager).await;
+                    tracing::info!(store_id = %store.writer().id(), "Event: NetworkStore → registering store");
+                    server.register_store(store.writer().clone(), peer_manager).await;
                 }
                 NodeEvent::SyncWithPeer { store_id, peer } => {
                     let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
@@ -196,7 +197,7 @@ impl MeshNetwork {
     /// Register a store for network access.
     /// This creates an AuthorizedStore wrapper and sets up gossip/sync infrastructure.
     /// Stores must be registered before they can be accessed via sync/fetch requests.
-    pub async fn register_store(self: &Arc<Self>, store: StoreHandle, pm: std::sync::Arc<lattice_core::PeerManager>) {
+    pub async fn register_store(self: &Arc<Self>, store: lattice_node::KvStore, pm: std::sync::Arc<lattice_node::PeerManager>) {
         let store_id = store.id();
         
         // Check if already registered
@@ -208,7 +209,7 @@ impl MeshNetwork {
         tracing::info!(store_id = %store_id, "Registering store for network");
         
         // Create AuthorizedStore - the single entry point for network authorization
-        let authorized_store = AuthorizedStore::new(store, pm.clone());
+        let authorized_store = AuthorizedStore::new(Arc::new(store), pm.clone());
         
         // Register in store registry
         self.stores.write().await.insert(store_id, authorized_store.clone());
@@ -274,7 +275,7 @@ impl MeshNetwork {
     fn spawn_sync_coordinator_with_rx(
         server: Arc<Self>, 
         store: AuthorizedStore,
-        mut sync_rx: tokio::sync::broadcast::Receiver<lattice_core::SyncNeeded>,
+        mut sync_rx: tokio::sync::broadcast::Receiver<lattice_kernel::SyncNeeded>,
     ) {
         const COOLDOWN_SECS: u64 = 30;
         const DEFER_SECS: u64 = 3;
@@ -335,7 +336,7 @@ impl MeshNetwork {
                         let still_out_of_sync = match store.get_peer_sync_state(&peer_bytes).await {
                             Some(info) => {
                                 if let Some(ref peer_proto) = info.sync_state {
-                                    let peer_state = lattice_core::SyncState::from_proto(peer_proto);
+                                    let peer_state = lattice_kernel::SyncState::from_proto(peer_proto);
                                     match store.sync_state().await {
                                         Ok(local) => local.calculate_discrepancy(&peer_state).is_out_of_sync(),
                                         Err(_) => false,
@@ -515,7 +516,7 @@ async fn handle_stream(
 async fn handle_join_request(
     node: &Node,
     remote_pubkey: &PubKey,
-    req: lattice_core::proto::network::JoinRequest,
+    req: lattice_kernel::proto::network::JoinRequest,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
     tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
@@ -572,7 +573,7 @@ async fn handle_status_request(
     
     // Parse incoming peer state
     let incoming_state = req.sync_state
-        .map(|s| lattice_core::SyncState::from_proto(&s))
+        .map(|s| lattice_kernel::SyncState::from_proto(&s))
         .unwrap_or_default();
     
     // Use SyncSession for symmetric handling
@@ -586,7 +587,7 @@ async fn handle_status_request(
 async fn handle_fetch_request(
     stores: StoresRegistry,
     remote_pubkey: &PubKey,
-    req: lattice_core::proto::network::FetchRequest,
+    req: lattice_kernel::proto::network::FetchRequest,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
     let store_id = Uuid::from_slice(&req.store_id)
@@ -616,9 +617,9 @@ async fn stream_entries_to_sink(
     sink: &mut MessageSink,
     store: &AuthorizedStore,
     store_id: &[u8],
-    ranges: &[lattice_core::proto::network::AuthorRange],
+    ranges: &[lattice_kernel::proto::network::AuthorRange],
 ) -> Result<(), LatticeNetError> {
-    let mut chunk: Vec<lattice_core::proto::storage::SignedEntry> = Vec::with_capacity(CHUNK_SIZE);
+    let mut chunk: Vec<lattice_kernel::proto::storage::SignedEntry> = Vec::with_capacity(CHUNK_SIZE);
     
     for range in ranges {
         if let Ok(author_bytes) = <PubKey>::try_from(range.author_id.as_slice()) {
@@ -630,7 +631,7 @@ async fn stream_entries_to_sink(
                     // Send chunk when full
                     if chunk.len() >= CHUNK_SIZE {
                         let resp = PeerMessage {
-                            message: Some(peer_message::Message::FetchResponse(lattice_core::proto::network::FetchResponse {
+                            message: Some(peer_message::Message::FetchResponse(lattice_kernel::proto::network::FetchResponse {
                                 store_id: store_id.to_vec(),
                                 status: 200,
                                 done: false,
@@ -646,7 +647,7 @@ async fn stream_entries_to_sink(
     
     // Send final chunk (may be empty) with done=true
     let resp = PeerMessage {
-        message: Some(peer_message::Message::FetchResponse(lattice_core::proto::network::FetchResponse {
+        message: Some(peer_message::Message::FetchResponse(lattice_kernel::proto::network::FetchResponse {
             store_id: store_id.to_vec(),
             status: 200,
             done: true,

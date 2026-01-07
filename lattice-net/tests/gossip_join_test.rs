@@ -3,23 +3,26 @@
 //! These tests replicate PRODUCTION usage exactly - no manual gossip setup.
 //! They rely purely on the event-driven flow that happens in the CLI.
 
-use lattice_core::{Merge, NodeBuilder, NodeEvent, Invite};
+use lattice_node::{NodeBuilder, NodeEvent, Invite};
+use lattice_kvstate::Merge;
 use lattice_model::types::PubKey;
-use lattice_core::Node;
+use lattice_node::Node;
+use lattice_kernel::Uuid;
+use lattice_node::KvHandle;
 use lattice_net::MeshNetwork;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
 /// Helper to create a temp data dir for testing
-fn temp_data_dir(name: &str) -> lattice_core::DataDir {
+fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     let path = std::env::temp_dir().join(format!("lattice_gossip_test_{}", name));
     let _ = std::fs::remove_dir_all(&path);
-    lattice_core::DataDir::new(path)
+    lattice_node::DataDir::new(path)
 }
 
 /// Helper: Join mesh via node.join() and wait for StoreReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: lattice_core::Uuid, secret: Vec<u8>) -> Option<lattice_core::StoreHandle> {
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<KvHandle> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
     
@@ -109,7 +112,7 @@ async fn test_production_flow_gossip() {
     let mut received_at_b = false;
     for _ in 0..20 {
         sleep(Duration::from_millis(100)).await;
-        if let Some(val) = store_b.get(b"/from_a").await.unwrap_or_default().lww_head() {
+        if let Some(val) = store_b.get(b"/from_a").unwrap_or_default().lww_head() {
             assert_eq!(val.value, b"hello from A".to_vec());
             received_at_b = true;
             break;
@@ -124,7 +127,7 @@ async fn test_production_flow_gossip() {
     let mut received_at_a = false;
     for _ in 0..20 {
         sleep(Duration::from_millis(100)).await;
-        if let Some(val) = store_a.get(b"/from_b").await.unwrap_or_default().lww_head() {
+        if let Some(val) = store_a.get(b"/from_b").unwrap_or_default().lww_head() {
             assert_eq!(val.value, b"hello from B".to_vec());
             received_at_a = true;
             break;

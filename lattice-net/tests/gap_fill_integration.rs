@@ -1,22 +1,25 @@
 //! Integration tests for gap filling between networked peers
 
-use lattice_core::{Merge, NodeBuilder, NodeEvent, Invite};
+use lattice_node::{NodeBuilder, NodeEvent, Invite};
+use lattice_kvstate::Merge;
 use lattice_model::types::PubKey;
-use lattice_core::Node;
+use lattice_node::Node;
 use lattice_net::MeshNetwork;
+use lattice_kernel::Uuid;
+use lattice_node::KvHandle;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
 /// Helper to create a temp data dir for testing
-fn temp_data_dir(name: &str) -> lattice_core::DataDir {
+fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     let path = std::env::temp_dir().join(format!("lattice_integ_test_{}", name));
     let _ = std::fs::remove_dir_all(&path);
-    lattice_core::DataDir::new(path)
+    lattice_node::DataDir::new(path)
 }
 
 /// Helper: Join mesh via node.join() and wait for StoreReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: lattice_core::Uuid, secret: Vec<u8>) -> Option<lattice_core::StoreHandle> {
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<KvHandle> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
     
@@ -84,10 +87,10 @@ async fn test_targeted_author_sync() {
     
     // B syncs specifically for A's author
     let author = PubKey::from(*node_a.node_id());
-    let _applied = server_b.engine().sync_author_all_by_id(store_b.id(), author).await.expect("sync author");
+    let _applied = server_b.engine().sync_author_all_by_id(store_b.writer().id(), author).await.expect("sync author");
     
     // Verify entry arrived after sync
-    let val = store_b.get(b"/data").await.expect("get").lww();
+    let val = store_b.get(b"/data").expect("get").lww();
     assert_eq!(val, Some(b"test".to_vec()));
     
     let _ = std::fs::remove_dir_all(data_a.base());
@@ -133,13 +136,13 @@ async fn test_sync_multiple_entries() {
     }
     
     // B syncs to get the new entries
-    let _results = server_b.engine().sync_all_by_id(store_b.id()).await.expect("sync");
+    let _results = server_b.engine().sync_all_by_id(store_b.writer().id()).await.expect("sync");
     
     // Verify all entries synced
     for i in 1..=5 {
         let key = format!("/key{}", i);
         let expected = format!("value{}", i);
-        let val = store_b.get(key.as_bytes()).await.expect("get").lww();
+        let val = store_b.get(key.as_bytes()).expect("get").lww();
         assert_eq!(val, Some(expected.into_bytes()), "key{} should sync", i);
     }
     

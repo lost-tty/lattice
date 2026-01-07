@@ -10,20 +10,20 @@ mod tracing_writer;
 
 use lattice_net::MeshNetwork;
 use commands::CommandResult;
-use lattice_core::NodeBuilder;
-use lattice_core::mesh::Mesh;
+use lattice_node::NodeBuilder;
+use lattice_node::mesh::Mesh;
 use rustyline_async::{Readline, ReadlineEvent};
 use std::io::Write;
 use std::sync::{Arc, RwLock};
 use tracing_subscriber::EnvFilter;
 
-fn make_prompt(mesh: Option<&Mesh>, store: Option<&lattice_core::StoreHandle>) -> String {
+fn make_prompt(mesh: Option<&Mesh>, store: Option<&lattice_node::KvHandle>) -> String {
     use owo_colors::OwoColorize;
     
     match (mesh, store) {
         (Some(m), Some(s)) => {
             let mesh_str = m.id().to_string();
-            let store_str = s.id().to_string();
+            let store_str = s.writer().id().to_string();
             let mesh_id = &mesh_str[..8];
             let store_id = &store_str[..8];
             if mesh_id == store_id {
@@ -35,7 +35,7 @@ fn make_prompt(mesh: Option<&Mesh>, store: Option<&lattice_core::StoreHandle>) -
             }
         }
         (Some(m), None) => format!("{}:{}> ", "lattice".cyan(), m.id().to_string()[..8].to_string().green()),
-        (None, Some(s)) => format!("{}:{}> ", "lattice".cyan(), s.id().to_string()[..8].to_string().yellow()),
+        (None, Some(s)) => format!("{}:{}> ", "lattice".cyan(), s.writer().id().to_string()[..8].to_string().yellow()),
         (None, None) => format!("{}:{}> ", "lattice".cyan(), "no-mesh".yellow()),
     }
 }
@@ -119,7 +119,7 @@ async fn main() {
         if let Some((mesh_id, _)) = meshes.into_iter().min_by_key(|(_, info)| info.joined_at) {
             if let Some(mesh) = node.mesh_by_id(mesh_id) {
                 if let Ok(mut guard) = current_store.write() {
-                    *guard = Some(mesh.root_store().clone());
+                    *guard = Some(mesh.kv().clone());
                 }
                 if let Ok(mut guard) = current_mesh.write() {
                     *guard = Some(mesh);
@@ -137,17 +137,17 @@ async fn main() {
         tokio::spawn(async move {
             while let Ok(event) = rx.recv().await {
                 match event {
-                    lattice_core::NodeEvent::MeshReady(mesh) => {
-                        wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.root_store().id());
+                    lattice_node::NodeEvent::MeshReady(mesh) => {
+                        wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.kv().writer().id());
                         if let Ok(mut guard) = current_store.write() {
-                            *guard = Some(mesh.root_store().clone());
+                            *guard = Some(mesh.kv().clone());
                         }
                         if let Ok(mut guard) = current_mesh.write() {
                             *guard = Some(mesh);
                         }
                     }
-                    lattice_core::NodeEvent::StoreReady(_) => {}
-                    lattice_core::NodeEvent::JoinFailed { mesh_id, reason } => {
+                    lattice_node::NodeEvent::StoreReady(_) => {}
+                    lattice_node::NodeEvent::JoinFailed { mesh_id, reason } => {
                         wout!(writer, "\nError: Join failed for mesh {}: {}", mesh_id, reason);
                     }
                     _ => {}
@@ -216,7 +216,7 @@ async fn main() {
                                         *guard = Some(h.clone());
                                     }
                                     // Update current mesh to match the store's mesh
-                                    if let Some(mesh) = node.mesh_by_id(h.id()) {
+                                    if let Some(mesh) = node.mesh_by_id(h.writer().id()) {
                                         if let Ok(mut guard) = current_mesh.write() {
                                             *guard = Some(mesh);
                                         }
