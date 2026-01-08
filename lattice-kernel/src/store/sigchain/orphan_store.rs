@@ -9,7 +9,7 @@
 //! Value: OrphanedEntry protobuf
 //!
 //! Table: dag_orphans
-//! Key:   DagOrphanKey (key_hash[32] + parent_hash[32] + entry_hash[32] = 96 bytes)
+//! Key:   DagOrphanKey (parent_hash[32] + entry_hash[32] = 64 bytes)
 //! Value: DagOrphanedEntry protobuf
 
 use crate::entry::SignedEntry;
@@ -24,7 +24,7 @@ const ORPHANS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("orpha
 const DAG_ORPHANS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dag_orphans");
 
 /// Composite key for orphan entries: author + prev_hash + entry_hash
-#[repr(C)]
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct OrphanKey {
     pub author: PubKey,
@@ -42,10 +42,13 @@ impl OrphanKey {
         }
     }
 
-    /// View the key as a byte slice for database operations
-    pub fn as_bytes(&self) -> &[u8; 96] {
-        // SAFETY: #[repr(C)] guarantees no padding for contiguous [u8; 32] arrays
-        unsafe { &*(self as *const Self as *const [u8; 96]) }
+    /// Convert the key to a byte array for database operations
+    pub fn to_bytes(&self) -> [u8; 96] {
+        let mut bytes = [0u8; 96];
+        bytes[0..32].copy_from_slice(self.author.as_ref());
+        bytes[32..64].copy_from_slice(self.prev_hash.as_ref());
+        bytes[64..96].copy_from_slice(self.entry_hash.as_ref());
+        bytes
     }
 
     /// Parse a key from bytes
@@ -79,37 +82,37 @@ impl OrphanKey {
     }
 }
 
-/// Composite key for DAG orphan entries: parent_hash + key_hash + entry_hash
+/// Composite key for DAG orphan entries: parent_hash + entry_hash
 /// parent_hash is FIRST to enable efficient prefix scans when querying by parent
-#[repr(C)]
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct DagOrphanKey {
     pub parent_hash: Hash, // awaited parent hash (FIRST for efficient range queries)
-    pub key_hash: Hash,    // blake3 hash of the key
     pub entry_hash: Hash,  // hash of the orphaned entry
 }
 
 impl DagOrphanKey {
-    pub fn new(key_hash: Hash, parent_hash: Hash, entry_hash: Hash) -> Self {
+    pub fn new(parent_hash: Hash, entry_hash: Hash) -> Self {
         Self {
             parent_hash,
-            key_hash,
             entry_hash,
         }
     }
 
-    pub fn as_bytes(&self) -> &[u8; 96] {
-        unsafe { &*(self as *const Self as *const [u8; 96]) }
+    pub fn to_bytes(&self) -> [u8; 64] {
+        let mut bytes = [0u8; 64];
+        bytes[0..32].copy_from_slice(self.parent_hash.as_ref());
+        bytes[32..64].copy_from_slice(self.entry_hash.as_ref());
+        bytes
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != 96 {
+        if bytes.len() != 64 {
             return None;
         }
         Some(Self {
             parent_hash: bytes[0..32].try_into().ok()?,
-            key_hash: bytes[32..64].try_into().ok()?,
-            entry_hash: bytes[64..96].try_into().ok()?,
+            entry_hash: bytes[32..64].try_into().ok()?,
         })
     }
 
@@ -117,7 +120,6 @@ impl DagOrphanKey {
     pub fn range_start_by_parent(parent_hash: Hash) -> Self {
         Self {
             parent_hash,
-            key_hash: Hash::from([0u8; 32]),
             entry_hash: Hash::from([0u8; 32]),
         }
     }
@@ -126,7 +128,6 @@ impl DagOrphanKey {
     pub fn range_end_by_parent(parent_hash: Hash) -> Self {
         Self {
             parent_hash,
-            key_hash: Hash::from([0xFFu8; 32]),
             entry_hash: Hash::from([0xFFu8; 32]),
         }
     }
@@ -226,7 +227,7 @@ impl OrphanStore {
         let is_new = {
             let mut table = write_txn.open_table(ORPHANS_TABLE)?;
             // Check if already exists
-            if table.get(key.as_bytes().as_slice())?.is_some() {
+            if table.get(key.to_bytes().as_slice())?.is_some() {
                 false
             } else {
                 let proto_entry: ProtoSignedEntry = entry.clone().into();
@@ -236,7 +237,7 @@ impl OrphanStore {
                     received_at,
                 }
                 .encode_to_vec();
-                table.insert(key.as_bytes().as_slice(), value.as_slice())?;
+                table.insert(key.to_bytes().as_slice(), value.as_slice())?;
                 true
             }
         };
@@ -257,7 +258,7 @@ impl OrphanStore {
         let table = read_txn.open_table(ORPHANS_TABLE)?;
 
         let mut results = Vec::new();
-        for row in table.range(start_key.as_bytes().as_slice()..=end_key.as_bytes().as_slice())? {
+        for row in table.range(start_key.to_bytes().as_slice()..=end_key.to_bytes().as_slice())? {
             let (key_bytes, value) = row?;
             let orphaned = OrphanedEntry::decode(value.value())?;
             let proto_signed = orphaned.entry.ok_or_else(|| {
@@ -287,7 +288,7 @@ impl OrphanStore {
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(ORPHANS_TABLE)?;
-            table.remove(key.as_bytes().as_slice())?;
+            table.remove(key.to_bytes().as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
@@ -332,29 +333,25 @@ impl OrphanStore {
     /// Returns true if new, false if already existed.
     pub fn insert_dag_orphan(
         &self,
-        key: &[u8],
         parent_hash: &Hash,
         entry_hash: &Hash,
         entry: &SignedEntry,
     ) -> Result<bool, OrphanStoreError> {
-        let key_hash: Hash = Hash::from(*blake3::hash(key).as_bytes());
         let dag_key =
-            DagOrphanKey::new(key_hash, Hash::from(*parent_hash), Hash::from(*entry_hash));
+            DagOrphanKey::new(Hash::from(*parent_hash), Hash::from(*entry_hash));
 
         let write_txn = self.db.begin_write()?;
         let is_new = {
             let mut table = write_txn.open_table(DAG_ORPHANS_TABLE)?;
-            if table.get(dag_key.as_bytes().as_slice())?.is_some() {
+            if table.get(dag_key.to_bytes().as_slice())?.is_some() {
                 false
             } else {
-                // Store: key bytes + entry (we need the original key for retry)
                 let proto_entry: ProtoSignedEntry = entry.clone().into();
                 let value = DagOrphanedEntry {
-                    key: key.to_vec(),
                     entry: Some(proto_entry),
                 }
                 .encode_to_vec();
-                table.insert(dag_key.as_bytes().as_slice(), value.as_slice())?;
+                table.insert(dag_key.to_bytes().as_slice(), value.as_slice())?;
                 true
             }
         };
@@ -367,7 +364,7 @@ impl OrphanStore {
     pub fn find_dag_orphans_by_parent(
         &self,
         parent_hash: &Hash,
-    ) -> Result<Vec<(Vec<u8>, SignedEntry, Hash)>, OrphanStoreError> {
+    ) -> Result<Vec<(SignedEntry, Hash)>, OrphanStoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(DAG_ORPHANS_TABLE)?;
 
@@ -376,7 +373,7 @@ impl OrphanStore {
         let end = DagOrphanKey::range_end_by_parent(Hash::from(*parent_hash));
 
         let mut results = Vec::new();
-        for row in table.range(start.as_bytes().as_slice()..=end.as_bytes().as_slice())? {
+        for row in table.range(start.to_bytes().as_slice()..=end.to_bytes().as_slice())? {
             let (key_bytes, value) = row?;
             let dag_key = DagOrphanKey::from_bytes(key_bytes.value())
                 .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
@@ -387,7 +384,7 @@ impl OrphanStore {
             })?;
             let signed = SignedEntry::try_from(proto_signed)
                 .map_err(|e| OrphanStoreError::Decode(prost::DecodeError::new(e.to_string())))?;
-            results.push((orphaned.key, signed, dag_key.entry_hash));
+            results.push((signed, dag_key.entry_hash));
         }
         Ok(results)
     }
@@ -395,18 +392,16 @@ impl OrphanStore {
     /// Delete a specific DAG orphan entry
     pub fn delete_dag_orphan(
         &self,
-        key: &[u8],
         parent_hash: &Hash,
         entry_hash: &Hash,
     ) -> Result<(), OrphanStoreError> {
-        let key_hash: Hash = Hash::from(*blake3::hash(key).as_bytes());
         let dag_key =
-            DagOrphanKey::new(key_hash, Hash::from(*parent_hash), Hash::from(*entry_hash));
+            DagOrphanKey::new(Hash::from(*parent_hash), Hash::from(*entry_hash));
 
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(DAG_ORPHANS_TABLE)?;
-            table.remove(dag_key.as_bytes().as_slice())?;
+            table.remove(dag_key.to_bytes().as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
@@ -416,10 +411,7 @@ impl OrphanStore {
 /// Stored value for DAG orphan entries
 #[derive(Clone, prost::Message)]
 pub struct DagOrphanedEntry {
-    #[prost(bytes = "vec", tag = "1")]
-    pub key: Vec<u8>,
-
-    #[prost(message, optional, tag = "2")]
+    #[prost(message, optional, tag = "1")]
     pub entry: Option<ProtoSignedEntry>,
 }
 
@@ -505,4 +497,136 @@ pub(crate) mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn test_dag_orphans() {
+        let path = tempfile::tempdir()
+            .expect("tempdir")
+            .keep()
+            .join("test_dag_orphans.db");
+        let _ = std::fs::remove_file(&path);
+
+        let store = OrphanStore::open(&path).unwrap();
+
+        // Create mock entry
+        use crate::entry::Entry;
+        use lattice_model::NodeIdentity;
+        use lattice_model::hlc::HLC;
+
+        let node = NodeIdentity::generate();
+        let entry = Entry::next_after(None)
+            .payload(b"payload".to_vec())
+            .sign(&node);
+        let entry_hash = entry.hash();
+        let parent_hash = Hash::from([1u8; 32]);
+
+        // Insert DAG orphan (no key needed now!)
+        store.insert_dag_orphan(
+            &parent_hash,
+            &entry_hash,
+            &entry
+        ).unwrap();
+
+        // Find by parent
+        let results = store.find_dag_orphans_by_parent(&parent_hash).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.author_id, PubKey::from(node.public_key()));
+        assert_eq!(results[0].1, entry_hash);
+
+        // Delete
+        store.delete_dag_orphan(&parent_hash, &entry_hash).unwrap();
+        
+        // Verify empty
+        let results = store.find_dag_orphans_by_parent(&parent_hash).unwrap();
+        assert!(results.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
+
+    #[test]
+    fn test_persistence_reopen() {
+        use crate::entry::Entry;
+        use lattice_model::NodeIdentity;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let db_path = tmp_dir.path().join("orphans_persist.db");
+
+        let node = NodeIdentity::generate();
+        let entry = Entry::next_after(None).payload(b"p".to_vec()).sign(&node);
+        let author = PubKey::from(node.public_key());
+        let prev = Hash::from([1u8; 32]);
+        let entry_hash = entry.hash();
+
+        // 1. Open, Write, Drop
+        {
+            let store = OrphanStore::open(&db_path).unwrap();
+            store.insert(&author, &prev, &entry_hash, 10, &entry).unwrap();
+        } // store is dropped here, db writes must be flushed
+
+        // 2. Re-open, Read
+        {
+            let store = OrphanStore::open(&db_path).unwrap();
+            let found = store.find_by_prev_hash(&author, &prev).unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].2, entry_hash);
+        }
+    }
+
+    #[test]
+    fn test_duplicate_insert() {
+        use crate::entry::Entry;
+        use lattice_model::NodeIdentity;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = OrphanStore::open(tmp.path().join("db_dupe")).unwrap();
+
+        let node = NodeIdentity::generate();
+        let entry = Entry::next_after(None).payload(b"x".to_vec()).sign(&node);
+        let author = PubKey::from(node.public_key());
+        let prev = Hash::from([1u8; 32]);
+        let entry_hash = entry.hash();
+
+        // First insert -> True
+        let is_new = store.insert(&author, &prev, &entry_hash, 5, &entry).unwrap();
+        assert!(is_new);
+
+        // Second insert -> False
+        let is_new_again = store.insert(&author, &prev, &entry_hash, 5, &entry).unwrap();
+        assert!(!is_new_again);
+
+        // Should still contain exactly 1
+        let found = store.find_by_prev_hash(&author, &prev).unwrap();
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn test_dag_orphan_isolation() {
+        use crate::entry::Entry;
+        use lattice_model::NodeIdentity;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = OrphanStore::open(tmp.path().join("db_dag_iso")).unwrap();
+        let node = NodeIdentity::generate();
+
+        // Parent A and Parent B
+        let parent_a = Hash::from([0xAA; 32]);
+        let parent_b = Hash::from([0xBB; 32]);
+
+        // Create 2 entries, one for each parent
+        let entry_a = Entry::next_after(None).payload(b"child_a".to_vec()).sign(&node);
+        let entry_b = Entry::next_after(None).payload(b"child_b".to_vec()).sign(&node);
+
+        store.insert_dag_orphan(&parent_a, &entry_a.hash(), &entry_a).unwrap();
+        store.insert_dag_orphan(&parent_b, &entry_b.hash(), &entry_b).unwrap();
+
+        // Query for Parent A -> Should ONLY get Entry A
+        let results_a = store.find_dag_orphans_by_parent(&parent_a).unwrap();
+        assert_eq!(results_a.len(), 1);
+        assert_eq!(results_a[0].1, entry_a.hash());
+
+        // Query for Parent B -> Should ONLY get Entry B
+        let results_b = store.find_dag_orphans_by_parent(&parent_b).unwrap();
+        assert_eq!(results_b.len(), 1);
+        assert_eq!(results_b[0].1, entry_b.hash());
+    }

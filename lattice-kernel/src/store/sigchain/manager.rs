@@ -543,13 +543,12 @@ impl SigChainManager {
     pub fn buffer_dag_orphan(
         &mut self,
         entry: &SignedEntry,
-        key: &[u8],
         parent_hash: &Hash,
     ) -> Result<(), SigChainError> {
         let entry_hash = entry.hash();
         let _ = self
             .orphan_store
-            .insert_dag_orphan(key, parent_hash, &entry_hash, entry)
+            .insert_dag_orphan(parent_hash, &entry_hash, entry)
             .map_err(|e| SigChainError::WrongAuthor {
                 expected: "dag orphan store insert".to_string(),
                 got: e.to_string(),
@@ -558,17 +557,17 @@ impl SigChainManager {
     }
 
     /// Find DAG orphans waiting for a specific hash to become a head
-    pub fn find_dag_orphans(&self, parent_hash: &Hash) -> Vec<(Vec<u8>, SignedEntry, Hash)> {
+    pub fn find_dag_orphans(&self, parent_hash: &Hash) -> Vec<(SignedEntry, Hash)> {
         self.orphan_store
             .find_dag_orphans_by_parent(parent_hash)
             .unwrap_or_default()
     }
 
     /// Delete a DAG orphan after it's been applied
-    pub fn delete_dag_orphan(&mut self, key: &[u8], parent_hash: &Hash, entry_hash: &Hash) {
+    pub fn delete_dag_orphan(&mut self, parent_hash: &Hash, entry_hash: &Hash) {
         let _ = self
             .orphan_store
-            .delete_dag_orphan(key, parent_hash, entry_hash);
+            .delete_dag_orphan(parent_hash, entry_hash);
     }
 
     /// Count sigchain orphans (for testing crash recovery)

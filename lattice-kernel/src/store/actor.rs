@@ -309,7 +309,7 @@ impl<S: StateMachine> ReplicationController<S> {
         #[derive(Clone)]
         enum CleanupMeta {
             SigChain { author: PubKey, prev_hash: Hash, entry_hash: Hash },
-            Dag { key: Vec<u8>, parent_hash: Hash, entry_hash: Hash },
+            Dag { parent_hash: Hash, entry_hash: Hash },
         }
 
         let mut work_queue: Vec<(SignedEntry, Option<CleanupMeta>)> = vec![(signed_entry.clone(), None)];
@@ -332,10 +332,8 @@ impl<S: StateMachine> ReplicationController<S> {
                     }
 
                     if let Some(parent) = missing_dep {
-                        // Buffer as DAG orphan
-                        // We use empty key for generic DAG orphans, or ideally author?
-                        // Using b"dag" as namespace.
-                        self.chain_manager.buffer_dag_orphan(&current, b"dag", &parent)?;
+                        // Buffer as DAG orphan (generic, no key)
+                        self.chain_manager.buffer_dag_orphan(&current, &parent)?;
                         // STOP processing this entry
                          if let Some(meta) = cleanup_meta {
                             // If it came from buffer, we might need to delete from OLD buffer?
@@ -347,8 +345,8 @@ impl<S: StateMachine> ReplicationController<S> {
                                 CleanupMeta::SigChain { author, prev_hash, entry_hash } => {
                                     self.chain_manager.delete_sigchain_orphan(&author, &prev_hash, &entry_hash);
                                 }
-                                CleanupMeta::Dag { key, parent_hash, entry_hash } => {
-                                    self.chain_manager.delete_dag_orphan(&key, &parent_hash, &entry_hash);
+                                CleanupMeta::Dag { parent_hash, entry_hash } => {
+                                    self.chain_manager.delete_dag_orphan(&parent_hash, &entry_hash);
                                 }
                             }
                         }
@@ -384,8 +382,8 @@ impl<S: StateMachine> ReplicationController<S> {
                             CleanupMeta::SigChain { author, prev_hash, entry_hash } => {
                                 self.chain_manager.delete_sigchain_orphan(&author, &prev_hash, &entry_hash);
                             }
-                            CleanupMeta::Dag { key, parent_hash, entry_hash } => {
-                                self.chain_manager.delete_dag_orphan(&key, &parent_hash, &entry_hash);
+                            CleanupMeta::Dag { parent_hash, entry_hash } => {
+                                self.chain_manager.delete_dag_orphan(&parent_hash, &entry_hash);
                             }
                         }
                     }
@@ -400,8 +398,8 @@ impl<S: StateMachine> ReplicationController<S> {
 
                     // Queue ready DAG orphans
                     let ready_dag_orphans = self.chain_manager.find_dag_orphans(&entry_hash);
-                    for (key, orphan, orphan_hash) in ready_dag_orphans {
-                        work_queue.push((orphan, Some(CleanupMeta::Dag { key, parent_hash: entry_hash, entry_hash: orphan_hash })));
+                    for (orphan, orphan_hash) in ready_dag_orphans {
+                        work_queue.push((orphan, Some(CleanupMeta::Dag { parent_hash: entry_hash, entry_hash: orphan_hash })));
                     }
                 }
                 SigchainValidation::Orphan { gap, prev_hash } => {
