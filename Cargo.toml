@@ -40,6 +40,7 @@ rand = "0.8"
 prost = "0.13"
 prost-types = "0.13"
 prost-build = "0.13"
+prost-reflect = "0.16"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

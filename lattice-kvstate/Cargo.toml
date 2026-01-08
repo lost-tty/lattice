@@ -10,11 +10,17 @@ lattice-model = { workspace = true }
 lattice-proto = { workspace = true }
 redb = { workspace = true }
 prost = { workspace = true }
+prost-types = { workspace = true }
+prost-reflect = { workspace = true }
+bytes = { workspace = true }
 thiserror = { workspace = true }
+async-trait = "0.1"
+futures = "0.3"
+tokio = { workspace = true }
+tracing = { workspace = true }
 regex = "1"
 regex-syntax = "0.8"
 blake3 = { workspace = true }
-tokio = { workspace = true }
 futures-util.workspace = true
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 

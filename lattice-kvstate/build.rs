@@ -1,17 +1,21 @@
 use std::io::Result;
 
 fn main() -> Result<()> {
-    println!("cargo:rerun-if-changed=src/kv_schema.proto");
-    println!("cargo:rerun-if-changed=../lattice-proto/proto/storage.proto");
+    println!("cargo:rerun-if-changed=proto/");
+
+    // Generate FileDescriptorSet for reflection
+    let descriptor_path = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap())
+        .join("kv_descriptor.bin");
 
     let mut config = prost_build::Config::new();
-    // Map the Proto HLC to the existing Rust Hlc struct in lattice-proto
-    config.extern_path(".lattice.storage.HLC", "::lattice_proto::storage::Hlc");
+    config
+        .file_descriptor_set_path(&descriptor_path)
+        // Use lattice_proto's storage types instead of generating duplicates
+        .extern_path(".lattice.storage", "::lattice_proto::storage")
+        .compile_protos(
+            &["proto/kv_store.proto"],
+            &["proto/", "../lattice-proto/proto/"],
+        )?;
 
-    config.compile_protos(
-        &["src/kv_schema.proto"],
-        &["src/", "../lattice-proto/proto"],
-    )?;
-    
     Ok(())
 }

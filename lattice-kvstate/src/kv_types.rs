@@ -1,4 +1,4 @@
-include!(concat!(env!("OUT_DIR"), "/lattice.kv_store.rs"));
+include!(concat!(env!("OUT_DIR"), "/lattice.kv.rs"));
 
 use operation::OpType;
 

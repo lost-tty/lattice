@@ -29,9 +29,6 @@ tokio-stream = { version = "0.1.18", features = ["sync"] }
 futures-core = "0.3.31"
 futures-util.workspace = true
 
-[build-dependencies]
-prost-build = { workspace = true }
-
 [dev-dependencies]
 tokio-test = { workspace = true }
 tempfile = "3"

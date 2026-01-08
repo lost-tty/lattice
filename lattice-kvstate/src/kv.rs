@@ -11,9 +11,10 @@ use crate::kv_types::{operation, KvPayload, WatchEvent, WatchEventKind};
 use crate::head::Head;
 use crate::merge::Merge;
 use lattice_model::types::{Hash, PubKey};
-use lattice_model::Op;
+use lattice_model::{Op, Introspectable};
 use crate::kv_types::{HeadInfo as ProtoHeadInfo, HeadList};
 use prost::Message;
+use prost_reflect::{DescriptorPool, ReflectMessage};
 use std::collections::HashSet;
 use std::path::Path;
 use std::io::Read;
@@ -629,6 +630,106 @@ impl lattice_model::StateMachine for KvState {
         }
         
         Ok(tips)
+    }
+}
+
+// Implement Introspectable for KvState
+// Global descriptor pool cache
+static DESCRIPTOR_POOL: std::sync::OnceLock<DescriptorPool> = std::sync::OnceLock::new();
+
+fn get_descriptor_pool() -> &'static DescriptorPool {
+    DESCRIPTOR_POOL.get_or_init(|| {
+        DescriptorPool::decode(crate::KV_DESCRIPTOR_BYTES).expect("Invalid embedded descriptors")
+    })
+}
+
+// Implement Introspectable for KvState
+impl Introspectable for KvState {
+    fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
+        get_descriptor_pool().get_service_by_name("lattice.kv.KvStore").expect("Service definition missing")
+    }
+
+    fn decode_payload(&self, payload: &[u8]) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+        // Decode using KvPayload from kv_store.proto (package lattice.kv)
+        let pool = get_descriptor_pool();
+        let msg_desc = pool.get_message_by_name("lattice.kv.KvPayload")
+            .ok_or("KvPayload not in descriptor")?;
+        
+        let mut dynamic = prost_reflect::DynamicMessage::new(msg_desc);
+        {
+            use prost_reflect::prost::Message;
+            dynamic.merge(payload)?;
+        }
+        Ok(dynamic)
+    }
+
+    fn command_docs(&self) -> std::collections::HashMap<String, String> {
+        let mut docs = std::collections::HashMap::new();
+        docs.insert("Put".to_string(), "Store a key-value pair".to_string());
+        docs.insert("Get".to_string(), "Get value for key".to_string());
+        docs.insert("Delete".to_string(), "Delete a key".to_string());
+        docs.insert("List".to_string(), "List keys by prefix".to_string());
+        docs
+    }
+
+    fn field_formats(&self) -> std::collections::HashMap<String, lattice_model::introspection::FieldFormat> {
+        use lattice_model::introspection::FieldFormat;
+        let mut formats = std::collections::HashMap::new();
+        // Request/Response hints
+        formats.insert("PutResponse.hash".to_string(), FieldFormat::Hex);
+        formats.insert("DeleteResponse.hash".to_string(), FieldFormat::Hex);
+        formats.insert("PutRequest.key".to_string(), FieldFormat::Utf8);
+        formats.insert("PutRequest.value".to_string(), FieldFormat::Utf8);
+        formats.insert("GetRequest.key".to_string(), FieldFormat::Utf8);
+        formats.insert("GetResponse.value".to_string(), FieldFormat::Utf8);
+        formats.insert("DeleteRequest.key".to_string(), FieldFormat::Utf8);
+        formats.insert("ListRequest.prefix".to_string(), FieldFormat::Utf8);
+        
+        // List Item hints
+        formats.insert("KeyValuePair.key".to_string(), FieldFormat::Utf8);
+        formats.insert("KeyValuePair.value".to_string(), FieldFormat::Utf8);
+        
+        // Payload/Op hints (for log inspection)
+        formats.insert("PutOp.value".to_string(), FieldFormat::Utf8);
+        formats.insert("DeleteOp.key".to_string(), FieldFormat::Utf8);
+        
+        formats
+    }
+
+    fn matches_filter(&self, payload: &prost_reflect::DynamicMessage, filter: &str) -> bool {
+         // KV Logic: matches if payload is a KvPayload and any op key matches filter
+         if payload.descriptor().name() != "KvPayload" {
+             return false;
+         }
+         
+         let Some(ops) = payload.get_field_by_name("ops") else { return false; };
+         let prost_reflect::Value::List(op_list) = ops.as_ref() else { return false; };
+
+         for op in op_list {
+             let prost_reflect::Value::Message(op_msg) = op else { continue; };
+             
+             // Check "put" or "delete" fields directly (oneof variants are fields)
+             let inner_op = if let Some(put) = op_msg.get_field_by_name("put") {
+                 put
+             } else if let Some(del) = op_msg.get_field_by_name("delete") {
+                 del
+             } else {
+                 continue;
+             };
+
+             let prost_reflect::Value::Message(inner) = inner_op.as_ref() else { continue; };
+             
+             // Check for "key" field in PutOp or DeleteOp
+             if let Some(key_val) = inner.get_field_by_name("key") {
+                  match key_val.as_ref() {
+                      prost_reflect::Value::Bytes(b) if b == filter.as_bytes() => return true,
+                      prost_reflect::Value::String(s) if s == filter => return true,
+                      _ => {}
+                  }
+             }
+         }
+         
+         false
     }
 }
 

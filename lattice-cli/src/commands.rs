@@ -4,6 +4,7 @@ use crate::{mesh_commands, node_commands, store_commands};
 use lattice_node::{Node, KvStore, Mesh};
 use lattice_net::MeshNetwork;
 use clap::{Parser, Subcommand, CommandFactory};
+use lattice_model::CommandDispatcher;
 use rustyline_async::SharedWriter;
 use std::sync::Arc;
 use std::io::Write;
@@ -32,13 +33,14 @@ pub enum CommandResult {
 }
 
 #[derive(Parser)]
-#[command(name = "lattice", no_binary_name = true, disable_help_subcommand = true)]
+#[command(name = "lattice", no_binary_name = true, disable_help_subcommand = true, infer_subcommands = true)]
 pub struct LatticeCli {
     #[command(subcommand)]
     pub command: LatticeCommand,
 }
 
 #[derive(Subcommand)]
+#[command(allow_external_subcommands = true)]
 pub enum LatticeCommand {
     /// Show all commands in a flat list
     Help,
@@ -57,37 +59,12 @@ pub enum LatticeCommand {
         #[command(subcommand)]
         subcommand: StoreSubcommand,
     },
-    /// Store a key-value pair
-    #[command(next_help_heading = "Key-Value Operations")]
-    Put {
-        key: String,
-        value: String,
-    },
-    /// Get value for key
-    #[command(next_help_heading = "Key-Value Operations")]
-    Get {
-        key: String,
-        /// Show all heads (verbose)
-        #[arg(short, long)]
-        verbose: bool,
-    },
-    /// Delete a key
-    #[command(next_help_heading = "Key-Value Operations")]
-    Delete {
-        key: String,
-    },
-    /// List keys
-    #[command(next_help_heading = "Key-Value Operations")]
-    List {
-        /// Optional prefix to filter by
-        prefix: Option<String>,
-        /// Show all heads (verbose)
-        #[arg(short, long)]
-        verbose: bool,
-    },
     /// Exit the CLI
     #[command(next_help_heading = "General")]
     Quit,
+    /// Dynamic commands (Put, Get, Delete, List, etc.) - caught externally
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 fn format_recursive_help(cmd: &clap::Command, prefix: &str, output: &mut String) {
@@ -217,6 +194,21 @@ pub async fn handle_command(
             let mut output = String::from("Available commands:\n");
             let cmd = LatticeCli::command();
             format_recursive_help(&cmd, "", &mut output);
+            
+            // Add dynamic commands from store introspection
+            if let Some(h) = store {
+                use std::fmt::Write;
+                let _ = writeln!(output, "\nStore Operations:");
+                let service = h.service_descriptor();
+                let docs = h.command_docs();
+                for method in service.methods() {
+                    let name = method.name();
+                    let name_lower = name.to_lowercase();
+                    let desc = docs.get(name).map(|s| s.as_str()).unwrap_or("(dynamic)");
+                    let _ = writeln!(output, "  {:24} {}", name_lower, desc);
+                }
+            }
+            
             output.push('\n');
             let mut w = writer.clone();
             let _ = write!(w, "{}", output);
@@ -243,7 +235,7 @@ pub async fn handle_command(
             StoreSubcommand::OrphanCleanup => store_commands::cmd_orphan_cleanup(node, store, mesh_network.as_deref(), &[], writer).await,
             StoreSubcommand::History { key } => {
                 let args: Vec<String> = key.into_iter().collect();
-                store_commands::cmd_key_history(node, store, mesh_network.as_deref(), &args, writer).await
+                store_commands::cmd_history(node, store, mesh_network.as_deref(), &args, writer).await
             },
             StoreSubcommand::AuthorState { pubkey, all } => {
                 let mut args = pubkey.map(|p| vec![p]).unwrap_or_default();
@@ -252,29 +244,13 @@ pub async fn handle_command(
             },
             StoreSubcommand::Sync => store_commands::cmd_store_sync(node, store, mesh_network.clone(), &[], writer).await,
         },
-        LatticeCommand::Put { key, value } => store_commands::cmd_put(node, store, mesh_network.as_deref(), &[key, value], writer).await,
-        LatticeCommand::Get { key, verbose } => {
-            let mut args = vec![key];
-            if verbose {
-                args.push("-v".to_string());
-            }
-            store_commands::cmd_get(node, store, mesh_network.as_deref(), &args, writer).await
-        },
-        LatticeCommand::Delete { key } => store_commands::cmd_delete(node, store, mesh_network.as_deref(), &[key], writer).await,
-        LatticeCommand::List { prefix, verbose } => {
-            let mut args = Vec::new();
-            if let Some(p) = prefix {
-                args.push(p);
-            }
-            if verbose {
-                args.push("-v".to_string());
-            }
-            store_commands::cmd_list(node, store, mesh_network.as_deref(), &args, writer).await
-        },
         LatticeCommand::Quit => {
             let mut w = writer.clone();
             let _ = writeln!(w, "Goodbye!");
             CommandResult::Quit
+        },
+        LatticeCommand::External(args) => {
+            store_commands::cmd_dynamic_exec(node, store, mesh_network.as_deref(), &args, writer).await
         }
     }
 }

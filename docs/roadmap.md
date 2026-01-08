@@ -77,8 +77,8 @@
 
 ### 4E: Generic CLI & Introspection (Next Up)
 
-- [ ] **Store Command Introspection**: `StateMachine` trait should expose metadata about supported commands (e.g. `put`, `incr`, `sql_query`).
-- [ ] **Dynamic CLI**: `lattice-cli` queries the open store for its type/capabilities and adapts the UI (e.g. showing `incr` for CounterStore, `put` for KvStore).
+- [x] **Store Command Introspection (gRPC)**: `StateMachine` exposes a `ServiceDescriptor`.
+- [x] **Dynamic CLI**: `lattice-cli` uses `prost-reflect` to dynamically build commands and decode log payloads.
 
 ### 4F: Lattice-Kernel Audit & Stability
 

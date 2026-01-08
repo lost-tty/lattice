@@ -1,0 +1,90 @@
+syntax = "proto3";
+package lattice.kv;
+
+import "storage.proto";
+
+// The Key-Value Store Service
+service KvStore {
+    rpc Put (PutRequest) returns (PutResponse);
+    rpc Get (GetRequest) returns (GetResponse);
+    rpc Delete (DeleteRequest) returns (DeleteResponse);
+    rpc List (ListRequest) returns (ListResponse);
+}
+
+// --- Service Request/Response ---
+
+message PutRequest {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+message PutResponse {
+    bytes hash = 1;
+}
+
+message GetRequest {
+    bytes key = 1;
+    bool verbose = 2;
+}
+
+message GetResponse {
+    bytes value = 1;
+}
+
+message DeleteRequest {
+    bytes key = 1;
+}
+
+message DeleteResponse {
+    bytes hash = 1;
+}
+
+message ListRequest {
+    bytes prefix = 1;
+    bool verbose = 2;
+}
+
+message ListResponse {
+    repeated KeyValuePair items = 1;
+}
+
+message KeyValuePair {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+// --- Payload Types (log entry format) ---
+
+message PutOp {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+message DeleteOp {
+    bytes key = 1;
+}
+
+message Operation {
+    oneof op_type {
+        PutOp put = 1;
+        DeleteOp delete = 2;
+    }
+}
+
+message KvPayload {
+    repeated Operation ops = 1;
+}
+
+// --- Storage Types (state.db format) ---
+
+message HeadInfo {
+    bytes value = 1;
+    lattice.storage.HLC hlc = 2;
+    bytes author = 3;
+    bytes hash = 4;
+    bool tombstone = 5;
+}
+
+message HeadList {
+    repeated HeadInfo heads = 1;
+}

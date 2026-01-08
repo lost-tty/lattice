@@ -4,9 +4,10 @@
 //! - Reads: Direct from KvState (sync)
 //! - Writes: Via StateWriter (goes through replication)
 
+use std::ops::Deref;
 use std::sync::Arc;
 use crate::{KvState, Head, StateError, KvPayload, Operation};
-use lattice_model::{StateWriter, StateWriterError};
+use lattice_model::{StateWriter, StateWriterError, Introspectable, CommandDispatcher};
 use lattice_model::types::Hash;
 use lattice_model::replication::EntryStreamProvider;
 use prost::Message;
@@ -51,6 +52,116 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
         &self.writer
     }
     
+    /// Get the service descriptor for introspection
+    pub fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
+        self.state().service_descriptor()
+    }
+    
+    /// Dispatch a command dynamically. 
+    /// Reads go to state, writes go through StateWriter.
+    pub async fn dispatch(&self, method_name: &str, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::{GetRequest, GetResponse, ListRequest, ListResponse};
+        use prost::Message as ProstMessage;
+        
+        let desc = self.service_descriptor();
+        
+        match method_name {
+            "Put" => {
+                // Extract key and value from DynamicMessage
+                let key = request.get_field_by_name("key")
+                    .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
+                    .unwrap_or_default();
+                let value = request.get_field_by_name("value")
+                    .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
+                    .unwrap_or_default();
+                
+                let hash = self.put(&key, &value).await?;
+                
+                // Build response
+                let method = desc.methods().find(|m| m.name() == "Put").ok_or("Method not found")?;
+                let mut response = prost_reflect::DynamicMessage::new(method.output());
+                response.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.to_vec().into()));
+                Ok(response)
+            }
+            "Delete" => {
+                let key = request.get_field_by_name("key")
+                    .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
+                    .unwrap_or_default();
+                
+                let hash = self.delete(&key).await?;
+                
+                let method = desc.methods().find(|m| m.name() == "Delete").ok_or("Method not found")?;
+                let mut response = prost_reflect::DynamicMessage::new(method.output());
+                response.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.to_vec().into()));
+                Ok(response)
+            }
+            "Get" => {
+                // Decode request
+                let mut buf = Vec::new();
+                { use prost_reflect::prost::Message; request.encode(&mut buf)?; }
+                let req = GetRequest::decode(buf.as_slice())?;
+                
+                let heads = self.get(&req.key)?;
+                let val = heads.iter().max_by_key(|h| h.hlc).map(|h| h.value.clone()).unwrap_or_default();
+                let resp = GetResponse { value: val };
+                
+                // Pack response
+                let mut resp_buf = Vec::new();
+                resp.encode(&mut resp_buf)?;
+                let method = desc.methods().find(|m| m.name() == "Get").ok_or("Method not found")?;
+                let mut dynamic = prost_reflect::DynamicMessage::new(method.output());
+                { use prost_reflect::prost::Message; dynamic.merge(resp_buf.as_slice())?; }
+                Ok(dynamic)
+            }
+            "List" => {
+                let mut buf = Vec::new();
+                { use prost_reflect::prost::Message; request.encode(&mut buf)?; }
+                let req = ListRequest::decode(buf.as_slice())?;
+                
+                let mut items = Vec::new();
+                self.scan(&req.prefix, None, |key, heads| {
+                    let val = heads.iter().max_by_key(|h| h.hlc).map(|h| h.value.clone()).unwrap_or_default();
+                    items.push(crate::proto::KeyValuePair { key, value: val });
+                    Ok(true)
+                })?;
+                
+                let resp = ListResponse { items };
+                let mut resp_buf = Vec::new();
+                resp.encode(&mut resp_buf)?;
+                let method = desc.methods().find(|m| m.name() == "List").ok_or("Method not found")?;
+                let mut dynamic = prost_reflect::DynamicMessage::new(method.output());
+                { use prost_reflect::prost::Message; dynamic.merge(resp_buf.as_slice())?; }
+                Ok(dynamic)
+            }
+            _ => Err(format!("Unknown method: {}", method_name).into()),
+        }
+    }
+}
+
+// Implement CommandDispatcher trait for KvHandle (Roadmap 4E)
+impl<W: StateWriter + AsRef<KvState> + Send + Sync> CommandDispatcher for KvHandle<W> {
+    fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
+        self.state().service_descriptor()
+    }
+
+    fn command_docs(&self) -> std::collections::HashMap<String, String> {
+        self.state().command_docs()
+    }
+
+    fn field_formats(&self) -> std::collections::HashMap<String, lattice_model::introspection::FieldFormat> {
+        self.state().field_formats()
+    }
+
+    fn dispatch<'a>(
+        &'a self,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+        Box::pin(async move {
+            // Delegate to the inherent async method
+            KvHandle::dispatch(self, method_name, request).await
+        })
+    }
 }
 
 impl<W: StateWriter + AsRef<KvState>> AsRef<KvState> for KvHandle<W> {

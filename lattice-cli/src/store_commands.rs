@@ -3,11 +3,12 @@
 use crate::commands::{CommandResult, Writer};
 use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
 use lattice_node::{Node, KvStore};
-use lattice_kvstate::Merge;
 use lattice_model::types::{PubKey, Hash};
+use lattice_model::{CommandDispatcher, FieldFormat, Introspectable};
 use lattice_net::MeshNetwork;
 use std::time::Instant;
 use std::io::Write;
+use prost_reflect::{DynamicMessage, Value, ReflectMessage};
 
 pub async fn cmd_store_status(node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
@@ -140,27 +141,13 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&KvStore>, _mesh: Optio
             let hlc = format!("{}.{}", e.timestamp.wall_time, e.timestamp.counter);
             
             // Format ops
+            let payload_bytes = &e.payload[..];
             // Format ops
-            use prost::Message;
-            use lattice_kvstate::KvPayload;
-            let kv_payload = KvPayload::decode(&e.payload[..]).unwrap_or_default();
-            let ops_str: Vec<String> = kv_payload.ops.iter().filter_map(|op| {
-                use lattice_kvstate::operation::OpType;
-                match &op.op_type {
-                    Some(OpType::Put(p)) => {
-                        let key = String::from_utf8_lossy(&p.key);
-                        let val = String::from_utf8_lossy(&p.value);
-                        let val_short = if val.len() > 20 { format!("{}...", &val[..20]) } else { val.to_string() };
-                        Some(format!("PUT:{}={}", key, val_short))
-                    }
-                    Some(OpType::Delete(d)) => {
-                        let key = String::from_utf8_lossy(&d.key);
-                        Some(format!("DEL:{}", key))
-                    }
-                    None => None,
-                }
-            }).collect();
-            
+            let summary = match h.state().decode_payload(payload_bytes) {
+                Ok(msg) => format_message_inline(&msg, &h.field_formats()),
+                Err(_) => "[decode error]".to_string(),
+            };
+
             // Format causal_deps
             let parents_str = if e.causal_deps.is_empty() {
                 String::new()
@@ -171,7 +158,7 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&KvStore>, _mesh: Optio
                 format!(" parents:[{}]", ps.join(","))
             };
             
-            let _ = writeln!(w, "  seq:{:<4} prev:{}  hash:{}  hlc:{}  {}{}", e.seq, prev_hash_short, hash_short, hlc, ops_str.join(" "), parents_str);
+            let _ = writeln!(w, "  seq:{:<4} prev:{}  hash:{}  hlc:{}  {}{}", e.seq, prev_hash_short, hash_short, hlc, summary, parents_str);
         }
         let _ = writeln!(w);
     }
@@ -179,162 +166,60 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&KvStore>, _mesh: Optio
     CommandResult::Ok
 }
 
-pub async fn cmd_put(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
-    let Some(h) = store else {
-        let mut w = writer.clone();
-        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
-        return CommandResult::Ok;
-    };
-    let start = Instant::now();
-    match h.put(args[0].as_bytes(), args[1].as_bytes()).await {
-        Ok(_) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "OK ({:.2?})", start.elapsed());
-        }
-        Err(e) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Error: {}", e);
-        }
+fn format_message_inline(msg: &prost_reflect::DynamicMessage, formats: &std::collections::HashMap<String, lattice_model::FieldFormat>) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    
+    // Generic inline format: append all fields "key:value"
+    // For nested repeated fields, iterate and recurse.
+    let desc = msg.descriptor();
+    let msg_name = desc.name();
+    
+    for field in desc.fields() {
+         if let Some(val) = msg.get_field_by_name(field.name()) {
+             match val.as_ref() {
+                 prost_reflect::Value::List(list) => {
+                     for (i, item) in list.iter().enumerate() {
+                         if i > 0 { let _ = write!(out, " "); }
+                         if let prost_reflect::Value::Message(m) = item {
+                             let _ = write!(out, "{}", format_message_inline(m, formats));
+                         } else {
+                             let _ = write!(out, "{}", format_scalar(item, lattice_model::FieldFormat::Default, true));
+                         }
+                     }
+                 },
+                 prost_reflect::Value::Message(m) => {
+                      let _ = write!(out, "{} ", format_message_inline(m, formats));
+                 },
+                 scalar => {
+                     // Check for "special" fields that might define the 'action' (like 'put' field in 'oneof')
+                     // In oneof, usually only one is set.
+                     let field_name = field.name();
+                     let fmt = resolve_format(msg_name, field_name, formats);
+                     let val_str = format_scalar(scalar, fmt, true);
+                     let _ = write!(out, "{}:{} ", field_name, val_str);
+                 }
+             }
+         }
     }
-    CommandResult::Ok
+    out.trim().to_string()
 }
 
-pub async fn cmd_get(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
-    let Some(h) = store else {
-        let mut w = writer.clone();
-        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
-        return CommandResult::Ok;
-    };
-    let verbose = args.get(1).map(|a| a == "-v").unwrap_or(false);
-    let start = Instant::now();
-    let key = args[0].as_bytes();
-    
-    let mut w = writer.clone();
-    match h.get(key) {
-        Ok(heads) if heads.is_empty() => { let _ = writeln!(w, "(nil)"); }
-        Ok(heads) => {
-            if verbose {
-                // Show all heads
-                for (i, head) in heads.iter().enumerate() {
-                    let winner = if i == 0 { "→" } else { " " };
-                    let tombstone = if head.tombstone { "⊗" } else { "" };
-                    let author_short = hex::encode(&head.author).chars().take(8).collect::<String>();
-                    let hash_short = if head.hash.len() >= 8 { hex::encode(&head.hash[..8]) } else { "????????".to_string() };
-                    if head.tombstone {
-                        let _ = writeln!(w, "{} {} (deleted) (hlc:{}, author:{}, hash:{})", 
-                            winner, tombstone, head.hlc, author_short, hash_short);
-                    } else {
-                        let _ = writeln!(w, "{} {} (hlc:{}, author:{}, hash:{})", 
-                            winner, format_value(&head.value), head.hlc, author_short, hash_short);
-                    }
-                }
-                if heads.len() > 1 {
-                    let _ = writeln!(w, "⚠ {} heads (conflict)", heads.len());
-                }
-            } else {
-                // Apply LWW merge for simple output
-                match heads.lww_head() {
-                    Some(winner) => {
-                        if heads.len() > 1 {
-                            let _ = writeln!(w, "{} (⚠ {} heads)", format_value(&winner.value), heads.len());
-                        } else {
-                            let _ = writeln!(w, "{}", format_value(&winner.value));
-                        }
-                    }
-                    None => { let _ = writeln!(w, "(nil)"); }
+fn format_scalar_inline(v: &prost_reflect::Value, format: lattice_model::FieldFormat) -> String {
+    use lattice_model::FieldFormat;
+    match v {
+        prost_reflect::Value::Bytes(b) => {
+            match format {
+                FieldFormat::Utf8 => String::from_utf8_lossy(b).into_owned(),
+                _ => {
+                    let h = hex::encode(&b[..4.min(b.len())]); // Short hash for inline
+                    if b.len() > 4 { format!("{}..", h) } else { h }
                 }
             }
-            let _ = writeln!(w, "({:.2?})", start.elapsed());
-        }
-        Err(e) => { let _ = writeln!(w, "Error: {}", e); }
+        },
+        prost_reflect::Value::String(s) => s.clone(),
+         _ => v.to_string(),
     }
-    CommandResult::Ok
-}
-
-pub async fn cmd_delete(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
-    let Some(h) = store else {
-        let mut w = writer.clone();
-        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
-        return CommandResult::Ok;
-    };
-    let start = Instant::now();
-    match h.delete(args[0].as_bytes()).await {
-        Ok(_) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "OK ({:.2?})", start.elapsed());
-        }
-        Err(e) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Error: {}", e);
-        }
-    }
-    CommandResult::Ok
-}
-
-pub async fn cmd_list(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
-    let Some(h) = store else {
-        let mut w = writer.clone();
-        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
-        return CommandResult::Ok;
-    };
-    
-    // Parse args: [prefix] [-v]
-    let verbose = args.iter().any(|a| a == "-v");
-    let prefix = args.iter().find(|a| *a != "-v").cloned();
-    
-    let start = Instant::now();
-    let result = if let Some(p) = &prefix {
-        h.list_by_prefix(p.as_bytes())
-    } else {
-        h.list()
-    };
-    
-    let mut w = writer.clone();
-    match result {
-        Ok(entries) => {
-            if entries.is_empty() {
-                let _ = writeln!(w, "(empty)");
-            } else {
-                // Count live keys (those with non-tombstone winners)
-                let mut live_count = 0;
-                for (k, heads) in &entries {
-                    let key_str = format_value(k);
-                    if verbose {
-                        // Show all heads for this key
-                        let _ = writeln!(w, "{}:", key_str);
-                        for (i, head) in heads.iter().enumerate() {
-                            let winner = if i == 0 { "→" } else { " " };
-                            let author_short = hex::encode(&head.author).chars().take(8).collect::<String>();
-                            let hash_short = if head.hash.len() >= 8 { hex::encode(&head.hash[..8]) } else { "????????".to_string() };
-                            if head.tombstone {
-                                let _ = writeln!(w, "  {} ⊗ (deleted) (hlc:{}, author:{}, hash:{})", 
-                                    winner, head.hlc, author_short, hash_short);
-                            } else {
-                                let _ = writeln!(w, "  {} {} (hlc:{}, author:{}, hash:{})", 
-                                    winner, format_value(&head.value), head.hlc, author_short, hash_short);
-                            }
-                        }
-                        live_count += 1;
-                    } else {
-                        // Apply LWW merge - only show live values
-                        if let Some(winner) = heads.lww_head() {
-                            if heads.len() > 1 {
-                                let _ = writeln!(w, "{} = {} (⚠ {} heads)", key_str, format_value(&winner.value), heads.len());
-                            } else {
-                                let _ = writeln!(w, "{} = {}", key_str, format_value(&winner.value));
-                            }
-                            live_count += 1;
-                        }
-                        // Skip tombstoned keys in non-verbose mode
-                    }
-                }
-                let prefix_str = prefix.as_ref().map(|p| format!(" (prefix: {})", p)).unwrap_or_default();
-                let _ = writeln!(w, "({} keys{}, {:.2?})", live_count, prefix_str, start.elapsed());
-            }
-        }
-        Err(e) => { let _ = writeln!(w, "Error: {}", e); }
-    }
-    CommandResult::Ok
 }
 
 pub async fn cmd_author_state(node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
@@ -429,30 +314,31 @@ async fn fetch_author_states(store: &KvStore, target: Option<PubKey>) -> Result<
     Ok(data)
 }
 
-fn format_value(v: &[u8]) -> String {
-    std::str::from_utf8(v).map(String::from).unwrap_or_else(|_| format!("0x{}", hex::encode(v)))
-}
 
-/// Entry info for history display
-#[derive(Clone)]
-struct HistoryEntry {
-    key: Vec<u8>,
-    author: PubKey,
-    hlc: u64,
-    value: Vec<u8>,
-    tombstone: bool,
-    causal_deps: Vec<Hash>,
-}
 
-pub async fn cmd_key_history(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+
+
+pub async fn cmd_history(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     
-    // Key is optional - empty means show all entries
-    let key: Option<&[u8]> = if args.is_empty() { None } else { Some(args[0].as_bytes()) };
+    // Usage: matches <filter> or <key=val>
+    // If no args, shows full history (might be huge, so perhaps we cap it or warn?)
+    let (filter_key, filter_val) = if args.is_empty() {
+        (None, None)
+    } else {
+        let arg = &args[0];
+        if let Some((k, v)) = arg.split_once('=') {
+            (Some(k.to_string()), Some(v.to_string()))
+        } else {
+            // "Heuristic": If single arg, assume it's filtering for "key"
+            (Some("key".to_string()), Some(arg.to_string()))
+        }
+    };
+    
     let mut w = writer.clone();
     
     // Get sync state to find all authors
@@ -464,11 +350,17 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&KvStore>, _mesh: Optio
         }
     };
     
-    // Collect entries (all or filtered by key)
-    let mut entries: std::collections::HashMap<Hash, HistoryEntry> = std::collections::HashMap::new();
+    // Collect entries matching filter
+    // We need to render a DAG. The DAG renderer needs: Hash -> {parents, ...}
+    // We will collect ALL entries that match, plus their ancestors? 
+    // Actually, DAG rendering usually requires the connected graph. 
+    // If we only pick matching entries, they might be disjoint.
+    // For now, let's collect ALL entries, but only "highlight" or "show" ones matching filter?
+    // OR: Standard behavior: Show history *of a key*. This implies we trace the causal history of operations touching that key.
+    
+    let mut entries: std::collections::HashMap<Hash, crate::graph_renderer::RenderEntry> = std::collections::HashMap::new();
     
     for (author, _info) in sync_state.authors() {
-        // Stream entries for this author
         let mut rx = match h.stream_entries_in_range(&author, 1, 0).await {
             Ok(rx) => rx,
             Err(_) => continue,
@@ -476,71 +368,390 @@ pub async fn cmd_key_history(_node: &Node, store: Option<&KvStore>, _mesh: Optio
         
         while let Some(entry) = rx.recv().await {
             let decoded = &entry.entry;
+            let payload_bytes = &decoded.payload[..];
             
-            // Check if this entry should be included
-            use prost::Message;
-            use lattice_kvstate::KvPayload;
-            let kv_payload = KvPayload::decode(&decoded.payload[..]).unwrap_or_default();
-            for op in &kv_payload.ops {
-                use lattice_kvstate::operation::OpType;
-                let (op_key, value, tombstone) = match &op.op_type {
-                    Some(OpType::Put(p)) => (&p.key, &p.value, false),
-                    Some(OpType::Delete(d)) => (&d.key, &vec![], true),
-                    None => continue,
-                };
-                
-                // Include if: no key filter OR key matches
-                if key.is_none() || key == Some(op_key.as_slice()) {
-                    let hash = Hash::from(entry.hash());
-                    let hlc = (decoded.timestamp.wall_time << 16) | decoded.timestamp.counter as u64;
-                    let causal_deps = decoded.causal_deps.clone();
-                    
-                    entries.insert(hash, HistoryEntry {
-                        key: op_key.clone(),
-                        author: *author,
-                        hlc,
-                        value: value.clone(),
-                        tombstone,
-                        causal_deps,
-                    });
-                    break;
-                }
+            // Generic check: Does this entry contain the key?
+            // Expensive decoding for every entry, but necessary for generic history
+            match h.state().decode_payload(payload_bytes) {
+                Ok(msg) => {
+                     // Check filter using authorization form State Machine
+                     let matches = match (&filter_key, &filter_val) {
+                         // If user typed key=val, we use val as the filter and trust the SM to match it.
+                         // Actually, matches_filter only takes "filter". The SM decides what that applies to (e.g. key).
+                         // If user types "foo", we pass "foo".
+                         // If user types "key=foo", we pass "foo" (pragmatic).
+                         // The Introspection trait signature is (payload, filter).
+                         (Some(_k), Some(v)) => h.state().matches_filter(&msg, v),
+                         (Some(v), None) => h.state().matches_filter(&msg, v), // user typed "history foo" -> k="key", v="foo"
+                         (None, None) => true, // No filter = show all
+                         _ => true
+                     };
+                     
+                     if matches {
+                         let hash = Hash::from(entry.hash());
+                         let hlc = (decoded.timestamp.wall_time << 16) | decoded.timestamp.counter as u64;
+                         let causal_deps = decoded.causal_deps.clone();
+                         
+                         // Determine value for display (heuristic: "value" field or "val" or provided key)
+                         // Used for the graph node label. 
+                         // We can still try to extract *some* value for the graph label even if generic.
+                         let display_val = extract_field_value(&msg, "value")
+                             .or_else(|| extract_field_value(&msg, "val"))
+                             .unwrap_or_else(|| vec![]);
+                         
+                         let tombstone = false; 
+                         
+                         entries.insert(hash, crate::graph_renderer::RenderEntry {
+                             key: filter_val.clone().map(|s| s.as_bytes().to_vec())
+                                 .or_else(|| extract_field_value(&msg, "key"))
+                                 .unwrap_or_default(),
+                             author: *author,
+                             hlc,
+                             value: display_val,
+                             tombstone,
+                             causal_deps: causal_deps.clone(),
+                             is_merge: causal_deps.len() > 1,
+                         });
+                     }
+                },
+                Err(_) => continue,
             }
         }
     }
     
     if entries.is_empty() {
-        let _ = writeln!(w, "(no history found)");
+        let _ = writeln!(w, "(no matching history found)");
         return CommandResult::Ok;
     }
     
-    // Convert to RenderEntry format for the grid renderer
-    let render_entries: std::collections::HashMap<Hash, crate::graph_renderer::RenderEntry> = entries
-        .into_iter()
-        .map(|(hash, e)| {
-            let is_merge = e.causal_deps.len() > 1;
-            (hash, crate::graph_renderer::RenderEntry {
-                key: e.key,
-                author: e.author,
-                hlc: e.hlc,
-                value: e.value,
-                tombstone: e.tombstone,
-                causal_deps: e.causal_deps,
-                is_merge,
-            })
-        })
-        .collect();
-    
-    // Use the grid-based renderer
-    if let Some(k) = key {
-        let _ = writeln!(w, "History for key: {}\n", format_value(k));
-        let output = crate::graph_renderer::render_dag(&render_entries, k);
-        let _ = write!(w, "{}", output);
-    } else {
-        let _ = writeln!(w, "Complete history\n");
-        let output = crate::graph_renderer::render_dag(&render_entries, b"*");
-        let _ = write!(w, "{}", output);
-    }
+    let target = filter_val.unwrap_or_else(|| "*".to_string());
+    let _ = writeln!(w, "History for: {}\n", target);
+    let output = crate::graph_renderer::render_dag(&entries, target.as_bytes());
+    let _ = write!(w, "{}", output);
     
     CommandResult::Ok
+}
+
+
+
+// Extra helper to extract a value byte vector for display
+fn extract_field_value(msg: &prost_reflect::DynamicMessage, field_name: &str) -> Option<Vec<u8>> {
+    let desc = msg.descriptor();
+    for field in desc.fields() {
+        if field.name() == field_name {
+             if let Some(val) = msg.get_field_by_name(field.name()) {
+                 match val.as_ref() {
+                     prost_reflect::Value::Bytes(b) => return Some(b.clone().into()),
+                     prost_reflect::Value::String(s) => return Some(s.as_bytes().to_vec()),
+                     _ => return Some(val.to_string().as_bytes().to_vec()),
+                 }
+             }
+        }
+        // Recurse? only logic if we found strict "value" field.
+        // But value might be inside "PutOp".
+        if let Some(val) = msg.get_field_by_name(field.name()) {
+             match val.as_ref() {
+                 prost_reflect::Value::Message(m) => {
+                     if let Some(v) = extract_field_value(m, field_name) { return Some(v); }
+                 },
+                 prost_reflect::Value::List(l) => {
+                     for item in l {
+                         if let prost_reflect::Value::Message(m) = item {
+                             if let Some(v) = extract_field_value(m, field_name) { return Some(v); }
+                         }
+                     }
+                 }
+                 _ => {}
+             }
+        }
+    }
+    None
+}
+
+pub async fn cmd_dynamic_exec(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+    let Some(h) = store else {
+        let mut w = writer.clone();
+        let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
+        return CommandResult::Ok;
+    };
+    
+    // args: [Command] [key=value]...
+    if args.is_empty() {
+        let mut w = writer.clone();
+        let _ = writeln!(w, "Usage: exec <Command> [key=value]...");
+        let _ = writeln!(w, "Available commands for {:?}:", h.id());
+        
+        // Introspect capabilities
+        let desc = h.service_descriptor();
+        for method in desc.methods() {
+            let _ = writeln!(w, "  {}", method.name());
+        }
+        return CommandResult::Ok;
+    }
+    
+    let method_name = &args[0];
+    let method_args = &args[1..];
+    
+    // 1. Get Method Descriptor (case-insensitive lookup)
+    let service = h.service_descriptor();
+    let method = match service.methods().find(|m| m.name().eq_ignore_ascii_case(method_name)) {
+        Some(m) => m,
+        None => {
+             let mut w = writer.clone();
+             let _ = writeln!(w, "Unknown command: {}", method_name);
+             return CommandResult::Ok;
+        }
+    };
+    
+    // 2. Parse arguments into DynamicMessage
+    let input_desc = method.input();
+    let mut dynamic_msg = DynamicMessage::new(input_desc.clone());
+    
+    // Get the list of field names for positional mapping
+    let field_names: Vec<_> = input_desc.fields().map(|f| f.name().to_string()).collect();
+    let mut positional_index = 0;
+    
+    for arg in method_args {
+        // Try key=value format first
+        if let Some((k, v)) = arg.split_once('=') {
+            if let Some(field) = input_desc.get_field_by_name(k) {
+                let value = match field.kind() {
+                    prost_reflect::Kind::String => Value::String(v.to_string()),
+                    prost_reflect::Kind::Bytes => Value::Bytes(v.as_bytes().to_vec().into()),
+                    prost_reflect::Kind::Bool => Value::Bool(v.parse().unwrap_or(false)),
+                     _ => Value::String(v.to_string()),
+                };
+                dynamic_msg.set_field(&field, value);
+            }
+        } else if positional_index < field_names.len() {
+            // Positional argument - map to next field
+            if let Some(field) = input_desc.get_field_by_name(&field_names[positional_index]) {
+                let value = match field.kind() {
+                    prost_reflect::Kind::String => Value::String(arg.to_string()),
+                    prost_reflect::Kind::Bytes => Value::Bytes(arg.as_bytes().to_vec().into()),
+                    prost_reflect::Kind::Bool => Value::Bool(arg.parse().unwrap_or(false)),
+                    _ => Value::String(arg.to_string()),
+                };
+                dynamic_msg.set_field(&field, value);
+                positional_index += 1;
+            }
+        }
+    }
+    
+    let start = Instant::now();
+    let mut w = writer.clone();
+    
+    // 3. Dispatch (async - handle supports both reads and writes)
+    match h.dispatch(method.name(), dynamic_msg).await {
+        Ok(response) => {
+            let formats = h.field_formats();
+            format_dynamic_response(&response, &mut w, &formats);
+            let _ = writeln!(w, "({:.2?})", start.elapsed());
+        },
+        Err(e) => {
+             let _ = writeln!(w, "Error executing {}: {}", method_name, e);
+        }
+    }
+
+    CommandResult::Ok
+}
+
+/// Format a DynamicMessage response in a human-readable way (fully generic via introspection)
+fn format_dynamic_response(
+    msg: &prost_reflect::DynamicMessage, 
+    w: &mut Writer,
+    formats: &std::collections::HashMap<String, lattice_model::FieldFormat>
+) {
+    let desc = msg.descriptor();
+    let msg_name = desc.name();
+    
+    // Generic formatting based on field types
+    let fields: Vec<_> = desc.fields().collect();
+    
+    if fields.is_empty() {
+        let _ = writeln!(w, "OK");
+        return;
+    }
+    
+    // Single field responses - just print the value
+    if fields.len() == 1 {
+        let field = &fields[0];
+        if let Some(value) = msg.get_field_by_name(field.name()) {
+            let v = value.as_ref();
+            if let prost_reflect::Value::List(list) = v {
+                // Special handling for top-level list: no prefix, no extra indent
+                if list.is_empty() {
+                    let _ = writeln!(w, "(empty)");
+                } else {
+                    let fmt = resolve_format(msg_name, field.name(), formats);
+                    for item in list {
+                        format_list_item(item, w, 0, formats, fmt);
+                    }
+                    let _ = writeln!(w, "({} items)", list.len());
+                }
+            } else {
+                let fmt = resolve_format(msg_name, field.name(), formats);
+                format_value_pretty(v, w, 0, fmt, formats);
+            }
+        } else {
+            let _ = writeln!(w, "(empty)");
+        }
+        return;
+    }
+    
+    // Multi-field: print each field
+    for field in fields {
+        if let Some(value) = msg.get_field_by_name(field.name()) {
+            let _ = write!(w, "{}: ", field.name());
+            let fmt = resolve_format(msg_name, field.name(), formats);
+            format_value_pretty(value.as_ref(), w, 0, fmt, formats);
+        }
+    }
+}
+
+fn resolve_format(msg_name: &str, field_name: &str, formats: &std::collections::HashMap<String, lattice_model::FieldFormat>) -> lattice_model::FieldFormat {
+    // Try fully qualified first "MessageName.fieldName"
+    let key = format!("{}.{}", msg_name, field_name);
+    if let Some(f) = formats.get(&key) {
+        return *f;
+    }
+    // Fallback to default
+    FieldFormat::Default
+}
+
+/// Format a prost_reflect::Value in a human-readable way
+fn format_value_pretty(
+    v: &prost_reflect::Value, 
+    w: &mut Writer, 
+    indent: usize, 
+    format: lattice_model::FieldFormat,
+    formats: &std::collections::HashMap<String, lattice_model::FieldFormat>
+) {
+    use prost_reflect::Value;
+    
+    match v {
+        Value::String(s) => { let _ = writeln!(w, "{}", s); }
+        Value::Bytes(b) => { 
+            match format {
+                FieldFormat::Hex | FieldFormat::Default => {
+                     let hex_str = hex::encode(&b[..32.min(b.len())]);
+                     let suffix = if b.len() > 32 { "..." } else { "" };
+                     let _ = writeln!(w, "{}{}", hex_str, suffix);
+                },
+                FieldFormat::Utf8 => {
+                     let _ = writeln!(w, "{}", String::from_utf8_lossy(b));
+                }
+            }
+        }
+        Value::Bool(b) => { let _ = writeln!(w, "{}", b); }
+        Value::I32(n) => { let _ = writeln!(w, "{}", n); }
+        Value::I64(n) => { let _ = writeln!(w, "{}", n); }
+        Value::U32(n) => { let _ = writeln!(w, "{}", n); }
+        Value::U64(n) => { let _ = writeln!(w, "{}", n); }
+        Value::F32(n) => { let _ = writeln!(w, "{}", n); }
+        Value::F64(n) => { let _ = writeln!(w, "{}", n); }
+        Value::EnumNumber(n) => { let _ = writeln!(w, "enum({})", n); }
+        Value::List(list) => {
+            if list.is_empty() {
+                let _ = writeln!(w, "(empty)");
+            } else {
+                let _ = writeln!(w);
+                for item in list {
+                    let _ = write!(w, "{}", "  ".repeat(indent + 1));
+                    // Propagate the list's format (e.g. Hex) to the items
+                    format_list_item(item, w, indent + 1, formats, format);
+                }
+                let _ = writeln!(w, "({} items)", list.len());
+            }
+        }
+        Value::Message(msg) => {
+            let _ = writeln!(w);
+            let desc = msg.descriptor();
+            let msg_name = desc.name();
+            for field in desc.fields() {
+                if let Some(fv) = msg.get_field_by_name(field.name()) {
+                    let _ = write!(w, "{}{}: ", "  ".repeat(indent + 1), field.name());
+                    let fmt = resolve_format(msg_name, field.name(), formats);
+                    format_value_pretty(fv.as_ref(), w, indent + 1, fmt, formats);
+                }
+            }
+        }
+        Value::Map(m) => { let _ = writeln!(w, "{{{}  entries}}", m.len()); }
+    }
+}
+
+/// Format a list item (message or scalar)
+fn format_list_item(
+    v: &prost_reflect::Value, 
+    w: &mut Writer, 
+    indent: usize,
+    formats: &std::collections::HashMap<String, lattice_model::FieldFormat>,
+    item_format: lattice_model::FieldFormat,
+) {
+    use prost_reflect::Value;
+    
+    match v {
+        Value::Message(msg) => {
+            // For key-value type messages (like KvPayload), format specially
+            let fields: Vec<_> = msg.descriptor().fields().collect();
+            let msg_name = msg.descriptor().name().to_string();
+            
+            if fields.len() == 2 {
+                let f1_name = fields[0].name().to_string();
+                let f2_name = fields[1].name().to_string();
+                
+                let f1 = msg.get_field_by_name(&f1_name);
+                let f2 = msg.get_field_by_name(&f2_name);
+                
+                if let (Some(k), Some(v)) = (f1, f2) {
+                    // Try to resolve format hints for these fields
+                    let fmt1 = resolve_format(&msg_name, &f1_name, formats);
+                    let fmt2 = resolve_format(&msg_name, &f2_name, formats);
+
+                    let key_str = format_scalar(k.as_ref(), fmt1, false);
+                    let val_str = format_scalar(v.as_ref(), fmt2, false);
+                    let _ = writeln!(w, "{} = {}", key_str, val_str);
+                    return;
+                }
+            }
+            // Fallback: print fields
+            for field in fields {
+                if let Some(fv) = msg.get_field_by_name(field.name()) {
+                    let _ = write!(w, "{}  {}: ", "  ".repeat(indent), field.name());
+                    let fmt = resolve_format(&msg_name, field.name(), formats);
+                    format_value_pretty(fv.as_ref(), w, indent + 1, fmt, formats);
+                }
+            }
+        }
+        _ => format_value_pretty(v, w, indent, item_format, formats),
+    }
+}
+
+fn format_scalar(v: &prost_reflect::Value, format: lattice_model::FieldFormat, compact: bool) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Bytes(b) => {
+            match format {
+                FieldFormat::Utf8 => String::from_utf8_lossy(b).to_string(),
+                // Default is Hex. If you want string, ask for it.
+                FieldFormat::Hex | FieldFormat::Default => {
+                     let limit = if compact { 4 } else { 32 };
+                     let hex_str = hex::encode(&b[..limit.min(b.len())]);
+                     if b.len() > limit {
+                         if compact { format!("{}..", hex_str) } else { format!("{}...", hex_str) }
+                     } else {
+                         hex_str
+                     }
+                }
+            }
+        },
+        Value::Bool(b) => b.to_string(),
+        Value::I32(n) => n.to_string(),
+        Value::I64(n) => n.to_string(),
+        Value::U32(n) => n.to_string(),
+        Value::U64(n) => n.to_string(),
+        Value::F32(n) => n.to_string(),
+        Value::F64(n) => n.to_string(),
+        _ => "[complex]".to_string(),
+    }
 }
