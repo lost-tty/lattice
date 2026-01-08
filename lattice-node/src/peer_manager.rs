@@ -24,13 +24,93 @@ use tokio::sync::broadcast;
 #[derive(Debug, thiserror::Error)]
 pub enum PeerManagerError {
     #[error("Store error: {0}")]
-    Store(String),
+    Store(#[from] lattice_kvstate::KvHandleError),
+    #[error("State writer error: {0}")]
+    StateWriter(#[from] lattice_model::StateWriterError),
+    #[error("State error: {0}")]
+    State(#[from] lattice_kernel::store::StateError),
+    #[error("KV State error: {0}")]
+    KvState(#[from] lattice_kvstate::StateError),
+    #[error("Watch error: {0}")]
+    Watch(#[from] lattice_kvstate::WatchError),
     #[error("Lock poisoned")]
     LockPoisoned,
     #[error("Peer not found: {0}")]
     PeerNotFound(String),
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+}
+
+/// A type-safe in-memory cache of peers.
+/// 
+/// Encapsulates the RwLock to ensure safe access patterns.
+/// Crucially, this struct does NOT have access to KvStore, preventing deadlocks.
+#[derive(Debug, Default)]
+struct PeerCache {
+    inner: RwLock<HashMap<PubKey, Peer>>,
+}
+
+impl PeerCache {
+    fn new() -> Self {
+        Self { inner: RwLock::new(HashMap::new()) }
+    }
+    
+    fn get_status(&self, pubkey: &PubKey) -> Option<PeerStatus> {
+        self.inner.read().ok()?.get(pubkey).map(|p| p.status.clone())
+    }
+    
+    fn can_join(&self, peer: &PubKey) -> bool {
+        let Ok(cache) = self.inner.read() else { return false };
+        cache.get(peer).map(|p| p.status == PeerStatus::Active).unwrap_or(false)
+    }
+    
+    fn can_accept_entry(&self, author: &PubKey) -> bool {
+        let Ok(cache) = self.inner.read() else { return false };
+        cache.get(author)
+            .map(|p| matches!(p.status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
+            .unwrap_or(false)
+    }
+    
+    fn list_acceptable_authors(&self) -> Vec<PubKey> {
+        let Ok(cache) = self.inner.read() else { return Vec::new() };
+        cache.iter()
+            .filter(|(_, p)| matches!(p.status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
+            .map(|(pubkey, _)| *pubkey)
+            .collect()
+    }
+    
+    /// Update the cache and return an event if state changed.
+    fn update(&self, pubkey: PubKey, status: Option<PeerStatus>) -> Option<PeerEvent> {
+        let Ok(mut cache) = self.inner.write() else { return None };
+        
+        match cache.get_mut(&pubkey) {
+            Some(peer) => {
+                let old = peer.status.clone();
+                let new = status.unwrap_or(PeerStatus::Revoked);
+                
+                if old != new {
+                    peer.status = new.clone();
+                    Some(PeerEvent::StatusChanged { pubkey, old, new })
+                } else {
+                    None
+                }
+            }
+            None => {
+                if let Some(new) = status {
+                    cache.insert(pubkey, Peer::minimal(pubkey, new.clone()));
+                    Some(PeerEvent::Added { pubkey, status: new })
+                } else {
+                    None
+                }
+            }
+        }
+    }
+    
+    fn insert(&self, pubkey: PubKey, peer: Peer) {
+        if let Ok(mut cache) = self.inner.write() {
+            cache.insert(pubkey, peer);
+        }
+    }
 }
 
 /// A peer in the mesh network with multi-key serialization.
@@ -50,20 +130,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    /// Create a new Peer with Invited status.
-    pub fn new_invited(pubkey: PubKey, invited_by: PubKey) -> Self {
-        let added_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        Self {
-            pubkey,
-            status: PeerStatus::Invited,
-            name: None,
-            added_at: Some(added_at),
-            added_by: Some(invited_by),
-        }
-    }
+
     
     /// Create a minimal Peer with just pubkey and status.
     fn minimal(pubkey: PubKey, status: PeerStatus) -> Self {
@@ -78,19 +145,51 @@ impl Peer {
 
     /// Construct a Peer from a collection of attributes (key-value pairs)
     pub fn from_attributes<'a>(pubkey: PubKey, attrs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<Self> {
-        let mut p = Self::minimal(pubkey, PeerStatus::Invited);
-        let mut valid = false;
+        // Default to Active if status logic allows, but better to require status.
+        // For now, we use minimal with placeholder, then overwrite.
+        // Actually, we should probably start with Active or parse status first.
+        // Let's stick to minimal() helper which takes status.
+        
+        // We'll scan attrs twice or restructure. 
+        // Simpler: Use a builder or temp vars.
+        
+        let mut p_status = PeerStatus::Active; // Default
+        let mut p_name = None;
+        let mut p_added_at = None;
+        let mut p_added_by = None;
+        let mut has_status = false;
 
         for (k, v) in attrs {
             match k {
-                "status" => { p.status = PeerStatus::from_str(v)?; valid = true; },
-                "name" => p.name = Some(v.into()),
-                "added_at" => p.added_at = v.parse().ok(),
-                "added_by" => p.added_by = hex::decode(v).ok().and_then(|b| PubKey::try_from(b).ok()),
+                "status" => { 
+                    if let Some(s) = PeerStatus::from_str(v) {
+                        p_status = s; 
+                        has_status = true;
+                    }
+                },
+                "name" => p_name = Some(v.into()),
+                "added_at" => p_added_at = v.parse().ok(),
+                "added_by" => p_added_by = hex::decode(v).ok().and_then(|b| PubKey::try_from(b).ok()),
                 _ => {}
             }
         }
-        valid.then_some(p)
+        
+        // If no status found, we might reject or default. 
+        // Since we are loading from DB, existing Invited peers (legacy) might exist.
+        // We restore legacy support by defaulting to Invited if it existed previously.
+        
+        if !has_status {
+             // Fallback for legacy peers written before strict status
+             p_status = PeerStatus::Invited;
+        }
+
+        Some(Self {
+            pubkey,
+            status: p_status,
+            name: p_name,
+            added_at: p_added_at,
+            added_by: p_added_by,
+        })
     }
     
     /// Load a Peer from the store (atomic read via list_by_prefix).
@@ -99,8 +198,7 @@ impl Peer {
         let prefix = format!("/nodes/{}/", pubkey_hex);
         
         // Single atomic query for all peer attributes
-        let entries = kv.list_by_prefix(prefix.as_bytes())
-            .map_err(|e| PeerManagerError::Store(e.to_string()))?;
+        let entries = kv.list_by_prefix(prefix.as_bytes())?;
         
         if entries.is_empty() {
             return Ok(None);
@@ -124,25 +222,21 @@ impl Peer {
     /// Save a Peer to the store (multi-key write).
     pub async fn save(&self, kv: &KvStore) -> Result<(), PeerManagerError> {
         // Write status
-        kv.put(&Self::key_status(self.pubkey), self.status.as_str().as_bytes()).await
-            .map_err(|e| PeerManagerError::Store(e.to_string()))?;
+        kv.put(&Self::key_status(self.pubkey), self.status.as_str().as_bytes()).await?;
         
         // Write name (if set)
         if let Some(ref name) = self.name {
-            kv.put(&Self::key_name(self.pubkey), name.as_bytes()).await
-                .map_err(|e| PeerManagerError::Store(e.to_string()))?;
+            kv.put(&Self::key_name(self.pubkey), name.as_bytes()).await?;
         }
         
         // Write added_at (if set)
         if let Some(added_at) = self.added_at {
-            kv.put(&Self::key_added_at(self.pubkey), added_at.to_string().as_bytes()).await
-                .map_err(|e| PeerManagerError::Store(e.to_string()))?;
+            kv.put(&Self::key_added_at(self.pubkey), added_at.to_string().as_bytes()).await?;
         }
         
         // Write added_by (if set)
         if let Some(added_by) = self.added_by {
-            kv.put(&Self::key_added_by(self.pubkey), hex::encode(added_by).as_bytes()).await
-                .map_err(|e| PeerManagerError::Store(e.to_string()))?;
+            kv.put(&Self::key_added_by(self.pubkey), hex::encode(added_by).as_bytes()).await?;
         }
         
         Ok(())
@@ -190,8 +284,8 @@ impl Peer {
 /// a cache for fast authorization checks. It also provides methods for peer operations
 /// like invite, join, set_status, and revoke.
 pub struct PeerManager {
-    /// Cache of peers with status and online state
-    peers: Arc<RwLock<HashMap<PubKey, Peer>>>,
+    /// Encapsulated peer cache (no direct lock access)
+    peers: Arc<PeerCache>,
     /// Broadcast channel for peer status change events
     peer_event_tx: broadcast::Sender<PeerEvent>,
     /// Bootstrap authors trusted during initial sync (cleared after first sync)
@@ -203,6 +297,19 @@ pub struct PeerManager {
     /// Handle to the background watcher task (abort on drop)
     watcher_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
+
+// LOCK SAFETY INVARIANT:
+// The `peers` lock (RWLock) MUST NOT be held while performing blocking operations on `kv` (KvStore).
+// `KvStore` operations (put, list, etc.) send synchronous commands to the Actor, which might
+// concurrently be trying to acquire a read lock on `peers` (via PeerProvider::can_accept_entry).
+//
+// Safe:
+// - Holding `peers` lock -> simple map operations
+// - Calling `kv` -> NO `peers` lock held
+//
+// This prevents the classical recursive deadlock:
+// Thread A (PeerManager): Holds peers lock -> Waiting on Actor (KV op)
+// Thread B (ActorRunner): Processing validation -> Waiting on peers lock (PeerProvider)
 
 impl std::fmt::Debug for PeerManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -221,7 +328,7 @@ impl PeerManager {
         let (peer_event_tx, _) = broadcast::channel(64);
         
         let manager = Arc::new(Self {
-            peers: Arc::new(RwLock::new(HashMap::new())),
+            peers: Arc::new(PeerCache::new()),
             peer_event_tx,
             bootstrap_authors: Arc::new(RwLock::new(HashSet::new())),
             kv: store.clone(),
@@ -241,21 +348,19 @@ impl PeerManager {
     
     /// Set a peer's name.
     pub async fn set_peer_name(&self, pubkey: PubKey, name: &str) -> Result<(), PeerManagerError> {
-        self.kv.put(&Peer::key_name(pubkey), name.as_bytes()).await
-            .map_err(|e| PeerManagerError::Store(e.to_string()))?;
+        self.kv.put(&Peer::key_name(pubkey), name.as_bytes()).await?;
         Ok(())
     }
     
     /// Set a peer's status.
     pub async fn set_peer_status(&self, pubkey: PubKey, status: PeerStatus) -> Result<(), PeerManagerError> {
-        self.kv.put(&Peer::key_status(pubkey), status.as_str().as_bytes()).await
-            .map_err(|e| PeerManagerError::Store(e.to_string()))?;
+        self.kv.put(&Peer::key_status(pubkey), status.as_str().as_bytes()).await?;
         Ok(())
     }
     
     /// Get a peer's status from cache (fast lookup).
     pub fn get_peer_status(&self, pubkey: &PubKey) -> Option<PeerStatus> {
-        self.peers.read().ok()?.get(pubkey).map(|p| p.status.clone())
+        self.peers.get_status(pubkey)
     }
     
     /// Activate a peer (set status to Active).
@@ -296,8 +401,7 @@ impl PeerManager {
     
     /// List all peers with their full info (name, added_at, etc.)
     pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
-        let nodes = self.kv.list_by_prefix(b"/nodes/")
-            .map_err(|e| PeerManagerError::Store(e.to_string()))?;
+        let nodes = self.kv.list_by_prefix(b"/nodes/")?;
         
         // Group attributes by pubkey hex
         let mut peers_attrs: HashMap<String, Vec<(String, String)>> = HashMap::new();
@@ -345,15 +449,12 @@ impl PeerManager {
         let pattern = r"^/nodes/.*/status$";
         
         // Use the watch API which handles initial scan + subscription atomically (preventing races)
-        let (initial, mut rx) = self.kv.watch(pattern).await
-            .map_err(|e| PeerManagerError::Store(e.to_string()))?;
+        let (initial, mut rx) = self.kv.watch(pattern).await?;
         
         // 1. Process initial state
         for (key, heads) in initial {
             if let Some((pubkey, status)) = Self::parse_peer_state(&key, &heads) {
-                 if let Ok(mut cache) = self.peers.write() {
-                    cache.insert(pubkey, Peer::minimal(pubkey, status));
-                }
+                self.peers.insert(pubkey, Peer::minimal(pubkey, status));
             }
         }
         
@@ -434,7 +535,7 @@ impl PeerManager {
     /// Handle a single watch event to update cache and notify listeners
     fn handle_watch_event(
         event: lattice_kvstate::WatchEvent,
-        peers: &Arc<RwLock<HashMap<PubKey, Peer>>>,
+        peers: &Arc<PeerCache>,
         notify: &broadcast::Sender<PeerEvent>
     ) {
         let lattice_kvstate::WatchEvent { key, kind } = event;
@@ -463,42 +564,16 @@ impl PeerManager {
 
     /// Update peer cache and emit events
     fn update_peer_cache(
-        peers: &Arc<RwLock<HashMap<PubKey, Peer>>>, 
+        peers: &Arc<PeerCache>, 
         pubkey: PubKey, 
         status: Option<PeerStatus>, 
         notify: &broadcast::Sender<PeerEvent>
     ) {
-        let Ok(mut cache) = peers.write() else { return };
-        
-        // Calculate transition
-        let event = match cache.get_mut(&pubkey) {
-            Some(peer) => {
-                let old = peer.status.clone();
-                // If status is None (deleted), treat as Revoked
-                let new = status.unwrap_or(PeerStatus::Revoked);
-                
-                if old != new {
-                    peer.status = new.clone();
-                    Some(PeerEvent::StatusChanged { pubkey, old, new })
-                } else {
-                    None
-                }
-            }
-            None => {
-                if let Some(new) = status {
-                    cache.insert(pubkey, Peer::minimal(pubkey, new.clone()));
-                    Some(PeerEvent::Added { pubkey, status: new })
-                } else {
-                    None // Deleted but never existed in cache
-                }
-            }
-        };
-
-        // Notify outside lock
-        if let Some(e) = event {
-            // Drop lock before sending to avoid potential deadlocks (though broadcast send is async-safe usually)
-            drop(cache);
-            let _ = notify.send(e);
+        // PeerCache handles locking internally.
+        // It returns an event if a change occurred, which we broadcast.
+        // Crucially, we do NOT hold any lock when calling notify.send().
+        if let Some(event) = peers.update(pubkey, status) {
+            let _ = notify.send(event);
         }
     }
 }
@@ -517,8 +592,7 @@ impl Drop for PeerManager {
 
 impl PeerProvider for PeerManager {
     fn can_join(&self, peer: &PubKey) -> bool {
-        let Ok(cache) = self.peers.read() else { return false };
-        cache.get(peer).map(|p| p.status == PeerStatus::Invited || p.status == PeerStatus::Active).unwrap_or(false)
+        self.peers.can_join(peer)
     }
     
     fn can_connect(&self, peer: &PubKey) -> bool {
@@ -526,10 +600,12 @@ impl PeerProvider for PeerManager {
         if self.bootstrap_authors.read().map(|b| b.contains(peer)).unwrap_or(false) {
             return true;
         }
-        let Ok(cache) = self.peers.read() else { return false };
-        cache.get(peer)
-            .map(|p| matches!(p.status, PeerStatus::Active | PeerStatus::Dormant))
-            .unwrap_or(false)
+        // Then check cache safely
+        if let Some(status) = self.peers.get_status(peer) {
+            matches!(status, PeerStatus::Active | PeerStatus::Dormant)
+        } else {
+            false
+        }
     }
     
     fn can_accept_entry(&self, author: &PubKey) -> bool {
@@ -537,19 +613,11 @@ impl PeerProvider for PeerManager {
         if self.bootstrap_authors.read().map(|b| b.contains(author)).unwrap_or(false) {
             return true;
         }
-        let Ok(cache) = self.peers.read() else { return false };
-        cache.get(author)
-            .map(|p| matches!(p.status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
-            .unwrap_or(false)
+        self.peers.can_accept_entry(author)
     }
     
     fn list_acceptable_authors(&self) -> Vec<PubKey> {
-        // Return all peers that can accept entries (Active, Dormant, Revoked)
-        let Ok(cache) = self.peers.read() else { return Vec::new() };
-        cache.iter()
-            .filter(|(_, p)| matches!(p.status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
-            .map(|(pubkey, _)| *pubkey)
-            .collect()
+        self.peers.list_acceptable_authors()
     }
     
     fn subscribe_peer_events(&self) -> broadcast::Receiver<PeerEvent> {

@@ -21,6 +21,8 @@ pub struct StoreRegistry {
     meta: Arc<MetaStore>,
     node: Arc<NodeIdentity>,
     stores: RwLock<HashMap<Uuid, Box<dyn StoreHandle>>>,
+    /// Tracked actor thread handles for clean shutdown
+    handles: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl StoreRegistry {
@@ -31,6 +33,7 @@ impl StoreRegistry {
             meta,
             node,
             stores: RwLock::new(HashMap::new()),
+            handles: std::sync::Mutex::new(Vec::new()),
         }
     }
     
@@ -88,19 +91,24 @@ impl StoreRegistry {
         
         let state = Arc::new(open_fn(&state_dir)?);
         let opened = OpenedStore::new(store_id, sigchain_dir, state)?;
-        let (handle, info, runner) = opened.into_handle((*self.node).clone())?;
+        let (store_handle, info, runner) = opened.into_handle((*self.node).clone())?;
         
         // Spawn the actor runner (detached thread)
-        std::thread::spawn(move || runner.run());
+        let thread_handle = std::thread::spawn(move || runner.run());
+        
+        // Track the handle
+        if let Ok(mut handles) = self.handles.lock() {
+            handles.push(thread_handle);
+        }
         
         // Cache original handle (owns actor thread), return a clone
-        let handle_clone = handle.clone();
+        let handle_clone = store_handle.clone();
         {
             let Ok(mut stores) = self.stores.write() else {
                 return Err(StateError::Backend("lock poisoned".into()));
             };
             // Box as Any
-            stores.insert(store_id, Box::new(handle));
+            stores.insert(store_id, Box::new(store_handle));
         }
         
         Ok((handle_clone, info))
@@ -119,5 +127,27 @@ impl StoreRegistry {
     pub fn is_open(&self, store_id: &Uuid) -> bool {
         let Ok(stores) = self.stores.read() else { return false };
         stores.contains_key(store_id)
+    }
+
+    /// Shutdown the registry, joining all tracked actor threads.
+    pub fn shutdown(&self) {
+        // 1. Drop all StoreHandles to close command channels.
+        // This causes the ActorRunner loops to exit.
+        if let Ok(mut stores) = self.stores.write() {
+            stores.clear();
+        }
+
+        // 2. Take handles and join them
+        let handles = {
+            if let Ok(mut guard) = self.handles.lock() {
+                std::mem::take(&mut *guard)
+            } else {
+                Vec::new()
+            }
+        };
+
+        for handle in handles {
+            let _ = handle.join();
+        }
     }
 }

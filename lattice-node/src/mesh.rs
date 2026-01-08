@@ -20,15 +20,19 @@ use lattice_kernel::{NodeIdentity, Uuid, store::Store};
 use lattice_model::types::PubKey;
 use lattice_kvstate::{KvState, Merge};
 use rand::RngCore;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Error type for Mesh operations
 #[derive(Debug, thiserror::Error)]
 pub enum MeshError {
     #[error("Store error: {0}")]
-    Store(String),
+    Store(#[from] lattice_kvstate::KvHandleError),
     #[error("Actor error: {0}")]
     Actor(String),
+    #[error("PeerManager error: {0}")]
+    PeerManager(#[from] PeerManagerError),
+    #[error("State writer error: {0}")]
+    StateWriter(#[from] lattice_model::StateWriterError),
 }
 
 /// A Mesh represents a group of nodes sharing a root store and peer list.
@@ -43,24 +47,21 @@ pub enum MeshError {
 #[derive(Clone)]
 pub struct Mesh {
     store: KvStore,
-    node: std::sync::Arc<NodeIdentity>,
     peer_manager: std::sync::Arc<PeerManager>,
-    invite_token: Arc<RwLock<Option<String>>>,
     root_store_id: Uuid,
 }
+
 
 impl Mesh {
     /// Create a new Mesh from an open store handle
     pub async fn create(store: KvStore, node: &std::sync::Arc<NodeIdentity>) -> Result<Self, MeshError> {
         let root_store_id = store.id();
         let peer_manager = PeerManager::new(store.clone(), node)
-            .await.map_err(|e| MeshError::Actor(e.to_string()))?;
+            .await?;
             
         Ok(Self {
             store,
-            node: node.clone(),
             peer_manager,
-            invite_token: Arc::new(RwLock::new(None)),
             root_store_id,
         })
     }
@@ -106,7 +107,7 @@ impl Mesh {
     /// 
     /// Generates a random secret, stores its hash, and returns a Base58Check encoded token
     /// containing (Inviter PubKey, Mesh ID, Secret).
-    pub async fn create_invite(&self, inviter: PubKey) -> Result<String, String> {
+    pub async fn create_invite(&self, inviter: PubKey) -> Result<String, MeshError> {
         // 1. Generate Secret
         let mut secret = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut secret);
@@ -114,7 +115,7 @@ impl Mesh {
         // 2. Store Hash
         let hash = blake3::hash(&secret);
         let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
-        self.store.put(key.as_bytes(), b"valid").await.map_err(|e| e.to_string())?;
+        self.store.put(key.as_bytes(), b"valid").await?;
         
         // 3. Create Token
         let invite = Invite::new(
@@ -129,13 +130,15 @@ impl Mesh {
     
     /// Validate and consume an invite secret.
     /// Returns true if valid and consumed, false otherwise.
-    pub async fn consume_invite_secret(&self, secret: &[u8]) -> Result<bool, String> {
+    /// Validate and consume an invite secret.
+    /// Returns true if valid and consumed, false otherwise.
+    pub async fn consume_invite_secret(&self, secret: &[u8]) -> Result<bool, MeshError> {
         let hash = blake3::hash(secret);
         let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
         
         if let Ok(Some(_)) = self.store.get(key.as_bytes()).map(|h| h.lww()) {
             // Valid! Delete it (one-time use)
-            self.store.delete(key.as_bytes()).await.map_err(|e| e.to_string())?;
+            self.store.delete(key.as_bytes()).await?;
             Ok(true)
         } else {
             Ok(false)

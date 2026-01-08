@@ -293,6 +293,11 @@ impl Node {
         }
         
         for (mesh_id, _info) in meshes {
+            // Check if already loaded to avoid race with concurrent create or duplicate start
+            if self.meshes.read().map(|m| m.contains_key(&mesh_id)).unwrap_or(false) {
+                continue;
+            }
+
             let (store, _) = self.open_root_store(mesh_id)?;
             let handle = KvHandle::new(store);
             
@@ -304,6 +309,12 @@ impl Node {
             {
                 let mut meshes_guard = self.meshes.write()
                     .map_err(|_| NodeError::Actor("Meshes lock poisoned".to_string()))?;
+                
+                // Double-check to avoid overwriting if a race occurred
+                if meshes_guard.contains_key(&mesh_id) {
+                    continue;
+                }
+                
                 meshes_guard.insert(mesh_id, mesh.clone());
             }
             
@@ -334,6 +345,9 @@ impl Node {
         for mesh in meshes {
             mesh.shutdown().await;
         }
+        
+        // Shutdown registry (joins actor threads)
+        self.registry.shutdown();
     }
 
     /// Create a new mesh (multi-mesh: can be called multiple times).
