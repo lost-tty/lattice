@@ -10,7 +10,6 @@ mod tracing_writer;
 
 use lattice_net::MeshNetwork;
 use commands::CommandResult;
-use lattice_node::KvOps;
 use lattice_node::KvStore;
 use lattice_node::NodeBuilder;
 use lattice_node::mesh::Mesh;

@@ -10,7 +10,7 @@
     ├── sigchain/             # SigChainManager owns this directory
     │   └── {author}.log      # Append-only SignedEntry stream
     ├── state/                # Backend owns this directory
-    │   └── state.db          # Per-store KV state (redb, for KvState)
+    │   └── state.db          # Per-store backend state (e.g. redb for KvState)
     └── sync/                 # Sync metadata
 ```
 
@@ -22,6 +22,8 @@
 | meta    | "root_store"  | UUID (16B)         | Auto-opened on CLI startup   |
 
 ## state.db (redb, per store)
+
+For `KvState`:
 
 | Table   | Key      | Value       | Purpose                |
 |---------|----------|-------------|------------------------|

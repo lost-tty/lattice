@@ -14,6 +14,8 @@ use regex::bytes::Regex;
 use tokio::sync::broadcast;
 use futures_util::StreamExt;
 use crate::{WatchEvent, WatchError};
+use std::future::Future;
+use std::pin::Pin;
 
 /// High-level KV handle with read/write operations
 /// 
@@ -22,28 +24,26 @@ use crate::{WatchEvent, WatchError};
 /// - `MockWriter` for tests (writes apply directly)
 #[derive(Debug)]
 pub struct KvHandle<W: StateWriter> {
-    state: Arc<KvState>,
     writer: W,
 }
 
 impl<W: StateWriter + Clone> Clone for KvHandle<W> {
     fn clone(&self) -> Self {
         Self {
-            state: self.state.clone(),
             writer: self.writer.clone(),
         }
     }
 }
 
-impl<W: StateWriter> KvHandle<W> {
+impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
     /// Create a new KvHandle
-    pub fn new(state: Arc<KvState>, writer: W) -> Self {
-        Self { state, writer }
+    pub fn new(writer: W) -> Self {
+        Self { writer }
     }
     
     /// Get the underlying state for direct reads
     pub fn state(&self) -> &KvState {
-        &self.state
+        self.writer.as_ref()
     }
     
     /// Get the underlying writer (e.g., Replica for replication operations)
@@ -51,49 +51,28 @@ impl<W: StateWriter> KvHandle<W> {
         &self.writer
     }
     
-    /// Scan keys with optional prefix and regex pattern.
-    pub fn scan<F>(&self, prefix: &[u8], pattern: Option<&str>, visitor: F) -> Result<(), StateError>
-    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateError> {
-        let (regex, search_prefix) = match pattern {
-            Some(p) => {
-                 let re = Regex::new(p).map_err(|e| StateError::Conversion(e.to_string()))?;
-                 let lit_prefix = if prefix.is_empty() {
-                     crate::kv::extract_literal_prefix(p).unwrap_or_default()
-                 } else {
-                     prefix.to_vec()
-                 };
-                 (Some(re), lit_prefix)
-            },
-            None => (None, prefix.to_vec())
-        };
-        self.state.scan(&search_prefix, regex, visitor)
-    }
+}
 
-    /// List all keys with heads (Collects to Vec)
-    pub fn list(&self) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
-        let mut out = Vec::new();
-        self.scan(&[], None, |k, v| { out.push((k, v)); Ok(true) })?;
-        Ok(out)
-    }
-    
-    /// List keys by prefix (Collects to Vec)
-    pub fn list_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
-        let mut out = Vec::new();
-        self.scan(prefix, None, |k, v| { out.push((k, v)); Ok(true) })?;
-        Ok(out)
-    }
-    
-    /// List keys by regex pattern (Collects to Vec)
-    pub fn list_by_regex(&self, pattern: &str) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
-        let mut out = Vec::new();
-        self.scan(&[], Some(pattern), |k, v| { out.push((k, v)); Ok(true) })?;
-        Ok(out)
+impl<W: StateWriter + AsRef<KvState>> AsRef<KvState> for KvHandle<W> {
+    fn as_ref(&self) -> &KvState {
+        self.writer.as_ref()
     }
 }
 
-impl<W: StateWriter> AsRef<KvState> for KvHandle<W> {
-    fn as_ref(&self) -> &KvState {
-        &self.state
+// Deref to the underlying writer (e.g. Store) to expose its methods directly.
+// This allows `handle.log_seq()` to work seamlessly.
+impl<W: StateWriter> std::ops::Deref for KvHandle<W> {
+    type Target = W;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writer
+    }
+}
+
+// DerefMut to the underlying writer
+impl<W: StateWriter> std::ops::DerefMut for KvHandle<W> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.writer
     }
 }
 
@@ -114,57 +93,6 @@ impl<W: lattice_model::replication::EntryStreamProvider + Send + Sync + StateWri
 }
 
 // ==================== Watch Operations (async, via EntryStreamProvider) ====================
-
-impl<W: StateWriter + EntryStreamProvider + Send + Sync + 'static> KvHandle<W> {
-    /// Watch keys matching a regex pattern
-    pub async fn watch(
-        &self, 
-        pattern: &str
-    ) -> Result<(Vec<(Vec<u8>, Vec<Head>)>, broadcast::Receiver<WatchEvent>), WatchError> 
-    where W: EntryStreamProvider + Send + Sync + 'static
-    {
-        // 1. Compile regex once
-        let re = Regex::new(pattern).map_err(|e| WatchError::InvalidRegex(e.to_string()))?;
-
-        // 2. Subscribe FIRST to avoid race condition (gap between snapshot and subscribe)
-        // KvState emits events AFTER commit. By subscribing first, we buffer any events 
-        // that happen while we are scanning the initial state.
-        let mut state_rx = self.state.subscribe();
-
-        // 3. Get initial state using the compiled regex
-        let prefix = crate::kv::extract_literal_prefix(pattern).unwrap_or_default();
-        let mut initial = Vec::new();
-        self.state.scan(&prefix, Some(re.clone()), |k, v| {
-            initial.push((k, v));
-            Ok(true)
-        }).map_err(|e| WatchError::Storage(e.to_string()))?;
-
-        // 4. Setup channel
-        let (tx, rx) = broadcast::channel(128);
-        
-        // 4. Spawn watcher task (clone regex cheap)
-        let re_task = re.clone();
-        
-        tokio::spawn(async move {
-            loop {
-                match state_rx.recv().await {
-                    Ok(event) => {
-                        // Filter by regex directly on bytes (safe for binary keys)
-                        if re_task.is_match(&event.key) {
-                            if tx.send(event).is_err() {
-                                break; // Channel closed, stop watcher
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue, // Skip gap
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-        
-        Ok((initial, rx))
-    }
-}
 
 /// Error type for KvHandle operations
 #[derive(Debug)]
@@ -190,51 +118,19 @@ impl From<StateError> for KvHandleError {
     }
 }
 
-// ==================== KvOps Extension Trait ====================
+// ==================== Inherent KvHandle Methods ====================
 
-use std::future::Future;
-use std::pin::Pin;
-
-/// Extension trait for Key-Value operations.
-/// 
-/// This trait provides a high-level synchronous-like API (for reads) and async API (for writes)
-/// that hides the complexity of `Op` construction and `KvPayload` encoding.
-/// 
-/// It is implemented generically for any type that:
-/// 1. Can write state (`StateWriter` trait)
-/// 2. Can read `KvState` (`AsRef<KvState>`)
-pub trait KvOps {
+impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
     /// Get the value for a key.
     /// Returns all heads for the key. Use `Merge` trait to resolve conflicts (e.g. `.lww()`).
-    fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateError>;
+    pub fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateError> {
+        self.state().get(key)
+    }
     
     /// Scan keys with optional prefix and regex pattern.
     /// calls visitor(key, heads). Returns Ok(false) to stop.
-    fn scan<F>(&self, prefix: &[u8], pattern: Option<&str>, visitor: F) -> Result<(), StateError>
-    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateError>;
-    
-    /// Write a value for a key.
-    /// Returns the operation hash (Entry Hash) upon successful submission.
-    fn put(&self, key: &[u8], value: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>>;
-    
-    /// Delete a key.
-    fn delete(&self, key: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>>;
-
-    /// Watch keys matching a regex pattern.
-    fn watch(&self, pattern: &str) -> Pin<Box<dyn Future<Output = Result<(Vec<(Vec<u8>, Vec<Head>)>, broadcast::Receiver<WatchEvent>), WatchError>> + Send + '_>>;
-}
-
-impl<T> KvOps for T
-where
-    T: StateWriter + AsRef<KvState> + EntryStreamProvider + Clone + Send + Sync + 'static,
-{
-    fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateError> {
-        self.as_ref().get(key)
-    }
-    
-    fn scan<F>(&self, prefix: &[u8], pattern: Option<&str>, visitor: F) -> Result<(), StateError>
-    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateError>
-    {
+    pub fn scan<F>(&self, prefix: &[u8], pattern: Option<&str>, visitor: F) -> Result<(), StateError>
+    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateError> {
         let (regex, search_prefix) = match pattern {
             Some(p) => {
                  let re = Regex::new(p).map_err(|e| StateError::Conversion(e.to_string()))?;
@@ -247,11 +143,70 @@ where
             },
             None => (None, prefix.to_vec())
         };
-
-        self.as_ref().scan(&search_prefix, regex, visitor)
+        self.state().scan(&search_prefix, regex, visitor)
     }
 
-    fn watch(&self, pattern: &str) -> Pin<Box<dyn Future<Output = Result<(Vec<(Vec<u8>, Vec<Head>)>, broadcast::Receiver<WatchEvent>), WatchError>> + Send + '_>> {
+    /// List all keys with heads (Collects to Vec)
+    pub fn list(&self) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
+        let mut out = Vec::new();
+        self.scan(&[], None, |k, v| { out.push((k, v)); Ok(true) })?;
+        Ok(out)
+    }
+    
+    /// List keys by prefix (Collects to Vec)
+    pub fn list_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
+        let mut out = Vec::new();
+        self.scan(prefix, None, |k, v| { out.push((k, v)); Ok(true) })?;
+        Ok(out)
+    }
+    
+    /// List keys by regex pattern (Collects to Vec)
+    pub fn list_by_regex(&self, pattern: &str) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
+        let mut out = Vec::new();
+        self.scan(&[], Some(pattern), |k, v| { out.push((k, v)); Ok(true) })?;
+        Ok(out)
+    }
+
+    /// Write a value for a key.
+    /// Returns the operation hash (Entry Hash) upon successful submission.
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
+        let key = key.to_vec();
+        let value = value.to_vec();
+        
+        Box::pin(async move {
+            // Fetch current heads to build causal dependency graph
+            let heads = self.state().get(&key).map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
+            let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
+
+            let op = Operation::put(key, value);
+            let kv_payload = KvPayload { ops: vec![op] };
+            let payload = kv_payload.encode_to_vec();
+            
+            self.submit(payload, causal_deps).await
+        })
+    }
+
+    /// Delete a key.
+    pub fn delete(&self, key: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
+        let key = key.to_vec();
+        
+        Box::pin(async move {
+            // Fetch current heads for causal deps
+            let heads = self.state().get(&key).map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
+            let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
+
+            let op = Operation::delete(key);
+            let kv_payload = KvPayload { ops: vec![op] };
+            let payload = kv_payload.encode_to_vec();
+            
+            self.submit(payload, causal_deps).await
+        })
+    }
+}
+
+impl<W: StateWriter + EntryStreamProvider + Clone + Send + Sync + AsRef<KvState> + 'static> KvHandle<W> {
+    /// Watch keys matching a regex pattern.
+    pub fn watch(&self, pattern: &str) -> Pin<Box<dyn Future<Output = Result<(Vec<(Vec<u8>, Vec<Head>)>, broadcast::Receiver<WatchEvent>), WatchError>> + Send + '_>> {
         let pattern_str = pattern.to_string();
         let this = self.clone();
         
@@ -261,12 +216,12 @@ where
 
             // 2. Subscribe FIRST to avoid race condition (gap between snapshot and subscribe)
             // Use internal KvState broadcast instead of log stream to ensure consistent view.
-            let mut state_rx = this.as_ref().subscribe();
+            let mut state_rx = this.state().subscribe();
 
             // 3. Get initial state
             let prefix = crate::kv::extract_literal_prefix(&pattern_str).unwrap_or_default();
             let mut initial = Vec::new();
-            this.as_ref().scan(&prefix, Some(re.clone()), |k, v| {
+            this.state().scan(&prefix, Some(re.clone()), |k, v| {
                 initial.push((k, v));
                 Ok(true)
             }).map_err(|e| WatchError::Storage(e.to_string()))?;
@@ -295,39 +250,6 @@ where
             Ok((initial, rx))
         })
     }
-
-    fn put(&self, key: &[u8], value: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
-        let key = key.to_vec();
-        let value = value.to_vec();
-        
-        Box::pin(async move {
-            // Fetch current heads to build causal dependency graph
-            let heads = self.as_ref().get(&key).map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
-            let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
-
-            let op = Operation::put(key, value);
-            let kv_payload = KvPayload { ops: vec![op] };
-            let payload = kv_payload.encode_to_vec();
-            
-            self.submit(payload, causal_deps).await
-        })
-    }
-
-    fn delete(&self, key: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
-        let key = key.to_vec();
-        
-        Box::pin(async move {
-            // Fetch current heads for causal deps
-            let heads = self.as_ref().get(&key).map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
-            let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
-
-            let op = Operation::delete(key);
-            let kv_payload = KvPayload { ops: vec![op] };
-            let payload = kv_payload.encode_to_vec();
-            
-            self.submit(payload, causal_deps).await
-        })
-    }
 }
 
 // ==================== Mock StateWriter for tests ====================
@@ -350,6 +272,12 @@ impl MockWriter {
             next_hash: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             entry_tx,
         }
+    }
+}
+
+impl AsRef<KvState> for MockWriter {
+    fn as_ref(&self) -> &KvState {
+        &self.state
     }
 }
 
@@ -382,17 +310,25 @@ impl StateWriter for MockWriter {
         use lattice_model::StateMachine;
         
         let state = self.state.clone();
-        let hash_num = self.next_hash.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let tx = self.entry_tx.clone();
-        
-        Box::pin(async move {
-            // Generate a deterministic hash for testing
-            let mut hash_bytes = [0u8; 32];
-            hash_bytes[0..8].copy_from_slice(&hash_num.to_le_bytes());
-            let hash = Hash::from(hash_bytes);
+            let hash_num = self.next_hash.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let tx = self.entry_tx.clone();
+            
+            Box::pin(async move {
+                // Generate a unique hash avoiding collisions on restart
+                // Hash = blake3(count + timestamp + payload)
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
 
-            // Use a fixed author for the mock to simulate a real single-writer session
-            let author = PubKey::from([1u8; 32]);
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&hash_num.to_le_bytes());
+                hasher.update(&timestamp.to_le_bytes());
+                hasher.update(&payload);
+                let hash = Hash::from(*hasher.finalize().as_bytes());
+
+                // Use a fixed author for the mock to simulate a real single-writer session
+                let author = PubKey::from([1u8; 32]);
             
             // Find correct prev_hash by querying current state
             // This ensures valid chain links regardless of how many ops we submit
@@ -476,7 +412,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer);
+        let handle = KvHandle::new(writer);
         
         // Put a value
         let hash = handle.put(b"test/key", b"hello").await.unwrap();
@@ -493,7 +429,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer);
+        let handle = KvHandle::new(writer);
         
         // Put then delete
         handle.put(b"to/delete", b"exists").await.unwrap();
@@ -509,7 +445,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer);
+        let handle = KvHandle::new(writer);
         
         // Put some values with common prefix
         handle.put(b"/nodes/alice/status", b"active").await.unwrap();
@@ -526,7 +462,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer);
+        let handle = KvHandle::new(writer);
 
         // 1. Setup Watcher
         let (_, mut rx) = handle.watch("^/nodes/.*$").await.unwrap();
@@ -558,7 +494,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone()); // Assuming MockWriter works similarly
-        let handle = KvHandle::new(state, writer);
+        let handle = KvHandle::new(writer);
 
         // Test invalid regex syntax
         let result = handle.watch("[").await;
@@ -570,7 +506,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone()); 
-        let handle = KvHandle::new(state.clone(), writer.clone());
+        let handle = KvHandle::new(writer.clone());
         
         let (_, mut rx) = handle.watch(".*").await.unwrap();
 
@@ -595,7 +531,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer);
+        let handle = KvHandle::new(writer);
 
         // 1. First Write: Should have NO dependencies (genesis for this key)
         let hash_v1 = handle.put(b"key", b"v1").await.unwrap();
@@ -647,7 +583,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer.clone());
+        let handle = KvHandle::new(writer.clone());
         
         let key = b"conflict_key";
 
@@ -691,7 +627,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer);
+        let handle = KvHandle::new(writer);
         let key = b"resurrect_me";
 
         // 1. Put
@@ -735,7 +671,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer.clone());
+        let handle = KvHandle::new(writer.clone());
         
         let key = b"mixed_conflict";
 
@@ -771,7 +707,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer);
+        let handle = KvHandle::new(writer);
 
         // Watch for everything
         let (_, mut rx) = handle.watch(".*").await.unwrap();
@@ -796,7 +732,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer);
+        let handle = KvHandle::new(writer);
 
         let empty_key = b"";
         
@@ -816,7 +752,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
-        let handle = KvHandle::new(state, writer.clone());
+        let handle = KvHandle::new(writer.clone());
         let key = b"genesis_conflict";
 
         // 1. Simulate Node A: Genesis write (no deps)

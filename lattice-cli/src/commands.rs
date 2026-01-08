@@ -1,7 +1,7 @@
 //! CLI command handlers
 
 use crate::{mesh_commands, node_commands, store_commands};
-use lattice_node::{Node, KvStore, Mesh, KvOps};
+use lattice_node::{Node, KvStore, Mesh};
 use lattice_net::MeshNetwork;
 use clap::{Parser, Subcommand, CommandFactory};
 use rustyline_async::SharedWriter;

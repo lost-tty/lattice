@@ -122,11 +122,11 @@ The system is composed of strictly layered crates to separate concerns:
 - **Logic**: Handles KV-specific conflicts (LWW, Tombstones, DAG resolution).
 - **Dependencies**: `lattice-model`, `lattice-proto`.
 
-### 3. `lattice-core` (Replication Engine)
+### 3. `lattice-kernel` (Replication Engine)
 - **Responsibility**: Replication, log management, sync protocol.
 - **Components**:
     - **SigChainManager**: Validates signatures, sequences, and hash chains. Manages append-only log files.
-    - **ReplicationEngine**: The core replication logic - signs entries, maintains log, broadcasts to peers.
+    - **ReplicatedState**: The core replication actor - signs entries, maintains log, broadcasts to peers.
 - **Key Principle**: Generic over `S: StateMachine`. NO KV-specific commands.
 - **Dependencies**: `lattice-model`. **State-machine agnostic**.
 
@@ -149,7 +149,7 @@ The combined runtime unit is **`ReplicatedState<S: StateMachine>`**:
 │        ReplicatedState<S: StateMachine>         │
 │                                                 │
 │  ┌─────────────────┐    ┌──────────────────┐   │
-│  │ReplicationEngine│───▶│   StateMachine   │   │
+│  │ ReplicatedState │───▶│   StateMachine   │   │
 │  │                 │    │   (e.g. KvState) │   │
 │  │ - submit()      │    │                  │   │
 │  │ - ingest()      │    │ - apply(op)      │   │
@@ -282,10 +282,10 @@ lattice-net                           lattice-core
 │  (owns Endpoint)│                  │  (owns stores)    │
 └────────┬────────┘                  └─────────┬─────────┘
          │                                     │
-         │ uses StoreHandle API                │ spawns
+         │ uses Store API                      │ spawns
          ▼                                     ▼
   ┌───────────────────────────────────────────────────────────┐
-  │                    StoreHandle                            │
+  │                           Store                           │
   │  Direct Methods:                                          │
   │  • get(key), put(key, value), delete(key)                 │
   │  • list(include_deleted), list_by_prefix(prefix, ...)     │
@@ -598,7 +598,7 @@ Stores can be exposed over HTTP API using token-based authentication. Tokens are
 1. User calls StoreHandle::put(key, value)
          │
          ▼
-2. StoreActor (internal) → SigChain.create_entry()
+2. ReplicatedState (internal) → SigChain.create_entry()
    - Build Entry with parent_hashes (current tips for key)
    - Use Operation::put(key, value) to add ops
    - Sign it → SignedEntry
@@ -807,7 +807,7 @@ The Root Store acts as the **Identity Provider** (Kernel), providing "User Space
        ┌───────────────────────────┼───────────────────────────┐
        ▼                           ▼                           ▼
 ┌──────────────┐           ┌──────────────┐           ┌──────────────┐
-│  StoreActor  │           │  BlobStore   │           │   SQLStore   │
+│  KvState     │           │  BlobStore   │           │   SQLStore   │
 │  (KV)        │           │  (future)    │           │   (future)   │
 └──────────────┘           └──────────────┘           └──────────────┘
 ```
@@ -825,7 +825,7 @@ The Root Store acts as the **Identity Provider** (Kernel), providing "User Space
    - Initial load on store open
    - Live updates via store watcher for status changes
 
-3. **`StoreActor::apply_ingested_entry()`**:
+3. **`ReplicatedState::apply_ingested_entry()`**:
    - Verifies signature first (proves `author_id` authentic)
    - Checks peer status via `PeerProvider` (`Active` or `Revoked`)
    - Trusts entries during join (no provider when cache not yet ready)
@@ -903,14 +903,14 @@ To ensure the `StateMachine` is truly independent of the replication log (enabli
       ```
     - No dependencies on network, storage, or logs.
 
-2.  **`lattice-core`** (Replication Engine):
+2.  **`lattice-kernel`** (Replication Engine):
     - Depends on `lattice-model`.
-    - **ReplicaController**: Manages `SigChain` (logs), `Gossip`, and P2P sync.
+    - **ReplicatedState**: Manages `SigChain` (logs), `Gossip`, and P2P sync.
     - Decodes `SignedEntry` -> calls `StateMachine::apply()`.
 
 3.  **`lattice-kvstate`** (State Implementation):
     - Depends on `lattice-model`.
     - **KvState**: Implements `StateMachine` using `redb`.
-    - **Isolation**: Does not import `lattice-core` or `Entry` protobufs. Purely materializes state from payload bytes.
+    - **Isolation**: Does not import `lattice-kernel` or `Entry` protobufs. Purely materializes state from payload bytes.
 
 This strict layering prevents "leakage" of log-specific concerns (like seq numbers or signatures) into the business logic.

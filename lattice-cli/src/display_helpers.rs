@@ -194,7 +194,7 @@ pub async fn write_store_summary(w: &mut Writer, h: &KvStore) {
     let _ = writeln!(w, "Log Seq:  {}", h.log_seq().await);
     let _ = writeln!(w, "Applied:  {}", h.applied_seq().await.unwrap_or(0));
     
-    let all = h.state().list_heads_all().unwrap_or_default();
+    let all = h.list().unwrap_or_default();
     let _ = writeln!(w, "Keys:     {}", all.len());
     
     // Display common HLC (min of max HLCs across all authors)

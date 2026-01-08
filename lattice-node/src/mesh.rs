@@ -14,15 +14,13 @@ use crate::{
     peer_manager::{PeerManager, PeerManagerError},
     token::Invite,
     PeerInfo,
+    KvStore,
 };
 use lattice_kernel::{NodeIdentity, Uuid, store::Store};
 use lattice_model::types::PubKey;
 use lattice_kvstate::{KvState, Merge};
 use rand::RngCore;
 use std::sync::{Arc, RwLock};
-
-use crate::KvOps;
-use crate::KvStore;
 
 /// Error type for Mesh operations
 #[derive(Debug, thiserror::Error)]
@@ -159,6 +157,11 @@ impl Mesh {
     /// Clear bootstrap authors after initial sync completes.
     pub fn clear_bootstrap_authors(&self) -> Result<(), PeerManagerError> {
         self.peer_manager.clear_bootstrap_authors()
+    }
+
+    /// Shutdown the mesh and its components (stops PeerManager watcher)
+    pub async fn shutdown(&self) {
+        self.peer_manager.shutdown().await;
     }
 }
 

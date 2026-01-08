@@ -13,11 +13,11 @@ use crate::{
     PeerInfo,
 };
 use lattice_kernel::{NodeIdentity, PeerStatus};
-use lattice_kvstate::{KvState, Merge, KvOps};
+use lattice_kvstate::Merge;
 use crate::KvStore;
 use lattice_model::types::PubKey;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex};
 use tokio::sync::broadcast;
 
 /// Error type for PeerManager operations
@@ -182,6 +182,8 @@ pub struct PeerManager {
     kv: KvStore,
     /// Our own identity
     identity: NodeIdentity,
+    /// Handle to the background watcher task (abort on drop)
+    watcher_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for PeerManager {
@@ -206,6 +208,7 @@ impl PeerManager {
             bootstrap_authors: Arc::new(RwLock::new(HashSet::new())),
             kv: store.clone(),
             identity: identity.clone(),
+            watcher_task: Mutex::new(None),
         });
         
         // Start watching peer status changes
@@ -317,46 +320,182 @@ impl PeerManager {
     }
     
     // ==================== Internal: Cache Watching ====================
-    
+
     /// Start watching peer status changes and keep cache updated.
     /// 
-    /// TODO: Watch functionality temporarily disabled during refactoring.
-    /// Currently loads initial cache from list_by_prefix without watching.
+    /// Subscribes to `/nodes/.*/status` and updates the cache reactively.
+    /// This ensures read-your-writes consistency (local writes trigger events)
+    /// as well as consistency with external changes (e.g. from gossip).
     async fn start_watching(self: &Arc<Self>) -> Result<(), PeerManagerError> {
-        // Load initial peer statuses from store
-        let prefix = b"/nodes/";
-        let initial = self.kv.list_by_prefix(prefix)
+        // Watch pattern for all peer statuses
+        let pattern = r"^/nodes/.*/status$";
+        
+        // Use the watch API which handles initial scan + subscription atomically (preventing races)
+        let (initial, mut rx) = self.kv.watch(pattern).await
             .map_err(|e| PeerManagerError::Store(e.to_string()))?;
         
-        // Populate initial cache
-        {
-            let mut cache = self.peers.write()
-                .map_err(|_| PeerManagerError::LockPoisoned)?;
-            for (key, heads) in initial {
-                if let Some(pubkey_hex) = parse_peer_status_key(&key) {
-                    if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
-                        if let Ok(pubkey) = PubKey::try_from(pubkey_bytes) {
-                            if let Some(winner) = heads.lww_head() {
-                                let status_str = String::from_utf8_lossy(&winner.value);
-                                if let Some(status) = PeerStatus::from_str(&status_str) {
-                                    cache.insert(pubkey, Peer::minimal(pubkey, status.clone()));
-                                    // Emit Added event for initial peers
-                                    let _ = self.peer_event_tx.send(PeerEvent::Added { 
-                                        pubkey, 
-                                        status,
-                                    });
-                                }
-                            }
-                        }
-                    }
+        // 1. Process initial state
+        for (key, heads) in initial {
+            if let Some((pubkey, status)) = Self::parse_peer_state(&key, &heads) {
+                 if let Ok(mut cache) = self.peers.write() {
+                    cache.insert(pubkey, Peer::minimal(pubkey, status));
                 }
             }
         }
         
-        // TODO: Re-enable watch when KvHandle has watch support
-        // Currently not watching for changes - would need KvStateActor integration
+        // 2. Spawn watcher task for ongoing updates
+        let peers = self.peers.clone();
+        let notify = self.peer_event_tx.clone();
+        let kv = self.kv.clone(); // Clone KV for re-syncing on lag
+        
+        let task = tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        Self::handle_watch_event(event, &peers, &notify);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("PeerManager watcher lagged by {} messages - triggering re-sync", n);
+                        
+                        // Re-sync on lag to ensure consistency
+                        // We list all status keys and re-apply them
+                        let prefix = b"/nodes/";
+                        match kv.list_by_prefix(prefix) {
+                            Ok(entries) => {
+                                for (key, heads) in entries {
+                                    // Filter for status keys purely by parsing
+                                    if let Some((pubkey, status)) = Self::parse_peer_state(&key, &heads) {
+                                        Self::update_peer_cache(&peers, pubkey, Some(status), &notify);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to re-sync PeerManager after lag: {}", e);
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        
+        // Store handle for cleanup
+        if let Ok(mut guard) = self.watcher_task.lock() {
+            *guard = Some(task);
+        }
         
         Ok(())
+    }
+    
+    /// Stop the background watcher and wait for it to finish.
+    /// This releases any held lock or handle on the store, allowing clean shutdown.
+    pub async fn shutdown(&self) {
+        let task = {
+            if let Ok(mut guard) = self.watcher_task.lock() {
+                guard.take()
+            } else {
+                None
+            }
+        };
+        
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await; // Wait for task to finish
+        }
+    }
+
+    /// Parse peer state from KV entry (helper for initial load and updates)
+    fn parse_peer_state(key: &[u8], heads: &[lattice_kvstate::Head]) -> Option<(PubKey, PeerStatus)> {
+        let pubkey_hex = parse_peer_status_key(key)?;
+        let pubkey_bytes = hex::decode(&pubkey_hex).ok()?;
+        let pubkey = PubKey::try_from(pubkey_bytes).ok()?;
+
+        let winner = heads.lww_head()?;
+        let status_str = String::from_utf8_lossy(&winner.value);
+        let status = PeerStatus::from_str(&status_str)?;
+        
+        Some((pubkey, status))
+    }
+
+    /// Handle a single watch event to update cache and notify listeners
+    fn handle_watch_event(
+        event: lattice_kvstate::WatchEvent,
+        peers: &Arc<RwLock<HashMap<PubKey, Peer>>>,
+        notify: &broadcast::Sender<PeerEvent>
+    ) {
+        let lattice_kvstate::WatchEvent { key, kind } = event;
+
+        let (pubkey, new_status) = match kind {
+            lattice_kvstate::WatchEventKind::Update { heads } => {
+                match Self::parse_peer_state(&key, &heads) {
+                    Some((pk, status)) => (pk, Some(status)),
+                    None => return, // Malformed or irrelevant update
+                }
+            }
+            lattice_kvstate::WatchEventKind::Delete => {
+                 // Try to recover pubkey from key even without value
+                 if let Some(pubkey_hex) = parse_peer_status_key(&key) {
+                    if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
+                        if let Ok(pubkey) = PubKey::try_from(pubkey_bytes) {
+                             (pubkey, None) // None means deleted/revoked
+                        } else { return; }
+                    } else { return; }
+                 } else { return; }
+            }
+        };
+
+        Self::update_peer_cache(peers, pubkey, new_status, notify);
+    }
+
+    /// Update peer cache and emit events
+    fn update_peer_cache(
+        peers: &Arc<RwLock<HashMap<PubKey, Peer>>>, 
+        pubkey: PubKey, 
+        status: Option<PeerStatus>, 
+        notify: &broadcast::Sender<PeerEvent>
+    ) {
+        let Ok(mut cache) = peers.write() else { return };
+        
+        // Calculate transition
+        let event = match cache.get_mut(&pubkey) {
+            Some(peer) => {
+                let old = peer.status.clone();
+                // If status is None (deleted), treat as Revoked
+                let new = status.unwrap_or(PeerStatus::Revoked);
+                
+                if old != new {
+                    peer.status = new.clone();
+                    Some(PeerEvent::StatusChanged { pubkey, old, new })
+                } else {
+                    None
+                }
+            }
+            None => {
+                if let Some(new) = status {
+                    cache.insert(pubkey, Peer::minimal(pubkey, new.clone()));
+                    Some(PeerEvent::Added { pubkey, status: new })
+                } else {
+                    None // Deleted but never existed in cache
+                }
+            }
+        };
+
+        // Notify outside lock
+        if let Some(e) = event {
+            // Drop lock before sending to avoid potential deadlocks (though broadcast send is async-safe usually)
+            drop(cache);
+            let _ = notify.send(e);
+        }
+    }
+}
+
+impl Drop for PeerManager {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.watcher_task.lock() {
+            if let Some(task) = guard.take() {
+                task.abort();
+            }
+        }
     }
 }
 

@@ -41,12 +41,10 @@ pub use meta_store::MetaStore;
 
 // Re-export from lattice-kvstate
 use lattice_kvstate::KvState;
-pub use lattice_kvstate::Head;
-pub use lattice_kvstate::KvOps;
+pub use lattice_kvstate::{Head, KvHandle};
 
-/// Type alias for the bare Store with KvState state machine.
-/// Used by network layer for AuthorizedStore wrapping.
-pub type KvStore = Store<KvState>;
+/// Type alias for the KvHandle wrapping a Store.
+pub type KvStore = KvHandle<Store<KvState>>;
 
 // Export AuthorizedStore
 pub use authorized_store::AuthorizedStore;

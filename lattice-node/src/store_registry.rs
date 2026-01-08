@@ -8,18 +8,19 @@
 use crate::{DataDir, MetaStore};
 use lattice_kernel::{
     NodeIdentity, Uuid,
-    store::{OpenedStore, Store, StoreInfo, StateError},
+    store::{OpenedStore, Store, StoreInfo, StateError, StoreHandle},
 };
-use lattice_kvstate::KvState;
+use lattice_model::StateMachine;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::path::Path;
 
 /// Manages store lifecycle and caching
 pub struct StoreRegistry {
     data_dir: DataDir,
     meta: Arc<MetaStore>,
     node: Arc<NodeIdentity>,
-    stores: RwLock<HashMap<Uuid, Store<KvState>>>,
+    stores: RwLock<HashMap<Uuid, Box<dyn StoreHandle>>>,
 }
 
 impl StoreRegistry {
@@ -35,16 +36,19 @@ impl StoreRegistry {
     
     /// Create a new store (registers in meta.db, creates storage)
     /// Does NOT open or spawn actor - use get_or_open() for that
-    pub fn create(&self, store_id: Uuid) -> Result<Uuid, StateError> {
+    pub fn create<S, F>(&self, store_id: Uuid, open_fn: F) -> Result<Uuid, StateError> 
+    where
+        S: StateMachine + Send + Sync + 'static,
+        F: FnOnce(&Path) -> Result<S, StateError>
+    {
         // Create storage directories
         let store_dir = self.data_dir.store_dir(store_id);
         let state_dir = store_dir.join("state");
         let sigchain_dir = store_dir.join("sigchain");
         std::fs::create_dir_all(&sigchain_dir)?;
         
-        // Open KvState (creates state.db)
-        let state = Arc::new(KvState::open(&state_dir)
-            .map_err(|e| StateError::KvState(e.to_string()))?);
+        // Open Initial State (creates db) using provided function
+        let state = Arc::new(open_fn(&state_dir)?);
         let _ = OpenedStore::new(store_id, sigchain_dir, state)?;
         
         // Register in meta
@@ -56,14 +60,23 @@ impl StoreRegistry {
     }
     
     /// Get a store handle, opening and spawning actor if not already cached
-    pub fn get_or_open(&self, store_id: Uuid) -> Result<(Store<KvState>, StoreInfo), StateError> {
+    pub fn get_or_open<S, F>(&self, store_id: Uuid, open_fn: F) -> Result<(Store<S>, StoreInfo), StateError> 
+    where
+        S: StateMachine + Send + Sync + 'static,
+        F: FnOnce(&Path) -> Result<S, StateError>
+    {
         {
             let Ok(stores) = self.stores.read() else {
                 return Err(StateError::Backend("lock poisoned".into()));
             };
-            if let Some(handle) = stores.get(&store_id) {
-                let info = StoreInfo { store_id, entries_replayed: 0 };
-                return Ok((handle.clone(), info));
+            if let Some(boxed_store) = stores.get(&store_id) {
+                // Downcast
+                if let Some(handle) = boxed_store.as_any().downcast_ref::<Store<S>>() {
+                    let info = StoreInfo { store_id, entries_replayed: 0 };
+                    return Ok((handle.clone(), info));
+                } else {
+                    return Err(StateError::Backend(format!("Store {} opened with different type", store_id)));
+                }
             }
         }
         
@@ -73,8 +86,7 @@ impl StoreRegistry {
         let sigchain_dir = store_dir.join("sigchain");
         std::fs::create_dir_all(&sigchain_dir)?;
         
-        let state = Arc::new(KvState::open(&state_dir)
-            .map_err(|e| StateError::KvState(e.to_string()))?);
+        let state = Arc::new(open_fn(&state_dir)?);
         let opened = OpenedStore::new(store_id, sigchain_dir, state)?;
         let (handle, info) = opened.into_handle((*self.node).clone())?;
         
@@ -84,7 +96,8 @@ impl StoreRegistry {
             let Ok(mut stores) = self.stores.write() else {
                 return Err(StateError::Backend("lock poisoned".into()));
             };
-            stores.insert(store_id, handle);
+            // Box as Any
+            stores.insert(store_id, Box::new(handle));
         }
         
         Ok((handle_clone, info))

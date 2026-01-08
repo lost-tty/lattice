@@ -2,7 +2,7 @@
 
 use crate::commands::{CommandResult, Writer};
 use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
-use lattice_node::{Node, KvStore, KvOps};
+use lattice_node::{Node, KvStore};
 use lattice_kvstate::Merge;
 use lattice_model::types::{PubKey, Hash};
 use lattice_net::MeshNetwork;

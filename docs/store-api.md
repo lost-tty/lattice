@@ -1,11 +1,11 @@
 # Store API Reference
 
-The `StoreHandle` is the primary interface for interacting with a Lattice store.
+The `Store` provides the generic replication interface, while `KvHandle` (and `KvOps`) provides the Key-Value specific API.
 
 ## Architecture
 
 ```
-StoreHandle → StoreCmd → StoreActor → { SigChain (log), KvState (heads) }
+Store/KvHandle → ReplicatedState → { SigChain (log), StateMachine (heads) }
 ```
 
 **Heads-Only:** All read methods return `Vec<Head>`. Use `Merge` trait for resolution.

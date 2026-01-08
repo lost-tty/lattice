@@ -36,7 +36,7 @@ async fn test_watch_gap_race_condition() {
     // KvHandle implementation also has the bug.
     // Let's use KvHandle for convenience.
     let writer = MockWriter::new(state.clone());
-    let handle = KvHandle::new(state.clone(), writer);
+    let handle = KvHandle::new(writer);
     
     // We want to verify that checking Initial State + Subscribing covers 100% of timeline.
     // If we do:

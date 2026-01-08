@@ -3,7 +3,7 @@
 //! These tests replicate PRODUCTION usage exactly - no manual gossip setup.
 //! They rely purely on the event-driven flow that happens in the CLI.
 
-use lattice_node::{NodeBuilder, NodeEvent, Node, KvStore, PeerStatus, Mesh, token::Invite, KvOps};
+use lattice_node::{NodeBuilder, NodeEvent, Node, KvStore, PeerStatus, Mesh, token::Invite};
 use lattice_kvstate::Merge;
 use lattice_model::types::PubKey;
 use lattice_kernel::Uuid;
@@ -61,6 +61,7 @@ async fn test_production_flow_gossip() {
         let node_a = Arc::new(NodeBuilder { data_dir: data_a.clone() }.build().expect("node a"));
         mesh_id = node_a.create_mesh().await.expect("init a");
         // Node A exits after init - no daemon running
+        node_a.shutdown().await;
     }
     
     // === Session 2: Both nodes run `lattice daemon` ===
@@ -69,8 +70,6 @@ async fn test_production_flow_gossip() {
     
     let server_a = MeshNetwork::new_from_node(node_a.clone()).await.expect("server a");
     node_a.start().await.expect("start a");  // Emits NetworkStore → gossip setup
-    
-    sleep(Duration::from_millis(1000)).await;
     
     // Verify A's mesh is accessible
     let mesh_a = node_a.mesh_by_id(mesh_id).expect("A should have mesh after start");
@@ -87,18 +86,9 @@ async fn test_production_flow_gossip() {
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     
     // B joins A via event flow with secret
-    let store_b = match join_mesh_via_event(&node_b, a_pubkey, mesh_id, invite.secret).await {
-        Some(s) => s,
-        None => {
-            eprintln!("Skipping test - no network");
-            let _ = std::fs::remove_dir_all(data_a.base());
-            let _ = std::fs::remove_dir_all(data_b.base());
-            return;
-        }
-    };
+    let store_b = join_mesh_via_event(&node_b, a_pubkey, mesh_id, invite.secret).await
+        .expect("Join failed or timed out - check network connectivity and token validity");
     
-    // Allow gossip to stabilize
-    sleep(Duration::from_millis(2000)).await;
     
     // Verify gossip is connected
     let _a_gossip_peers = server_a.connected_peers();

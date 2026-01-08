@@ -1,6 +1,6 @@
 //! Integration tests for gap filling between networked peers
 
-use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, KvOps, KvStore};
+use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, KvStore, KvHandle};
 use lattice_kvstate::Merge;
 use lattice_model::types::PubKey;
 use lattice_net::MeshNetwork;
@@ -56,7 +56,8 @@ async fn test_targeted_author_sync() {
     
     // Node A inits and creates invite token
     let store_id = node_a.create_mesh().await.expect("init a");
-    let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
+    let (store_a_raw, _) = node_a.open_root_store(store_id).expect("open a");
+    let store_a = KvHandle::new(store_a_raw);
     
     let token_string = node_a.mesh_by_id(store_id).expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");
@@ -108,7 +109,8 @@ async fn test_sync_multiple_entries() {
     let server_b = MeshNetwork::new_from_node(node_b.clone()).await.expect("server b");
     
     let store_id = node_a.create_mesh().await.expect("init a");
-    let (store_a, _) = node_a.open_store(store_id).await.expect("open a");
+    let (store_a_raw, _) = node_a.open_root_store(store_id).expect("open a");
+    let store_a = KvHandle::new(store_a_raw);
     
     let token_string = node_a.mesh_by_id(store_id).expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");

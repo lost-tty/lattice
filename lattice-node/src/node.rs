@@ -1,7 +1,7 @@
 //! Local Lattice node API with multi-store support
 
 use crate::{
-    DataDir, MetaStore, KvOps,
+    DataDir, MetaStore,
     auth::PeerProvider,
     meta_store::MetaStoreError,
     store_registry::StoreRegistry,
@@ -10,10 +10,10 @@ use crate::{
 };
 use lattice_kernel::{
     NodeIdentity, NodeError as IdentityError, PeerStatus, Uuid,
-    store::{StateError, Store, LogError},
+    store::{StateError, LogError, Store},
 };
 use crate::KvStore;
-use lattice_kvstate::{KvState, KvHandleError};
+use lattice_kvstate::{KvHandle, KvHandleError, KvState};
 use lattice_model::types::PubKey;
 use std::collections::HashMap;
 use std::path::Path;
@@ -293,10 +293,11 @@ impl Node {
         }
         
         for (mesh_id, _info) in meshes {
-            let (store, _) = self.registry.get_or_open(mesh_id)?;
+            let (store, _) = self.open_root_store(mesh_id)?;
+            let handle = KvHandle::new(store);
             
             // Create Mesh (handles PeerManager creation internally)
-            let mesh = Mesh::create(store.clone(), &self.node).await
+            let mesh = Mesh::create(handle, &self.node).await
                 .map_err(|e| NodeError::Actor(e.to_string()))?;
             
             // Store mesh in node
@@ -318,10 +319,29 @@ impl Node {
         Ok(())
     }
 
+    /// Stop the node and all its meshes/watchers.
+    /// Ensures database handles are released for clean shutdown.
+    pub async fn shutdown(&self) {
+        // Shutdown all meshes
+        let meshes = {
+            if let Ok(guard) = self.meshes.read() {
+                guard.values().cloned().collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        };
+        
+        for mesh in meshes {
+            mesh.shutdown().await;
+        }
+    }
+
     /// Create a new mesh (multi-mesh: can be called multiple times).
     /// Returns the mesh ID (same as root store ID).
     pub async fn create_mesh(&self) -> Result<Uuid, NodeError> {
-        let store_id = self.registry.create(Uuid::new_v4())?;
+        let store_id = self.registry.create(Uuid::new_v4(), |path| {
+            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+        })?;
         
         // Register mesh in meta.db
         let now_ms = std::time::SystemTime::now()
@@ -335,8 +355,10 @@ impl Node {
         self.meta.add_mesh(store_id, &mesh_info)?;
         
         // Open the store and write our node info as separate keys
-        let (store, _) = self.registry.get_or_open(store_id)?;
-        let kv = store.clone();
+        let (store, _) = self.registry.get_or_open(store_id, |path| {
+            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+        })?;
+        let kv = KvHandle::new(store.clone());
         let pubkey_hex = hex::encode(self.node.public_key());
         
         // Store node metadata as separate keys
@@ -355,7 +377,7 @@ impl Node {
         let _ = kv.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await;
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = Mesh::create(store, &self.node).await
+        let mesh = Mesh::create(kv.clone(), &self.node).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node
@@ -433,7 +455,9 @@ impl Node {
     /// If `via_peer` is provided, server will sync with that peer after registration.
     pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<KvStore, NodeError> {
         // Create local store with that UUID
-        self.registry.create(store_id)?;
+        self.registry.create(store_id, |path| {
+            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+        })?;
         
         // Register mesh in meta.db (as a member, not creator)
         let now_ms = std::time::SystemTime::now()
@@ -447,10 +471,13 @@ impl Node {
         self.meta.add_mesh(store_id, &mesh_info)?;
         
         // Open and cache the handle (registry caches it)
-        let (store, _) = self.registry.get_or_open(store_id)?;
+        let (store, _) = self.registry.get_or_open(store_id, |path| {
+            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+        })?;
+        let handle = KvHandle::new(store);
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = Mesh::create(store.clone(), &self.node).await
+        let mesh = Mesh::create(handle.clone(), &self.node).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node
@@ -464,7 +491,7 @@ impl Node {
         let _ = self.publish_name_to(store_id).await;
         
         // Emit StoreReady for listeners waiting on join completion (like CLI)
-        let _ = self.event_tx.send(NodeEvent::StoreReady(store.clone()));
+        let _ = self.event_tx.send(NodeEvent::StoreReady(handle.clone()));
         
         // Emit NetworkStore event - server will register for networking
         let _ = self.event_tx.send(NodeEvent::NetworkStore { 
@@ -477,7 +504,7 @@ impl Node {
             let _ = self.event_tx.send(NodeEvent::SyncWithPeer { store_id, peer });
         }
         
-        Ok(store)
+        Ok(handle)
     }
     
     /// Accept a peer's join request - verifies they're invited, sets active, returns join info
@@ -524,12 +551,16 @@ impl Node {
     }
     
     fn create_store_internal(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
-        self.registry.create(store_id)?;
+        self.registry.create(store_id, |path| {
+            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+        })?;
         Ok(store_id)
     }
 
-    pub async fn open_store(&self, store_id: Uuid) -> Result<(KvStore, StoreInfo), NodeError> {
-        Ok(self.registry.get_or_open(store_id)?)
+    pub fn open_root_store(&self, store_id: Uuid) -> Result<(Store<KvState>, StoreInfo), NodeError> {
+        self.registry.get_or_open(store_id, |path| {
+            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+        }).map_err(NodeError::from)
     }
     
     /// Get PeerManager for a specific mesh
@@ -555,7 +586,7 @@ impl Node {
 mod tests {
     use super::*;
     use lattice_model::types::PubKey;
-    use lattice_kvstate::{Merge, WatchEventKind};
+    use lattice_kvstate::{KvHandle, Merge, WatchEventKind};
 
     #[tokio::test]
     async fn test_create_and_open_store() {
@@ -573,7 +604,8 @@ mod tests {
         let stores: Vec<_> = node.meta().list_stores().expect("list failed").into_iter().map(|(id, _)| id).collect();
         assert!(stores.contains(&store_id));
         
-        let (handle, _) = node.open_store(store_id).await.expect("Failed to open store");
+        let (store, _) = node.open_root_store(store_id).expect("Failed to open store");
+        let handle = KvHandle::new(store);
         handle.put(b"/key", b"value").await.expect("put failed");
         assert_eq!(handle.get(b"/key").unwrap().lww(), Some(b"value".to_vec()));
         
@@ -591,10 +623,12 @@ mod tests {
         let store_a = node.create_store().expect("create A");
         let store_b = node.create_store().expect("create B");
         
-        let (handle_a, _) = node.open_store(store_a).await.expect("open A");
+        let (store_a, _) = node.open_root_store(store_a).expect("open A");
+        let handle_a = KvHandle::new(store_a);
         handle_a.put(b"/key", b"from A").await.expect("put A");
         
-        let (handle_b, _) = node.open_store(store_b).await.expect("open B");
+        let (store_b, _) = node.open_root_store(store_b).expect("open B");
+        let handle_b = KvHandle::new(store_b);
         assert_eq!(handle_b.get(b"/key").unwrap().lww(), None);
         
         assert_eq!(handle_a.get(b"/key").unwrap().lww(), Some(b"from A".to_vec()));

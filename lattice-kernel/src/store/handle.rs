@@ -27,6 +27,19 @@ pub struct StoreInfo {
     pub entries_replayed: u64,
 }
 
+use std::any::Any;
+
+/// Marker trait for generic store handles to allow storage in registries
+pub trait StoreHandle: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+}
+
+impl<S: StateMachine + Send + Sync + 'static> StoreHandle for Store<S> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 /// A handle to a replicated state machine
 ///
 /// Generic over state machine type `S`. Provides:

@@ -17,4 +17,4 @@ pub use head::{Head, HeadError};
 pub use merge::{Merge, MergeList};
 pub use kv_types::{KvPayload, Operation, operation, WatchEvent, WatchEventKind, WatchError};
 pub use kv::{KvState, StateError};
-pub use kv_handle::{KvHandle, KvHandleError, KvOps};
+pub use kv_handle::{KvHandle, KvHandleError};

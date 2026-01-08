@@ -20,7 +20,7 @@ pub mod sigchain;
 // Public API - types needed by consumers
 pub use actor::{ReplicatedState, ReplicatedStateCmd, ReplicatedStateError};
 pub use error::{ParentValidationError, StoreError, StateError};
-pub use handle::{OpenedStore, Store, StoreInfo};
+pub use handle::{OpenedStore, Store, StoreInfo, StoreHandle};
 pub use peer_sync_store::PeerSyncStore;
 
 // Re-exports from sigchain submodule

@@ -209,7 +209,10 @@ impl MeshNetwork {
         tracing::info!(store_id = %store_id, "Registering store for network");
         
         // Create AuthorizedStore - the single entry point for network authorization
-        let authorized_store = AuthorizedStore::new(Arc::new(store), pm.clone());
+        // KvHandle wraps the store, so we extract the inner Store (which implements SyncProvider)
+        // and wrap it in Arc for the AuthorizedStore.
+        let inner_store = store.writer().clone(); 
+        let authorized_store = AuthorizedStore::new(Arc::new(inner_store), pm.clone());
         
         // Register in store registry
         self.stores.write().await.insert(store_id, authorized_store.clone());
