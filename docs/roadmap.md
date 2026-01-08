@@ -82,12 +82,16 @@
 
 ### 4F: Lattice-Kernel Audit & Stability
 
+- [ ] Move `PeerSyncStore` out of `lattice-kernel` and into `lattice-net`.
 - [ ] **Lattice-Kernel Audit**: Thorough review of `lattice-kernel` to ensure architectural cleanliness, proper visibility, and minimal dependencies before declaring it stable.
   - [ ] **Enforce strict limit on causal_deps**: Prevent DoS by capping `entry.causal_deps` len (e.g. 1024).
-  - [ ] **Rename ReplicatedState to ReplicationController**: Align code name with architectural concept.
-- [ ] **Transactional Atomicity (Dual Commit Problem)**: `StoreActor::commit_entry` writes to two storage mediums (filesystem log via `SigChainManager`, redb via `KvState`) without unified transaction. If log succeeds but state fails, runtime inconsistency until restart.
-  - [ ] **Fix WAL Inversion**: Current order (State then Log) is unsafe. Must be **Log (WAL) then State**. Log is source of truth.
-  - [ ] Solutions: (1) Store ChainTips in redb within same transaction as KV updates, (2) Enforce strict WAL pattern where file log is single source of truth, (3) Don't update state.db until file flush confirms success.
+  - [x] **Rename ReplicatedState to ReplicationController**: Align code name with architectural concept.
+  - [x] **Environmental Agnosticism**: Removed `hostname` dependency.
+  - [x] **Runtime Decoupling**: "Ownership Inversion" for threading (Node spawns threads).
+- [x] **Transactional Atomicity (Dual Commit Problem)**: `StoreActor::commit_entry` writes to two storage mediums (filesystem log via `SigChainManager`, redb via `KvState`) without unified transaction. If log succeeds but state fails, runtime inconsistency until restart.
+  - [x] **Fix WAL Inversion**: Current order (State then Log) is unsafe. Must be **Log (WAL) then State**. Log is source of truth.
+  - [x] Solutions: (1) Store ChainTips in redb within same transaction as KV updates, (2) Enforce strict WAL pattern where file log is single source of truth, (3) Don't update state.db until file flush confirms success.
+- [ ] **Encapsulation of Orphan Resolution Logic**: `OrphanStore` currently requires a `key` argument, coupling it to KV-semantics. Refactor `OrphanStore` and `SigChainManager` to strictly use `causal_deps` (hashes) for DAG orphan detection. This enables generic buffering for any StateMachine (e.g. Chat/Counter) without decoding payloads. Solutions: (1) Remove `key` from `DagOrphanKey` in `redb`, (2) Create `SigChainManager::ingest_and_resolve` that handles recursion internally.
 - [ ] **Encapsulation of Orphan Resolution Logic**: `OrphanStore` currently requires a `key` argument, coupling it to KV-semantics. Refactor `OrphanStore` and `SigChainManager` to strictly use `causal_deps` (hashes) for DAG orphan detection. This enables generic buffering for any StateMachine (e.g. Chat/Counter) without decoding payloads. Solutions: (1) Remove `key` from `DagOrphanKey` in `redb`, (2) Create `SigChainManager::ingest_and_resolve` that handles recursion internally.
 
 ---

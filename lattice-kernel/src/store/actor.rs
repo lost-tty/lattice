@@ -625,8 +625,6 @@ mod tests {
         async fn put(&self, key: &[u8], value: &[u8]) -> Result<Hash, lattice_model::StateWriterError> {
              self.submit(make_payload_put(key, value), vec![]).await
         }
-
-
     }
 
     fn make_payload_put(key: &[u8], value: &[u8]) -> Vec<u8> {
@@ -649,6 +647,7 @@ mod tests {
         (
             crate::store::Store<MockStateMachine>,
             crate::store::StoreInfo,
+            std::thread::JoinHandle<()>,
         ),
         crate::store::StateError,
     > {
@@ -661,7 +660,9 @@ mod tests {
             state.clone(),
         )?;
         
-        opened.into_handle(node)
+        let (handle, info, runner) = opened.into_handle(node)?;
+        let join_handle = std::thread::spawn(move || runner.run());
+        Ok((handle, info, join_handle))
     }
 
     const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
@@ -674,7 +675,7 @@ mod tests {
         let store_dir = tmp.path().to_path_buf();
 
         let node = NodeIdentity::generate();
-        let (handle, _info) = open_test_store(TEST_STORE, store_dir, node.clone()).unwrap();
+        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node.clone()).unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -726,7 +727,7 @@ mod tests {
         let node2 = NodeIdentity::generate(); 
         let node3 = NodeIdentity::generate(); 
 
-        let (handle, _info) = open_test_store(TEST_STORE, store_dir, node1.clone()).unwrap();
+        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone()).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         // Author1: entry_a
@@ -783,7 +784,7 @@ mod tests {
         let node2 = NodeIdentity::generate();
         let node3 = NodeIdentity::generate();
 
-        let (handle, _info) = open_test_store(TEST_STORE, store_dir, node1.clone()).unwrap();
+        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone()).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         // Setup entries A, B, C (see previous test)
@@ -836,7 +837,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store_dir = tmp.path().to_path_buf();
         let node = NodeIdentity::generate();
-        let (handle, _info) = open_test_store(TEST_STORE, store_dir, node.clone()).unwrap();
+        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node.clone()).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         let mut sync_needed_rx = handle.subscribe_sync_needed();
@@ -876,8 +877,8 @@ mod tests {
         let node_c = NodeIdentity::generate();
         let node_d = NodeIdentity::generate();
 
-        let (handle_a, _info_a) = open_test_store(TEST_STORE, store_dir_a, node_a.clone()).unwrap();
-        let (handle_d, _info_d) = open_test_store(TEST_STORE, store_dir_d, node_d.clone()).unwrap();
+        let (handle_a, _info_a, _join_a) = open_test_store(TEST_STORE, store_dir_a, node_a.clone()).unwrap();
+        let (handle_d, _info_d, _join_d) = open_test_store(TEST_STORE, store_dir_d, node_d.clone()).unwrap();
         
         let mut entry_rx_a = handle_a.subscribe_entries();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -947,7 +948,7 @@ mod tests {
 
         // Phase 1: Write
         {
-            let (handle, _info) = open_test_store(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
+            let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
             let h1 = handle.put(b"/wal_test/key1", b"value1").await.unwrap();
             let h2 = handle.put(b"/wal_test/key2", b"value2").await.unwrap();
             
@@ -958,11 +959,12 @@ mod tests {
             let log_seq = handle.log_seq().await;
             assert!(log_seq >= 2);
             drop(handle);
+            let _ = _join.join();
         }
 
         // Phase 2: Re-open (simulate crash)
         {
-            let (handle, info) = open_test_store(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
+            let (handle, info, _join) = open_test_store(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
             // Should have replayed entries from log
             assert!(info.entries_replayed >= 2, "Should replay from log");
             
@@ -971,6 +973,7 @@ mod tests {
              // (We can't easily check hashes without refactoring test setup to capture them)
              
              drop(handle);
+             let _ = _join.join();
 
              // Or better: Re-calculate hashes? No, random timestamps.
              // We can use SigChainManager to peek hashes.
@@ -993,7 +996,7 @@ mod tests {
         let node2 = NodeIdentity::generate();
         let node3 = NodeIdentity::generate();
 
-        let (handle, _info) = open_test_store(TEST_STORE, store_dir, node1.clone()).unwrap();
+        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone()).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         // A, B, C merging
@@ -1027,6 +1030,7 @@ mod tests {
 
         assert!(handle.state().has_applied(hash_c));
         drop(handle);
+        let _ = _join.join();
 
         let orphan_db_path = logs_dir.join("orphans.db");
         let orphan_store = crate::store::sigchain::orphan_store::OrphanStore::open(&orphan_db_path).unwrap();
@@ -1045,11 +1049,12 @@ mod tests {
 
         // 1. Create full history (3 entries)
         {
-            let (handle, _) = open_test_store(TEST_STORE_LOCAL, store_dir.clone(), node.clone()).unwrap();
+            let (handle, _, _join) = open_test_store(TEST_STORE_LOCAL, store_dir.clone(), node.clone()).unwrap();
             handle.put(b"/k1", b"v1").await.unwrap();
             handle.put(b"/k2", b"v2").await.unwrap();
             handle.put(b"/k3", b"v3").await.unwrap();
             drop(handle);
+            let _ = _join.join();
         }
 
         // 2. Create state with PARTIAL history (simulating a snapshot or lagging state)

@@ -52,7 +52,6 @@ pub struct Store<S> {
     store_id: Uuid,
     state: std::sync::Arc<S>,
     tx: mpsc::Sender<ReplicationControllerCmd>,
-    actor_handle: Option<std::thread::JoinHandle<()>>,
     entry_tx: broadcast::Sender<SignedEntry>,
     sync_needed_tx: broadcast::Sender<SyncNeeded>,
 }
@@ -63,7 +62,6 @@ impl<S> Clone for Store<S> {
             store_id: self.store_id,
             state: self.state.clone(),
             tx: self.tx.clone(),
-            actor_handle: None, // Clones don't own the actor thread
             entry_tx: self.entry_tx.clone(),
             sync_needed_tx: self.sync_needed_tx.clone(),
         }
@@ -109,8 +107,8 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
     pub fn id(&self) -> Uuid { self.store_id }
 
     /// Spawn actor and get a handle. Consumes the OpenedStore.
-    /// Spawn actor and get a handle. Consumes the OpenedStore.
-    pub fn into_handle(self, node: NodeIdentity) -> Result<(Store<S>, StoreInfo), super::StateError> {
+    /// Returns the Store handle and an ActorRunner that MUST be spawned/run by the caller.
+    pub fn into_handle(self, node: NodeIdentity) -> Result<(Store<S>, StoreInfo, ActorRunner<S>), super::StateError> {
         let (tx, rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(64);
         let (sync_needed_tx, _sync_needed_rx) = broadcast::channel(64);
@@ -124,18 +122,18 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
             state_for_actor, chain_manager,
             node, rx, entry_tx.clone(), sync_needed_tx.clone(),
         )?;
-        let actor_handle = thread::spawn(move || actor.run());
+        
+        let runner = ActorRunner { actor };
 
         let handle = Store {
             store_id: self.store_id,
             state: self.state,
             tx,
-            actor_handle: Some(actor_handle),
             entry_tx,
             sync_needed_tx,
         };
         let info = StoreInfo { store_id: self.store_id, entries_replayed: self.entries_replayed };
-        Ok((handle, info))
+        Ok((handle, info, runner))
     }
 
     /// Access the underlying state directly (no actor).
@@ -143,6 +141,18 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
 
     /// Get number of entries replayed during crash recovery.
     pub fn entries_replayed(&self) -> u64 { self.entries_replayed }
+}
+
+/// Runner for the replication actor. Must be spawned or run in a thread.
+pub struct ActorRunner<S: StateMachine> {
+    actor: ReplicationController<S>,
+}
+
+impl<S: StateMachine + Send + Sync + 'static> ActorRunner<S> {
+    /// Run the actor loop. This blocks until the channel is closed or shutdown is received.
+    pub fn run(self) {
+        self.actor.run();
+    }
 }
 
 impl<S: StateMachine> Store<S> {
@@ -159,10 +169,6 @@ impl<S: StateMachine> Store<S> {
     /// Get a cloned Arc to the state machine.
     pub fn state_arc(&self) -> Arc<S> {
         self.state.clone()
-    }
-
-    pub fn actor_handle(&self) -> Option<&StoreActorHandle> {
-        self.actor_handle.as_ref()
     }
 
     /// Subscribe to receive entries as they're committed locally
@@ -438,17 +444,6 @@ impl<S: StateMachine> StateWriter for Store<S> {
                 .map_err(|_| StateWriterError::ChannelClosed)?
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))
         })
-    }
-}
-
-impl<S> Drop for Store<S> {
-    fn drop(&mut self) {
-        // Only send shutdown if we own the actor (non-cloned handle)
-        if let Some(handle) = self.actor_handle.take() {
-            let _ = self.tx.try_send(ReplicationControllerCmd::Shutdown);
-            let _ = handle.join();
-        }
-        // Clones (actor_handle = None) don't send shutdown - actor keeps running
     }
 }
 

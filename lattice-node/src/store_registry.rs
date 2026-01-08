@@ -88,7 +88,10 @@ impl StoreRegistry {
         
         let state = Arc::new(open_fn(&state_dir)?);
         let opened = OpenedStore::new(store_id, sigchain_dir, state)?;
-        let (handle, info) = opened.into_handle((*self.node).clone())?;
+        let (handle, info, runner) = opened.into_handle((*self.node).clone())?;
+        
+        // Spawn the actor runner (detached thread)
+        std::thread::spawn(move || runner.run());
         
         // Cache original handle (owns actor thread), return a clone
         let handle_clone = handle.clone();
