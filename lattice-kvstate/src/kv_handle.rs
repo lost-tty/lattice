@@ -4,7 +4,6 @@
 //! - Reads: Direct from KvState (sync)
 //! - Writes: Via StateWriter (goes through replication)
 
-use std::ops::Deref;
 use std::sync::Arc;
 use crate::{KvState, Head, StateError, KvPayload, Operation};
 use lattice_model::{StateWriter, StateWriterError, Introspectable, CommandDispatcher};
@@ -287,6 +286,7 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
         Box::pin(async move {
             // Fetch current heads to build causal dependency graph
             let heads = self.state().get(&key).map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
+
             let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
 
             let op = Operation::put(key, value);
@@ -304,6 +304,7 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
         Box::pin(async move {
             // Fetch current heads for causal deps
             let heads = self.state().get(&key).map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
+
             let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
 
             let op = Operation::delete(key);
@@ -598,6 +599,42 @@ mod tests {
         handle.delete(b"/nodes/1").await.unwrap();
         let event = expect_event(&mut rx, b"/nodes/1").await;
         assert!(matches!(event.kind, WatchEventKind::Delete));
+    }
+
+    #[tokio::test]
+    async fn test_kv_handle_strict_updates() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(writer.clone());
+        
+        let key = b"strict_key";
+        
+        // 1. Initial Put
+        let hash1 = handle.put(key, b"val").await.unwrap();
+        assert_ne!(hash1, Hash::ZERO);
+        
+        // Wait a tiny bit to ensure timestamp would tick
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // 2. Redundant Put: Should ALWAYS write (fresh hash)
+        // Correct LWW behavior requires bumping timestamp to asserted "now".
+        let hash2 = handle.put(key, b"val").await.unwrap();
+        assert_ne!(hash1, hash2, "Strict put should create new entry (update timestamp)");
+        
+        // 3. Delete: Should write new tombstone
+        let hash_del1 = handle.delete(key).await.unwrap();
+        assert_ne!(hash_del1, Hash::ZERO);
+        
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        
+        // 4. Redundant Delete: Should write NEW tombstone
+        let hash_del2 = handle.delete(key).await.unwrap();
+        assert_ne!(hash_del1, hash_del2, "Strict delete should create new tombstone");
+        
+        // 5. Delete on empty: Should write tombstone (to defeat potential lurking puts)
+        let hash_none = handle.delete(b"non_existent").await.unwrap();
+        assert_ne!(hash_none, Hash::ZERO);
     }
 
     #[tokio::test]
@@ -908,5 +945,52 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_watch_complex_regex() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(writer);
+        
+        // Watch for specific pattern
+        let (_, mut rx) = handle.watch("^/nodes/[a-f0-9]+/status$").await.unwrap();
+        
+        // This should NOT match (name, not status)
+        handle.put(b"/nodes/abc123/name", b"Alice").await.unwrap();
+        
+        // This SHOULD match (status)
+        handle.put(b"/nodes/abc123/status", b"active").await.unwrap();
+        
+        // Should only receive the status key
+        let event = expect_event(&mut rx, b"/nodes/abc123/status").await;
+        assert!(event.key.ends_with(b"/status"));
+    }
+
+    #[tokio::test]
+    async fn test_watch_multiple_watchers() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(writer);
+        
+        // Two watchers with different patterns
+        let (_, mut rx1) = handle.watch("^/nodes/").await.unwrap();
+        let (_, mut rx2) = handle.watch("^/config/").await.unwrap();
+        
+        // Write to nodes (should trigger rx1 only)
+        handle.put(b"/nodes/test", b"value").await.unwrap();
+        
+        // Write to config (should trigger rx2 only)
+        handle.put(b"/config/test", b"value").await.unwrap();
+        
+        // rx1 should receive nodes event
+        let event1 = expect_event(&mut rx1, b"/nodes/test").await;
+        assert!(event1.key.starts_with(b"/nodes/"));
+        
+        // rx2 should receive config event
+        let event2 = expect_event(&mut rx2, b"/config/test").await;
+        assert!(event2.key.starts_with(b"/config/"));
     }
 }

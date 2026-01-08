@@ -596,7 +596,7 @@ impl Node {
 mod tests {
     use super::*;
     use lattice_model::types::PubKey;
-    use lattice_kvstate::{KvHandle, Merge, WatchEventKind};
+    use lattice_kvstate::{KvHandle, Merge};
 
     #[tokio::test]
     async fn test_create_and_open_store() {
@@ -708,35 +708,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
 
-    #[tokio::test]
-    async fn test_idempotent_put_and_delete() {
-        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
-        
-        let node = NodeBuilder { data_dir: data_dir.clone() }
-            .build()
-            .expect("create node");
-        let mesh_id = node.create_mesh().await.expect("create_mesh");
-        let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-        
-        // Get baseline seq after init
-        let baseline = store.log_seq().await;
-        
-        // Put twice with same value - second should be idempotent
-        store.put(b"/key", b"value").await.expect("put 1");
-        assert_eq!(store.log_seq().await, baseline + 1);
-        
-        store.put(b"/key", b"value").await.expect("put 2");
-        assert_eq!(store.log_seq().await, baseline + 1, "Second put should be idempotent (no new entry)");
-        
-        // Delete twice - second should be idempotent  
-        store.delete(b"/key").await.expect("delete 1");
-        assert_eq!(store.log_seq().await, baseline + 2);
-        
-        store.delete(b"/key").await.expect("delete 2");
-        assert_eq!(store.log_seq().await, baseline + 2, "Second delete should be idempotent (no new entry)");
-        
-        let _ = std::fs::remove_dir_all(data_dir.base());
-    }
+
     
     #[tokio::test]
     async fn test_set_name_updates_store() {
@@ -887,167 +859,5 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir_b.base());
     }
 
-    // === Watcher Tests ===
 
-    #[tokio::test]
-    async fn test_watch_receives_put_event() {
-        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
-        
-        let node = NodeBuilder { data_dir: data_dir.clone() }
-            .build()
-            .expect("create node");
-        let mesh_id = node.create_mesh().await.expect("create_mesh");
-        
-        let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-        
-        // Watch for keys starting with /test/
-        let (_initial, mut rx) = store.watch("^/test/").await.expect("watch");
-        
-        // Write a matching key
-        store.put(b"/test/key1", b"value1").await.expect("put");
-        
-        // Should receive the event
-        let event = rx.recv().await.expect("recv");
-        assert_eq!(event.key, b"/test/key1");
-        match event.kind {
-            WatchEventKind::Update { heads } => {
-                let value = heads.lww_head()
-                    .map(|h| h.value.as_slice())
-                    .unwrap_or(&[]);
-                assert_eq!(value, b"value1");
-            }
-            _ => panic!("Expected Update event"),
-        }
-        
-        let _ = std::fs::remove_dir_all(data_dir.base());
-    }
-
-    #[tokio::test]
-    async fn test_watch_receives_delete_event() {
-        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
-        
-        let node = NodeBuilder { data_dir: data_dir.clone() }
-            .build()
-            .expect("create node");
-        let mesh_id = node.create_mesh().await.expect("create_mesh");
-        
-        let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-        
-        // First put, then watch, then delete
-        store.put(b"/test/key", b"value").await.expect("put");
-        
-        let (_initial, mut rx) = store.watch("^/test/").await.expect("watch");
-        store.delete(b"/test/key").await.expect("delete");
-        
-        // Should receive delete event
-        let event = rx.recv().await.expect("recv");
-        assert_eq!(event.key, b"/test/key");
-        assert!(matches!(event.kind, WatchEventKind::Delete));
-        
-        let _ = std::fs::remove_dir_all(data_dir.base());
-    }
-
-    #[tokio::test]
-    async fn test_watch_only_matching_keys() {
-        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
-        
-        let node = NodeBuilder { data_dir: data_dir.clone() }
-            .build()
-            .expect("create node");
-        let mesh_id = node.create_mesh().await.expect("create_mesh");
-        
-        let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-        
-        // Watch only /nodes/
-        let (_initial, mut rx) = store.watch("^/nodes/").await.expect("watch");
-        
-        // Write a non-matching key (should NOT trigger)
-        store.put(b"/config/setting", b"value").await.expect("put config");
-        
-        // Write a matching key (should trigger)
-        store.put(b"/nodes/abc/status", b"active").await.expect("put nodes");
-        
-        // Should only receive the nodes key
-        let event = rx.recv().await.expect("recv");
-        assert_eq!(event.key, b"/nodes/abc/status");
-        
-        let _ = std::fs::remove_dir_all(data_dir.base());
-    }
-
-    #[tokio::test]
-    async fn test_watch_complex_regex() {
-        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
-        
-        let node = NodeBuilder { data_dir: data_dir.clone() }
-            .build()
-            .expect("create node");
-        let mesh_id = node.create_mesh().await.expect("create_mesh");
-        
-        let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-        
-        // Watch for peer status keys specifically
-        let (_initial, mut rx) = store.watch("^/nodes/[a-f0-9]+/status$").await.expect("watch");
-        
-        // This should NOT match (name, not status)
-        store.put(b"/nodes/abc123/name", b"Alice").await.expect("put name");
-        
-        // This SHOULD match (status)
-        store.put(b"/nodes/abc123/status", b"active").await.expect("put status");
-        
-        // Should only receive the status key
-        let event = rx.recv().await.expect("recv");
-        assert!(event.key.ends_with(b"/status"));
-        
-        let _ = std::fs::remove_dir_all(data_dir.base());
-    }
-
-    #[tokio::test]
-    async fn test_watch_invalid_regex_fails() {
-        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
-        
-        let node = NodeBuilder { data_dir: data_dir.clone() }
-            .build()
-            .expect("create node");
-        let mesh_id = node.create_mesh().await.expect("create_mesh");
-        
-        let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-        
-        // Invalid regex should return error
-        let result = store.watch("[invalid(regex").await;
-        assert!(result.is_err());
-        
-        let _ = std::fs::remove_dir_all(data_dir.base());
-    }
-
-    #[tokio::test]
-    async fn test_watch_multiple_watchers() {
-        let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
-        
-        let node = NodeBuilder { data_dir: data_dir.clone() }
-            .build()
-            .expect("create node");
-        let mesh_id = node.create_mesh().await.expect("create_mesh");
-        
-        let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-        
-        // Two watchers with different patterns
-        let (_initial1, mut rx1) = store.watch("^/nodes/").await.expect("watch 1");
-        let (_initial2, mut rx2) = store.watch("^/config/").await.expect("watch 2");
-        
-        // Write to nodes (should trigger rx1 only)
-        store.put(b"/nodes/test", b"value").await.expect("put nodes");
-        
-        // Write to config (should trigger rx2 only)
-        store.put(b"/config/test", b"value").await.expect("put config");
-        
-        // rx1 should receive nodes event
-        let event1 = rx1.recv().await.expect("recv1");
-        assert!(event1.key.starts_with(b"/nodes/"));
-        
-        // rx2 should receive config event
-        let event2 = rx2.recv().await.expect("recv2");
-        assert!(event2.key.starts_with(b"/config/"));
-        
-        let _ = std::fs::remove_dir_all(data_dir.base());
-    }
 }
