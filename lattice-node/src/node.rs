@@ -6,7 +6,7 @@ use crate::{
     meta_store::MetaStoreError,
     store_registry::StoreRegistry,
     mesh::Mesh,
-    peer_manager::{PeerManager, PeerManagerError},
+    peer_manager::{PeerManager, PeerManagerError, Peer},
 };
 use lattice_kernel::{
     NodeIdentity, NodeError as IdentityError, PeerStatus, Uuid,
@@ -274,8 +274,8 @@ impl Node {
         let mesh = self.mesh_by_id(mesh_id)
             .ok_or_else(|| NodeError::Actor(format!("Mesh {} not found", mesh_id)))?;
         if let Some(name) = self.name() {
-            let name_key = format!("/nodes/{:x}/name", self.node.public_key());
-            mesh.kv().put(name_key.as_bytes(), name.as_bytes()).await?;
+            let name_key = Peer::key_name(self.node.public_key());
+            mesh.kv().put(&name_key, name.as_bytes()).await?;
         }
         Ok(())
     }
@@ -359,22 +359,18 @@ impl Node {
             KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
         })?;
         let kv = KvHandle::new(store.clone());
-        let pubkey_hex = hex::encode(self.node.public_key());
         
         // Store node metadata as separate keys
         if let Some(name) = self.name() {
-            let name_key = format!("/nodes/{}/name", pubkey_hex);
-            kv.put(name_key.as_bytes(), name.as_bytes()).await?;
+            kv.put(&Peer::key_name(self.node.public_key()), name.as_bytes()).await?;
         }
         
         let added_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let added_at_key = format!("/nodes/{}/added_at", pubkey_hex);
-        kv.put(added_at_key.as_bytes(), added_at.to_string().as_bytes()).await?;
-        let status_key = format!("/nodes/{}/status", pubkey_hex);
-        let _ = kv.put(status_key.as_bytes(), PeerStatus::Active.as_str().as_bytes()).await;
+        kv.put(&Peer::key_added_at(self.node.public_key()), added_at.to_string().as_bytes()).await?;
+        let _ = kv.put(&Peer::key_status(self.node.public_key()), PeerStatus::Active.as_str().as_bytes()).await;
         
         // Create Mesh (handles PeerManager creation internally)
         let mesh = Mesh::create(kv.clone(), &self.node).await

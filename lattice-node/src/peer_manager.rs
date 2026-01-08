@@ -121,32 +121,27 @@ impl Peer {
     }
     
     /// Save a Peer to the store (multi-key write).
+    /// Save a Peer to the store (multi-key write).
     pub async fn save(&self, kv: &KvStore) -> Result<(), PeerManagerError> {
-        let pubkey_hex = hex::encode(self.pubkey);
-        
         // Write status
-        let status_key = format!("/nodes/{}/status", pubkey_hex);
-        kv.put(status_key.as_bytes(), self.status.as_str().as_bytes()).await
+        kv.put(&Self::key_status(self.pubkey), self.status.as_str().as_bytes()).await
             .map_err(|e| PeerManagerError::Store(e.to_string()))?;
         
         // Write name (if set)
         if let Some(ref name) = self.name {
-            let name_key = format!("/nodes/{}/name", pubkey_hex);
-            kv.put(name_key.as_bytes(), name.as_bytes()).await
+            kv.put(&Self::key_name(self.pubkey), name.as_bytes()).await
                 .map_err(|e| PeerManagerError::Store(e.to_string()))?;
         }
         
         // Write added_at (if set)
         if let Some(added_at) = self.added_at {
-            let added_at_key = format!("/nodes/{}/added_at", pubkey_hex);
-            kv.put(added_at_key.as_bytes(), added_at.to_string().as_bytes()).await
+            kv.put(&Self::key_added_at(self.pubkey), added_at.to_string().as_bytes()).await
                 .map_err(|e| PeerManagerError::Store(e.to_string()))?;
         }
         
         // Write added_by (if set)
         if let Some(added_by) = self.added_by {
-            let added_by_key = format!("/nodes/{}/added_by", pubkey_hex);
-            kv.put(added_by_key.as_bytes(), hex::encode(added_by).as_bytes()).await
+            kv.put(&Self::key_added_by(self.pubkey), hex::encode(added_by).as_bytes()).await
                 .map_err(|e| PeerManagerError::Store(e.to_string()))?;
         }
         
@@ -162,6 +157,29 @@ impl Peer {
             added_at: self.added_at,
             added_by: self.added_by.map(|p| hex::encode(p)),
         }
+    }
+
+    // ==================== Schema Key Helpers ====================
+    // Centralized schema definitions to avoid "stringly typed" scattering.
+
+    /// Key for peer status: `/nodes/{pubkey_hex}/status`
+    pub fn key_status(pubkey: PubKey) -> Vec<u8> {
+        format!("/nodes/{}/status", hex::encode(pubkey)).into_bytes()
+    }
+
+    /// Key for peer name: `/nodes/{pubkey_hex}/name`
+    pub fn key_name(pubkey: PubKey) -> Vec<u8> {
+        format!("/nodes/{}/name", hex::encode(pubkey)).into_bytes()
+    }
+
+    /// Key for added_at timestamp: `/nodes/{pubkey_hex}/added_at`
+    pub fn key_added_at(pubkey: PubKey) -> Vec<u8> {
+        format!("/nodes/{}/added_at", hex::encode(pubkey)).into_bytes()
+    }
+
+    /// Key for added_by inviter: `/nodes/{pubkey_hex}/added_by`
+    pub fn key_added_by(pubkey: PubKey) -> Vec<u8> {
+        format!("/nodes/{}/added_by", hex::encode(pubkey)).into_bytes()
     }
 }
 
@@ -223,18 +241,14 @@ impl PeerManager {
     
     /// Set a peer's name.
     pub async fn set_peer_name(&self, pubkey: PubKey, name: &str) -> Result<(), PeerManagerError> {
-        let pubkey_hex = hex::encode(pubkey);
-        let name_key = format!("/nodes/{}/name", pubkey_hex);
-        self.kv.put(name_key.as_bytes(), name.as_bytes()).await
+        self.kv.put(&Peer::key_name(pubkey), name.as_bytes()).await
             .map_err(|e| PeerManagerError::Store(e.to_string()))?;
         Ok(())
     }
     
     /// Set a peer's status.
     pub async fn set_peer_status(&self, pubkey: PubKey, status: PeerStatus) -> Result<(), PeerManagerError> {
-        let pubkey_hex = hex::encode(pubkey);
-        let status_key = format!("/nodes/{}/status", pubkey_hex);
-        self.kv.put(status_key.as_bytes(), status.as_str().as_bytes()).await
+        self.kv.put(&Peer::key_status(pubkey), status.as_str().as_bytes()).await
             .map_err(|e| PeerManagerError::Store(e.to_string()))?;
         Ok(())
     }
