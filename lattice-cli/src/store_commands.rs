@@ -205,23 +205,6 @@ fn format_message_inline(msg: &prost_reflect::DynamicMessage, formats: &std::col
     out.trim().to_string()
 }
 
-fn format_scalar_inline(v: &prost_reflect::Value, format: lattice_model::FieldFormat) -> String {
-    use lattice_model::FieldFormat;
-    match v {
-        prost_reflect::Value::Bytes(b) => {
-            match format {
-                FieldFormat::Utf8 => String::from_utf8_lossy(b).into_owned(),
-                _ => {
-                    let h = hex::encode(&b[..4.min(b.len())]); // Short hash for inline
-                    if b.len() > 4 { format!("{}..", h) } else { h }
-                }
-            }
-        },
-        prost_reflect::Value::String(s) => s.clone(),
-         _ => v.to_string(),
-    }
-}
-
 pub async fn cmd_author_state(node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
     let Some(store) = store else {
         let mut w = writer.clone();
@@ -752,6 +735,6 @@ fn format_scalar(v: &prost_reflect::Value, format: lattice_model::FieldFormat, c
         Value::U64(n) => n.to_string(),
         Value::F32(n) => n.to_string(),
         Value::F64(n) => n.to_string(),
-        _ => "[complex]".to_string(),
+        _ => v.to_string(),
     }
 }

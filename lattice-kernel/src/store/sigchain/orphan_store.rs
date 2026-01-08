@@ -511,7 +511,6 @@ pub(crate) mod tests {
         // Create mock entry
         use crate::entry::Entry;
         use lattice_model::NodeIdentity;
-        use lattice_model::hlc::HLC;
 
         let node = NodeIdentity::generate();
         let entry = Entry::next_after(None)
