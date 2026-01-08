@@ -7,7 +7,7 @@ use crate::entry::SignedEntry;
 use crate::Uuid;
 use lattice_model::types::PubKey;
 use lattice_model::NodeIdentity;
-use lattice_model::StateMachine;
+use lattice_model::{StateMachine, Op, LogEntry};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -16,6 +16,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use futures_util::StreamExt;
 use lattice_model::replication::EntryStreamProvider;
 use prost::Message;
+use super::sigchain::SigChainManager;
+use std::collections::HashMap;
 
 /// Handle to the store actor thread
 pub type StoreActorHandle = std::thread::JoinHandle<()>;
@@ -97,7 +99,8 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
         std::fs::create_dir_all(&sigchain_dir)?;
         
         // TODO: Crash recovery - replay sigchain logs
-        let entries_replayed = 0;
+        let mut chain_manager = SigChainManager::new(&sigchain_dir)?;
+        let entries_replayed = replay_sigchains(&mut chain_manager, &state)?;
         
         Ok(Self { store_id, sigchain_dir, state, entries_replayed })
     }
@@ -106,14 +109,19 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
     pub fn id(&self) -> Uuid { self.store_id }
 
     /// Spawn actor and get a handle. Consumes the OpenedStore.
+    /// Spawn actor and get a handle. Consumes the OpenedStore.
     pub fn into_handle(self, node: NodeIdentity) -> Result<(Store<S>, StoreInfo), super::StateError> {
         let (tx, rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(64);
         let (sync_needed_tx, _sync_needed_rx) = broadcast::channel(64);
 
         let state_for_actor = self.state.clone();
+        
+        // Reload chain manager from the dir since we don't hold it in OpenedStore
+        let chain_manager = SigChainManager::new(&self.sigchain_dir)?;
+        
         let actor = ReplicationController::new(
-            state_for_actor, self.sigchain_dir.clone(),
+            state_for_actor, chain_manager,
             node, rx, entry_tx.clone(), sync_needed_tx.clone(),
         )?;
         let actor_handle = thread::spawn(move || actor.run());
@@ -535,4 +543,75 @@ impl<S: StateMachine + Send + Sync + 'static> EntryStreamProvider for Store<S> {
             });
         Box::new(Box::pin(stream))
     }
+}
+
+/// Helper to replay sigchain logs into a state machine.
+/// Returns number of entries replayed.
+fn replay_sigchains<S: StateMachine>(
+    chain_manager: &mut SigChainManager,
+    state: &Arc<S>,
+) -> Result<u64, super::StateError> {
+    let mut entries_replayed = 0;
+
+    // 1. Get applied tips from state machine
+    let applied_tips = state.applied_chaintips().map_err(|e| super::StateError::Backend(e.to_string()))?;
+    let applied_map: HashMap<PubKey, Hash> = applied_tips.into_iter().collect();
+
+    // 2. Iterate each chain (author) in the logs
+    for author in chain_manager.authors() {
+        let chain = chain_manager.get(&author).ok_or_else(|| super::StateError::Backend("Chain not found".into()))?;
+        let tip = chain.tip().map(|t| t.hash).unwrap_or(Hash::ZERO);
+        
+        // Check if state is already caught up for this author
+        let applied_hash = applied_map.get(&author).cloned().unwrap_or(Hash::ZERO);
+        if tip == applied_hash {
+            continue;
+        }
+
+
+        // We are behind (or ahead? assuming behind). Replay needed.
+        // Iterate log to find start point
+        if let Ok(iter) = chain.iter() {
+            let mut applying = applied_hash == Hash::ZERO;
+
+            // If starting from ZERO, we apply everything. 
+            // If starting from Hash::X, we skip until we see Hash::X, then apply subsequent.
+            
+            for result in iter {
+                if let Ok(signed_entry) = result {
+                    let entry_hash = Hash::from(signed_entry.hash());
+
+                    if !applying {
+                        if entry_hash == applied_hash {
+                            applying = true;
+                        }
+                        continue;
+                    }
+
+                    // Apply
+                    // Construct Op
+                     let causal_deps: Vec<Hash> = signed_entry
+                        .entry
+                        .causal_deps
+                        .iter()
+                        .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok().map(Hash::from))
+                        .collect();
+
+                    let op = Op {
+                        id: entry_hash,
+                        causal_deps: &causal_deps,
+                        payload: &signed_entry.entry.payload,
+                        author: signed_entry.author(),
+                        timestamp: signed_entry.entry.timestamp,
+                        prev_hash: Hash::try_from(signed_entry.entry.prev_hash.as_slice()).unwrap_or(Hash::ZERO),
+                    };
+
+                    state.apply(&op).map_err(|e| super::StateError::Backend(e.to_string()))?;
+                    entries_replayed += 1;
+                }
+            }
+        }
+    }
+    
+    Ok(entries_replayed)
 }

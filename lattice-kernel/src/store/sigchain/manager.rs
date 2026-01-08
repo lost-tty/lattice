@@ -143,9 +143,12 @@ impl SigChain {
     }
 
     /// Get the author's public key
-    #[cfg(test)]
-    pub fn author_id(&self) -> &[u8; 32] {
+    pub fn author_id(&self) -> &PubKey {
         &self.author_id
+    }
+
+    pub fn iter(&self) -> Result<impl Iterator<Item = Result<SignedEntry, LogError>> + '_, LogError> {
+        self.log.iter()
     }
 
     /// Get the next expected sequence number
@@ -394,6 +397,12 @@ impl SigChainManager {
         self.cached_sync_state.clone()
     }
 
+    pub fn authors(&self) -> Vec<PubKey> {
+        self.chains.keys().cloned().collect()
+    }
+
+
+
     /// Validate an entry against sigchain WITHOUT appending.
     /// Returns validation result that actor can use to decide next steps.
     pub fn validate_entry(
@@ -638,7 +647,7 @@ mod tests {
 
         let chain = SigChain::new(&path, PubKey::from(author)).unwrap();
 
-        assert_eq!(chain.author_id(), &author);
+        assert_eq!(chain.author_id(), &PubKey::from(author));
         assert_eq!(chain.next_seq(), 1);
         assert_eq!(chain.last_hash(), Hash::ZERO);
         assert!(chain.is_empty());
