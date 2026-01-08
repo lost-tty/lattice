@@ -277,6 +277,15 @@ pub struct SigChainManager {
     cached_sync_state: SyncState,
 }
 
+#[cfg(test)]
+impl SigChainManager {
+    /// Helper for tests to append directly to a chain
+    pub fn append_unchecked(&mut self, entry: &SignedEntry) -> Result<(), SigChainError> {
+        let chain = self.get_or_create(entry.author_id)?;
+        chain.append_unchecked(entry)
+    }
+}
+
 impl SigChainManager {
     /// Create a new manager for a store's logs directory
     pub fn new(logs_dir: impl AsRef<Path>) -> Result<Self, SigChainError> {
@@ -287,7 +296,7 @@ impl SigChainManager {
 
         // Load all chains, build hash index, and sync state in one pass
         let (chains, hash_index, cached_sync_state) =
-            Self::load_chains_and_build_all(&logs_path);
+            Self::load_chains_and_build_all(&logs_path)?;
 
         Ok(Self {
             logs_dir: logs_path,
@@ -302,17 +311,19 @@ impl SigChainManager {
     /// Load all chains, hash index, and sync state in one pass
     fn load_chains_and_build_all(
         logs_dir: &Path,
-    ) -> (
+    ) -> Result<(
         std::collections::HashMap<PubKey, SigChain>,
         std::collections::HashSet<Hash>,
         SyncState,
-    ) {
+    ), SigChainError> {
         let mut chains = std::collections::HashMap::new();
         let mut hash_index = std::collections::HashSet::new();
         let mut sync_state = SyncState::new();
 
-        let Ok(entries) = std::fs::read_dir(logs_dir) else {
-            return (chains, hash_index, sync_state);
+        let entries = match std::fs::read_dir(logs_dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((chains, hash_index, sync_state)),
+            Err(e) => return Err(LogError::Io(e).into()),
         };
 
         for entry in entries.flatten() {
@@ -330,31 +341,34 @@ impl SigChainManager {
 
             // Parse author from hex using strong type helper
             let Ok(author) = PubKey::from_hex(stem) else {
-                continue;
+                continue; // Skip invalid filenames
             };
 
             // Load chain (populates last_hash, last_hlc, etc)
-            if let Ok(chain) = SigChain::from_log(&path, author) {
-                // Build hash index from this chain's log
-                if let Ok(log) = Log::open(&path) {
-                    if let Ok(iter) = log.iter() {
-                        for result in iter {
-                            if let Ok(signed_entry) = result {
-                                hash_index.insert(Hash::from(signed_entry.hash()));
-                            }
-                        }
-                    }
-                }
-                // Build sync state entry from chain tip
-                if let Some(tip) = chain.tip() {
-                    sync_state.set_tip(author, *tip);
-                }
-
-                chains.insert(author, chain);
+            // Error here means CORRUPTION or IO error -> Fail fast
+            let chain = SigChain::from_log(&path, author).map_err(|e| {
+                SigChainError::Internal(format!("Corrupt log file {:?}: {}", path, e))
+            })?;
+            
+            // Build hash index from this chain's log
+            // We use a fresh scan. Optimization: SigChain could return hashes?
+            // For now, re-scan is safe.
+            let log = Log::open(&path)?;
+            let iter = log.iter()?;
+            for result in iter {
+                let signed_entry = result?; // Propagate corruption from scan
+                hash_index.insert(Hash::from(signed_entry.hash()));
             }
+
+            // Build sync state entry from chain tip
+            if let Some(tip) = chain.tip() {
+                sync_state.set_tip(author, *tip);
+            }
+            
+            chains.insert(author, chain);
         }
 
-        (chains, hash_index, sync_state)
+        Ok((chains, hash_index, sync_state))
     }
 
     /// Check if an entry hash exists in history

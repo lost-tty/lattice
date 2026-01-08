@@ -372,9 +372,16 @@ impl<S: StateMachine> ReplicationController<S> {
 
                     let ready_sigchain_orphans = self.chain_manager.commit_entry(&current)?;
 
-                    self.state
-                        .apply(&op)
-                        .map_err(|e| StateError::Backend(e.to_string()))?;
+                    if let Err(e) = self.state.apply(&op) {
+                        // CRITICAL: WAL advanced but State update failed.
+                        // Fail-stop immediately to prevent divergence. Restarting will repair state via replay.
+                        let msg = format!(
+                            "FATAL: State divergence! WAL committed entry {} (author {}) but State::apply failed: {}. Node must restart to repair state from WAL.",
+                            entry_hash, current.author(), e
+                        );
+                        eprintln!("{}", msg);
+                        panic!("{}", msg);
+                    }
 
                     // Delete source orphan entry if applicable
                     if let Some(meta) = cleanup_meta {
@@ -801,6 +808,57 @@ mod tests {
         drop(handle_a);
         drop(handle_d);
     }
+
+    struct FailingStateMachine;
+    impl lattice_model::StateMachine for FailingStateMachine {
+        type Error = std::io::Error;
+        fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> { Ok(Box::new(std::io::Cursor::new(Vec::new()))) }
+        fn restore(&self, _: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> { Ok(()) }
+        fn state_identity(&self) -> Hash { Hash::ZERO }
+        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> { Ok(Vec::new()) }
+        fn apply(&self, _: &lattice_model::Op) -> Result<(), std::io::Error> {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "Simulated Failure"))
+        }
+    }
+
+    #[test]
+    fn test_state_apply_failure_causes_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().to_path_buf();
+        let node = NodeIdentity::generate();
+
+        // Manual open to inject FailingStateMachine
+        let state = Arc::new(FailingStateMachine);
+        let logs_dir = store_dir.join("logs");
+        let opened = crate::store::OpenedStore::new(Uuid::new_v4(), logs_dir, state).unwrap();
+        let (handle, _, runner) = opened.into_handle(node.clone()).unwrap();
+        
+        // Spawn actor in thread
+        let join_handle = std::thread::spawn(move || runner.run());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // Create an entry
+        let entry = Entry::next_after(None)
+            .payload(b"trigger".to_vec())
+            .sign(&node);
+
+        // Ingest -> This should commit to WAL then fail on apply -> PANIC
+        let _ = rt.block_on(handle.ingest_entry(entry));
+
+        // Join the thread -> Should encounter panic
+        let result = join_handle.join();
+        assert!(result.is_err(), "Actor should have panicked");
+        
+        let err = result.err().unwrap();
+        if let Some(msg) = err.downcast_ref::<&str>() {
+            assert!(msg.contains("FATAL: State divergence"));
+        } else if let Some(msg) = err.downcast_ref::<String>() {
+            assert!(msg.contains("FATAL: State divergence"));
+        } else {
+             // Panic payload type might vary, checking simple error existence is enough given assertion above
+        }
+    }
+
     
     #[tokio::test]
     async fn test_wal_pattern_state_and_log_consistent() {

@@ -473,40 +473,40 @@ fn replay_sigchains<S: StateMachine>(
             // If starting from Hash::X, we skip until we see Hash::X, then apply subsequent.
             
             for result in iter {
-                if let Ok(signed_entry) = result {
-                    let entry_hash = Hash::from(signed_entry.hash());
+                let signed_entry = result.map_err(|e| super::StateError::Backend(e.to_string()))?;
+                let entry_hash = Hash::from(signed_entry.hash());
 
-                    if !applying {
-                        if entry_hash == applied_hash {
-                            applying = true;
-                        }
-                        continue;
+                if !applying {
+                    if entry_hash == applied_hash {
+                        applying = true;
                     }
-
-                    // Apply
-                    // Construct Op
-                     let causal_deps: Vec<Hash> = signed_entry
-                        .entry
-                        .causal_deps
-                        .iter()
-                        .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok().map(Hash::from))
-                        .collect();
-
-                    let op = Op {
-                        id: entry_hash,
-                        causal_deps: &causal_deps,
-                        payload: &signed_entry.entry.payload,
-                        author: signed_entry.author(),
-                        timestamp: signed_entry.entry.timestamp,
-                        prev_hash: Hash::try_from(signed_entry.entry.prev_hash.as_slice()).unwrap_or(Hash::ZERO),
-                    };
-
-                    state.apply(&op).map_err(|e| super::StateError::Backend(e.to_string()))?;
-                    entries_replayed += 1;
+                    continue;
                 }
+
+                // Apply
+                // Construct Op
+                let causal_deps: Vec<Hash> = signed_entry
+                    .entry
+                    .causal_deps
+                    .iter()
+                    .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok().map(Hash::from))
+                    .collect();
+
+                let op = Op {
+                    id: entry_hash,
+                    causal_deps: &causal_deps,
+                    payload: &signed_entry.entry.payload,
+                    author: signed_entry.author(),
+                    timestamp: signed_entry.entry.timestamp,
+                    prev_hash: Hash::try_from(signed_entry.entry.prev_hash.as_slice()).unwrap_or(Hash::ZERO),
+                };
+
+                state.apply(&op).map_err(|e| super::StateError::Backend(e.to_string()))?;
+                entries_replayed += 1;
             }
         }
     }
     
     Ok(entries_replayed)
 }
+
