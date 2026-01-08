@@ -10,7 +10,6 @@ use lattice_model::NodeIdentity;
 use lattice_model::{StateMachine, Op, LogEntry};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::thread;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::BroadcastStream;
 use futures_util::StreamExt;
@@ -18,9 +17,6 @@ use lattice_model::replication::EntryStreamProvider;
 use prost::Message;
 use super::sigchain::SigChainManager;
 use std::collections::HashMap;
-
-/// Handle to the store actor thread
-pub type StoreActorHandle = std::thread::JoinHandle<()>;
 
 /// Information about a store open operation
 #[derive(Debug, Clone)]

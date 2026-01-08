@@ -287,18 +287,6 @@ mod tests {
     use lattice_model::clock::MockClock;
     use lattice_model::hlc::HLC;
 
-
-    fn make_payload_put(key: &[u8], value: &[u8]) -> Vec<u8> {
-        let mut p = Vec::new();
-        p.push(1); // PUT
-        let len = key.len() as u16;
-        p.push((len >> 8) as u8);
-        p.push((len & 0xFF) as u8);
-        p.extend_from_slice(key);
-        p.extend_from_slice(value);
-        p
-    }
-
     fn read_entries(path: impl AsRef<std::path::Path>) -> Result<Vec<SignedEntry>, LogError> {
         Log::open(&path)?.iter()?.collect()
     }
@@ -314,10 +302,7 @@ mod tests {
         let hlc = HLC::now_with_clock(&clock);
 
         let entry = EntryBuilder::new(1, hlc)
-            .payload(make_payload_put(
-                b"/test/key",
-                b"value",
-            ))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         Log::open_or_create(&path).unwrap().append(&entry).unwrap();
@@ -340,10 +325,7 @@ mod tests {
 
         for i in 1..=5 {
             let entry = EntryBuilder::new(i, HLC::now_with_clock(&clock))
-                .payload(make_payload_put(
-                    format!("/key/{}", i).as_bytes(),
-                    format!("value{}", i).as_bytes(),
-                ))
+                .payload(format!("test{}", i).into_bytes())
                 .sign(&node);
             Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         }
@@ -364,10 +346,7 @@ mod tests {
         let clock = MockClock::new(1000);
 
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .payload(make_payload_put(
-                b"/key",
-                b"value",
-            ))
+            .payload(b"test".to_vec())
             .sign(&node);
         let expected_hash = entry.hash();
         let log = Log::open_or_create(&path).unwrap();
@@ -426,10 +405,7 @@ mod tests {
         let clock = MockClock::new(1000);
 
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .payload(make_payload_put(
-                b"/key",
-                b"original",
-            ))
+            .payload(b"test".to_vec())
             .sign(&node);
         Log::open_or_create(&path).unwrap().append(&entry).unwrap();
 
@@ -461,7 +437,7 @@ mod tests {
         let clock = MockClock::new(1000);
 
         let entry = EntryBuilder::new(1, HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"data"))
+            .payload(b"test".to_vec())
             .sign(&node);
         Log::open_or_create(&path).unwrap().append(&entry).unwrap();
 
@@ -547,10 +523,7 @@ mod tests {
         // Write 3 entries
         for i in 0..3 {
             let entry = EntryBuilder::new(i + 1, HLC::now_with_clock(&clock))
-                .payload(make_payload_put(
-                    format!("/key/{}", i).as_bytes(),
-                    b"val",
-                ))
+                .payload(format!("test{}", i).into_bytes())
                 .sign(&node);
             Log::open_or_create(&path).unwrap().append(&entry).unwrap();
         }

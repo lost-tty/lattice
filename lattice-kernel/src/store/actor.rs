@@ -620,24 +620,6 @@ mod tests {
         }
     }
 
-    // Helper extension methods for Store<MockStateMachine> to simplify tests
-    impl crate::store::Store<MockStateMachine> {
-        async fn put(&self, key: &[u8], value: &[u8]) -> Result<Hash, lattice_model::StateWriterError> {
-             self.submit(make_payload_put(key, value), vec![]).await
-        }
-    }
-
-    fn make_payload_put(key: &[u8], value: &[u8]) -> Vec<u8> {
-        let mut p = Vec::new();
-        p.push(1); // PUT
-        let len = key.len() as u16;
-        p.push((len >> 8) as u8);
-        p.push((len & 0xFF) as u8);
-        p.extend_from_slice(key);
-        p.extend_from_slice(value);
-        p
-    }
-
     /// Helper: open a Store for testing
     fn open_test_store(
         store_id: Uuid,
@@ -685,7 +667,7 @@ mod tests {
             .timestamp(HLC::now_with_clock(&clock1))
             .prev_hash(Hash::ZERO)
             .causal_deps(vec![])
-            .payload(make_payload_put(b"/key", b"value1"))
+            .payload(b"test".to_vec())
             .sign(&node);
         let hash1 = entry1.hash();
 
@@ -694,7 +676,7 @@ mod tests {
         let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
             .timestamp(HLC::now_with_clock(&clock2))
             .causal_deps(vec![hash1])
-            .payload(make_payload_put(b"/key", b"value2"))
+            .payload(b"test".to_vec())
             .sign(&node);
         let hash2 = entry2.hash();
 
@@ -735,7 +717,7 @@ mod tests {
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_a))
             .causal_deps(vec![])
-            .payload(make_payload_put(b"/merged", b"value_a"))
+            .payload(b"test".to_vec())
             .sign(&node1);
         let hash_a = entry_a.hash();
 
@@ -744,7 +726,7 @@ mod tests {
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_b))
             .causal_deps(vec![])
-            .payload(make_payload_put(b"/merged", b"value_b"))
+            .payload(b"test".to_vec())
             .sign(&node2);
         let hash_b = entry_b.hash();
 
@@ -753,7 +735,7 @@ mod tests {
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_c))
             .causal_deps(vec![hash_a, hash_b])
-            .payload(make_payload_put(b"/merged", b"merged_value"))
+            .payload(b"test".to_vec())
             .sign(&node3);
         let hash_c = entry_c.hash();
 
@@ -792,7 +774,7 @@ mod tests {
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_a))
             .causal_deps(vec![])
-            .payload(make_payload_put(b"/merged", b"value_a"))
+            .payload(b"test".to_vec())
             .sign(&node1);
         let hash_a = entry_a.hash();
 
@@ -800,7 +782,7 @@ mod tests {
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_b))
             .causal_deps(vec![])
-            .payload(make_payload_put(b"/merged", b"value_b"))
+            .payload(b"test".to_vec())
             .sign(&node2);
         let hash_b = entry_b.hash();
 
@@ -808,7 +790,7 @@ mod tests {
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_c))
             .causal_deps(vec![hash_a, hash_b])
-            .payload(make_payload_put(b"/merged", b"merged_value"))
+            .payload(b"test".to_vec())
             .sign(&node3);
         let hash_c = entry_c.hash();
 
@@ -890,21 +872,21 @@ mod tests {
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock)) // 1000
             .causal_deps(vec![])
-            .payload(make_payload_put(b"/a", b"from_a"))
+            .payload(b"test".to_vec())
             .sign(&node_a);
 
         let clock = MockClock::new(1001);
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock)) // 1001
             .causal_deps(vec![])
-            .payload(make_payload_put(b"/a", b"from_b"))
+            .payload(b"test".to_vec())
             .sign(&node_b);
 
         let clock = MockClock::new(1002);
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock)) // 1002
             .causal_deps(vec![])
-            .payload(make_payload_put(b"/a", b"from_c"))
+            .payload(b"test".to_vec())
             .sign(&node_c);
 
         // Ingest all to A
@@ -919,7 +901,7 @@ mod tests {
         // Original test merged. Let's do a merge explicitly.
         // Merge means a new entry citing tips.
         // With simple mock, we don't track chain tips of state machine, but we can just write a new value properly.
-        let merge_payload = make_payload_put(b"/a", b"merged");
+        let merge_payload = b"test".to_vec();
         let hash_merged = rt.block_on(handle_a.submit(merge_payload, vec![])).unwrap();
         
         // Verify merged
@@ -949,8 +931,8 @@ mod tests {
         // Phase 1: Write
         {
             let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
-            let h1 = handle.put(b"/wal_test/key1", b"value1").await.unwrap();
-            let h2 = handle.put(b"/wal_test/key2", b"value2").await.unwrap();
+            let h1 = handle.submit(b"x".to_vec(), vec![]).await.unwrap();
+            let h2 = handle.submit(b"x".to_vec(), vec![]).await.unwrap();
             
             assert!(handle.state().has_applied(h1));
             assert!(handle.state().has_applied(h2));
@@ -1004,7 +986,7 @@ mod tests {
         let entry_a = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_a))
             .causal_deps(vec![])
-            .payload(make_payload_put(b"/m", b"val_a"))
+            .payload(b"test".to_vec())
             .sign(&node1);
         let hash_a = entry_a.hash();
 
@@ -1012,7 +994,7 @@ mod tests {
         let entry_b = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_b))
             .causal_deps(vec![])
-            .payload(make_payload_put(b"/m", b"val_b"))
+            .payload(b"test".to_vec())
             .sign(&node2);
         let hash_b = entry_b.hash();
 
@@ -1020,7 +1002,7 @@ mod tests {
         let entry_c = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock_c))
             .causal_deps(vec![hash_a, hash_b])
-            .payload(make_payload_put(b"/m", b"val_c"))
+            .payload(b"test".to_vec())
             .sign(&node3);
         let hash_c = entry_c.hash();
 
@@ -1050,9 +1032,9 @@ mod tests {
         // 1. Create full history (3 entries)
         {
             let (handle, _, _join) = open_test_store(TEST_STORE_LOCAL, store_dir.clone(), node.clone()).unwrap();
-            handle.put(b"/k1", b"v1").await.unwrap();
-            handle.put(b"/k2", b"v2").await.unwrap();
-            handle.put(b"/k3", b"v3").await.unwrap();
+            handle.submit(b"x".to_vec(), vec![]).await.unwrap();
+            handle.submit(b"x".to_vec(), vec![]).await.unwrap();
+            handle.submit(b"x".to_vec(), vec![]).await.unwrap();
             drop(handle);
             let _ = _join.join();
         }
@@ -1060,7 +1042,7 @@ mod tests {
         // 2. Create state with PARTIAL history (simulating a snapshot or lagging state)
         let state = Arc::new(MockStateMachine::new());
         let logs_dir = store_dir.join("logs");
-        let mut chain_manager = crate::store::sigchain::SigChainManager::new(&logs_dir).unwrap();
+        let chain_manager = crate::store::sigchain::SigChainManager::new(&logs_dir).unwrap();
         
         // Get the first entry from the chain
         let author = node.public_key();

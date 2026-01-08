@@ -456,17 +456,6 @@ pub(crate) mod tests {
 
         use lattice_model::hlc::HLC;
 
-        fn make_payload_put(key: &[u8], value: &[u8]) -> Vec<u8> {
-            let mut p = Vec::new();
-            p.push(1); // PUT
-            let len = key.len() as u16;
-            p.push((len >> 8) as u8);
-            p.push((len & 0xFF) as u8);
-            p.extend_from_slice(key);
-            p.extend_from_slice(value);
-            p
-        }
-
         // Mock node/entry
         let node = NodeIdentity::generate();
         let author = PubKey::from(node.public_key());
@@ -478,8 +467,7 @@ pub(crate) mod tests {
         };
         let entry = Entry::next_after(Some(&fake_tip))
             .timestamp(HLC::default())
-
-            .payload(make_payload_put(b"key", b"val"))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         let entry_hash = entry.hash();

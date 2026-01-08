@@ -618,26 +618,11 @@ impl SigChainManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
     use crate::entry::{ChainTip, Entry};
 
     use lattice_model::clock::MockClock;
     use lattice_model::hlc::HLC;
     use lattice_model::NodeIdentity;
-
-
-    const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
-
-    fn make_payload_put(key: &[u8], value: &[u8]) -> Vec<u8> {
-        let mut p = Vec::new();
-        p.push(1); // PUT
-        let len = key.len() as u16;
-        p.push((len >> 8) as u8);
-        p.push((len & 0xFF) as u8);
-        p.extend_from_slice(key);
-        p.extend_from_slice(value);
-        p
-    }
 
     #[test]
     fn test_new_sigchain() {
@@ -667,7 +652,7 @@ mod tests {
         let clock = MockClock::new(1000);
         let entry = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"value"))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         chain.append(&entry).unwrap();
@@ -693,10 +678,7 @@ mod tests {
         for i in 1..=3 {
             let entry = Entry::next_after(chain.tip())
                 .timestamp(HLC::now_with_clock(&clock))
-                .payload(make_payload_put(
-                    format!("/key/{}", i).as_bytes(),
-                    format!("value{}", i).as_bytes(),
-                ))
+                .payload(format!("test{}", i).into_bytes())
                 .sign(&node);
             chain.append(&entry).unwrap();
         }
@@ -723,7 +705,7 @@ mod tests {
             for _ in 0..3 {
                 let entry = Entry::next_after(chain.tip())
                     .timestamp(HLC::now_with_clock(&clock))
-                    .payload(make_payload_put(b"/key", b"val"))
+                    .payload(b"test".to_vec())
                     .sign(&node);
                 chain.append(&entry).unwrap();
             }
@@ -759,7 +741,7 @@ mod tests {
         };
         let entry = Entry::next_after(Some(&fake_tip))
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"val"))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         let result = chain.append(&entry);
@@ -784,7 +766,7 @@ mod tests {
         // First entry
         let entry1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"v1"))
+            .payload(b"test".to_vec())
             .sign(&node);
         chain.append(&entry1).unwrap();
 
@@ -798,7 +780,7 @@ mod tests {
         };
         let entry2 = Entry::next_after(Some(&fake_tip))
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"v2"))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         let result = chain.append(&entry2);
@@ -823,7 +805,7 @@ mod tests {
         // Entry signed by node but chain expects other_author
         let entry = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"val"))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         let result = chain.append(&entry);
@@ -843,7 +825,7 @@ mod tests {
         let author = node.public_key();
         let mut chain = SigChain::new(&path, PubKey::from(*author)).unwrap();
 
-        let payload = make_payload_put(b"/test", b"hello");
+        let payload = b"test".to_vec();
 
         // Build entry (doesn't append)
         let signed = chain.build_entry(&node, vec![], payload);
@@ -882,21 +864,21 @@ mod tests {
         // Create entry_1 (genesis)
         let entry_1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"value1"))
+            .payload(b"test".to_vec())
             .sign(&node);
         let hash_1 = entry_1.hash();
 
         // Create entry_2 (child of entry_1)
         let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"value2"))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         // Create entry_3 (child of entry_2)
         // Create entry_3 (child of entry_2)
         let entry_3 = Entry::next_after(Some(&ChainTip::from(&entry_2)))
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"value3"))
+            .payload(b"test".to_vec())
             .sign(&node);
         let hash_3 = entry_3.hash();
 
@@ -998,12 +980,12 @@ mod tests {
         // Create entries
         let entry_1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"v1"))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"v2"))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         // Ingest entry_2 first (orphan - entry_1 missing)
@@ -1075,17 +1057,17 @@ mod tests {
 
         let entry_1 = Entry::next_after(None)
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"v1"))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         let entry_2 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"v2"))
+            .payload(b"test".to_vec())
             .sign(&node);
 
         let entry_3 = Entry::next_after(Some(&ChainTip::from(&entry_2)))
             .timestamp(HLC::now_with_clock(&clock))
-            .payload(make_payload_put(b"/key", b"v3"))
+            .payload(b"test".to_vec())
             .sign(&node);
         let hash_3 = entry_3.hash();
 
