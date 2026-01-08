@@ -20,6 +20,8 @@ pub struct SyncResult {
     pub entries_sent: u64,
 }
 
+const PROTOCOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Symmetric sync session - same core logic runs on both sides
 pub struct SyncSession<'a> {
     store: &'a AuthorizedStore,
@@ -98,7 +100,8 @@ impl<'a> SyncSession<'a> {
     }
     
     async fn recv_status_response(&mut self) -> Result<SyncState, NodeError> {
-        let msg = self.stream.recv().await
+        let msg = tokio::time::timeout(PROTOCOL_TIMEOUT, self.stream.recv()).await
+             .map_err(|_| NodeError::Actor("Timeout receiving StatusResponse".into()))?
             .map_err(|e| NodeError::Actor(e.to_string()))?
             .ok_or_else(|| NodeError::Actor("Stream closed".into()))?;
         
@@ -152,7 +155,7 @@ impl<'a> SyncSession<'a> {
         
         while !my_fetch_done || !peer_fetch_done {
             let msg = match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
+                PROTOCOL_TIMEOUT,
                 self.stream.recv()
             ).await {
                 Ok(Ok(Some(m))) => m,

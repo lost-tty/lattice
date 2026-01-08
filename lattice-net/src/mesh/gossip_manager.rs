@@ -30,6 +30,7 @@ pub struct GossipManager {
     gossip: Gossip,
     senders: Arc<RwLock<HashMap<Uuid, iroh_gossip::api::GossipSender>>>,
     my_pubkey: iroh::PublicKey,
+    cancel_token: tokio_util::sync::CancellationToken,
 }
 
 impl GossipManager {
@@ -39,7 +40,13 @@ impl GossipManager {
             gossip: Gossip::builder().spawn(endpoint.endpoint().clone()),
             senders: Arc::new(RwLock::new(HashMap::new())),
             my_pubkey: endpoint.public_key(),
+            cancel_token: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    /// Shutdown all gossip background tasks
+    pub fn shutdown(&self) {
+        self.cancel_token.cancel();
     }
     
     /// Get the gossip instance for router registration
@@ -90,10 +97,11 @@ impl GossipManager {
         
         // Spawn background tasks - all use AuthorizedStore for security
         // SessionTracker (network layer) tracks online status, not PeerManager (core layer)
-        self.spawn_receiver(store.clone(), receiver, pm.clone(), sessions, pending_syncstate.clone(), peer_store, sync_needed_tx);
-        self.spawn_forwarder(store.clone(), entry_rx, pending_syncstate.clone());
-        self.spawn_syncstate_fallback(store, pending_syncstate);
-        self.spawn_peer_watcher(store_id, rx);
+        let token = self.cancel_token.clone();
+        self.spawn_receiver(store.clone(), receiver, pm.clone(), sessions, pending_syncstate.clone(), peer_store, sync_needed_tx, token.clone());
+        self.spawn_forwarder(store.clone(), entry_rx, pending_syncstate.clone(), token.clone());
+        self.spawn_syncstate_fallback(store, pending_syncstate, token.clone());
+        self.spawn_peer_watcher(store_id, rx, token);
         
         tracing::debug!("Gossip tasks spawned");
         Ok(())
@@ -107,6 +115,7 @@ impl GossipManager {
         pending_syncstate: Arc<AtomicBool>,
         peer_store: std::sync::Arc<PeerSyncStore>,
         sync_needed_tx: tokio::sync::broadcast::Sender<SyncNeeded>,
+        token: tokio_util::sync::CancellationToken,
     ) {
         let store_id = store.id();
         
@@ -128,7 +137,14 @@ impl GossipManager {
             }
             tracing::info!(store_id = %store_id, initial_neighbors = neighbors.len(), "Gossip receiver started");
             
-            while let Some(event) = futures_util::StreamExt::next(&mut rx).await {
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        tracing::debug!(store_id = %store_id, "Gossip receiver cancelled");
+                        break;
+                    }
+                    event = futures_util::StreamExt::next(&mut rx) => {
+                         let Some(event) = event else { break };
                 tracing::debug!(store_id = %store_id, event = ?event, "Gossip event");
                 match event {
                     Ok(iroh_gossip::api::Event::Received(msg)) => {
@@ -252,6 +268,8 @@ impl GossipManager {
                         tracing::warn!(store_id = %store_id, error = %e, "Gossip receive error");
                     }
                 }
+                }
+                }
             }
             tracing::warn!(store_id = %store_id, "Gossip receiver ended");
         });
@@ -262,6 +280,7 @@ impl GossipManager {
         store: AuthorizedStore,
         mut entry_rx: tokio::sync::broadcast::Receiver<lattice_kernel::SignedEntry>,
         pending_syncstate: Arc<AtomicBool>,
+        token: tokio_util::sync::CancellationToken,
     ) {
         let senders = self.senders.clone();
         let store_id = store.id();
@@ -269,7 +288,14 @@ impl GossipManager {
         
         tokio::spawn(async move {
             tracing::debug!(store_id = %store_id, "Entry forwarder started");
-            while let Ok(entry) = entry_rx.recv().await {
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        tracing::debug!(store_id = %store_id, "Entry forwarder cancelled");
+                        break;
+                    }
+                    res = entry_rx.recv() => {
+                        let Ok(entry) = res else { break };
                 // Unified Entry Feed: filtering required
                 if my_pubkey_bytes.as_slice() == entry.author_id.as_ref() {
                     tracing::debug!(store_id = %store_id, "Broadcasting local entry via gossip");
@@ -294,6 +320,8 @@ impl GossipManager {
                     pending_syncstate.store(true, Ordering::SeqCst);
                 }
             }
+        }
+    }
             tracing::warn!(store_id = %store_id, "Entry forwarder ended");
         });
     }
@@ -303,6 +331,7 @@ impl GossipManager {
         &self,
         store: AuthorizedStore,
         pending_syncstate: Arc<AtomicBool>,
+        token: tokio_util::sync::CancellationToken,
     ) {
         let senders = self.senders.clone();
         let store_id = store.id();
@@ -310,7 +339,13 @@ impl GossipManager {
         
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(FALLBACK_INTERVAL).await;
+                tokio::select! {
+                    _ = token.cancelled() => {
+                         tracing::debug!(store_id = %store_id, "SyncState fallback cancelled");
+                         break;
+                    }
+                    _ = tokio::time::sleep(FALLBACK_INTERVAL) => {}
+                }
                 
                 // If pending (received entries but no outbound), broadcast SyncState alone
                 if pending_syncstate.swap(false, Ordering::SeqCst) {
@@ -339,12 +374,17 @@ impl GossipManager {
         &self,
         store_id: Uuid,
         mut rx: tokio::sync::broadcast::Receiver<PeerEvent>,
+        token: tokio_util::sync::CancellationToken,
     ) {
         let my_pubkey = self.my_pubkey;
         let senders = self.senders.clone();
         
         tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    res = rx.recv() => {
+                         let Ok(event) = res else { break };
                 match event {
                     PeerEvent::Added { pubkey, status } if status == PeerStatus::Active => {
                         if let Ok(peer_id) = iroh::PublicKey::from_bytes(&pubkey) {
@@ -380,6 +420,8 @@ impl GossipManager {
                         );
                     }
                     _ => {}
+                }
+            }
                 }
             }
         });

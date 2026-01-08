@@ -461,6 +461,7 @@ impl MeshNetwork {
 
     /// Gracefully shut down the network router
     pub async fn shutdown(&self) -> Result<(), String> {
+        self.gossip_manager.shutdown();
         self.router.shutdown().await.map_err(|e| e.to_string())
     }
 }
@@ -515,14 +516,19 @@ async fn handle_stream(
 ) -> Result<(), LatticeNetError> {
     let mut sink = MessageSink::new(send);
     let mut stream = MessageStream::new(recv);
+    const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
     
     // Dispatch loop - handles multiple messages per stream (e.g. RPC session)
     loop {
-        let msg = match stream.recv().await {
-            Ok(Some(m)) => m,
-            Ok(None) => break,  // Stream closed cleanly
-            Err(e) => {
+        let msg = match tokio::time::timeout(STREAM_TIMEOUT, stream.recv()).await {
+            Ok(Ok(Some(m))) => m,
+            Ok(Ok(None)) => break,  // Stream closed cleanly
+            Ok(Err(e)) => {
                 tracing::debug!("Stream recv error: {}", e);
+                break;
+            }
+            Err(_) => {
+                tracing::debug!("Stream timed out");
                 break;
             }
         };

@@ -44,6 +44,21 @@ async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, se
     }
 }
 
+async fn wait_for_entry(store: &KvStore, key: &[u8], expected: &[u8]) -> bool {
+    let timeout = Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    
+    while start.elapsed() < timeout {
+        if let Some(val) = store.get(key).unwrap_or_default().lww_head() {
+            if val.value == expected {
+                return true;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 /// Replicate production flow - simulating two CLI sessions:
 /// Session 1: `lattice init` on node A (no daemon)
 /// Session 2: `lattice daemon` starts on both, B joins A
@@ -97,30 +112,15 @@ async fn test_production_flow_gossip() {
     store_a.put(b"/from_a", b"hello from A").await.expect("put from A");
     
     // Wait for gossip propagation (no explicit sync!)
-    let mut received_at_b = false;
-    for _ in 0..50 {
-        sleep(Duration::from_millis(100)).await;
-        if let Some(val) = store_b.get(b"/from_a").unwrap_or_default().lww_head() {
-            assert_eq!(val.value, b"hello from A".to_vec());
-            received_at_b = true;
-            break;
-        }
-    }
+    // Wait for gossip propagation (no explicit sync!)
+    let received_at_b = wait_for_entry(&store_b, b"/from_a", b"hello from A").await;
     
     assert!(received_at_b, "B should receive A's entry via gossip (A→B direction)");
     
     // === Test B → A direction ===
     store_b.put(b"/from_b", b"hello from B").await.expect("put from B");
     
-    let mut received_at_a = false;
-    for _ in 0..50 {
-        sleep(Duration::from_millis(100)).await;
-        if let Some(val) = store_a.get(b"/from_b").unwrap_or_default().lww_head() {
-            assert_eq!(val.value, b"hello from B".to_vec());
-            received_at_a = true;
-            break;
-        }
-    }
+    let received_at_a = wait_for_entry(&store_a, b"/from_b", b"hello from B").await;
     
     assert!(received_at_a, "A should receive B's entry via gossip (B→A direction)");
     

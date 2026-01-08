@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use crate::peer_sync_store::PeerSyncStore;
+use futures_util::StreamExt;
 
 /// Result of a sync operation with a peer
 pub struct SyncResult {
@@ -156,17 +157,18 @@ impl MeshEngine {
             .filter_map(|p| iroh::PublicKey::from_bytes(&p.pubkey).ok())
             .collect();
         
-        let results = futures_util::future::join_all(
-            active_peers.iter().map(|pk| {
-                let pk = *pk;
+        let results: Vec<_> = futures_util::stream::iter(active_peers)
+            .map(|pk| {
+                let engine = self.clone();
                 let sync_state = our_sync_state.clone();
                 async move {
-                    let result = self.status_peer(pk, store_id, sync_state).await
+                    let result = engine.status_peer(pk, store_id, sync_state).await
                         .map_err(|e| e.to_string());
                     (pk, result)
                 }
             })
-        ).await;
+            .buffer_unordered(10)
+            .collect().await;
         
         results.into_iter().collect()
     }
