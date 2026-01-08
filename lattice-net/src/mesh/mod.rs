@@ -15,6 +15,7 @@ mod session;
 
 pub use server::{MeshNetwork, SyncResult};
 pub use engine::MeshEngine;
+pub use engine::PeerStoreRegistry;
 pub use error::{ServerError, GossipError};
 pub use sync_session::SyncSession;
 pub use session::SessionTracker;

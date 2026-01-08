@@ -2,12 +2,10 @@
 //!
 //! This actor is generic over any StateMachine implementation.
 
-use crate::proto::storage::PeerSyncInfo;
 use crate::store::{
-    peer_sync_store::PeerSyncStore,
     sigchain::{
         GapInfo, Log, OrphanInfo, SigChainError, SigChainManager, SigchainValidation,
-        SyncDiscrepancy, SyncNeeded, SyncState,
+        SyncState,
     },
     StateError,
 };
@@ -68,21 +66,6 @@ pub enum ReplicationControllerCmd {
     SubscribeGaps {
         resp: oneshot::Sender<broadcast::Receiver<GapInfo>>,
     },
-    /// Set peer sync state
-    SetPeerSyncState {
-        peer: PubKey,
-        info: PeerSyncInfo,
-        resp: oneshot::Sender<Result<SyncDiscrepancy, StateError>>,
-    },
-    /// Get peer sync state
-    GetPeerSyncState {
-        peer: PubKey,
-        resp: oneshot::Sender<Option<PeerSyncInfo>>,
-    },
-    /// List all peer sync states
-    ListPeerSyncStates {
-        resp: oneshot::Sender<Vec<(PubKey, PeerSyncInfo)>>,
-    },
     /// Stream entries in sequence range
     StreamEntriesInRange {
         author: PubKey,
@@ -132,14 +115,11 @@ impl std::error::Error for ReplicationControllerError {}
 pub struct ReplicationController<S: StateMachine> {
     state: std::sync::Arc<S>,
     chain_manager: SigChainManager,
-    peer_store: PeerSyncStore,
     node: NodeIdentity,
 
     rx: mpsc::Receiver<ReplicationControllerCmd>,
     /// Broadcast sender for emitting entries after they're committed locally
     entry_tx: broadcast::Sender<SignedEntry>,
-    /// Broadcast sender for sync-needed events (when we detect we're behind a peer)
-    sync_needed_tx: broadcast::Sender<SyncNeeded>,
 }
 
 impl<S: StateMachine> ReplicationController<S> {
@@ -151,25 +131,16 @@ impl<S: StateMachine> ReplicationController<S> {
 
         rx: mpsc::Receiver<ReplicationControllerCmd>,
         entry_tx: broadcast::Sender<SignedEntry>,
-        sync_needed_tx: broadcast::Sender<SyncNeeded>,
     ) -> Result<Self, StateError> {
         let local_author = node.public_key();
         chain_manager.get_or_create(local_author)?; // Ensure local chain exists
 
-        // Initialize peer store in separate DB file for better separation
-        let logs_dir_path = chain_manager.logs_dir();
-        let store_root = logs_dir_path.parent().unwrap_or(logs_dir_path);
-        let peer_db_path = store_root.join("peer_sync.db");
-        let peer_store = PeerSyncStore::open(&peer_db_path)?;
-
         Ok(Self {
             state,
             chain_manager,
-            peer_store,
             node,
             rx,
             entry_tx,
-            sync_needed_tx,
         })
     }
 
@@ -241,37 +212,6 @@ impl<S: StateMachine> ReplicationController<S> {
                 }
                 ReplicationControllerCmd::SubscribeGaps { resp } => {
                     let _ = resp.send(self.chain_manager.subscribe_gaps());
-                }
-                ReplicationControllerCmd::SetPeerSyncState { peer, info, resp } => {
-                    // Compute bidirectional discrepancy
-                    let discrepancy = if let Some(ref peer_sync_state) = info.sync_state {
-                        let peer_state = SyncState::from_proto(peer_sync_state);
-                        let local_state = self.chain_manager.sync_state();
-                        local_state.calculate_discrepancy(&peer_state)
-                    } else {
-                        SyncDiscrepancy::default()
-                    };
-
-                    // Emit SyncNeeded if out of sync (sync is bidirectional)
-                    if discrepancy.is_out_of_sync() {
-                        let _ = self.sync_needed_tx.send(SyncNeeded {
-                            peer,
-                            discrepancy: discrepancy.clone(),
-                        });
-                    }
-
-                    let result = self
-                        .peer_store
-                        .set_peer_sync_state(&peer, &info)
-                        .map(|_| discrepancy);
-                    let _ = resp.send(result);
-                }
-                ReplicationControllerCmd::GetPeerSyncState { peer, resp } => {
-                    let _ = resp.send(self.peer_store.get_peer_sync_state(&peer).ok().flatten());
-                }
-                ReplicationControllerCmd::ListPeerSyncStates { resp } => {
-                    let result = self.peer_store.list_peer_sync_states().unwrap_or_default();
-                    let _ = resp.send(result);
                 }
                 ReplicationControllerCmd::StreamEntriesInRange {
                     author,
@@ -453,8 +393,6 @@ impl<S: StateMachine> ReplicationController<S> {
                     // Broadcast
                     let _ = self.entry_tx.send(current.clone());
 
-                    self.emit_sync_for_stale_peers();
-
                     // Queue ready SigChain orphans
                     for (orphan, author, prev_hash, orphan_hash) in ready_sigchain_orphans {
                         work_queue.push((orphan, Some(CleanupMeta::SigChain { author, prev_hash, entry_hash: orphan_hash })));
@@ -533,28 +471,6 @@ impl<S: StateMachine> ReplicationController<S> {
         });
 
         Ok(rx)
-    }
-
-    /// Check cached peer states against local state and emit SyncNeeded for any discrepancies.
-    /// Called after local state changes (entry applied) to trigger sync with stale peers.
-    fn emit_sync_for_stale_peers(&self) {
-        let local_state = self.chain_manager.sync_state();
-
-        let cached_peers = self.peer_store.list_peer_sync_states().unwrap_or_default();
-
-        for (peer_bytes, info) in cached_peers {
-            if let Some(ref peer_proto) = info.sync_state {
-                let peer_state = SyncState::from_proto(peer_proto);
-                let discrepancy = local_state.calculate_discrepancy(&peer_state);
-
-                if discrepancy.is_out_of_sync() {
-                    let _ = self.sync_needed_tx.send(SyncNeeded {
-                        peer: PubKey::from(peer_bytes),
-                        discrepancy,
-                    });
-                }
-            }
-        }
     }
 }
 
@@ -812,40 +728,6 @@ mod tests {
         drop(handle);
     }
 
-    #[test]
-    fn test_sync_needed_event_emission() {
-        // ... (same logic, independent of payload) ...
-        use std::time::Duration;
-        let tmp = tempfile::tempdir().unwrap();
-        let store_dir = tmp.path().to_path_buf();
-        let node = NodeIdentity::generate();
-        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node.clone()).unwrap();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-
-        let mut sync_needed_rx = handle.subscribe_sync_needed();
-
-        let peer_bytes = PubKey::from([99u8; 32]);
-        let author = PubKey::from([1u8; 32]);
-        let mut peer_sync_state = SyncState::new();
-        peer_sync_state.set(author, 50, Hash::from([0xAA; 32]));
-
-        let peer_info = PeerSyncInfo {
-            sync_state: Some(peer_sync_state.to_proto()),
-            updated_at: 0,
-        };
-
-        let discrepancy = rt
-            .block_on(handle.set_peer_sync_state(&peer_bytes, peer_info))
-            .unwrap();
-        assert_eq!(discrepancy.entries_we_need, 50);
-
-        std::thread::sleep(Duration::from_millis(10));
-        let event = sync_needed_rx.try_recv().expect("Should have sync needed event");
-        assert_eq!(event.peer, peer_bytes);
-
-        drop(handle);
-    }
-    
     #[test]
     fn test_multinode_sync_after_merge() {
          let tmp_a = tempfile::tempdir().unwrap();

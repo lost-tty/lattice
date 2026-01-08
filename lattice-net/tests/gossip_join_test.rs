@@ -3,7 +3,7 @@
 //! These tests replicate PRODUCTION usage exactly - no manual gossip setup.
 //! They rely purely on the event-driven flow that happens in the CLI.
 
-use lattice_node::{NodeBuilder, NodeEvent, Node, KvStore, PeerStatus, Mesh, token::Invite};
+use lattice_node::{NodeBuilder, NodeEvent, Node, KvStore, token::Invite};
 use lattice_kvstate::Merge;
 use lattice_model::types::PubKey;
 use lattice_kernel::Uuid;

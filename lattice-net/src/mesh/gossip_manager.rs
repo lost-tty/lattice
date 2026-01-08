@@ -8,6 +8,8 @@ use lattice_model::types::PubKey;
 use lattice_node::AuthorizedStore;
 use lattice_kernel::proto::storage::PeerSyncInfo;
 use lattice_kernel::proto::network::GossipMessage;
+use lattice_kernel::SyncNeeded;
+use crate::peer_sync_store::PeerSyncStore;
 use iroh_gossip::Gossip;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +54,8 @@ impl GossipManager {
         pm: std::sync::Arc<lattice_node::PeerManager>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
         store: AuthorizedStore,
+        peer_store: std::sync::Arc<PeerSyncStore>,
+        sync_needed_tx: tokio::sync::broadcast::Sender<SyncNeeded>,
     ) -> Result<(), GossipError> {
         let store_id = store.id();
         
@@ -86,7 +90,7 @@ impl GossipManager {
         
         // Spawn background tasks - all use AuthorizedStore for security
         // SessionTracker (network layer) tracks online status, not PeerManager (core layer)
-        self.spawn_receiver(store.clone(), receiver, pm.clone(), sessions, pending_syncstate.clone());
+        self.spawn_receiver(store.clone(), receiver, pm.clone(), sessions, pending_syncstate.clone(), peer_store, sync_needed_tx);
         self.spawn_forwarder(store.clone(), entry_rx, pending_syncstate.clone());
         self.spawn_syncstate_fallback(store, pending_syncstate);
         self.spawn_peer_watcher(store_id, rx);
@@ -101,6 +105,8 @@ impl GossipManager {
         pm: std::sync::Arc<lattice_node::PeerManager>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
         pending_syncstate: Arc<AtomicBool>,
+        peer_store: std::sync::Arc<PeerSyncStore>,
+        sync_needed_tx: tokio::sync::broadcast::Sender<SyncNeeded>,
     ) {
         let store_id = store.id();
         
@@ -180,15 +186,27 @@ impl GossipManager {
                             let formatted = format_sync_state(&sync_state);
                             
                             let info = PeerSyncInfo {
-                                sync_state: Some(sync_state),
+                                sync_state: Some(sync_state.clone()),
                                 updated_at: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_secs(),
                             };
                             
-                            if let Err(e) = store.set_peer_sync_state(&sender, info).await {
+                            if let Err(e) = peer_store.set_peer_sync_state(&sender, info) {
                                 tracing::warn!(store_id = %store_id, error = %e, "Failed to update peer sync state");
+                            }
+
+                            // Check discrepancy and emit SyncNeeded
+                            if let Ok(local_state) = store.sync_state().await {
+                                let peer_state_obj = lattice_kernel::SyncState::from_proto(&sync_state);
+                                let discrepancy = local_state.calculate_discrepancy(&peer_state_obj);
+                                if discrepancy.is_out_of_sync() {
+                                    let _ = sync_needed_tx.send(SyncNeeded {
+                                        peer: sender,
+                                        discrepancy,
+                                    });
+                                }
                             }
                             
                             tracing::info!(

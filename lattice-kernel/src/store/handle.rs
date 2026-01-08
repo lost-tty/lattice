@@ -2,7 +2,6 @@
 
 use super::actor::{ReplicationController, ReplicationControllerCmd};
 use super::error::StoreError;
-use super::SyncNeeded;
 use crate::entry::SignedEntry;
 use crate::Uuid;
 use lattice_model::types::PubKey;
@@ -49,7 +48,6 @@ pub struct Store<S> {
     state: std::sync::Arc<S>,
     tx: mpsc::Sender<ReplicationControllerCmd>,
     entry_tx: broadcast::Sender<SignedEntry>,
-    sync_needed_tx: broadcast::Sender<SyncNeeded>,
 }
 
 impl<S> Clone for Store<S> {
@@ -59,7 +57,6 @@ impl<S> Clone for Store<S> {
             state: self.state.clone(),
             tx: self.tx.clone(),
             entry_tx: self.entry_tx.clone(),
-            sync_needed_tx: self.sync_needed_tx.clone(),
         }
     }
 }
@@ -107,7 +104,6 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
     pub fn into_handle(self, node: NodeIdentity) -> Result<(Store<S>, StoreInfo, ActorRunner<S>), super::StateError> {
         let (tx, rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(64);
-        let (sync_needed_tx, _sync_needed_rx) = broadcast::channel(64);
 
         let state_for_actor = self.state.clone();
         
@@ -116,7 +112,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
         
         let actor = ReplicationController::new(
             state_for_actor, chain_manager,
-            node, rx, entry_tx.clone(), sync_needed_tx.clone(),
+            node, rx, entry_tx.clone(),
         )?;
         
         let runner = ActorRunner { actor };
@@ -126,7 +122,6 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
             state: self.state,
             tx,
             entry_tx,
-            sync_needed_tx,
         };
         let info = StoreInfo { store_id: self.store_id, entries_replayed: self.entries_replayed };
         Ok((handle, info, runner))
@@ -170,11 +165,6 @@ impl<S: StateMachine> Store<S> {
     /// Subscribe to receive entries as they're committed locally
     pub fn subscribe_entries(&self) -> broadcast::Receiver<SignedEntry> {
         self.entry_tx.subscribe()
-    }
-
-    /// Subscribe to receive sync-needed events (emitted when we're behind a peer)
-    pub fn subscribe_sync_needed(&self) -> broadcast::Receiver<SyncNeeded> {
-        self.sync_needed_tx.subscribe()
     }
 
     pub async fn log_seq(&self) -> u64 {
@@ -327,56 +317,7 @@ impl<S: StateMachine> Store<S> {
 
     /// Store a peer's sync state (received via gossip or status command).
     /// Returns SyncDiscrepancy showing what each side is missing.
-    pub async fn set_peer_sync_state(
-        &self,
-        peer: &PubKey,
-        info: crate::proto::storage::PeerSyncInfo,
-    ) -> Result<super::SyncDiscrepancy, StoreError> {
-        use ReplicationControllerCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(ReplicationControllerCmd::SetPeerSyncState {
-                peer: *peer,
-                info,
-                resp: resp_tx,
-            })
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
-    }
 
-    /// Get a peer's last known sync state
-    pub async fn get_peer_sync_state(
-        &self,
-        peer: &PubKey,
-    ) -> Option<crate::proto::storage::PeerSyncInfo> {
-        use ReplicationControllerCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let _ = self
-            .tx
-            .send(ReplicationControllerCmd::GetPeerSyncState {
-                peer: *peer,
-                resp: resp_tx,
-            })
-            .await;
-        resp_rx.await.ok().flatten()
-    }
-
-    /// List all known peer sync states
-    pub async fn list_peer_sync_states(
-        &self,
-    ) -> Vec<(PubKey, crate::proto::storage::PeerSyncInfo)> {
-        use ReplicationControllerCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let _ = self
-            .tx
-            .send(ReplicationControllerCmd::ListPeerSyncStates { resp: resp_tx })
-            .await;
-        resp_rx.await.unwrap_or_default()
-    }
 
     /// Stream entries for an author within a sequence range [from_seq, to_seq]
     /// If to_seq is 0, streams entries from from_seq to latest
@@ -495,26 +436,6 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         Box::pin(Store::subscribe_gaps(self))
     }
 
-    fn subscribe_sync_needed(&self) -> broadcast::Receiver<SyncNeeded> {
-        Store::subscribe_sync_needed(self)
-    }
-
-    fn set_peer_sync_state(
-        &self,
-        peer: PubKey,
-        info: crate::proto::storage::PeerSyncInfo,
-    ) -> Pin<Box<dyn Future<Output = Result<super::SyncDiscrepancy, StoreError>> + Send + '_>>
-    {
-        Box::pin(async move { Store::set_peer_sync_state(self, &peer, info).await })
-    }
-
-    fn get_peer_sync_state(
-        &self,
-        peer: PubKey,
-    ) -> Pin<Box<dyn Future<Output = Option<crate::proto::storage::PeerSyncInfo>> + Send + '_>>
-    {
-        Box::pin(async move { Store::get_peer_sync_state(self, &peer).await })
-    }
 }
 // ==================== EntryStreamProvider implementation ====================
 

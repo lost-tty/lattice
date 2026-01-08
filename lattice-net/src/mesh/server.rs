@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinResponse, StatusRequest};
+use tokio::sync::broadcast;
+use crate::peer_sync_store::PeerSyncStore;
+use super::engine::PeerStoreRegistry;
 
 // Re-export from engine
 pub use super::engine::{SyncResult, MeshEngine};
@@ -22,13 +25,10 @@ pub struct MeshNetwork {
     node: Arc<Node>,
     endpoint: LatticeEndpoint,
     gossip_manager: Arc<super::gossip_manager::GossipManager>,
-    /// Registry of authorized stores - network only interacts with registered stores
     stores: StoresRegistry,
-    /// Sync engine for outbound operations
+    peer_stores: PeerStoreRegistry,
     engine: MeshEngine,
-    /// Ephemeral session tracking (who is online)
     sessions: Arc<super::session::SessionTracker>,
-    #[allow(dead_code)]
     router: Router,
 }
 
@@ -36,6 +36,7 @@ pub struct MeshNetwork {
 struct SyncProtocol {
     node: Arc<Node>,
     stores: StoresRegistry,
+    peer_stores: PeerStoreRegistry,
 }
 
 impl std::fmt::Debug for SyncProtocol {
@@ -48,8 +49,9 @@ impl ProtocolHandler for SyncProtocol {
     fn accept(&self, conn: Connection) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
         let node = self.node.clone();
         let stores = self.stores.clone();
+        let peer_stores = self.peer_stores.clone();
         Box::pin(async move {
-            if let Err(e) = handle_connection(node, stores, conn).await {
+            if let Err(e) = handle_connection(node, stores, peer_stores, conn).await {
                 tracing::error!(error = %e, "Connection handler error");
             }
             Ok(())
@@ -73,13 +75,15 @@ impl MeshNetwork {
         
         // Create shared stores registry - used by SyncProtocol, MeshNetwork, and MeshEngine
         let stores: StoresRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashMap::new()));
         
         // Create the sync engine for outbound operations
-        let engine = MeshEngine::new(endpoint.clone(), stores.clone(), node.clone());
+        let engine = MeshEngine::new(endpoint.clone(), stores.clone(), peer_stores.clone(), node.clone());
         
         let sync_protocol = SyncProtocol { 
             node: node.clone(), 
             stores: stores.clone(),
+            peer_stores: peer_stores.clone(),
         };
         let router = Router::builder(endpoint.endpoint().clone())
             .accept(LATTICE_ALPN, sync_protocol)
@@ -93,6 +97,7 @@ impl MeshNetwork {
             endpoint,
             gossip_manager: gossip_manager.clone(),
             stores,
+            peer_stores,
             engine,
             sessions: sessions.clone(),
             router,
@@ -125,8 +130,9 @@ impl MeshNetwork {
                              tracing::info!(peer = %iroh_peer_id.fmt_short(), "Join successful, keeping connection active");
                              let node = server.node.clone();
                              let stores = server.stores.clone();
+                             let peer_stores = server.peer_stores.clone();
                              tokio::spawn(async move {
-                                 if let Err(e) = crate::mesh::server::handle_connection(node, stores, conn).await {
+                                 if let Err(e) = crate::mesh::server::handle_connection(node, stores, peer_stores, conn).await {
                                      tracing::debug!("Join connection handler error: {}", e);
                                  }
                              });
@@ -217,15 +223,26 @@ impl MeshNetwork {
         // Register in store registry
         self.stores.write().await.insert(store_id, authorized_store.clone());
         
-        // Subscribe BEFORE gossip setup to avoid missing events
-        let sync_needed_rx = authorized_store.subscribe_sync_needed();
+        // Create PeerSyncStore (in-memory)
+        let peer_store = Arc::new(PeerSyncStore::new());
+        self.peer_stores.write().await.insert(store_id, peer_store.clone());
         
-        if let Err(e) = self.gossip_manager.setup_for_store(pm, self.sessions.clone(), authorized_store.clone()).await {
+        // Subscribe BEFORE gossip setup to avoid missing events
+        // Create channel for SyncNeeded events
+        let (sync_needed_tx, sync_needed_rx) = broadcast::channel(128);
+        
+        if let Err(e) = self.gossip_manager.setup_for_store(
+            pm, 
+            self.sessions.clone(), 
+            authorized_store.clone(),
+            peer_store.clone(),
+            sync_needed_tx
+        ).await {
             tracing::error!(error = %e, "Gossip setup failed");
         }
         
         Self::spawn_gap_watcher(self.clone(), authorized_store.clone());
-        Self::spawn_sync_coordinator_with_rx(self.clone(), authorized_store, sync_needed_rx);
+        Self::spawn_sync_coordinator_with_rx(self.clone(), authorized_store, peer_store, sync_needed_rx);
     }
     
     /// Spawn gap watcher that triggers sync when orphans are detected.
@@ -278,6 +295,7 @@ impl MeshNetwork {
     fn spawn_sync_coordinator_with_rx(
         server: Arc<Self>, 
         store: AuthorizedStore,
+        peer_store: Arc<PeerSyncStore>,
         mut sync_rx: tokio::sync::broadcast::Receiver<lattice_kernel::SyncNeeded>,
     ) {
         const COOLDOWN_SECS: u64 = 30;
@@ -336,8 +354,8 @@ impl MeshNetwork {
                         pending_peers.remove(&peer_bytes);
                         
                         // Re-check if still out of sync
-                        let still_out_of_sync = match store.get_peer_sync_state(&peer_bytes).await {
-                            Some(info) => {
+                        let still_out_of_sync = match peer_store.get_peer_sync_state(&peer_bytes) {
+                            Ok(Some(info)) => {
                                 if let Some(ref peer_proto) = info.sync_state {
                                     let peer_state = lattice_kernel::SyncState::from_proto(peer_proto);
                                     match store.sync_state().await {
@@ -348,7 +366,8 @@ impl MeshNetwork {
                                     false
                                 }
                             }
-                            None => false,
+
+                            _ => false,
                         };
                         
                         if still_out_of_sync {
@@ -434,6 +453,16 @@ impl MeshNetwork {
     pub fn engine(&self) -> &MeshEngine {
         &self.engine
     }
+    
+    /// Access the registry of in-memory peer sync stores
+    pub fn peer_stores(&self) -> &PeerStoreRegistry {
+        &self.peer_stores
+    }
+
+    /// Gracefully shut down the network router
+    pub async fn shutdown(&self) -> Result<(), String> {
+        self.router.shutdown().await.map_err(|e| e.to_string())
+    }
 }
 
 /// Helper to lookup store from registry
@@ -446,6 +475,7 @@ async fn lookup_store(stores: &StoresRegistry, store_id: Uuid) -> Result<Authori
 pub(crate) async fn handle_connection(
     node: Arc<Node>,
     stores: StoresRegistry,
+    peer_stores: PeerStoreRegistry,
     conn: Connection,
 ) -> Result<(), LatticeNetError> {
     let remote_id = conn.remote_id();
@@ -458,8 +488,9 @@ pub(crate) async fn handle_connection(
             Ok((send, recv)) => {
                 let node = node.clone();
                 let stores = stores.clone();
+                let peer_stores = peer_stores.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_stream(node, stores, remote_pubkey, send, recv).await {
+                    if let Err(e) = handle_stream(node, stores, peer_stores, remote_pubkey, send, recv).await {
                         tracing::debug!("Stream handler error: {}", e);
                     }
                 });
@@ -477,6 +508,7 @@ pub(crate) async fn handle_connection(
 async fn handle_stream(
     node: Arc<Node>,
     stores: StoresRegistry,
+    peer_stores: PeerStoreRegistry,
     remote_pubkey: PubKey,
     send: iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
@@ -501,7 +533,7 @@ async fn handle_stream(
                 break;  // Join protocol complete for this stream
             }
             Some(peer_message::Message::StatusRequest(req)) => {
-                handle_status_request(stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
+                handle_status_request(stores.clone(), peer_stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
             }
             Some(peer_message::Message::FetchRequest(req)) => {
                 handle_fetch_request(stores.clone(), &remote_pubkey, req, &mut sink).await?;
@@ -554,6 +586,7 @@ async fn handle_join_request(
 /// Handle an incoming status request using symmetric SyncSession
 async fn handle_status_request(
     stores: StoresRegistry,
+    peer_stores: PeerStoreRegistry,
     remote_pubkey: &PubKey,
     req: StatusRequest,
     sink: &mut MessageSink,
@@ -566,6 +599,8 @@ async fn handle_status_request(
     
     // Lookup store from registry - only respond to registered stores
     let authorized_store = lookup_store(&stores, store_id).await?;
+    let peer_store = peer_stores.read().await.get(&store_id).cloned()
+        .ok_or_else(|| LatticeNetError::Connection(format!("PeerStore {} not registered", store_id)))?;
     
     // Verify peer can connect (using store's peer provider)
     if !authorized_store.can_connect(remote_pubkey) {
@@ -580,7 +615,7 @@ async fn handle_status_request(
         .unwrap_or_default();
     
     // Use SyncSession for symmetric handling
-    let mut session = super::sync_session::SyncSession::new(&authorized_store, sink, stream, *remote_pubkey);
+    let mut session = super::sync_session::SyncSession::new(&authorized_store, sink, stream, *remote_pubkey, &peer_store);
     let _ = session.run_as_responder(incoming_state).await?;
     
     Ok(())

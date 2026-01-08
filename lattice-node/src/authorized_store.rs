@@ -7,8 +7,7 @@ use crate::auth::PeerProvider;
 use crate::node::NodeError;
 use lattice_kernel::{
     SignedEntry, Uuid, SyncProvider,
-    store::{StateError, SyncState, SyncDiscrepancy, SyncNeeded, GapInfo},
-    proto::storage::PeerSyncInfo,
+    store::{StateError, SyncState, GapInfo},
 };
 use lattice_model::types::PubKey;
 use std::sync::Arc;
@@ -41,14 +40,6 @@ impl AuthorizedStore {
         self.sync.sync_state().await.map_err(Into::into)
     }
     
-    pub async fn set_peer_sync_state(&self, peer: &PubKey, info: PeerSyncInfo) -> Result<SyncDiscrepancy, NodeError> {
-        self.sync.set_peer_sync_state(*peer, info).await.map_err(Into::into)
-    }
-    
-    pub async fn get_peer_sync_state(&self, peer: &PubKey) -> Option<PeerSyncInfo> {
-        self.sync.get_peer_sync_state(*peer).await
-    }
-    
     /// Ingest entry with authorization check
     pub async fn ingest_entry(&self, entry: SignedEntry) -> Result<(), StateError> {
         // Verify signature
@@ -70,7 +61,5 @@ impl AuthorizedStore {
     
     pub async fn subscribe_gaps(&self) -> Result<broadcast::Receiver<GapInfo>, NodeError> {
         self.sync.subscribe_gaps().await.map_err(Into::into)
-    }
-    
-    pub fn subscribe_sync_needed(&self) -> broadcast::Receiver<SyncNeeded> { self.sync.subscribe_sync_needed() }
+    } 
 }

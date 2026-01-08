@@ -10,7 +10,7 @@ use std::time::Instant;
 use std::io::Write;
 use prost_reflect::{DynamicMessage, Value, ReflectMessage};
 
-pub async fn cmd_store_status(node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_status(node: &Node, store: Option<&KvStore>, mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -21,7 +21,7 @@ pub async fn cmd_store_status(node: &Node, store: Option<&KvStore>, _mesh: Optio
     write_store_summary(&mut w, h).await;
     write_log_files(&mut w, h).await;
     write_orphan_details(&mut w, h).await;
-    write_peer_sync_matrix(&mut w, node, h).await;
+    write_peer_sync_matrix(&mut w, node, h, mesh).await;
     
     CommandResult::Ok
 }

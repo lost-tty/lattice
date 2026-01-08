@@ -14,6 +14,7 @@ use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinRequest, Sta
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
+use crate::peer_sync_store::PeerSyncStore;
 
 /// Result of a sync operation with a peer
 pub struct SyncResult {
@@ -23,6 +24,7 @@ pub struct SyncResult {
 
 /// Type alias for the stores registry - simple HashMap, Node is source of truth for root
 pub(super) type StoresRegistry = Arc<RwLock<HashMap<Uuid, AuthorizedStore>>>;
+pub type PeerStoreRegistry = Arc<RwLock<HashMap<Uuid, Arc<PeerSyncStore>>>>;
 
 /// MeshEngine handles outbound sync and connection operations.
 /// 
@@ -32,13 +34,14 @@ pub(super) type StoresRegistry = Arc<RwLock<HashMap<Uuid, AuthorizedStore>>>;
 pub struct MeshEngine {
     endpoint: LatticeEndpoint,
     stores: StoresRegistry,
+    peer_stores: PeerStoreRegistry,
     node: Arc<Node>,
 }
 
 impl MeshEngine {
     /// Create a new MeshEngine
-    pub fn new(endpoint: LatticeEndpoint, stores: StoresRegistry, node: Arc<Node>) -> Self {
-        Self { endpoint, stores, node }
+    pub fn new(endpoint: LatticeEndpoint, stores: StoresRegistry, peer_stores: PeerStoreRegistry, node: Arc<Node>) -> Self {
+        Self { endpoint, stores, peer_stores, node }
     }
     
     /// Handle JoinRequested event - does network protocol (outbound)
@@ -185,7 +188,12 @@ impl MeshEngine {
         let mut stream = MessageStream::new(recv);
         
         let peer_pubkey: PubKey = peer_id.to_lattice();
-        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_pubkey);
+        
+        let store_id = store.id();
+        let peer_store = self.peer_stores.read().await.get(&store_id).cloned()
+            .ok_or_else(|| NodeError::Actor(format!("PeerStore {} not registered during sync", store_id)))?;
+            
+        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_pubkey, &peer_store);
         let result = session.run_as_initiator().await?;
         
         sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;

@@ -5,8 +5,7 @@
 //! hold replicas of different state machine types.
 
 use crate::{
-    proto::storage::PeerSyncInfo,
-    store::{GapInfo, StoreError, SyncDiscrepancy, SyncNeeded, SyncState},
+    store::{GapInfo, StoreError, SyncState},
     SignedEntry, Uuid,
 };
 use lattice_model::types::PubKey;
@@ -42,17 +41,4 @@ pub trait SyncProvider: Send + Sync {
     fn subscribe_gaps(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<broadcast::Receiver<GapInfo>, StoreError>> + Send + '_>>;
-
-    fn subscribe_sync_needed(&self) -> broadcast::Receiver<SyncNeeded>;
-
-    fn set_peer_sync_state(
-        &self,
-        peer: PubKey,
-        info: PeerSyncInfo,
-    ) -> Pin<Box<dyn Future<Output = Result<SyncDiscrepancy, StoreError>> + Send + '_>>;
-
-    fn get_peer_sync_state(
-        &self,
-        peer: PubKey,
-    ) -> Pin<Box<dyn Future<Output = Option<PeerSyncInfo>> + Send + '_>>;
 }

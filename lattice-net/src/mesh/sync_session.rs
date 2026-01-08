@@ -11,6 +11,7 @@ use lattice_model::types::PubKey;
 use lattice_node::AuthorizedStore;
 use lattice_kernel::proto::storage::SignedEntry;
 use lattice_kernel::proto::network::{PeerMessage, peer_message, AuthorRange, FetchRequest, FetchResponse, StatusRequest, StatusResponse};
+use crate::peer_sync_store::PeerSyncStore;
 
 /// Result of a sync session
 #[derive(Debug, Default)]
@@ -25,6 +26,7 @@ pub struct SyncSession<'a> {
     sink: &'a mut MessageSink,
     stream: &'a mut MessageStream,
     peer_id: PubKey,
+    peer_store: &'a PeerSyncStore,
 }
 
 impl<'a> SyncSession<'a> {
@@ -33,8 +35,9 @@ impl<'a> SyncSession<'a> {
         sink: &'a mut MessageSink,
         stream: &'a mut MessageStream,
         peer_id: PubKey,
+        peer_store: &'a PeerSyncStore,
     ) -> Self {
-        Self { store, sink, stream, peer_id }
+        Self { store, sink, stream, peer_id, peer_store }
     }
     
     /// Run as initiator - sends StatusRequest first, receives StatusResponse
@@ -116,7 +119,7 @@ impl<'a> SyncSession<'a> {
             sync_state: Some(state.to_proto()),
             updated_at: now,
         };
-        let _ = self.store.set_peer_sync_state(&self.peer_id, info).await;
+        let _ = self.peer_store.set_peer_sync_state(&self.peer_id, info);
     }
     
     fn compute_missing(my_state: &SyncState, peer_state: &SyncState) -> Vec<AuthorRange> {

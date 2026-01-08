@@ -12,7 +12,6 @@
 mod actor;
 mod error;
 mod handle;
-mod peer_sync_store;
 
 // Public submodules
 pub mod sigchain;
@@ -21,7 +20,6 @@ pub mod sigchain;
 pub use actor::{ReplicationController, ReplicationControllerCmd, ReplicationControllerError};
 pub use error::{ParentValidationError, StoreError, StateError};
 pub use handle::{OpenedStore, Store, StoreInfo, StoreHandle, ActorRunner};
-pub use peer_sync_store::PeerSyncStore;
 
 // Re-exports from sigchain submodule
 pub use sigchain::log::{Log, LogError};
