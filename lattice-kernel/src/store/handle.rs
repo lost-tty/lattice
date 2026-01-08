@@ -75,9 +75,9 @@ impl<S> std::fmt::Debug for Store<S> {
 /// Generic over state machine type `S`. Caller provides the opened state.
 pub struct OpenedStore<S> {
     store_id: Uuid,
-    sigchain_dir: PathBuf,
     state: Arc<S>,
     entries_replayed: u64,
+    chain_manager: Option<SigChainManager>,
 }
 
 impl<S: StateMachine + 'static> OpenedStore<S> {
@@ -93,7 +93,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
         let mut chain_manager = SigChainManager::new(&sigchain_dir)?;
         let entries_replayed = replay_sigchains(&mut chain_manager, &state)?;
         
-        Ok(Self { store_id, sigchain_dir, state, entries_replayed })
+        Ok(Self { store_id, state, entries_replayed, chain_manager: Some(chain_manager) })
     }
 
     /// Get the store ID
@@ -107,8 +107,8 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
 
         let state_for_actor = self.state.clone();
         
-        // Reload chain manager from the dir since we don't hold it in OpenedStore
-        let chain_manager = SigChainManager::new(&self.sigchain_dir)?;
+        // Use the pre-initialized chain manager
+        let chain_manager = self.chain_manager.expect("OpenedStore must have chain_manager");
         
         let actor = ReplicationController::new(
             state_for_actor, chain_manager,
