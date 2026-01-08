@@ -340,7 +340,7 @@ impl Node {
     /// Returns the mesh ID (same as root store ID).
     pub async fn create_mesh(&self) -> Result<Uuid, NodeError> {
         let store_id = self.registry.create(Uuid::new_v4(), |path| {
-            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
         })?;
         
         // Register mesh in meta.db
@@ -356,7 +356,7 @@ impl Node {
         
         // Open the store and write our node info as separate keys
         let (store, _) = self.registry.get_or_open(store_id, |path| {
-            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
         })?;
         let kv = KvHandle::new(store.clone());
         let pubkey_hex = hex::encode(self.node.public_key());
@@ -456,7 +456,7 @@ impl Node {
     pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<KvStore, NodeError> {
         // Create local store with that UUID
         self.registry.create(store_id, |path| {
-            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
         })?;
         
         // Register mesh in meta.db (as a member, not creator)
@@ -472,7 +472,7 @@ impl Node {
         
         // Open and cache the handle (registry caches it)
         let (store, _) = self.registry.get_or_open(store_id, |path| {
-            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
         })?;
         let handle = KvHandle::new(store);
         
@@ -552,14 +552,14 @@ impl Node {
     
     fn create_store_internal(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
         self.registry.create(store_id, |path| {
-            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
         })?;
         Ok(store_id)
     }
 
     pub fn open_root_store(&self, store_id: Uuid) -> Result<(Store<KvState>, StoreInfo), NodeError> {
         self.registry.get_or_open(store_id, |path| {
-            KvState::open(path).map_err(|e| StateError::KvState(e.to_string()))
+            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
         }).map_err(NodeError::from)
     }
     

@@ -1,7 +1,7 @@
 //! Store module - Generic replicated state with sigchain validation
 //!
 //! This module encapsulates:
-//! - ReplicatedState<S>: Actor that owns StateMachine + SigChain
+//! - ReplicationController<S>: Actor that owns StateMachine + SigChain
 //! - Store<S>: Async handle for consumers
 //! - SigChain: entry validation and signing (source of truth)
 //! - SyncState: sync protocol state tracking
@@ -18,7 +18,7 @@ mod peer_sync_store;
 pub mod sigchain;
 
 // Public API - types needed by consumers
-pub use actor::{ReplicatedState, ReplicatedStateCmd, ReplicatedStateError};
+pub use actor::{ReplicationController, ReplicationControllerCmd, ReplicationControllerError};
 pub use error::{ParentValidationError, StoreError, StateError};
 pub use handle::{OpenedStore, Store, StoreInfo, StoreHandle};
 pub use peer_sync_store::PeerSyncStore;

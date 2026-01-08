@@ -53,9 +53,6 @@ pub enum StateError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-
-    #[error("KvState error: {0}")]
-    KvState(String),
 }
 
 /// Errors that occur when validating parent_hashes against current state

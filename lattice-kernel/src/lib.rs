@@ -23,7 +23,7 @@ pub use lattice_model::{NodeError, NodeIdentity, PeerStatus};
 // Store exports (replication engine)
 pub use store::{LogError, MissingRange, SyncDiscrepancy, SyncNeeded, SyncState};
 pub use store::{OpenedStore, Store, StoreInfo, StateError};
-pub use store::{ReplicatedState, ReplicatedStateCmd, ReplicatedStateError};
+pub use store::{ReplicationController, ReplicationControllerCmd, ReplicationControllerError};
 pub use sync_provider::SyncProvider;
 
 // Re-exports from dependencies

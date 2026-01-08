@@ -1,4 +1,4 @@
-//! ReplicatedState - dedicated thread that owns StateMachine + SigChain and processes commands
+//! ReplicationController - dedicated thread that owns StateMachine + SigChain and processes commands
 //!
 //! This actor is generic over any StateMachine implementation.
 
@@ -18,11 +18,11 @@ use lattice_model::{LogEntry, StateMachine};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-/// Commands sent to the ReplicatedState actor
+/// Commands sent to the ReplicationController actor
 ///
 /// These are state-machine agnostic replication commands.
 /// State-machine-specific commands (like KV Get/Put) live in the state machine's crate.
-pub enum ReplicatedStateCmd {
+pub enum ReplicationControllerCmd {
     /// Get current log sequence
     LogSeq { resp: oneshot::Sender<u64> },
     /// Get applied sequence
@@ -95,61 +95,61 @@ pub enum ReplicatedStateCmd {
 }
 
 #[derive(Debug)]
-pub enum ReplicatedStateError {
+pub enum ReplicationControllerError {
     State(StateError),
     SigChain(SigChainError),
 }
 
-impl From<StateError> for ReplicatedStateError {
+impl From<StateError> for ReplicationControllerError {
     fn from(e: StateError) -> Self {
-        ReplicatedStateError::State(e)
+        ReplicationControllerError::State(e)
     }
 }
 
-impl From<SigChainError> for ReplicatedStateError {
+impl From<SigChainError> for ReplicationControllerError {
     fn from(e: SigChainError) -> Self {
-        ReplicatedStateError::SigChain(e)
+        ReplicationControllerError::SigChain(e)
     }
 }
 
-impl std::fmt::Display for ReplicatedStateError {
+impl std::fmt::Display for ReplicationControllerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReplicatedStateError::State(e) => write!(f, "State error: {}", e),
-            ReplicatedStateError::SigChain(e) => write!(f, "SigChain error: {}", e),
+            ReplicationControllerError::State(e) => write!(f, "State error: {}", e),
+            ReplicationControllerError::SigChain(e) => write!(f, "SigChain error: {}", e),
         }
     }
 }
 
-impl std::error::Error for ReplicatedStateError {}
+impl std::error::Error for ReplicationControllerError {}
 
-/// ReplicatedState - actor that owns StateMachine + SigChain
+/// ReplicationController - actor that owns StateMachine + SigChain
 ///
 /// Runs in its own thread, processes replication commands.
 /// Generic over state machine type `S`.
 ///
 /// State is held in Arc for sharing with Store handle (for direct reads).
-pub struct ReplicatedState<S: StateMachine> {
+pub struct ReplicationController<S: StateMachine> {
     state: std::sync::Arc<S>,
     chain_manager: SigChainManager,
     peer_store: PeerSyncStore,
     node: NodeIdentity,
 
-    rx: mpsc::Receiver<ReplicatedStateCmd>,
+    rx: mpsc::Receiver<ReplicationControllerCmd>,
     /// Broadcast sender for emitting entries after they're committed locally
     entry_tx: broadcast::Sender<SignedEntry>,
     /// Broadcast sender for sync-needed events (when we detect we're behind a peer)
     sync_needed_tx: broadcast::Sender<SyncNeeded>,
 }
 
-impl<S: StateMachine> ReplicatedState<S> {
-    /// Create a new ReplicatedState (but don't start the thread yet)
+impl<S: StateMachine> ReplicationController<S> {
+    /// Create a new ReplicationController (but don't start the thread yet)
     pub fn new(
         state: std::sync::Arc<S>,
         logs_dir: std::path::PathBuf,
         node: NodeIdentity,
 
-        rx: mpsc::Receiver<ReplicatedStateCmd>,
+        rx: mpsc::Receiver<ReplicationControllerCmd>,
         entry_tx: broadcast::Sender<SignedEntry>,
         sync_needed_tx: broadcast::Sender<SyncNeeded>,
     ) -> Result<Self, StateError> {
@@ -179,7 +179,7 @@ impl<S: StateMachine> ReplicatedState<S> {
     pub fn run(mut self) {
         while let Some(cmd) = self.rx.blocking_recv() {
             match cmd {
-                ReplicatedStateCmd::LogSeq { resp } => {
+                ReplicationControllerCmd::LogSeq { resp } => {
                     let local_author = self.node.public_key();
                     let len = self
                         .chain_manager
@@ -188,7 +188,7 @@ impl<S: StateMachine> ReplicatedState<S> {
                         .unwrap_or(0);
                     let _ = resp.send(len);
                 }
-                ReplicatedStateCmd::AppliedSeq { resp } => {
+                ReplicationControllerCmd::AppliedSeq { resp } => {
                     let author = self.node.public_key();
                     // Get tip from sigchain, not state machine
                     let result = self
@@ -199,7 +199,7 @@ impl<S: StateMachine> ReplicatedState<S> {
                         .unwrap_or(0);
                     let _ = resp.send(Ok(result));
                 }
-                ReplicatedStateCmd::ChainTip { author, resp } => {
+                ReplicationControllerCmd::ChainTip { author, resp } => {
                     // Get tip from sigchain, not state machine
                     let result = self
                         .chain_manager
@@ -208,42 +208,42 @@ impl<S: StateMachine> ReplicatedState<S> {
                         .map(|tip| tip.clone().into());
                     let _ = resp.send(Ok(result));
                 }
-                ReplicatedStateCmd::SyncState { resp } => {
+                ReplicationControllerCmd::SyncState { resp } => {
                     let _ = resp.send(Ok(self.chain_manager.sync_state()));
                 }
-                ReplicatedStateCmd::IngestEntry { entry, resp } => {
+                ReplicationControllerCmd::IngestEntry { entry, resp } => {
                     let result = self.apply_ingested_entry(&entry).map_err(|e| match e {
-                        ReplicatedStateError::SigChain(e) => StateError::from(e),
-                        ReplicatedStateError::State(e) => e,
+                        ReplicationControllerError::SigChain(e) => StateError::from(e),
+                        ReplicationControllerError::State(e) => e,
                     });
                     let _ = resp.send(result);
                 }
-                ReplicatedStateCmd::Submit { payload, causal_deps, resp } => {
+                ReplicationControllerCmd::Submit { payload, causal_deps, resp } => {
                     let result = self
                         .create_and_commit_local_entry(payload, causal_deps)
                         .map_err(|e| match e {
-                            ReplicatedStateError::SigChain(e) => StateError::from(e),
-                            ReplicatedStateError::State(e) => e,
+                            ReplicationControllerError::SigChain(e) => StateError::from(e),
+                            ReplicationControllerError::State(e) => e,
                         });
                     let _ = resp.send(result);
                 }
-                ReplicatedStateCmd::LogStats { resp } => {
+                ReplicationControllerCmd::LogStats { resp } => {
                     let _ = resp.send(self.chain_manager.log_stats());
                 }
-                ReplicatedStateCmd::LogPaths { resp } => {
+                ReplicationControllerCmd::LogPaths { resp } => {
                     let _ = resp.send(self.chain_manager.log_paths());
                 }
-                ReplicatedStateCmd::OrphanList { resp } => {
+                ReplicationControllerCmd::OrphanList { resp } => {
                     let _ = resp.send(self.chain_manager.orphan_list());
                 }
-                ReplicatedStateCmd::OrphanCleanup { resp } => {
+                ReplicationControllerCmd::OrphanCleanup { resp } => {
                     let removed = self.cleanup_stale_orphans();
                     let _ = resp.send(removed);
                 }
-                ReplicatedStateCmd::SubscribeGaps { resp } => {
+                ReplicationControllerCmd::SubscribeGaps { resp } => {
                     let _ = resp.send(self.chain_manager.subscribe_gaps());
                 }
-                ReplicatedStateCmd::SetPeerSyncState { peer, info, resp } => {
+                ReplicationControllerCmd::SetPeerSyncState { peer, info, resp } => {
                     // Compute bidirectional discrepancy
                     let discrepancy = if let Some(ref peer_sync_state) = info.sync_state {
                         let peer_state = SyncState::from_proto(peer_sync_state);
@@ -267,14 +267,14 @@ impl<S: StateMachine> ReplicatedState<S> {
                         .map(|_| discrepancy);
                     let _ = resp.send(result);
                 }
-                ReplicatedStateCmd::GetPeerSyncState { peer, resp } => {
+                ReplicationControllerCmd::GetPeerSyncState { peer, resp } => {
                     let _ = resp.send(self.peer_store.get_peer_sync_state(&peer).ok().flatten());
                 }
-                ReplicatedStateCmd::ListPeerSyncStates { resp } => {
+                ReplicationControllerCmd::ListPeerSyncStates { resp } => {
                     let result = self.peer_store.list_peer_sync_states().unwrap_or_default();
                     let _ = resp.send(result);
                 }
-                ReplicatedStateCmd::StreamEntriesInRange {
+                ReplicationControllerCmd::StreamEntriesInRange {
                     author,
                     from_seq,
                     to_seq,
@@ -283,7 +283,7 @@ impl<S: StateMachine> ReplicatedState<S> {
                     let result = self.do_stream_entries_in_range(&author, from_seq, to_seq);
                     let _ = resp.send(result);
                 }
-                ReplicatedStateCmd::Shutdown => {
+                ReplicationControllerCmd::Shutdown => {
                     break;
                 }
             }
@@ -324,7 +324,7 @@ impl<S: StateMachine> ReplicatedState<S> {
         &mut self,
         payload: Vec<u8>,
         causal_deps: Vec<Hash>,
-    ) -> Result<Hash, ReplicatedStateError> {
+    ) -> Result<Hash, ReplicationControllerError> {
         let author = self.node.public_key();
 
         // Get or create chain, then build entry using existing helper
@@ -347,10 +347,10 @@ impl<S: StateMachine> ReplicatedState<S> {
     ///
     /// Note: Signature is verified here as defense in depth, even though
     /// AuthorizedStore also verifies at the network layer.
-    fn apply_ingested_entry(&mut self, entry: &SignedEntry) -> Result<(), ReplicatedStateError> {
+    fn apply_ingested_entry(&mut self, entry: &SignedEntry) -> Result<(), ReplicationControllerError> {
         // Verify signature - defense in depth
         entry.verify().map_err(|_| {
-            ReplicatedStateError::State(StateError::Unauthorized("Invalid signature".to_string()))
+            ReplicationControllerError::State(StateError::Unauthorized("Invalid signature".to_string()))
         })?;
 
         self.commit_entry(entry)
@@ -361,7 +361,7 @@ impl<S: StateMachine> ReplicatedState<S> {
     /// - Applies to State via StateMachine::apply
     /// - Commits to SigChain log
     /// - Broadcasts to listeners
-    fn commit_entry(&mut self, signed_entry: &SignedEntry) -> Result<(), ReplicatedStateError> {
+    fn commit_entry(&mut self, signed_entry: &SignedEntry) -> Result<(), ReplicationControllerError> {
         use lattice_model::Op;
 
         // Work queue for processing orphans that become ready
@@ -482,7 +482,7 @@ impl<S: StateMachine> ReplicatedState<S> {
                 }
                 SigchainValidation::Error(e) => {
                     if is_primary_entry {
-                        return Err(ReplicatedStateError::SigChain(e));
+                        return Err(ReplicationControllerError::SigChain(e));
                     } else {
                         eprintln!("[warn] Cascaded orphan failed sigchain validation: {:?}", e);
                     }
@@ -1000,9 +1000,9 @@ mod tests {
         // So "deleting state.db" logic from original test doesn't apply directly.
         // IMPORTANT: The real test relies on persistence.
         // But `MockStateMachine` here is in-memory only.
-        // So "replay" logic is: when we re-open `ReplicatedState`, does it replay from `SigChain` (which IS on disk)?
-        // Yes, `SigChainManager` loads logs from disk. `OpenedStore` (or `ReplicatedState::new`) should trigger replay?
-        // Actually, `ReplicatedState::new` doesn't auto-replay in current code... or does it?
+        // So "replay" logic is: when we re-open `ReplicationController`, does it replay from `SigChain` (which IS on disk)?
+        // Yes, `SigChainManager` loads logs from disk. `OpenedStore` (or `ReplicationController::new`) should trigger replay?
+        // Actually, `ReplicationController::new` doesn't auto-replay in current code... or does it?
         // `OpenedStore` triggers replay.
         
         // In the original test using KvState/Redb, deleting the db file simulated loss.

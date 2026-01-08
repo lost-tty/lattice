@@ -23,7 +23,7 @@ pub use lattice_kernel::{
     NodeIdentity, PeerStatus,
     Entry, SignedEntry,
     StateError, Store, StoreInfo, OpenedStore,
-    ReplicatedState, ReplicatedStateCmd, ReplicatedStateError,
+    ReplicationController, ReplicationControllerCmd, ReplicationControllerError,
     LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded,
     Uuid, SigningKey,
     MAX_ENTRY_SIZE,

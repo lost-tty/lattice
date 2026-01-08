@@ -1,6 +1,6 @@
 //! Replica - Handle to a replicated state machine
 
-use super::actor::{ReplicatedState, ReplicatedStateCmd};
+use super::actor::{ReplicationController, ReplicationControllerCmd};
 use super::error::StoreError;
 use super::SyncNeeded;
 use crate::entry::SignedEntry;
@@ -49,7 +49,7 @@ impl<S: StateMachine + Send + Sync + 'static> StoreHandle for Store<S> {
 pub struct Store<S> {
     store_id: Uuid,
     state: std::sync::Arc<S>,
-    tx: mpsc::Sender<ReplicatedStateCmd>,
+    tx: mpsc::Sender<ReplicationControllerCmd>,
     actor_handle: Option<std::thread::JoinHandle<()>>,
     entry_tx: broadcast::Sender<SignedEntry>,
     sync_needed_tx: broadcast::Sender<SyncNeeded>,
@@ -112,7 +112,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
         let (sync_needed_tx, _sync_needed_rx) = broadcast::channel(64);
 
         let state_for_actor = self.state.clone();
-        let actor = ReplicatedState::new(
+        let actor = ReplicationController::new(
             state_for_actor, self.sigchain_dir.clone(),
             node, rx, entry_tx.clone(), sync_needed_tx.clone(),
         )?;
@@ -168,20 +168,20 @@ impl<S: StateMachine> Store<S> {
     }
 
     pub async fn log_seq(&self) -> u64 {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
-            .send(ReplicatedStateCmd::LogSeq { resp: resp_tx })
+            .send(ReplicationControllerCmd::LogSeq { resp: resp_tx })
             .await;
         resp_rx.await.unwrap_or(0)
     }
 
     pub async fn applied_seq(&self) -> Result<u64, StoreError> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
-            .send(ReplicatedStateCmd::AppliedSeq { resp: resp_tx })
+            .send(ReplicationControllerCmd::AppliedSeq { resp: resp_tx })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
         resp_rx
@@ -194,10 +194,10 @@ impl<S: StateMachine> Store<S> {
         &self,
         author: &PubKey,
     ) -> Result<Option<crate::proto::storage::ChainTip>, StoreError> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
-            .send(ReplicatedStateCmd::ChainTip {
+            .send(ReplicationControllerCmd::ChainTip {
                 author: *author,
                 resp: resp_tx,
             })
@@ -211,11 +211,11 @@ impl<S: StateMachine> Store<S> {
 
     /// Get log directory statistics (file count, total bytes, orphan count)
     pub async fn log_stats(&self) -> (usize, u64, usize) {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
-            .send(ReplicatedStateCmd::LogStats { resp: resp_tx })
+            .send(ReplicationControllerCmd::LogStats { resp: resp_tx })
             .await;
         resp_rx.await.unwrap_or((0, 0, 0))
     }
@@ -223,11 +223,11 @@ impl<S: StateMachine> Store<S> {
     /// Get detailed log file info (filename, size, checksum)
     /// Heavy I/O and hashing is done via spawn_blocking to avoid blocking the actor.
     pub async fn log_stats_detailed(&self) -> Vec<(String, u64, String)> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
-            .send(ReplicatedStateCmd::LogPaths { resp: resp_tx })
+            .send(ReplicationControllerCmd::LogPaths { resp: resp_tx })
             .await;
         let paths = resp_rx.await.unwrap_or_default();
 
@@ -250,11 +250,11 @@ impl<S: StateMachine> Store<S> {
 
     /// Get list of orphaned entries
     pub async fn orphan_list(&self) -> Vec<super::OrphanInfo> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
-            .send(ReplicatedStateCmd::OrphanList { resp: resp_tx })
+            .send(ReplicationControllerCmd::OrphanList { resp: resp_tx })
             .await;
         resp_rx.await.unwrap_or_default()
     }
@@ -262,20 +262,20 @@ impl<S: StateMachine> Store<S> {
     /// Cleanup stale orphans that are already in the sigchain
     /// Returns the number of orphans removed
     pub async fn orphan_cleanup(&self) -> usize {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
-            .send(ReplicatedStateCmd::OrphanCleanup { resp: resp_tx })
+            .send(ReplicationControllerCmd::OrphanCleanup { resp: resp_tx })
             .await;
         resp_rx.await.unwrap_or(0)
     }
 
     pub async fn sync_state(&self) -> Result<super::SyncState, StoreError> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
-            .send(ReplicatedStateCmd::SyncState { resp: resp_tx })
+            .send(ReplicationControllerCmd::SyncState { resp: resp_tx })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
         resp_rx
@@ -285,10 +285,10 @@ impl<S: StateMachine> Store<S> {
     }
 
     pub async fn ingest_entry(&self, entry: SignedEntry) -> Result<(), StoreError> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
-            .send(ReplicatedStateCmd::IngestEntry {
+            .send(ReplicationControllerCmd::IngestEntry {
                 entry: entry,
                 resp: resp_tx,
             })
@@ -304,10 +304,10 @@ impl<S: StateMachine> Store<S> {
     pub async fn subscribe_gaps(
         &self,
     ) -> Result<broadcast::Receiver<super::GapInfo>, StoreError> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
-            .send(ReplicatedStateCmd::SubscribeGaps { resp: resp_tx })
+            .send(ReplicationControllerCmd::SubscribeGaps { resp: resp_tx })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
         resp_rx.await.map_err(|_| StoreError::ChannelClosed)
@@ -322,10 +322,10 @@ impl<S: StateMachine> Store<S> {
         peer: &PubKey,
         info: crate::proto::storage::PeerSyncInfo,
     ) -> Result<super::SyncDiscrepancy, StoreError> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
-            .send(ReplicatedStateCmd::SetPeerSyncState {
+            .send(ReplicationControllerCmd::SetPeerSyncState {
                 peer: *peer,
                 info,
                 resp: resp_tx,
@@ -343,11 +343,11 @@ impl<S: StateMachine> Store<S> {
         &self,
         peer: &PubKey,
     ) -> Option<crate::proto::storage::PeerSyncInfo> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
-            .send(ReplicatedStateCmd::GetPeerSyncState {
+            .send(ReplicationControllerCmd::GetPeerSyncState {
                 peer: *peer,
                 resp: resp_tx,
             })
@@ -359,11 +359,11 @@ impl<S: StateMachine> Store<S> {
     pub async fn list_peer_sync_states(
         &self,
     ) -> Vec<(PubKey, crate::proto::storage::PeerSyncInfo)> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
-            .send(ReplicatedStateCmd::ListPeerSyncStates { resp: resp_tx })
+            .send(ReplicationControllerCmd::ListPeerSyncStates { resp: resp_tx })
             .await;
         resp_rx.await.unwrap_or_default()
     }
@@ -376,10 +376,10 @@ impl<S: StateMachine> Store<S> {
         from_seq: u64,
         to_seq: u64,
     ) -> Result<tokio::sync::mpsc::Receiver<SignedEntry>, StoreError> {
-        use ReplicatedStateCmd;
+        use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
-            .send(ReplicatedStateCmd::StreamEntriesInRange {
+            .send(ReplicationControllerCmd::StreamEntriesInRange {
                 author: *author,
                 from_seq,
                 to_seq,
@@ -418,7 +418,7 @@ impl<S: StateMachine> StateWriter for Store<S> {
         let tx = self.tx.clone();
         Box::pin(async move {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-            tx.send(ReplicatedStateCmd::Submit {
+            tx.send(ReplicationControllerCmd::Submit {
                 payload,
                 causal_deps,
                 resp: resp_tx,
@@ -437,7 +437,7 @@ impl<S> Drop for Store<S> {
     fn drop(&mut self) {
         // Only send shutdown if we own the actor (non-cloned handle)
         if let Some(handle) = self.actor_handle.take() {
-            let _ = self.tx.try_send(ReplicatedStateCmd::Shutdown);
+            let _ = self.tx.try_send(ReplicationControllerCmd::Shutdown);
             let _ = handle.join();
         }
         // Clones (actor_handle = None) don't send shutdown - actor keeps running
