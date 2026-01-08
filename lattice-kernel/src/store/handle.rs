@@ -220,32 +220,15 @@ impl<S: StateMachine> Store<S> {
         resp_rx.await.unwrap_or((0, 0, 0))
     }
 
-    /// Get detailed log file info (filename, size, checksum)
-    /// Heavy I/O and hashing is done via spawn_blocking to avoid blocking the actor.
-    pub async fn log_stats_detailed(&self) -> Vec<(String, u64, String)> {
+    /// Get log file paths for diagnostics
+    pub async fn log_paths(&self) -> Vec<(String, u64, std::path::PathBuf)> {
         use ReplicationControllerCmd;
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
             .send(ReplicationControllerCmd::LogPaths { resp: resp_tx })
             .await;
-        let paths = resp_rx.await.unwrap_or_default();
-
-        // Do heavy I/O + hashing off the actor thread
-        tokio::task::spawn_blocking(move || {
-            paths
-                .into_iter()
-                .map(|(name, size, path)| {
-                    let checksum = match std::fs::read(&path) {
-                        Ok(data) => hex::encode(&blake3::hash(&data).as_bytes()[..8]),
-                        Err(_) => "????????".to_string(),
-                    };
-                    (name, size, checksum)
-                })
-                .collect()
-        })
-        .await
-        .unwrap_or_default()
+        resp_rx.await.unwrap_or_default()
     }
 
     /// Get list of orphaned entries

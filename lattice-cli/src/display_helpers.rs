@@ -220,7 +220,14 @@ pub async fn write_log_files(w: &mut Writer, h: &KvStore) {
     if file_count > 0 {
         let _ = writeln!(w);
         let _ = writeln!(w, "Log Files:");
-        for (name, size, checksum) in h.log_stats_detailed().await {
+        
+        let paths = h.log_paths().await;
+        // Calculate hashes locally (CLI-side) to avoid burdening the kernel
+        for (name, size, path) in paths {
+            let checksum = match std::fs::read(&path) {
+                Ok(data) => hex::encode(&blake3::hash(&data).as_bytes()[..8]),
+                Err(_) => "????????".to_string(),
+            };
             let _ = writeln!(w, "  {} {:>10} bytes  {}", checksum, size, name);
         }
     }

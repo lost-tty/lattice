@@ -32,3 +32,4 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 owo-colors = "4.2"
 bs58 = { version = "0.5", features = ["check"] }
+blake3.workspace = true
