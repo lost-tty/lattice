@@ -5,7 +5,7 @@
 //! - Writes: Via StateWriter (goes through replication)
 
 use std::sync::Arc;
-use crate::{KvState, Head, StateError, KvPayload, Operation};
+use crate::{KvState, Head, StateError, KvPayload, Operation, Merge};
 use lattice_model::{StateWriter, StateWriterError, Introspectable, CommandDispatcher};
 use lattice_model::types::Hash;
 use lattice_model::replication::EntryStreamProvider;
@@ -101,7 +101,7 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
                 let req = GetRequest::decode(buf.as_slice())?;
                 
                 let heads = self.get(&req.key)?;
-                let val = heads.iter().max_by_key(|h| h.hlc).map(|h| h.value.clone()).unwrap_or_default();
+                let val = heads.lww().unwrap_or_default();
                 let resp = GetResponse { value: val };
                 
                 // Pack response
@@ -119,8 +119,9 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
                 
                 let mut items = Vec::new();
                 self.scan(&req.prefix, None, |key, heads| {
-                    let val = heads.iter().max_by_key(|h| h.hlc).map(|h| h.value.clone()).unwrap_or_default();
-                    items.push(crate::proto::KeyValuePair { key, value: val });
+                    if let Some(val) = heads.lww() {
+                        items.push(crate::proto::KeyValuePair { key, value: val });
+                    }
                     Ok(true)
                 })?;
                 
