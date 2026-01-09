@@ -44,12 +44,15 @@ pub trait Introspectable: Send + Sync {
 
     /// Check if a log payload matches a user-specified filter.
     ///
-    /// This allows the state machine to define domain-specific filtering logic
-    /// (e.g., checking if a KV op touches a specific key).
-    ///
     /// The default implementation returns false (no matches).
     fn matches_filter(&self, _payload: &DynamicMessage, _filter: &str) -> bool {
         false
+    }
+
+    /// Summarize a payload for history display.
+    /// Returns a list of human-readable summary strings (e.g. "key=val", "delete key").
+    fn summarize_payload(&self, _payload: &DynamicMessage) -> Vec<String> {
+        Vec::new()
     }
 }
 

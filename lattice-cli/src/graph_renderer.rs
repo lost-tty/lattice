@@ -11,28 +11,26 @@ pub const SPACE: u8 = 0;
 pub const DOT: u8 = 1;      // ● entry marker
 pub const CIRCLE: u8 = 2;   // ○ merge entry marker
 pub const ROOT: u8 = 3;     // ⊙ root entry marker (no parents)
-pub const TOMBSTONE: u8 = 4; // ✖ delete entry marker
-pub const VER: u8 = 5;      // │ vertical line
-pub const HOR: u8 = 6;      // ─ horizontal line
-pub const CROSS: u8 = 7;    // ┼ crossing
-pub const R_U: u8 = 8;      // ╰ right-up corner
-pub const R_D: u8 = 9;      // ╭ right-down corner
-pub const L_D: u8 = 10;     // ╮ left-down corner
-pub const L_U: u8 = 11;     // ╯ left-up corner
-pub const VER_L: u8 = 12;   // ┤ vertical with left branch
-pub const VER_R: u8 = 13;   // ├ vertical with right branch
-pub const HOR_U: u8 = 14;   // ┴ horizontal with up branch
-pub const HOR_D: u8 = 15;   // ┬ horizontal with down branch
-pub const ARR_L: u8 = 16;   // ⟨ left angle bracket (merge indicator)
-pub const ARR_R: u8 = 17;   // ⟩ right angle bracket (merge indicator)
+pub const VER: u8 = 4;      // │ vertical line
+pub const HOR: u8 = 5;      // ─ horizontal line
+pub const CROSS: u8 = 6;    // ┼ crossing
+pub const R_U: u8 = 7;      // ╰ right-up corner
+pub const R_D: u8 = 8;      // ╭ right-down corner
+pub const L_D: u8 = 9;      // ╮ left-down corner
+pub const L_U: u8 = 10;     // ╯ left-up corner
+pub const VER_L: u8 = 11;   // ┤ vertical with left branch
+pub const VER_R: u8 = 12;   // ├ vertical with right branch
+pub const HOR_U: u8 = 13;   // ┴ horizontal with up branch
+pub const HOR_D: u8 = 14;   // ┬ horizontal with down branch
+pub const ARR_L: u8 = 15;   // ⟨ left angle bracket (merge indicator)
+pub const ARR_R: u8 = 16;   // ⟩ right angle bracket (merge indicator)
 
 // Character mappings
-const CHARS: [char; 18] = [
+const CHARS: [char; 17] = [
     ' ',  // SPACE
     '●',  // DOT
     '○',  // CIRCLE
     '⊙',  // ROOT
-    '✖',  // TOMBSTONE
     '│',  // VER
     '─',  // HOR
     '┼',  // CROSS
@@ -271,14 +269,11 @@ impl Grid {
     }
 }
 
-/// Entry info for history rendering
 #[derive(Clone)]
 pub struct RenderEntry {
-    pub key: Vec<u8>,
+    pub label: String,
     pub author: PubKey,
     pub hlc: u64,
-    pub value: Vec<u8>,
-    pub tombstone: bool,
     pub causal_deps: Vec<Hash>,
     pub is_merge: bool,
 }
@@ -446,7 +441,7 @@ pub fn render_dag(
                 
                 // Check if parent_col is occupied by an unrelated line
                 let is_blocked = active_columns.contains(&parent_col) && 
-                               column_tips.get(&parent_col) != Some(&parent);
+                                column_tips.get(&parent_col) != Some(&parent);
                 
                 // Also check reuse gap if it's NOT active (meaning we are trying to reuse a JUST freed column from parent??)
                 // If parent owns it, active_columns should have it. 
@@ -527,10 +522,8 @@ pub fn render_dag(
         let is_root = parents_in_set.is_empty();
         
         // Draw entry marker with author color
-        // Priority: tombstone > root > merge > normal
-        let marker = if entry.tombstone { 
-            TOMBSTONE 
-        } else if is_root { 
+        // Priority: root > merge > normal
+        let marker = if is_root { 
             ROOT 
         } else if entry.is_merge { 
             CIRCLE 
@@ -542,17 +535,11 @@ pub fn render_dag(
         // Create colored label
         let hash_short = hex::encode(&hash[..4]);
         let author_short = hex::encode(&entry.author[..4]);
-        let key_display = String::from_utf8_lossy(&entry.key);
-        let val_str = if entry.tombstone { 
-            "⊗".to_string() 
-        } else { 
-            String::from_utf8_lossy(&entry.value).to_string()
-        };
         
         // Format with ANSI color: \x1b[{color}m ... \x1b[0m
         labels[row] = format!(
-            "\x1b[{}m[{}] {}={} \x1b[{}m(a:{})\x1b[0m", 
-            color_code, hash_short, key_display, val_str, color_code, author_short
+            "\x1b[{}m[{}] {} \x1b[{}m(a:{})\x1b[0m", 
+            color_code, hash_short, entry.label, color_code, author_short
         );
         
         // Draw connections to parents (use parents_in_set from above)

@@ -731,6 +731,56 @@ impl Introspectable for KvState {
          
          false
     }
+    
+    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<String> {
+        payload_summary::summarize(payload)
+    }
+}
+
+mod payload_summary {
+    use prost_reflect::{DynamicMessage, Value};
+
+    pub fn summarize(payload: &DynamicMessage) -> Vec<String> {
+        if let Some(Value::List(ops)) = payload.get_field_by_name("ops").map(|v| v.into_owned()) {
+            let entries: Vec<_> = ops.iter().filter_map(summarize_op).collect();
+            if !entries.is_empty() { return entries; }
+        }
+        format_entry(payload, false).into_iter().collect()
+    }
+
+    fn summarize_op(op: &Value) -> Option<String> {
+        let Value::Message(m) = op else { return None };
+        get_msg(m, "delete").and_then(|d| format_entry(&d, true))
+            .or_else(|| get_msg(m, "put").and_then(|p| format_entry(&p, false)))
+    }
+
+    fn format_entry(msg: &DynamicMessage, is_delete: bool) -> Option<String> {
+        let k = String::from_utf8_lossy(&get_bytes(msg, "key")?).to_string();
+        let is_tombstone = matches!(
+            msg.get_field_by_name("tombstone").map(|f| f.into_owned()),
+            Some(Value::Bool(true))
+        );
+        if is_delete || is_tombstone {
+            Some(format!("{} ⊗", k))
+        } else {
+            let v = get_bytes(msg, "value").map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+            Some(format!("{}={}", k, v))
+        }
+    }
+
+    fn get_bytes(msg: &DynamicMessage, field: &str) -> Option<Vec<u8>> {
+        match msg.get_field_by_name(field)?.as_ref() {
+            Value::Bytes(b) if !b.is_empty() => Some(b.to_vec()),
+            _ => None,
+        }
+    }
+
+    fn get_msg(op: &DynamicMessage, field: &str) -> Option<DynamicMessage> {
+        match op.get_field_by_name(field)?.into_owned() {
+            Value::Message(m) => Some(m),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

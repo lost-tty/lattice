@@ -378,20 +378,26 @@ pub async fn cmd_history(_node: &Node, store: Option<&KvStore>, _mesh: Option<&M
                          // Determine value for display (heuristic: "value" field or "val" or provided key)
                          // Used for the graph node label. 
                          // We can still try to extract *some* value for the graph label even if generic.
-                         let display_val = extract_field_value(&msg, "value")
-                             .or_else(|| extract_field_value(&msg, "val"))
-                             .unwrap_or_else(|| vec![]);
+                         // Structured extraction of KV details via Introspection
+                         let summaries = h.state().summarize_payload(&msg);
                          
-                         let tombstone = false; 
+                         // Determine display label
+                         // If we have summaries, join them.
+                         // If not, try to reconstruct "key=value" from raw fields as fallback.
+                         let label = if !summaries.is_empty() {
+                             summaries.join(", ")
+                         } else {
+                             let key_bytes = extract_field_value(&msg, "key").unwrap_or_default();
+                             let val_bytes = extract_field_value(&msg, "value").unwrap_or_default();
+                             let key_str = String::from_utf8_lossy(&key_bytes);
+                             let val_str = String::from_utf8_lossy(&val_bytes);
+                             format!("{}={}", key_str, val_str)
+                         };
                          
                          entries.insert(hash, crate::graph_renderer::RenderEntry {
-                             key: filter_val.clone().map(|s| s.as_bytes().to_vec())
-                                 .or_else(|| extract_field_value(&msg, "key"))
-                                 .unwrap_or_default(),
+                             label,
                              author: *author,
                              hlc,
-                             value: display_val,
-                             tombstone,
                              causal_deps: causal_deps.clone(),
                              is_merge: causal_deps.len() > 1,
                          });
