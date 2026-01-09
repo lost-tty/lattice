@@ -111,14 +111,11 @@ pub struct PeerInfo {
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
     /// Store is ready (opened and available) - informational only
-    StoreReady(KvStore),
+    StoreReady { store_id: Uuid },
     /// Mesh is fully initialized and ready (store + network + perms)
-    MeshReady(Mesh),
-    /// Network store opened
-    NetworkStore { 
-        store: KvStore, 
-        peer_manager: std::sync::Arc<PeerManager>,
-    },
+    MeshReady { mesh_id: Uuid },
+    /// Network store opened and ready for sync
+    NetworkStoreReady { store_id: Uuid },
     /// Sync requested (catch up with peers)
     SyncRequested(Uuid),
     /// Request to join a mesh
@@ -318,12 +315,9 @@ impl Node {
                 meshes_guard.insert(mesh_id, mesh.clone());
             }
             
-            // Emit events for listeners - NetworkStore triggers server registration
-            let _ = self.event_tx.send(NodeEvent::StoreReady(mesh.root_store().clone()));
-            let _ = self.event_tx.send(NodeEvent::NetworkStore { 
-                store: mesh.root_store().clone(), 
-                peer_manager: mesh.peer_manager().clone(),
-            });
+            // Emit events for listeners - NetworkStoreReady triggers server registration
+            let _ = self.event_tx.send(NodeEvent::StoreReady { store_id: mesh_id });
+            let _ = self.event_tx.send(NodeEvent::NetworkStoreReady { store_id: mesh_id });
             let _ = self.event_tx.send(NodeEvent::SyncRequested(mesh_id));
         }
         
@@ -397,11 +391,8 @@ impl Node {
             meshes_guard.insert(store_id, mesh.clone());
         }
         
-        // Emit NetworkStore event - server will register for networking
-        let _ = self.event_tx.send(NodeEvent::NetworkStore { 
-            store: mesh.root_store().clone(), 
-            peer_manager: mesh.peer_manager().clone(),
-        });
+        // Emit NetworkStoreReady event - server will register for networking
+        let _ = self.event_tx.send(NodeEvent::NetworkStoreReady { store_id });
         
         Ok(store_id)
     }
@@ -454,8 +445,8 @@ impl Node {
             pending.remove(&mesh_id);
         }
         
-        let mesh = self.mesh_by_id(mesh_id).expect("mesh initialized");
-        let _ = self.event_tx.send(NodeEvent::MeshReady(mesh));
+        let mesh_id = self.mesh_by_id(mesh_id).expect("mesh initialized").id();
+        let _ = self.event_tx.send(NodeEvent::MeshReady { mesh_id });
         
         Ok(store)
     }
@@ -501,13 +492,10 @@ impl Node {
         let _ = self.publish_name_to(store_id).await;
         
         // Emit StoreReady for listeners waiting on join completion (like CLI)
-        let _ = self.event_tx.send(NodeEvent::StoreReady(handle.clone()));
+        let _ = self.event_tx.send(NodeEvent::StoreReady { store_id });
         
-        // Emit NetworkStore event - server will register for networking
-        let _ = self.event_tx.send(NodeEvent::NetworkStore { 
-            store: mesh.root_store().clone(), 
-            peer_manager: mesh.peer_manager().clone(),
-        });
+        // Emit NetworkStoreReady event - server will register for networking
+        let _ = self.event_tx.send(NodeEvent::NetworkStoreReady { store_id });
         
         // If we joined via a specific peer, emit SyncWithPeer to get initial data
         if let Some(peer) = via_peer {

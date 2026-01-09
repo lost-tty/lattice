@@ -3,20 +3,19 @@
 //! Handles both inbound (server) and outbound (client) mesh operations.
 //! Integrates `MeshEngine` logic directly into the service to avoid state duplication.
 
-use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
+use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN};
 use lattice_node::{Node, NodeEvent, NodeError};
 use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
-use lattice_node::AuthorizedStore;
+use crate::network_store::NetworkStore;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
-use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinResponse, StatusRequest, JoinRequest};
+use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinRequest};
 use tokio::sync::broadcast;
 use crate::peer_sync_store::PeerSyncStore;
-use futures_util::StreamExt;
 
 /// Result of a sync operation with a peer
 pub struct SyncResult {
@@ -25,7 +24,7 @@ pub struct SyncResult {
 }
 
 /// Type alias for the stores registry
-pub type StoresRegistry = Arc<RwLock<HashMap<Uuid, AuthorizedStore>>>;
+pub type StoresRegistry = Arc<RwLock<HashMap<Uuid, NetworkStore>>>;
 pub type PeerStoreRegistry = Arc<RwLock<HashMap<Uuid, Arc<PeerSyncStore>>>>;
 
 /// MeshService wraps Node + Endpoint + Gossip and provides mesh networking methods.
@@ -38,6 +37,7 @@ pub struct MeshService {
     peer_stores: PeerStoreRegistry,
     sessions: Arc<super::session::SessionTracker>,
     router: Router,
+    sync_engine: super::sync_engine::SyncEngine,
 }
 
 /// Protocol handler for lattice sync connections
@@ -59,7 +59,7 @@ impl ProtocolHandler for SyncProtocol {
         let stores = self.stores.clone();
         let peer_stores = self.peer_stores.clone();
         Box::pin(async move {
-            if let Err(e) = handle_connection(node, stores, peer_stores, conn).await {
+            if let Err(e) = super::handlers::handle_connection(node, stores, peer_stores, conn).await {
                 tracing::error!(error = %e, "Connection handler error");
             }
             Ok(())
@@ -97,6 +97,14 @@ impl MeshService {
         
         let sessions = Arc::new(super::session::SessionTracker::new());
         
+        // Create SyncEngine (owns sync protocol logic)
+        let sync_engine = super::sync_engine::SyncEngine::new(
+            endpoint.clone(),
+            stores.clone(),
+            peer_stores.clone(),
+            sessions.clone(),
+        );
+        
         let service = Arc::new(Self { 
             node: node.clone(), 
             endpoint,
@@ -105,6 +113,7 @@ impl MeshService {
             peer_stores,
             sessions: sessions.clone(),
             router,
+            sync_engine,
         });
         
         // Subscribe to node events and spawn handler
@@ -113,31 +122,20 @@ impl MeshService {
         tokio::spawn(async move {
             Self::run_event_handler(service_clone, event_rx).await;
         });
-
-        // Register any meshes that are already active (fix for race condition where Lattice CLI starts node before service)
+        
+        // CRITICAL: Register existing meshes that were loaded before this service started.
+        // Without this, we miss NetworkStoreReady events emitted during Node::new().
         if let Ok(meshes) = node.meta().list_meshes() {
-            fn register_mesh_recursive(service: &Arc<MeshService>, mesh: lattice_node::Mesh) {
-                let service = service.clone();
-                tokio::spawn(async move {
-                    tracing::info!(mesh_id = %mesh.id(), "Startup: Registering existing root store");
-                    service.register_store(mesh.kv().clone(), mesh.peer_manager().clone()).await;
-                    
-                    let stores_to_register: Vec<_> = if let Ok(apps) = mesh.store_manager().app_stores().read() {
-                         apps.values().map(|a| a.store.clone()).collect()
-                    } else {
-                         Vec::new()
-                    };
-
-                    for store in stores_to_register {
-                           tracing::info!(store_id = %store.id(), "Startup: Registering existing app store");
-                           service.register_store(store, mesh.peer_manager().clone()).await;
-                    }
-                });
-            }
-
             for (mesh_id, _) in meshes {
                 if let Some(mesh) = node.mesh_by_id(mesh_id) {
-                    register_mesh_recursive(&service, mesh);
+                    let service_inner = service.clone();
+                    tokio::spawn(async move {
+                        tracing::info!(store_id = %mesh_id, "Startup: Registering existing store");
+                        service_inner.register_store(
+                            mesh.root_store().clone(), 
+                            mesh.peer_manager().clone()
+                        ).await;
+                    });
                 }
             }
         }
@@ -168,6 +166,11 @@ impl MeshService {
     /// Access the peer store registry
     pub fn peer_stores(&self) -> &PeerStoreRegistry {
         &self.peer_stores
+    }
+    
+    /// Access the sync engine for sync operations
+    pub fn sync_engine(&self) -> &super::sync_engine::SyncEngine {
+        &self.sync_engine
     }
     
     /// Get currently connected peers with last-seen timestamp.
@@ -246,303 +249,149 @@ impl MeshService {
     pub async fn status_peer(&self, peer_id: iroh::PublicKey, store_id: Uuid, our_sync_state: Option<lattice_kernel::proto::storage::SyncState>) 
         -> Result<(u64, Option<lattice_kernel::proto::storage::SyncState>), LatticeNetError> 
     {
-        let start = std::time::Instant::now();
-        
-        let conn = self.endpoint.connect(peer_id).await
-            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
-        let (send, recv) = conn.open_bi().await
-            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
-        
-        let mut sink = MessageSink::new(send);
-        let mut stream = MessageStream::new(recv);
-        
-        let req = PeerMessage {
-            message: Some(peer_message::Message::StatusRequest(StatusRequest {
-                store_id: store_id.as_bytes().to_vec(),
-                sync_state: our_sync_state,
-            })),
-        };
-        sink.send(&req).await?;
-        
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            stream.recv()
-        ).await
-            .map_err(|_| LatticeNetError::Connection("Status request timed out".into()))?
-            ?
-            .ok_or_else(|| LatticeNetError::Connection("No status response".into()))?;
-        
-        let sync_state = match resp.message {
-            Some(peer_message::Message::StatusResponse(res)) => res.sync_state,
-            _ => return Err(LatticeNetError::Connection("Expected StatusResponse".into())),
-        };
-        
-        let rtt_ms = start.elapsed().as_millis() as u64;
-        Ok((rtt_ms, sync_state))
+        self.sync_engine.status_peer(peer_id, store_id, our_sync_state).await
     }
     
     /// Request status from all known active peers
     pub async fn status_all(&self, store_id: Uuid, our_sync_state: Option<lattice_kernel::proto::storage::SyncState>) 
         -> HashMap<iroh::PublicKey, Result<(u64, Option<lattice_kernel::proto::storage::SyncState>), String>> 
     {
-        let peers = match self.node.mesh_by_id(store_id) {
-            Some(m) => m.list_peers().await.unwrap_or_default(),
-            None => return HashMap::new(),
-        };
-        
-        let active_peers: Vec<_> = peers.iter()
-            .filter(|p| p.status == lattice_node::PeerStatus::Active && p.pubkey != self.node.node_id())
-            .filter_map(|p| iroh::PublicKey::from_bytes(&p.pubkey).ok())
-            .collect();
-        
-        let results: Vec<_> = futures_util::stream::iter(active_peers)
-            .map(|pk| {
-                let service = self;
-                let sync_state = our_sync_state.clone();
-                async move {
-                    let result = service.status_peer(pk, store_id, sync_state).await
-                        .map_err(|e| e.to_string());
-                    (pk, result)
-                }
-            })
-            .buffer_unordered(10)
-            .collect().await;
-        
-        results.into_iter().collect()
+        self.sync_engine.status_all(store_id, our_sync_state).await
     }
     
     /// Sync with a peer using symmetric SyncSession protocol
-    #[tracing::instrument(skip(self, store, _authors), fields(store_id = %store.id(), peer = %peer_id.fmt_short()))]
-    pub async fn sync_with_peer(&self, store: &AuthorizedStore, peer_id: iroh::PublicKey, _authors: &[PubKey]) -> Result<SyncResult, NodeError> {
-        tracing::debug!("Sync: connecting to peer");
-        let conn = self.endpoint.connect(peer_id).await
-            .map_err(|e| {
-                tracing::warn!(error = %e, "Sync: connection failed");
-                NodeError::Actor(format!("Connection failed: {}", e))
-            })?;
-        
-        let (send, recv) = conn.open_bi().await
-            .map_err(|e| NodeError::Actor(format!("Failed to open stream: {}", e)))?;
-        
-        let mut sink = MessageSink::new(send);
-        let mut stream = MessageStream::new(recv);
-        
-        let peer_pubkey: PubKey = peer_id.to_lattice();
-        
-        let store_id = store.id();
-        let peer_store = self.peer_stores.read().await.get(&store_id).cloned()
-            .ok_or_else(|| NodeError::Actor(format!("PeerStore {} not registered during sync", store_id)))?;
-            
-        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_pubkey, &peer_store);
-        let result = session.run_as_initiator().await?;
-        
-        sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
-        
-        tracing::info!(entries = result.entries_received, "Sync: complete");
-        
-        Ok(SyncResult { 
-            entries_applied: result.entries_received, 
-            entries_sent_by_peer: result.entries_received,
-        })
-    }
-    
-    /// Get active peer IDs for a store (excluding self)
-    async fn active_peer_ids(&self, _store_id: Uuid) -> Result<Vec<iroh::PublicKey>, NodeError> {
-        let my_pubkey = self.endpoint.public_key();
-        
-        let peers = self.connected_peers()
-            .map_err(|e| NodeError::Actor(e))?;
-        
-        Ok(peers.keys()
-            .filter_map(|pk| iroh::PublicKey::from_bytes(pk).ok())
-            .filter(|id| *id != my_pubkey)
-            .collect())
-    }
-    
-    /// Sync with specific peers in parallel
-    async fn sync_peers(&self, store: &AuthorizedStore, peer_ids: &[iroh::PublicKey], authors: &[PubKey]) -> Vec<SyncResult> {
-        use futures_util::future::join_all;
-        use std::time::Duration;
-        
-        const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
-        
-        let futures = peer_ids.iter().map(|&peer_id| {
-            let store = store.clone();
-            let authors = authors.to_vec();
-            async move {
-                match tokio::time::timeout(SYNC_TIMEOUT, self.sync_with_peer(&store, peer_id, &authors)).await {
-                    Ok(Ok(result)) => Some(result),
-                    Ok(Err(e)) => {
-                        tracing::debug!(peer = %peer_id.fmt_short(), error = %e, "Sync failed");
-                        None
-                    }
-                    Err(_) => {
-                        tracing::debug!(peer = %peer_id.fmt_short(), "Sync timed out");
-                        None
-                    }
-                }
-            }
-        });
-        
-        // This could be optimized like status_all with buffer_unordered, but join_all is fine for now as it's batch sync
-        join_all(futures).await.into_iter().flatten().collect()
+    pub async fn sync_with_peer(&self, store: &NetworkStore, peer_id: iroh::PublicKey, authors: &[PubKey]) -> Result<SyncResult, LatticeNetError> {
+        self.sync_engine.sync_with_peer(store, peer_id, authors).await
     }
     
     /// Sync a specific author with all active peers (for gap filling)
-    pub async fn sync_author_all(&self, store: &AuthorizedStore, author: PubKey) -> Result<u64, NodeError> {
-        let peer_ids = self.active_peer_ids(store.id()).await?;
-        if peer_ids.is_empty() {
-            return Ok(0);
-        }
-        
-        let results = self.sync_peers(store, &peer_ids, &[author]).await;
-        Ok(results.iter().map(|r| r.entries_applied).sum())
+    pub async fn sync_author_all(&self, store: &NetworkStore, author: PubKey) -> Result<u64, LatticeNetError> {
+        self.sync_engine.sync_author_all(store, author).await
     }
     
     /// Sync with all active peers in parallel
-    pub async fn sync_all(&self, store: &AuthorizedStore) -> Result<Vec<SyncResult>, NodeError> {
-        let peer_ids = self.active_peer_ids(store.id()).await?;
-        if peer_ids.is_empty() {
-            tracing::debug!("[Sync] No active peers");
-            return Ok(Vec::new());
-        }
-        
-        tracing::debug!("[Sync] Syncing with {} peers...", peer_ids.len());
-        let results = self.sync_peers(store, &peer_ids, &[]).await;
-        tracing::info!("[Sync] Complete: {}/{} peers", results.len(), peer_ids.len());
-        
-        Ok(results)
+    pub async fn sync_all(&self, store: &NetworkStore) -> Result<Vec<SyncResult>, LatticeNetError> {
+        self.sync_engine.sync_all(store).await
     }
     
     /// Get a registered store by ID
-    pub async fn get_store(&self, store_id: Uuid) -> Option<AuthorizedStore> {
-        self.stores.read().await.get(&store_id).cloned()
+    pub async fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
+        self.sync_engine.get_store(store_id).await
     }
     
     /// Sync with all active peers for a store (by ID)
-    pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, NodeError> {
-        let store = self.get_store(store_id).await
-            .ok_or_else(|| NodeError::Actor(format!("Store {} not registered", store_id)))?;
-        self.sync_all(&store).await
+    pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, LatticeNetError> {
+        self.sync_engine.sync_all_by_id(store_id).await
     }
     
     /// Sync a specific author with all active peers (by store ID)
-    pub async fn sync_author_all_by_id(&self, store_id: Uuid, author: PubKey) -> Result<u64, NodeError> {
-        let store = self.get_store(store_id).await
-            .ok_or_else(|| NodeError::Actor(format!("Store {} not registered", store_id)))?;
-        self.sync_author_all(&store, author).await
+    pub async fn sync_author_all_by_id(&self, store_id: Uuid, author: PubKey) -> Result<u64, LatticeNetError> {
+        self.sync_engine.sync_author_all_by_id(store_id, author).await
     }
     
     /// Sync with a specific peer (by store ID)
-    pub async fn sync_with_peer_by_id(&self, store_id: Uuid, peer_id: iroh::PublicKey, authors: &[PubKey]) -> Result<SyncResult, NodeError> {
-        let store = self.get_store(store_id).await
-            .ok_or_else(|| NodeError::Actor(format!("Store {} not registered", store_id)))?;
-        self.sync_with_peer(&store, peer_id, authors).await
+    pub async fn sync_with_peer_by_id(&self, store_id: Uuid, peer_id: iroh::PublicKey, authors: &[PubKey]) -> Result<SyncResult, LatticeNetError> {
+        self.sync_engine.sync_with_peer_by_id(store_id, peer_id, authors).await
     }
 
     // ==================== Event Handling & Lifecycle ====================
 
-    /// Handle node events - handles join and sync requests
+    /// Handle node events - spawns dedicated tasks for each event
     async fn run_event_handler(service: Arc<Self>, mut event_rx: tokio::sync::broadcast::Receiver<NodeEvent>) {
         while let Ok(event) = event_rx.recv().await {
+            let service = service.clone();
+            
             match event {
                 NodeEvent::JoinRequested { peer, mesh_id, secret } => {
-                    let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
-                        tracing::error!(peer = %PubKey::from(peer), "JoinRequested: invalid PubKey");
-                        continue;
-                    };
-                    tracing::info!(peer = %iroh_peer_id.fmt_short(), mesh = %mesh_id, "Event: JoinRequested → starting join protocol");
-                    
-                    match service.handle_join_request_event(iroh_peer_id, mesh_id, secret).await {
-                        Ok(conn) => {
-                             // Keep connection alive by upgrading it to a full mesh session
-                             tracing::info!(peer = %iroh_peer_id.fmt_short(), "Join successful, keeping connection active");
-                             let node = service.node.clone();
-                             let stores = service.stores.clone();
-                             let peer_stores = service.peer_stores.clone();
-                             tokio::spawn(async move {
-                                 if let Err(e) = handle_connection(node, stores, peer_stores, conn).await {
-                                     tracing::debug!("Join connection handler error: {}", e);
-                                 }
-                             });
+                    tokio::spawn(async move {
+                        let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
+                            tracing::error!(peer = %PubKey::from(peer), "JoinRequested: invalid PubKey");
+                            return;
+                        };
+                        tracing::info!(peer = %iroh_peer_id.fmt_short(), mesh = %mesh_id, "Event: JoinRequested → starting join protocol");
+                        
+                        match service.handle_join_request_event(iroh_peer_id, mesh_id, secret).await {
+                            Ok(conn) => {
+                                tracing::info!(peer = %iroh_peer_id.fmt_short(), "Join successful, keeping connection active");
+                                let node = service.node.clone();
+                                let stores = service.stores.clone();
+                                let peer_stores = service.peer_stores.clone();
+                                if let Err(e) = super::handlers::handle_connection(node, stores, peer_stores, conn).await {
+                                    tracing::debug!("Join connection handler error: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "Event: JoinRequested → join failed");
+                                service.node.emit(NodeEvent::JoinFailed { mesh_id, reason: e.to_string() });
+                            }
                         }
-                        Err(e) => {
-                            tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "Event: JoinRequested → join failed");
-                            service.node.emit(NodeEvent::JoinFailed { mesh_id, reason: e.to_string() });
-                        }
-                    }
+                    });
                 }
-                NodeEvent::MeshReady(mesh) => {
-                    tracing::info!(mesh_id = %mesh.id(), "Event: MeshReady → registering root store");
-                    // Clone peer manager to ensure it's available for all stores
-                    let peer_manager = mesh.peer_manager();
-
-                    service.register_store(mesh.kv().clone(), peer_manager.clone()).await;
-                    
-                    // Collect stores first to drop lock
-                    let stores_to_register: Vec<_> = if let Ok(apps) = mesh.store_manager().app_stores().read() {
-                        apps.values().map(|a| a.store.clone()).collect()
-                    } else {
-                        Vec::new()
-                    };
-                    
-                    for store in stores_to_register {
-                        tracing::info!(store_id = %store.id(), "Event: MeshReady → registering existing app store");
-                        service.register_store(store, peer_manager.clone()).await;
-                    }
-                }
-                NodeEvent::NetworkStore { store, peer_manager } => {
-                    tracing::info!(store_id = %store.id(), "Event: NetworkStore → registering store");
-                    service.register_store(store.clone(), peer_manager).await;
+                NodeEvent::NetworkStoreReady { store_id } => {
+                    tokio::spawn(async move {
+                        tracing::info!(store_id = %store_id, "Event: NetworkStoreReady → registering store");
+                        // Look up store and peer_manager from node
+                        let Some(mesh) = service.node.mesh_by_id(store_id) else {
+                            tracing::warn!(store_id = %store_id, "Mesh not found for NetworkStoreReady");
+                            return;
+                        };
+                        let store = mesh.root_store().clone();
+                        let peer_manager = mesh.peer_manager().clone();
+                        service.register_store(store, peer_manager).await;
+                    });
                 }
                 NodeEvent::SyncWithPeer { store_id, peer } => {
-                    let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
-                        tracing::error!("SyncWithPeer: invalid PubKey");
-                        continue;
-                    };
-                    tracing::info!(
-                        store_id = %store_id, 
-                        peer = %iroh_peer_id.fmt_short(), 
-                        "Event: SyncWithPeer → starting targeted sync"
-                    );
-                    
-                    match service.sync_with_peer_by_id(store_id, iroh_peer_id, &[]).await {
-                        Ok(result) => tracing::info!(
-                            store_id = %store_id,
-                            peer = %iroh_peer_id.fmt_short(),
-                            entries = result.entries_applied,
-                            "Event: SyncWithPeer → complete"
-                        ),
-                        Err(e) => tracing::warn!(
-                            store_id = %store_id,
-                            peer = %iroh_peer_id.fmt_short(),
-                            error = %e,
-                            "Event: SyncWithPeer → failed"
-                        ),
-                    }
+                    tokio::spawn(async move {
+                        let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
+                            tracing::error!("SyncWithPeer: invalid PubKey");
+                            return;
+                        };
+                        tracing::info!(
+                            store_id = %store_id, 
+                            peer = %iroh_peer_id.fmt_short(), 
+                            "Event: SyncWithPeer → starting targeted sync"
+                        );
+                        
+                        match service.sync_with_peer_by_id(store_id, iroh_peer_id, &[]).await {
+                            Ok(result) => tracing::info!(
+                                store_id = %store_id,
+                                peer = %iroh_peer_id.fmt_short(),
+                                entries = result.entries_applied,
+                                "Event: SyncWithPeer → complete"
+                            ),
+                            Err(e) => tracing::warn!(
+                                store_id = %store_id,
+                                peer = %iroh_peer_id.fmt_short(),
+                                error = %e,
+                                "Event: SyncWithPeer → failed"
+                            ),
+                        }
+                    });
                 }
                 NodeEvent::SyncRequested(store_id) => {
-                    tracing::info!(store_id = %store_id, "Event: SyncRequested → syncing with all peers");
-                    if service.get_store(store_id).await.is_some() {
-                        match service.sync_all_by_id(store_id).await {
-                            Ok(results) if !results.is_empty() => {
-                                let total: u64 = results.iter().map(|r| r.entries_applied).sum();
-                                tracing::info!(
-                                    store_id = %store_id,
-                                    entries = total, 
-                                    peers = results.len(), 
-                                    "Event: SyncRequested → complete"
-                                );
+                    tokio::spawn(async move {
+                        tracing::info!(store_id = %store_id, "Event: SyncRequested → syncing with all peers");
+                        if service.get_store(store_id).await.is_some() {
+                            match service.sync_all_by_id(store_id).await {
+                                Ok(results) if !results.is_empty() => {
+                                    let total: u64 = results.iter().map(|r| r.entries_applied).sum();
+                                    tracing::info!(
+                                        store_id = %store_id,
+                                        entries = total, 
+                                        peers = results.len(), 
+                                        "Event: SyncRequested → complete"
+                                    );
+                                }
+                                Ok(_) => tracing::debug!(store_id = %store_id, "Event: SyncRequested → no peers to sync"),
+                                Err(e) => tracing::warn!(store_id = %store_id, error = %e, "Event: SyncRequested → failed"),
                             }
-                            Ok(_) => tracing::debug!(store_id = %store_id, "Event: SyncRequested → no peers to sync"),
-                            Err(e) => tracing::warn!(store_id = %store_id, error = %e, "Event: SyncRequested → failed"),
+                        } else {
+                            tracing::warn!(store_id = %store_id, "Event: SyncRequested → store not registered");
                         }
-                    } else {
-                        tracing::warn!(store_id = %store_id, "Event: SyncRequested → store not registered");
-                    }
+                    });
                 }
-                other => {
-                    tracing::trace!(event = ?other, "Event: ignored");
+                _ => {
+                    // Ignored events don't need tasks
                 }
             }
         }
@@ -560,12 +409,12 @@ impl MeshService {
         
         tracing::info!(store_id = %store_id, "Registering store for network");
         
-        // Create AuthorizedStore
+        // Create NetworkStore (combines SyncProvider + PeerProvider)
         let inner_store = store.writer().clone(); 
-        let authorized_store = AuthorizedStore::new(Arc::new(inner_store), pm.clone());
+        let network_store = NetworkStore::new(Arc::new(inner_store), pm.clone());
         
         // Register in store registry
-        self.stores.write().await.insert(store_id, authorized_store.clone());
+        self.stores.write().await.insert(store_id, network_store.clone());
         
         // Create PeerSyncStore (in-memory)
         let peer_store = Arc::new(PeerSyncStore::new());
@@ -577,7 +426,7 @@ impl MeshService {
         if let Err(e) = self.gossip_manager.setup_for_store(
             pm, 
             self.sessions.clone(), 
-            authorized_store.clone(),
+            network_store.clone(),
             peer_store.clone(),
             sync_needed_tx
         ).await {
@@ -596,7 +445,7 @@ impl MeshService {
                 }
                 
                 // Active peer check
-                match service.active_peer_ids(store_id).await {
+                match service.sync_engine.active_peer_ids().await {
                     Ok(peers) if !peers.is_empty() => {
                         tracing::info!(store_id = %store_id, peers = peers.len(), "Boot Sync: Triggering initial sync");
                         service.node.emit(NodeEvent::SyncRequested(store_id));
@@ -609,12 +458,12 @@ impl MeshService {
             }
         });
         
-        Self::spawn_gap_watcher(self.clone(), authorized_store.clone());
-        Self::spawn_sync_coordinator_with_rx(self.clone(), authorized_store, peer_store, sync_needed_rx);
+        Self::spawn_gap_watcher(self.clone(), network_store.clone());
+        Self::spawn_sync_coordinator_with_rx(self.clone(), network_store, peer_store, sync_needed_rx);
     }
     
     /// Spawn gap watcher
-    fn spawn_gap_watcher(service: Arc<Self>, store: AuthorizedStore) {
+    fn spawn_gap_watcher(service: Arc<Self>, store: NetworkStore) {
         tokio::spawn(async move {
             let Ok(mut gap_rx) = store.subscribe_gaps().await else { return };
             
@@ -655,7 +504,7 @@ impl MeshService {
     /// Sync coordinator
     fn spawn_sync_coordinator_with_rx(
         service: Arc<Self>, 
-        store: AuthorizedStore,
+        store: NetworkStore,
         peer_store: Arc<PeerSyncStore>,
         mut sync_rx: tokio::sync::broadcast::Receiver<lattice_kernel::SyncNeeded>,
     ) {
@@ -739,239 +588,4 @@ impl MeshService {
     }
 }
 
-/// Helper to lookup store from registry
-async fn lookup_store(stores: &StoresRegistry, store_id: Uuid) -> Result<AuthorizedStore, LatticeNetError> {
-    stores.read().await.get(&store_id).cloned()
-        .ok_or_else(|| LatticeNetError::Connection(format!("Store {} not registered", store_id)))
-}
-
-// ==================== Inbound Handlers (Server Logic) ====================
-
-/// Handle a single incoming connection (keep accepting streams)
-pub(crate) async fn handle_connection(
-    node: Arc<Node>,
-    stores: StoresRegistry,
-    peer_stores: PeerStoreRegistry,
-    conn: Connection,
-) -> Result<(), LatticeNetError> {
-    let remote_id = conn.remote_id();
-    tracing::debug!("[Incoming] {} (ALPN: {})", remote_id.fmt_short(), String::from_utf8_lossy(conn.alpn()));
-    
-    let remote_pubkey: PubKey = remote_id.to_lattice();
-
-    loop {
-        match conn.accept_bi().await {
-            Ok((send, recv)) => {
-                let node = node.clone();
-                let stores = stores.clone();
-                let peer_stores = peer_stores.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_stream(node, stores, peer_stores, remote_pubkey, send, recv).await {
-                        tracing::debug!("Stream handler error: {}", e);
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::debug!("Connection closed: {}", e);
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Handle a single bidirectional stream on a connection
-async fn handle_stream(
-    node: Arc<Node>,
-    stores: StoresRegistry,
-    peer_stores: PeerStoreRegistry,
-    remote_pubkey: PubKey,
-    send: iroh::endpoint::SendStream,
-    recv: iroh::endpoint::RecvStream,
-) -> Result<(), LatticeNetError> {
-    let mut sink = MessageSink::new(send);
-    let mut stream = MessageStream::new(recv);
-    const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-    
-    // Dispatch loop - handles multiple messages per stream (e.g. RPC session)
-    loop {
-        let msg = match tokio::time::timeout(STREAM_TIMEOUT, stream.recv()).await {
-            Ok(Ok(Some(m))) => m,
-            Ok(Ok(None)) => break,  // Stream closed cleanly
-            Ok(Err(e)) => {
-                tracing::debug!("Stream recv error: {}", e);
-                break;
-            }
-            Err(_) => {
-                tracing::debug!("Stream timed out");
-                break;
-            }
-        };
-        
-        match msg.message {
-            Some(peer_message::Message::JoinRequest(req)) => {
-                handle_join_request(&node, &remote_pubkey, req, &mut sink).await?;
-                break;  // Join protocol complete for this stream
-            }
-            Some(peer_message::Message::StatusRequest(req)) => {
-                handle_status_request(stores.clone(), peer_stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
-            }
-            Some(peer_message::Message::FetchRequest(req)) => {
-                handle_fetch_request(stores.clone(), &remote_pubkey, req, &mut sink).await?;
-            }
-            _ => {
-                tracing::debug!("Unexpected message type");
-            }
-        }
-    }
-    sink.finish().await?;
-    Ok(())
-}
-
-/// Handle a join request from an invited peer
-async fn handle_join_request(
-    node: &Node,
-    remote_pubkey: &PubKey,
-    req: lattice_kernel::proto::network::JoinRequest,
-    sink: &mut MessageSink,
-) -> Result<(), LatticeNetError> {
-    tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
-    
-    // Extract mesh_id from request (mandatory)
-    let mesh_id = Uuid::from_slice(&req.mesh_id)
-        .map_err(|_| LatticeNetError::Connection("Invalid mesh_id in JoinRequest".into()))?;
-
-    // Accept the join - verifies token, checks mesh_id matches, sets active, returns store ID & authors
-    let acceptance = node.accept_join(*remote_pubkey, mesh_id, &req.invite_secret).await?;
-    
-    // Convert to Vec<Vec<u8>> for protobuf
-    let authorized_authors: Vec<Vec<u8>> = acceptance.authorized_authors
-        .into_iter()
-        .map(|p| p.to_vec())
-        .collect();
-    
-    tracing::debug!("[Join] Sending {} authorized authors", authorized_authors.len());
-    
-    let resp = PeerMessage {
-        message: Some(peer_message::Message::JoinResponse(JoinResponse {
-            mesh_id: acceptance.store_id.as_bytes().to_vec(),
-            inviter_pubkey: node.node_id().to_vec(),
-            authorized_authors,
-        })),
-    };
-    sink.send(&resp).await?;
-    
-    tracing::debug!("[Join] Sent JoinResponse, peer now active");
-    Ok(())
-}
-
-/// Handle an incoming status request using symmetric SyncSession
-async fn handle_status_request(
-    stores: StoresRegistry,
-    peer_stores: PeerStoreRegistry,
-    remote_pubkey: &PubKey,
-    req: StatusRequest,
-    sink: &mut MessageSink,
-    stream: &mut MessageStream,
-) -> Result<(), LatticeNetError> {
-    let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
-    
-    tracing::debug!("[Status] Received status request for store {}", store_id);
-    
-    // Lookup store from registry - only respond to registered stores
-    let authorized_store = lookup_store(&stores, store_id).await?;
-    let peer_store = peer_stores.read().await.get(&store_id).cloned()
-        .ok_or_else(|| LatticeNetError::Connection(format!("PeerStore {} not registered", store_id)))?;
-    
-    // Verify peer can connect (using store's peer provider)
-    if !authorized_store.can_connect(remote_pubkey) {
-        return Err(LatticeNetError::Connection(format!(
-            "Peer {} not authorized", hex::encode(remote_pubkey)
-        )));
-    };
-    
-    // Parse incoming peer state
-    let incoming_state = req.sync_state
-        .map(|s| lattice_kernel::SyncState::from_proto(&s))
-        .unwrap_or_default();
-    
-    // Use SyncSession for symmetric handling
-    let mut session = super::sync_session::SyncSession::new(&authorized_store, sink, stream, *remote_pubkey, &peer_store);
-    let _ = session.run_as_responder(incoming_state).await?;
-    
-    Ok(())
-}
-
-/// Handle a FetchRequest - streams entries in chunks
-async fn handle_fetch_request(
-    stores: StoresRegistry,
-    remote_pubkey: &PubKey,
-    req: lattice_kernel::proto::network::FetchRequest,
-    sink: &mut MessageSink,
-) -> Result<(), LatticeNetError> {
-    let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
-    
-    // Lookup store from registry - only respond to registered stores
-    let authorized_store = lookup_store(&stores, store_id).await?;
-    
-    // Verify peer can connect (using store's peer provider)
-    if !authorized_store.can_connect(remote_pubkey) {
-        return Err(LatticeNetError::Connection(format!(
-            "Peer {} not authorized", hex::encode(remote_pubkey)
-        )));
-    };
-    
-    // Stream entries in chunks
-    stream_entries_to_sink(sink, &authorized_store, &req.store_id, &req.ranges).await?;
-    
-    Ok(())
-}
-
-/// Stream entries for requested ranges in chunks
-const CHUNK_SIZE: usize = 100;
-
-async fn stream_entries_to_sink(
-    sink: &mut MessageSink,
-    store: &AuthorizedStore,
-    store_id: &[u8],
-    ranges: &[lattice_kernel::proto::network::AuthorRange],
-) -> Result<(), LatticeNetError> {
-    let mut chunk: Vec<lattice_kernel::proto::storage::SignedEntry> = Vec::with_capacity(CHUNK_SIZE);
-    
-    for range in ranges {
-        if let Ok(author_bytes) = <PubKey>::try_from(range.author_id.as_slice()) {
-            let author = PubKey::from(author_bytes);
-            if let Ok(mut rx) = store.stream_entries_in_range(&author, range.from_seq, range.to_seq).await {
-                while let Some(entry) = rx.recv().await {
-                    chunk.push(entry.into());
-                    
-                    if chunk.len() >= CHUNK_SIZE {
-                        let resp = PeerMessage {
-                            message: Some(peer_message::Message::FetchResponse(lattice_kernel::proto::network::FetchResponse {
-                                store_id: store_id.to_vec(),
-                                status: 200,
-                                done: false,
-                                entries: std::mem::take(&mut chunk),
-                            })),
-                        };
-                        sink.send(&resp).await?;
-                    }
-                }
-            }
-        }
-    }
-    
-    let resp = PeerMessage {
-        message: Some(peer_message::Message::FetchResponse(lattice_kernel::proto::network::FetchResponse {
-            store_id: store_id.to_vec(),
-            status: 200,
-            done: true,
-            entries: chunk,
-        })),
-    };
-    sink.send(&resp).await?;
-    
-    Ok(())
-}
+// Handlers moved to super::handlers module

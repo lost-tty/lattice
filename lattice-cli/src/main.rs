@@ -135,19 +135,22 @@ async fn main() {
         let writer = writer.clone();
         let current_store = current_store.clone();
         let current_mesh = current_mesh.clone();
+        let node_clone = node.clone();
         tokio::spawn(async move {
             while let Ok(event) = rx.recv().await {
                 match event {
-                    lattice_node::NodeEvent::MeshReady(mesh) => {
-                        wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.kv().id());
-                        if let Ok(mut guard) = current_store.write() {
-                            *guard = Some(mesh.kv().clone());
-                        }
-                        if let Ok(mut guard) = current_mesh.write() {
-                            *guard = Some(mesh);
+                    lattice_node::NodeEvent::MeshReady { mesh_id } => {
+                        if let Some(mesh) = node_clone.mesh_by_id(mesh_id) {
+                            wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.kv().id());
+                            if let Ok(mut guard) = current_store.write() {
+                                *guard = Some(mesh.kv().clone());
+                            }
+                            if let Ok(mut guard) = current_mesh.write() {
+                                *guard = Some(mesh);
+                            }
                         }
                     }
-                    lattice_node::NodeEvent::StoreReady(_) => {}
+                    lattice_node::NodeEvent::StoreReady { .. } => {}
                     lattice_node::NodeEvent::JoinFailed { mesh_id, reason } => {
                         wout!(writer, "\nError: Join failed for mesh {}: {}", mesh_id, reason);
                     }

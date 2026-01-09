@@ -5,7 +5,7 @@
 //! - Store instantiation and lifecycle via watcher
 //! - Declarative: stores in root store → automatically instantiated
 
-use crate::{KvStore, StoreType, StoreRegistry, NodeEvent, PeerManager};
+use crate::{KvStore, StoreType, StoreRegistry, NodeEvent};
 use lattice_kernel::Uuid;
 use lattice_kvstate::{Merge, KvState};
 use std::collections::HashMap;
@@ -49,7 +49,6 @@ pub struct AppStore {
 pub struct StoreManager {
     root_store: KvStore,
     registry: Arc<StoreRegistry>,
-    peer_manager: Arc<PeerManager>,
     event_tx: broadcast::Sender<NodeEvent>,
     /// Live application stores (non-archived)
     app_stores: RwLock<HashMap<Uuid, AppStore>>,
@@ -62,14 +61,12 @@ impl StoreManager {
     pub fn new(
         root_store: KvStore, 
         registry: Arc<StoreRegistry>, 
-        peer_manager: Arc<PeerManager>,
         event_tx: broadcast::Sender<NodeEvent>
     ) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
         Self { 
             root_store,
             registry,
-            peer_manager,
             event_tx,
             app_stores: RwLock::new(HashMap::new()),
             shutdown_tx,
@@ -182,10 +179,9 @@ impl StoreManager {
                          store_type: decl.store_type,
                      });
                      
-                     // Emit NetworkStore event
-                     let _ = self.event_tx.send(NodeEvent::NetworkStore {
-                        store: store.clone(),
-                        peer_manager: self.peer_manager.clone(),
+                     // Emit NetworkStoreReady event
+                     let _ = self.event_tx.send(NodeEvent::NetworkStoreReady {
+                        store_id: target_id,
                      });
                      
                      Ok(store)
@@ -234,10 +230,9 @@ impl StoreManager {
                                 store_type: decl.store_type,
                             });
                             
-                            // Emit NetworkStore event for peer syncing
-                            let _ = self.event_tx.send(NodeEvent::NetworkStore {
-                                store: kv,
-                                peer_manager: self.peer_manager.clone(),
+                            // Emit NetworkStoreReady event for peer syncing
+                            let _ = self.event_tx.send(NodeEvent::NetworkStoreReady {
+                                store_id: decl.id,
                             });
                             
                             info!(store_id = %decl.id, store_type = %decl.store_type, "Opened store");

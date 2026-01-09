@@ -30,8 +30,11 @@ async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, se
     let timeout = tokio::time::Duration::from_secs(10);
     match tokio::time::timeout(timeout, async {
         while let Ok(event) = events.recv().await {
-            if let NodeEvent::StoreReady(handle) = event {
-                return Some(handle);
+            if let NodeEvent::StoreReady { store_id } = event {
+                // Look up the store by ID
+                if let Some(mesh) = node.mesh_by_id(store_id) {
+                    return Some(mesh.root_store().clone());
+                }
             }
         }
         None

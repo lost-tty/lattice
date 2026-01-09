@@ -74,7 +74,6 @@ impl Mesh {
         let store_manager = Arc::new(StoreManager::new(
             store.clone(), 
             registry, 
-            peer_manager.clone(), 
             event_tx
         ));
 

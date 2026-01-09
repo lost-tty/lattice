@@ -14,9 +14,6 @@ pub enum LatticeNetError {
     #[error("Node ID parse error: {0}")]
     ParseNodeId(String),
     
-    #[error("Store error: {0}")]
-    Store(#[from] lattice_node::NodeError),
-    
     #[error("State error: {0}")]
     State(#[from] lattice_kernel::store::StateError),
     
@@ -25,4 +22,7 @@ pub enum LatticeNetError {
 
     #[error("Validation error: {0}")]
     Validation(String),
+    
+    #[error("Sync error: {0}")]
+    Sync(String),
 }

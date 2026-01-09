@@ -11,6 +11,7 @@ pub mod log_traits;
 pub mod replication;
 pub mod node_identity;
 pub mod introspection;
+pub mod peer_provider;
 
 // Re-exports
 pub use types::{Hash, PubKey, Signature};
@@ -28,4 +29,5 @@ pub use replication::{
     GapInfo, SyncNeeded, PeerSyncInfo, EntryStream,
 };
 pub use node_identity::{NodeIdentity, NodeError, PeerStatus};
+pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream};
 

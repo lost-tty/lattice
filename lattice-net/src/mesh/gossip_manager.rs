@@ -2,10 +2,10 @@
 
 use crate::{LatticeEndpoint, ToLattice};
 use super::error::GossipError;
-use lattice_node::{PeerStatus, PeerEvent, PeerProvider};
+use lattice_model::{PeerStatus, PeerEvent, PeerProvider};
 use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
-use lattice_node::AuthorizedStore;
+use crate::network_store::NetworkStore;
 use lattice_kernel::proto::storage::PeerSyncInfo;
 use lattice_kernel::proto::network::GossipMessage;
 use lattice_kernel::SyncNeeded;
@@ -60,7 +60,7 @@ impl GossipManager {
         &self,
         pm: std::sync::Arc<lattice_node::PeerManager>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
-        store: AuthorizedStore,
+        store: NetworkStore,
         peer_store: std::sync::Arc<PeerSyncStore>,
         sync_needed_tx: tokio::sync::broadcast::Sender<SyncNeeded>,
     ) -> Result<(), GossipError> {
@@ -108,7 +108,7 @@ impl GossipManager {
     }
     fn spawn_receiver(
         &self,
-        store: AuthorizedStore,
+        store: NetworkStore,
         mut rx: iroh_gossip::api::GossipReceiver,
         pm: std::sync::Arc<lattice_node::PeerManager>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
@@ -277,7 +277,7 @@ impl GossipManager {
     
     fn spawn_forwarder(
         &self,
-        store: AuthorizedStore,
+        store: NetworkStore,
         mut entry_rx: tokio::sync::broadcast::Receiver<lattice_kernel::SignedEntry>,
         pending_syncstate: Arc<AtomicBool>,
         token: tokio_util::sync::CancellationToken,
@@ -329,7 +329,7 @@ impl GossipManager {
     /// Fallback timer for read-only nodes - broadcasts SyncState when pending but no outbound entries
     fn spawn_syncstate_fallback(
         &self,
-        store: AuthorizedStore,
+        store: NetworkStore,
         pending_syncstate: Arc<AtomicBool>,
         token: tokio_util::sync::CancellationToken,
     ) {
@@ -373,9 +373,10 @@ impl GossipManager {
     fn spawn_peer_watcher(
         &self,
         store_id: Uuid,
-        mut rx: tokio::sync::broadcast::Receiver<PeerEvent>,
+        mut rx: lattice_model::PeerEventStream,
         token: tokio_util::sync::CancellationToken,
     ) {
+        use futures_util::StreamExt;
         let my_pubkey = self.my_pubkey;
         let senders = self.senders.clone();
         
@@ -383,8 +384,8 @@ impl GossipManager {
             loop {
                 tokio::select! {
                     _ = token.cancelled() => break,
-                    res = rx.recv() => {
-                         let Ok(event) = res else { break };
+                    event = rx.next() => {
+                         let Some(event) = event else { break };
                 match event {
                     PeerEvent::Added { pubkey, status } if status == PeerStatus::Active => {
                         if let Ok(peer_id) = iroh::PublicKey::from_bytes(&pubkey) {

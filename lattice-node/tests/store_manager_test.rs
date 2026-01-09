@@ -119,14 +119,14 @@ async fn test_store_emits_network_event() {
     let store_id = store_manager.create_store(None, StoreType::KvStore).await.unwrap();
     store_manager.reconcile().unwrap();
     
-    // Check for NetworkStore event
+    // Check for NetworkStoreReady event
     let mut found = false;
     // We might get other events (like SyncRequested), so drain a few
     for _ in 0..10 {
         match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
             Ok(Ok(event)) => {
-                if let lattice_node::NodeEvent::NetworkStore { store, .. } = event {
-                    if store.id() == store_id {
+                if let lattice_node::NodeEvent::NetworkStoreReady { store_id: id } = event {
+                    if id == store_id {
                         found = true;
                         break;
                     }
@@ -136,5 +136,5 @@ async fn test_store_emits_network_event() {
         }
     }
     
-    assert!(found, "Did not receive NetworkStore event for opened store");
+    assert!(found, "Did not receive NetworkStoreReady event for opened store");
 }

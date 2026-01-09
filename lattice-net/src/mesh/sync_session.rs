@@ -5,10 +5,10 @@
 //! After initial handshake, both run identical exchange logic.
 
 use crate::{MessageSink, MessageStream};
-use lattice_node::NodeError;
+use crate::error::LatticeNetError;
 use lattice_kernel::SyncState;
 use lattice_model::types::PubKey;
-use lattice_node::AuthorizedStore;
+use crate::network_store::NetworkStore;
 use lattice_kernel::proto::storage::SignedEntry;
 use lattice_kernel::proto::network::{PeerMessage, peer_message, AuthorRange, FetchRequest, FetchResponse, StatusRequest, StatusResponse};
 use crate::peer_sync_store::PeerSyncStore;
@@ -24,7 +24,7 @@ const PROTOCOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15)
 
 /// Symmetric sync session - same core logic runs on both sides
 pub struct SyncSession<'a> {
-    store: &'a AuthorizedStore,
+    store: &'a NetworkStore,
     sink: &'a mut MessageSink,
     stream: &'a mut MessageStream,
     peer_id: PubKey,
@@ -33,7 +33,7 @@ pub struct SyncSession<'a> {
 
 impl<'a> SyncSession<'a> {
     pub fn new(
-        store: &'a AuthorizedStore,
+        store: &'a NetworkStore,
         sink: &'a mut MessageSink,
         stream: &'a mut MessageStream,
         peer_id: PubKey,
@@ -43,7 +43,7 @@ impl<'a> SyncSession<'a> {
     }
     
     /// Run as initiator - sends StatusRequest first, receives StatusResponse
-    pub async fn run_as_initiator(&mut self) -> Result<SyncResult, NodeError> {
+    pub async fn run_as_initiator(&mut self) -> Result<SyncResult, LatticeNetError> {
         let my_state = self.store.sync_state().await?;
         
         // Send StatusRequest
@@ -57,7 +57,7 @@ impl<'a> SyncSession<'a> {
     }
     
     /// Run as responder - receives StatusRequest first, sends StatusResponse
-    pub async fn run_as_responder(&mut self, incoming_state: SyncState) -> Result<SyncResult, NodeError> {
+    pub async fn run_as_responder(&mut self, incoming_state: SyncState) -> Result<SyncResult, LatticeNetError> {
         let my_state = self.store.sync_state().await?;
         
         // Send StatusResponse
@@ -68,7 +68,7 @@ impl<'a> SyncSession<'a> {
     }
     
     /// Common exchange logic - identical on both sides
-    async fn run_exchange(&mut self, my_state: SyncState, peer_state: SyncState) -> Result<SyncResult, NodeError> {
+    async fn run_exchange(&mut self, my_state: SyncState, peer_state: SyncState) -> Result<SyncResult, LatticeNetError> {
         // Cache peer's state
         self.cache_peer_state(&peer_state).await;
         
@@ -79,37 +79,37 @@ impl<'a> SyncSession<'a> {
         self.exchange_entries(i_need).await
     }
     
-    async fn send_status_request(&mut self, state: &SyncState) -> Result<(), NodeError> {
+    async fn send_status_request(&mut self, state: &SyncState) -> Result<(), LatticeNetError> {
         let msg = PeerMessage {
             message: Some(peer_message::Message::StatusRequest(StatusRequest {
                 store_id: self.store.id().as_bytes().to_vec(),
                 sync_state: Some(state.to_proto()),
             })),
         };
-        self.sink.send(&msg).await.map_err(|e| NodeError::Actor(e.to_string()))
+        self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))
     }
     
-    async fn send_status_response(&mut self, state: &SyncState) -> Result<(), NodeError> {
+    async fn send_status_response(&mut self, state: &SyncState) -> Result<(), LatticeNetError> {
         let msg = PeerMessage {
             message: Some(peer_message::Message::StatusResponse(StatusResponse {
                 store_id: self.store.id().as_bytes().to_vec(),
                 sync_state: Some(state.to_proto()),
             })),
         };
-        self.sink.send(&msg).await.map_err(|e| NodeError::Actor(e.to_string()))
+        self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))
     }
     
-    async fn recv_status_response(&mut self) -> Result<SyncState, NodeError> {
+    async fn recv_status_response(&mut self) -> Result<SyncState, LatticeNetError> {
         let msg = tokio::time::timeout(PROTOCOL_TIMEOUT, self.stream.recv()).await
-             .map_err(|_| NodeError::Actor("Timeout receiving StatusResponse".into()))?
-            .map_err(|e| NodeError::Actor(e.to_string()))?
-            .ok_or_else(|| NodeError::Actor("Stream closed".into()))?;
+             .map_err(|_| LatticeNetError::Sync("Timeout receiving StatusResponse".into()))?
+            .map_err(|e| LatticeNetError::Sync(e.to_string()))?
+            .ok_or_else(|| LatticeNetError::Sync("Stream closed".into()))?;
         
         match msg.message {
             Some(peer_message::Message::StatusResponse(resp)) => {
                 Ok(resp.sync_state.map(|s| SyncState::from_proto(&s)).unwrap_or_default())
             }
-            _ => Err(NodeError::Actor("Expected StatusResponse".into())),
+            _ => Err(LatticeNetError::Sync("Expected StatusResponse".into())),
         }
     }
     
@@ -140,7 +140,7 @@ impl<'a> SyncSession<'a> {
         ranges
     }
     
-    async fn exchange_entries(&mut self, i_need: Vec<AuthorRange>) -> Result<SyncResult, NodeError> {
+    async fn exchange_entries(&mut self, i_need: Vec<AuthorRange>) -> Result<SyncResult, LatticeNetError> {
         let mut entries_received: u64 = 0;
         let mut entries_sent: u64 = 0;
         
@@ -188,17 +188,17 @@ impl<'a> SyncSession<'a> {
         Ok(SyncResult { entries_received, entries_sent })
     }
     
-    async fn send_fetch_request(&mut self, ranges: &[AuthorRange]) -> Result<(), NodeError> {
+    async fn send_fetch_request(&mut self, ranges: &[AuthorRange]) -> Result<(), LatticeNetError> {
         let msg = PeerMessage {
             message: Some(peer_message::Message::FetchRequest(FetchRequest {
                 store_id: self.store.id().as_bytes().to_vec(),
                 ranges: ranges.to_vec(),
             })),
         };
-        self.sink.send(&msg).await.map_err(|e| NodeError::Actor(e.to_string()))
+        self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))
     }
     
-    async fn handle_fetch_request(&mut self, req: &FetchRequest) -> Result<u64, NodeError> {
+    async fn handle_fetch_request(&mut self, req: &FetchRequest) -> Result<u64, LatticeNetError> {
         const CHUNK_SIZE: usize = 100;
         let mut chunk: Vec<SignedEntry> = Vec::with_capacity(CHUNK_SIZE);
         let mut sent: u64 = 0;
@@ -221,7 +221,7 @@ impl<'a> SyncSession<'a> {
         Ok(sent)
     }
     
-    async fn send_fetch_response(&mut self, store_id: &[u8], entries: Vec<SignedEntry>, done: bool) -> Result<(), NodeError> {
+    async fn send_fetch_response(&mut self, store_id: &[u8], entries: Vec<SignedEntry>, done: bool) -> Result<(), LatticeNetError> {
         let msg = PeerMessage {
             message: Some(peer_message::Message::FetchResponse(FetchResponse {
                 store_id: store_id.to_vec(),
@@ -230,6 +230,6 @@ impl<'a> SyncSession<'a> {
                 entries,
             })),
         };
-        self.sink.send(&msg).await.map_err(|e| NodeError::Actor(e.to_string()))
+        self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))
     }
 }

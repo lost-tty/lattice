@@ -15,7 +15,6 @@ pub mod store_registry;
 pub mod meta_store;
 pub mod data_dir;
 pub mod token;
-pub mod authorized_store;
 pub mod store_type;
 pub mod store_manager;
 pub use token::Invite;
@@ -50,6 +49,3 @@ pub use lattice_kvstate::{Head, KvHandle};
 
 /// Type alias for the KvHandle wrapping a Store.
 pub type KvStore = KvHandle<Store<KvState>>;
-
-// Export AuthorizedStore
-pub use authorized_store::AuthorizedStore;

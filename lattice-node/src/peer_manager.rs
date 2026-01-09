@@ -618,7 +618,10 @@ impl PeerProvider for PeerManager {
         self.peers.list_acceptable_authors()
     }
     
-    fn subscribe_peer_events(&self) -> broadcast::Receiver<PeerEvent> {
-        self.peer_event_tx.subscribe()
+    fn subscribe_peer_events(&self) -> lattice_model::PeerEventStream {
+        use futures_util::StreamExt;
+        let rx = self.peer_event_tx.subscribe();
+        Box::pin(tokio_stream::wrappers::BroadcastStream::new(rx)
+            .filter_map(|r| async move { r.ok() }))
     }
 }
