@@ -140,33 +140,64 @@
 
 ---
 
-## Milestone 7: HTTP API (lattice-http)
+## Milestone 7: Negentropy Sync Protocol
+
+**Goal:** Replace O(n) vector clock sync with sub-linear bandwidth using range-based set reconciliation.
+
+Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
+
+### 7A: Infrastructure
+- [ ] Add hash→entry index (for efficient fetch-by-hash)
+- [ ] Implement negentropy fingerprint generation per store
+
+### 7B: Protocol Migration
+- [ ] Replace `SyncState` protocol with negentropy exchange
+- [ ] Decouple `seq` from network sync protocol (keep internal only)
+- [ ] Update `FetchRequest` to use hashes instead of seq ranges
+
+**Current `seq` Dependencies to Migrate:**
+| Component | Current | Negentropy Approach |
+|-----------|---------|---------------------|
+| `SyncState.diff()` | `MissingRange{from_seq, to_seq}` | Hash fingerprint exchange → list of missing hashes |
+| `FetchRequest.ranges` | `{author, from_seq, to_seq}` | Fetch by hash directly |
+| `Log::iter_range()` | Range by seq | Need hash→entry index for lookup |
+| `GapInfo` | Triggers sync when `seq > next_seq` | "Missing prev_hash X" → fetch by hash |
+
+**What to Keep:**
+- `seq` for **local sigchain validation** (prevents insertion attacks, enforces append-only)
+- `ChainTip.seq` as internal implementation detail
+
+- **Ref:** [Negentropy Protocol](https://github.com/hoytech/negentropy)
+
+---
+
+## Milestone 8: HTTP API (lattice-http)
 
 **Goal:** External access to stores via REST.
 
-### 7A: Access Tokens
+### 8A: Access Tokens
 - [ ] Token storage: `/tokens/{id}/store_id`, `/tokens/{id}/secret_hash`
 - [ ] CLI: `token create`, `token list`, `token revoke`
 
-### 7B: HTTP Server
+### 8B: HTTP Server
 - [ ] REST endpoints: `GET/PUT/DELETE /stores/{uuid}/keys/{key}`
 - [ ] Auth via `Authorization: Bearer {token_id}:{secret}`
 
 ---
 
-## Milestone 8: Content-Addressable Store (CAS) via Garage
+## Milestone 9: Content-Addressable Store (CAS) via Garage
 
 **Goal:** Blob storage using Garage as S3-compatible sidecar.
 
-### 8A: Garage Integration
+### 9A: Garage Integration
 - [ ] S3 client wrapper in `lattice-cas` crate
 - [ ] `put_blob(data) -> hash`, `get_blob(hash) -> data`
 
-### 8B: Metadata & Pinning
+### 9B: Metadata & Pinning
 - [ ] `/cas/pins/{node_id}/{hash}` in root store
 - [ ] Pin reconciler: watch pins, trigger Garage fetch
 
-### 8C: CLI
+### 9C: CLI
 - [ ] `cas put`, `cas get`, `cas pin`, `cas ls`
 
 ---
@@ -194,28 +225,8 @@
 Research areas and papers that may inform future Lattice development.
 
 ### Sync Efficiency: Negentropy
-Range-based set reconciliation using hash fingerprints. Replaces O(n) vector clock sync with sub-linear bandwidth. Used by Nostr ecosystem.
 
-**Current `seq` Dependencies to Migrate:**
-| Component | Current | Negentropy Approach |
-|-----------|---------|---------------------|
-| `SyncState.diff()` | `MissingRange{from_seq, to_seq}` | Hash fingerprint exchange → list of missing hashes |
-| `FetchRequest.ranges` | `{author, from_seq, to_seq}` | Fetch by hash directly |
-| `Log::iter_range()` | Range by seq | Need hash→entry index for lookup |
-| `GapInfo` | Triggers sync when `seq > next_seq` | "Missing prev_hash X" → fetch by hash |
-
-**What to Keep:**
-- `seq` for **local sigchain validation** (prevents insertion attacks, enforces append-only)
-- `ChainTip.seq` as internal implementation detail
-
-**Required Infrastructure:**
-- [ ] Add hash→entry index (for efficient fetch-by-hash)
-- [ ] Implement negentropy fingerprint generation per store
-- [ ] Replace `SyncState` protocol with negentropy exchange
-- [ ] Decouple `seq` from network sync protocol (keep internal only)
-
-- **Apply to:** `mesh/protocol.rs` sync diff logic, `SyncState`, `FetchRequest`
-- **Ref:** [Negentropy Protocol](https://github.com/hoytech/negentropy)
+> **Note:** Negentropy is now **Milestone 7**. See above for implementation details.
 
 ### Byzantine Fork Detection
 Formal framework for detecting equivocation (same seq# with different content). Generate `FraudProof` for permanent blocklisting.
