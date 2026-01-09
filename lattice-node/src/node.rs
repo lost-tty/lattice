@@ -169,7 +169,7 @@ impl NodeBuilder {
 
         let node = std::sync::Arc::new(node);
         let meta = std::sync::Arc::new(meta);
-        let registry = StoreRegistry::new(self.data_dir.clone(), meta.clone(), node.clone());
+        let registry = std::sync::Arc::new(StoreRegistry::new(self.data_dir.clone(), meta.clone(), node.clone()));
 
         Ok(Node {
             data_dir: self.data_dir,
@@ -192,7 +192,7 @@ pub struct Node {
     data_dir: DataDir,
     node: std::sync::Arc<NodeIdentity>,
     meta: std::sync::Arc<MetaStore>,
-    registry: StoreRegistry,
+    registry: std::sync::Arc<StoreRegistry>,
     event_tx: broadcast::Sender<NodeEvent>,
     /// All active meshes by ID (multi-mesh support)
     meshes: RwLock<HashMap<Uuid, Mesh>>,
@@ -302,7 +302,7 @@ impl Node {
             let handle = KvHandle::new(store);
             
             // Create Mesh (handles PeerManager creation internally)
-            let mesh = Mesh::create(handle, &self.node).await
+            let mesh = Mesh::create(handle, &self.node, self.registry.clone(), self.event_tx.clone()).await
                 .map_err(|e| NodeError::Actor(e.to_string()))?;
             
             // Store mesh in node
@@ -387,7 +387,7 @@ impl Node {
         let _ = kv.put(&Peer::key_status(self.node.public_key()), PeerStatus::Active.as_str().as_bytes()).await;
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = Mesh::create(kv.clone(), &self.node).await
+        let mesh = Mesh::create(kv.clone(), &self.node, self.registry.clone(), self.event_tx.clone()).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node
@@ -487,7 +487,7 @@ impl Node {
         let handle = KvHandle::new(store);
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = Mesh::create(handle.clone(), &self.node).await
+        let mesh = Mesh::create(handle.clone(), &self.node, self.registry.clone(), self.event_tx.clone()).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node

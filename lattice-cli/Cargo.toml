@@ -14,7 +14,7 @@ lattice-node = { workspace = true }
 lattice-kernel = { workspace = true }
 lattice-net = { workspace = true }
 lattice-model = { workspace = true }
-rustyline-async = "0.4"
+rustyline-async = { git = "https://github.com/lost-tty/rustyline-async" }
 hex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

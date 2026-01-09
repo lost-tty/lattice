@@ -129,6 +129,17 @@ impl StoreRegistry {
         stores.contains_key(store_id)
     }
 
+    /// Close a store by removing its handle from the registry.
+    /// This drops the primary reference to the store handle.
+    /// The store actor will shutdown once all other references (e.g. key streams) are dropped.
+    pub fn close(&self, store_id: &Uuid) -> bool {
+        if let Ok(mut stores) = self.stores.write() {
+            stores.remove(store_id).is_some()
+        } else {
+            false
+        }
+    }
+
     /// Shutdown the registry, joining all tracked actor threads.
     pub fn shutdown(&self) {
         // 1. Drop all StoreHandles to close command channels.

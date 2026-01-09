@@ -82,7 +82,7 @@
 
 ### 4F: Lattice-Kernel Audit & Stability
 
-- [ ] Move `PeerSyncStore` out of `lattice-kernel` and into `lattice-net`.
+- [x] Move `PeerSyncStore` out of `lattice-kernel` and into `lattice-net`.
 - [ ] **Lattice-Kernel Audit**: Thorough review of `lattice-kernel` to ensure architectural cleanliness, proper visibility, and minimal dependencies before declaring it stable.
   - [ ] **Enforce strict limit on causal_deps**: Prevent DoS by capping `entry.causal_deps` len (e.g. 1024).
   - [x] **Rename ReplicatedState to ReplicationController**: Align code name with architectural concept.
@@ -115,28 +115,28 @@
 **Goal:** Root store as control plane for declaring/managing additional stores.
 
 ### 6A: Store Declarations in Root Store
-- [ ] Root store keys: `/stores/{uuid}/name`, `/stores/{uuid}/created_at`, `/stores/{uuid}/type`
-- [ ] CLI: `store create [name] --type <kvstore|chat|...>`, `store delete <uuid>`, `store list`
+- [x] Root store keys: `/stores/{uuid}/name`, `/stores/{uuid}/created_at`, `/stores/{uuid}/type`
+- [x] CLI: `store create [name] --type <kvstore|chat|...>`, `store delete <uuid>`, `store list`
 
 ### 6B: Store Watcher ("Cluster Manager")
 
-- [ ] `app_stores: RwLock<HashMap<Uuid, Store>>` in `Node`
-- [ ] Initial Reconciliation: On startup, process `/stores/` snapshot
-- [ ] Live Reconciliation: Background task watching `/stores/` prefix
-- [ ] On Put: open new store; On Delete: close/archive store
+- [x] `app_stores: RwLock<HashMap<Uuid, Store>>` in `StoreManager`
+- [x] Initial Reconciliation: On startup, process `/stores/` snapshot
+- [x] Live Reconciliation: Background task watching `/stores/` prefix
+- [x] On Put: open new store; On Delete: close/archive store
 
 ### 6C: Multi-Store Gossip
-- [ ] `setup_for_store` called for each active store
-- [ ] Per-store gossip topics, verify store-id before applying
+- [x] `setup_for_store` called for each active store
+- [x] Per-store gossip topics, verify store-id before applying
 
 ### 6D: Shared Peer List (Ingest Guard)
-- [ ] All stores use root store peer list for authorization
-- [ ] Check `/nodes/{pubkey}/status` on connect
+- [x] All stores use root store peer list for authorization (`AuthorizedStore`)
+- [x] Check `/nodes/{pubkey}/status` on connect
 
 ### 6E: Mesh-Based Join Model
-- [ ] A **mesh** = root store + subordinated stores
-- [ ] JoinRequest always targets the **mesh** (i.e., root store), not individual stores
-- [ ] After joining mesh, node gains access to all declared stores via 6B reconciliation
+- [x] A **mesh** = root store + subordinated stores
+- [x] JoinRequest always targets the **mesh** (i.e., root store), not individual stores
+- [x] After joining mesh, node gains access to all declared stores via 6B reconciliation
 
 ---
 
@@ -186,33 +186,57 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 ---
 
-## Milestone 9: HTTP API (lattice-http)
+## Milestone 9: Client/Daemon Split (CLI Separation)
+
+**Goal:** Decouple the CLI from the Node application logic, establishing a true Daemon/Client architecture.
+
+**Reference:** Kubernetes (CRI uses gRPC/UDS), Docker (dockerd/docker-cli).
+
+### 9A: Lattice Daemon (`latticed`)
+- [ ] New binary `latticed`: Long-running background process.
+- [ ] Hosts `Node`, P2P Networking, and Storage.
+- [ ] Exposes **gRPC API** over **Unix Domain Sockets** (macOS/Linux) or Named Pipes (Windows).
+- [ ] **Security:** File system permissions (`0600`) restrict access to the user.
+
+### 9B: Lattice CLI (`lattice`)
+- [ ] Refactor CLI to be a thin gRPC client.
+- [ ] Connects to default socket `~/.lattice/control.sock`.
+- [ ] Supports multiple concurrent clients (e.g., CLI + Menu Bar App + Web GUI).
+
+### 9C: Multi-Head Support
+- [ ] **CLI**: Interactive text-based control.
+- [ ] **GUI**: Native Swift/Rust UI connecting to the same daemon UDS.
+- [ ] **Web**: Optional HTTP gateway for browser-based access (like Syncthing).
+
+---
+
+## Milestone 10: HTTP API (lattice-http)
 
 **Goal:** External access to stores via REST.
 
-### 9A: Access Tokens
+### 10A: Access Tokens
 - [ ] Token storage: `/tokens/{id}/store_id`, `/tokens/{id}/secret_hash`
 - [ ] CLI: `token create`, `token list`, `token revoke`
 
-### 9B: HTTP Server
+### 10B: HTTP Server
 - [ ] REST endpoints: `GET/PUT/DELETE /stores/{uuid}/keys/{key}`
 - [ ] Auth via `Authorization: Bearer {token_id}:{secret}`
 
 ---
 
-## Milestone 10: Content-Addressable Store (CAS) via Garage
+## Milestone 11: Content-Addressable Store (CAS) via Garage
 
 **Goal:** Blob storage using Garage as S3-compatible sidecar.
 
-### 10A: Garage Integration
+### 11A: Garage Integration
 - [ ] S3 client wrapper in `lattice-cas` crate
 - [ ] `put_blob(data) -> hash`, `get_blob(hash) -> data`
 
-### 10B: Metadata & Pinning
+### 11B: Metadata & Pinning
 - [ ] `/cas/pins/{node_id}/{hash}` in root store
 - [ ] Pin reconciler: watch pins, trigger Garage fetch
 
-### 10C: CLI
+### 11C: CLI
 - [ ] `cas put`, `cas get`, `cas pin`, `cas ls`
 
 ---
@@ -309,5 +333,4 @@ If validation rules in `apply_op` can change between software versions, state di
 - Secure storage (Keychain, TPM)
 - FUSE filesystem mount
 - Merkle-ized state (signed root hash, O(1) sync checks)
-- **CLI/Daemon Separation**: Refactor CLI to use gRPC internally (local socket, no network initially) to prepare for daemon/CLI split. Daemon runs as long-lived process, CLI becomes thin gRPC client.
 - **Salted Gossip ALPN**: Use `/config/salt` from root store to salt the gossip ALPN per mesh (improves privacy by isolating mesh traffic).

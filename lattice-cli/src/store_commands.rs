@@ -2,13 +2,146 @@
 
 use crate::commands::{CommandResult, Writer};
 use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
-use lattice_node::{Node, KvStore};
+use lattice_node::{Node, KvStore, Mesh, StoreType};
 use lattice_model::types::{PubKey, Hash};
 use lattice_model::{CommandDispatcher, FieldFormat, Introspectable};
 use lattice_net::MeshService;
 use std::time::Instant;
 use std::io::Write;
 use prost_reflect::{DynamicMessage, Value, ReflectMessage};
+
+// ==================== Multi-Store Commands (M5) ====================
+
+/// Create a new store in the mesh
+pub async fn cmd_store_create(_node: &Node, mesh: Option<&Mesh>, name: &Option<String>, type_str: &str, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let mesh = match mesh {
+        Some(m) => m,
+        None => {
+            let _ = writeln!(w, "Error: No active mesh. Use 'mesh create' first.");
+            return CommandResult::Ok;
+        }
+    };
+    
+    // Parse store type
+    let store_type: StoreType = match type_str.parse() {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = writeln!(w, "Error: Unknown store type '{}'. Supported: kvstore", type_str);
+            return CommandResult::Ok;
+        }
+    };
+    
+    match mesh.store_manager().create_store(name.clone(), store_type).await {
+        Ok(store_id) => {
+            let display_name = name.as_ref().map(|n| format!(" ({})", n)).unwrap_or_default();
+            let _ = writeln!(w, "Created store: {}{}", store_id, display_name);
+            let _ = writeln!(w, "Type: {}", store_type);
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error creating store: {}", e);
+        }
+    }
+    
+    CommandResult::Ok
+}
+
+/// List all stores in the mesh
+pub async fn cmd_store_list(_node: &Node, mesh: Option<&Mesh>, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let mesh = match mesh {
+        Some(m) => m,
+        None => {
+            let _ = writeln!(w, "Error: No active mesh.");
+            return CommandResult::Ok;
+        }
+    };
+    
+    match mesh.store_manager().list_stores() {
+        Ok(stores) => {
+            let _ = writeln!(w, "Stores:");
+            
+            // 1. Root Store
+            let root_id = mesh.id();
+            let _ = writeln!(w, "  {} [root] (Lattice Mesh)", root_id);
+            
+            // 2. App Stores
+            if !stores.is_empty() {
+                for s in stores {
+                    let archived_str = if s.archived { " [archived]" } else { "" };
+                    let name_str = s.name.map(|n| format!(" ({})", n)).unwrap_or_default();
+                    let _ = writeln!(w, "  {} [{}]{}{}", s.id, s.store_type, name_str, archived_str);
+                }
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error listing stores: {}", e);
+        }
+    }
+    
+    CommandResult::Ok
+}
+
+/// Switch to a specific store
+pub async fn cmd_store_use(_node: &Node, mesh: Option<&Mesh>, uuid_str: &str, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let mesh = match mesh {
+        Some(m) => m,
+        None => {
+            let _ = writeln!(w, "Error: No active mesh.");
+            return CommandResult::Ok;
+        }
+    };
+    
+    match mesh.resolve_store(uuid_str) {
+        Ok(store) => {
+             let _ = writeln!(w, "Switching to Store {}", store.id());
+             CommandResult::SwitchTo(store)
+        }
+        Err(e) => {
+             let _ = writeln!(w, "Error: {}", e);
+             CommandResult::Ok
+        }
+    }
+}
+
+/// Delete (archive) a store
+pub async fn cmd_store_delete(_node: &Node, mesh: Option<&Mesh>, uuid_str: &str, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let mesh = match mesh {
+        Some(m) => m,
+        None => {
+            let _ = writeln!(w, "Error: No active mesh.");
+            return CommandResult::Ok;
+        }
+    };
+    
+    // Parse UUID
+    let store_id = match lattice_kernel::Uuid::parse_str(uuid_str) {
+        Ok(id) => id,
+        Err(_) => {
+            let _ = writeln!(w, "Invalid UUID: {}", uuid_str);
+            return CommandResult::Ok;
+        }
+    };
+    
+    match mesh.store_manager().delete_store(store_id).await {
+        Ok(()) => {
+            let _ = writeln!(w, "Archived store: {}", store_id);
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+        }
+    }
+    
+    CommandResult::Ok
+}
+
+// ==================== Existing Store Commands ====================
 
 pub async fn cmd_store_status(node: &Node, store: Option<&KvStore>, mesh: Option<&MeshService>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {

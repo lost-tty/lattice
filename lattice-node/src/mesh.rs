@@ -12,6 +12,7 @@
 
 use crate::{
     peer_manager::{PeerManager, PeerManagerError},
+    store_manager::StoreManager,
     token::Invite,
     PeerInfo,
     KvStore,
@@ -33,6 +34,10 @@ pub enum MeshError {
     PeerManager(#[from] PeerManagerError),
     #[error("State writer error: {0}")]
     StateWriter(#[from] lattice_model::StateWriterError),
+    #[error("StoreManager error: {0}")]
+    StoreManager(#[from] crate::store_manager::StoreManagerError),
+    #[error("Other: {0}")]
+    Other(String),
 }
 
 /// A Mesh represents a group of nodes sharing a root store and peer list.
@@ -40,28 +45,46 @@ pub enum MeshError {
 /// The Mesh acts as a high-level controller for:
 /// - The Root Store (KvStore for KV ops)
 /// - The PeerManager (peer cache + operations)
+/// - The StoreManager (store declarations)
 ///
 /// Use `mesh.kv()` for KV data operations.
 /// Use `mesh.store()` for replication operations (id, sync_state, etc).
 /// Use `mesh.peer_manager()` for network layer integration.
+/// Use `mesh.store_manager()` for store operations.
 #[derive(Clone)]
 pub struct Mesh {
     store: KvStore,
-    peer_manager: std::sync::Arc<PeerManager>,
+    peer_manager: Arc<PeerManager>,
+    store_manager: Arc<StoreManager>,
     root_store_id: Uuid,
 }
 
 
 impl Mesh {
     /// Create a new Mesh from an open store handle
-    pub async fn create(store: KvStore, node: &std::sync::Arc<NodeIdentity>) -> Result<Self, MeshError> {
+    pub async fn create(
+        store: KvStore, 
+        node: &Arc<NodeIdentity>, 
+        registry: Arc<crate::StoreRegistry>,
+        event_tx: tokio::sync::broadcast::Sender<crate::NodeEvent>
+    ) -> Result<Self, MeshError> {
         let root_store_id = store.id();
         let peer_manager = PeerManager::new(store.clone(), node)
             .await?;
+        let store_manager = Arc::new(StoreManager::new(
+            store.clone(), 
+            registry, 
+            peer_manager.clone(), 
+            event_tx
+        ));
+
+        // Start watcher to automatically open/close stores declared in root store
+        store_manager.start_watcher();
             
         Ok(Self {
             store,
             peer_manager,
+            store_manager,
             root_store_id,
         })
     }
@@ -89,6 +112,40 @@ impl Mesh {
     /// Get peer manager for network layer integration.
     pub fn peer_manager(&self) -> Arc<PeerManager> {
         self.peer_manager.clone()
+    }
+    
+    /// Get store manager for store operations.
+    pub fn store_manager(&self) -> Arc<StoreManager> {
+        self.store_manager.clone()
+    }
+
+    /// Resolve a store alias (UUID string or prefix) to a store handle.
+    /// Checks Root Store first, then delegates to StoreManager.
+    pub fn resolve_store(&self, id_or_prefix: &str) -> Result<KvStore, MeshError> {
+        let root_match = self.root_store_id.to_string().starts_with(id_or_prefix);
+        
+        match self.store_manager.resolve_store(id_or_prefix) {
+            Ok(store) => {
+                // If conflict with root, ambiguous
+                if root_match {
+                    Err(MeshError::Other(format!("Ambiguous ID '{}' (matches Root and App Store)", id_or_prefix)))
+                } else {
+                    Ok(store)
+                }
+            }
+            Err(crate::StoreManagerError::NotFound(_)) => {
+                if root_match {
+                    Ok(self.store.clone())
+                } else {
+                    Err(MeshError::Other(format!("Store '{}' not found", id_or_prefix)))
+                }
+            }
+            Err(crate::StoreManagerError::Watch(msg)) => {
+                // Ambiguous in App Stores
+                Err(MeshError::Other(msg))
+            }
+            Err(e) => Err(MeshError::Other(e.to_string()))
+        }
     }
     
     // ==================== Peer Management ====================
@@ -128,8 +185,6 @@ impl Mesh {
         Ok(invite.to_string())
     }
     
-    /// Validate and consume an invite secret.
-    /// Returns true if valid and consumed, false otherwise.
     /// Validate and consume an invite secret.
     /// Returns true if valid and consumed, false otherwise.
     pub async fn consume_invite_secret(&self, secret: &[u8]) -> Result<bool, MeshError> {

@@ -191,6 +191,7 @@ async fn main() {
                         let needs_blocking = matches!(
                             &cli.command,
                             LatticeCommand::Mesh { subcommand: MeshSubcommand::Create | MeshSubcommand::Use { .. } }
+                            | LatticeCommand::Store { subcommand: crate::commands::StoreSubcommand::Use { .. } }
                             | LatticeCommand::Quit
                         );
                         

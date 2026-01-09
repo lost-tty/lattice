@@ -16,7 +16,12 @@ pub mod meta_store;
 pub mod data_dir;
 pub mod token;
 pub mod authorized_store;
+pub mod store_type;
+pub mod store_manager;
 pub use token::Invite;
+pub use store_type::StoreType;
+pub use store_manager::{StoreManager, StoreDeclaration, StoreManagerError, AppStore};
+pub use store_registry::StoreRegistry;
 
 // Re-export from lattice-kernel (replication engine)
 pub use lattice_kernel::{

@@ -4,7 +4,7 @@
 //! Integrates `MeshEngine` logic directly into the service to avoid state duplication.
 
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
-use lattice_node::{Node, NodeEvent, NodeError, PeerStatus};
+use lattice_node::{Node, NodeEvent, NodeError};
 use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
 use lattice_node::AuthorizedStore;
@@ -24,7 +24,7 @@ pub struct SyncResult {
     pub entries_sent_by_peer: u64,
 }
 
-/// Type alias for the stores registry - simple HashMap, Node is source of truth for root
+/// Type alias for the stores registry
 pub type StoresRegistry = Arc<RwLock<HashMap<Uuid, AuthorizedStore>>>;
 pub type PeerStoreRegistry = Arc<RwLock<HashMap<Uuid, Arc<PeerSyncStore>>>>;
 
@@ -113,6 +113,34 @@ impl MeshService {
         tokio::spawn(async move {
             Self::run_event_handler(service_clone, event_rx).await;
         });
+
+        // Register any meshes that are already active (fix for race condition where Lattice CLI starts node before service)
+        if let Ok(meshes) = node.meta().list_meshes() {
+            fn register_mesh_recursive(service: &Arc<MeshService>, mesh: lattice_node::Mesh) {
+                let service = service.clone();
+                tokio::spawn(async move {
+                    tracing::info!(mesh_id = %mesh.id(), "Startup: Registering existing root store");
+                    service.register_store(mesh.kv().clone(), mesh.peer_manager().clone()).await;
+                    
+                    let stores_to_register: Vec<_> = if let Ok(apps) = mesh.store_manager().app_stores().read() {
+                         apps.values().map(|a| a.store.clone()).collect()
+                    } else {
+                         Vec::new()
+                    };
+
+                    for store in stores_to_register {
+                           tracing::info!(store_id = %store.id(), "Startup: Registering existing app store");
+                           service.register_store(store, mesh.peer_manager().clone()).await;
+                    }
+                });
+            }
+
+            for (mesh_id, _) in meshes {
+                if let Some(mesh) = node.mesh_by_id(mesh_id) {
+                    register_mesh_recursive(&service, mesh);
+                }
+            }
+        }
         
         Ok(service)
     }
@@ -319,16 +347,14 @@ impl MeshService {
     }
     
     /// Get active peer IDs for a store (excluding self)
-    async fn active_peer_ids(&self, store_id: Uuid) -> Result<Vec<iroh::PublicKey>, NodeError> {
-        let peers = self.node.mesh_by_id(store_id)
-            .ok_or_else(|| NodeError::Actor(format!("Mesh {} not initialized", store_id)))?
-            .list_peers().await
-            .map_err(NodeError::PeerManager)?;
+    async fn active_peer_ids(&self, _store_id: Uuid) -> Result<Vec<iroh::PublicKey>, NodeError> {
         let my_pubkey = self.endpoint.public_key();
         
-        Ok(peers.into_iter()
-            .filter(|p| p.status == PeerStatus::Active)
-            .filter_map(|p| iroh::PublicKey::from_bytes(&p.pubkey).ok())
+        let peers = self.connected_peers()
+            .map_err(|e| NodeError::Actor(e))?;
+        
+        Ok(peers.keys()
+            .filter_map(|pk| iroh::PublicKey::from_bytes(pk).ok())
             .filter(|id| *id != my_pubkey)
             .collect())
     }
@@ -395,21 +421,21 @@ impl MeshService {
     
     /// Sync with all active peers for a store (by ID)
     pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, NodeError> {
-        let store = self.stores.read().await.get(&store_id).cloned()
+        let store = self.get_store(store_id).await
             .ok_or_else(|| NodeError::Actor(format!("Store {} not registered", store_id)))?;
         self.sync_all(&store).await
     }
     
     /// Sync a specific author with all active peers (by store ID)
     pub async fn sync_author_all_by_id(&self, store_id: Uuid, author: PubKey) -> Result<u64, NodeError> {
-        let store = self.stores.read().await.get(&store_id).cloned()
+        let store = self.get_store(store_id).await
             .ok_or_else(|| NodeError::Actor(format!("Store {} not registered", store_id)))?;
         self.sync_author_all(&store, author).await
     }
     
     /// Sync with a specific peer (by store ID)
     pub async fn sync_with_peer_by_id(&self, store_id: Uuid, peer_id: iroh::PublicKey, authors: &[PubKey]) -> Result<SyncResult, NodeError> {
-        let store = self.stores.read().await.get(&store_id).cloned()
+        let store = self.get_store(store_id).await
             .ok_or_else(|| NodeError::Actor(format!("Store {} not registered", store_id)))?;
         self.sync_with_peer(&store, peer_id, authors).await
     }
@@ -444,6 +470,25 @@ impl MeshService {
                             tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "Event: JoinRequested → join failed");
                             service.node.emit(NodeEvent::JoinFailed { mesh_id, reason: e.to_string() });
                         }
+                    }
+                }
+                NodeEvent::MeshReady(mesh) => {
+                    tracing::info!(mesh_id = %mesh.id(), "Event: MeshReady → registering root store");
+                    // Clone peer manager to ensure it's available for all stores
+                    let peer_manager = mesh.peer_manager();
+
+                    service.register_store(mesh.kv().clone(), peer_manager.clone()).await;
+                    
+                    // Collect stores first to drop lock
+                    let stores_to_register: Vec<_> = if let Ok(apps) = mesh.store_manager().app_stores().read() {
+                        apps.values().map(|a| a.store.clone()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    
+                    for store in stores_to_register {
+                        tracing::info!(store_id = %store.id(), "Event: MeshReady → registering existing app store");
+                        service.register_store(store, peer_manager.clone()).await;
                     }
                 }
                 NodeEvent::NetworkStore { store, peer_manager } => {
@@ -538,6 +583,31 @@ impl MeshService {
         ).await {
             tracing::error!(error = %e, "Gossip setup failed");
         }
+
+        // Boot Sync: Spawn a task to wait for active peers and trigger initial sync
+        let service = self.clone();
+        tokio::spawn(async move {
+            tracing::info!(store_id = %store_id, "Boot Sync: Waiting for peers...");
+            let start = std::time::Instant::now();
+            loop {
+                if start.elapsed().as_secs() > 60 {
+                    tracing::debug!(store_id = %store_id, "Boot Sync: Timed out/Done waiting for peers");
+                    break;
+                }
+                
+                // Active peer check
+                match service.active_peer_ids(store_id).await {
+                    Ok(peers) if !peers.is_empty() => {
+                        tracing::info!(store_id = %store_id, peers = peers.len(), "Boot Sync: Triggering initial sync");
+                        service.node.emit(NodeEvent::SyncRequested(store_id));
+                        break;
+                    }
+                    _ => {}
+                }
+                
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        });
         
         Self::spawn_gap_watcher(self.clone(), authorized_store.clone());
         Self::spawn_sync_coordinator_with_rx(self.clone(), authorized_store, peer_store, sync_needed_rx);

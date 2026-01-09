@@ -154,6 +154,26 @@ pub enum MeshSubcommand {
 
 #[derive(Subcommand)]
 pub enum StoreSubcommand {
+    /// Create a new store
+    Create {
+        /// Optional display name
+        name: Option<String>,
+        /// Store type (e.g., kvstore)
+        #[arg(short = 't', long)]
+        r#type: String,
+    },
+    /// List all stores in the mesh
+    List,
+    /// Switch context to a specific store
+    Use {
+        /// Store UUID (or first few chars)
+        uuid: String,
+    },
+    /// Delete (archive) a store
+    Delete {
+        /// Store UUID
+        uuid: String,
+    },
     /// Show current store info
     Status {
         /// Show detailed file info
@@ -227,6 +247,12 @@ pub async fn handle_command(
             }
         },
         LatticeCommand::Store { subcommand } => match subcommand {
+            StoreSubcommand::Create { name, r#type } => {
+                store_commands::cmd_store_create(node, mesh, &name, &r#type, writer).await
+            },
+            StoreSubcommand::List => store_commands::cmd_store_list(node, mesh, writer).await,
+            StoreSubcommand::Use { uuid } => store_commands::cmd_store_use(node, mesh, &uuid, writer).await,
+            StoreSubcommand::Delete { uuid } => store_commands::cmd_store_delete(node, mesh, &uuid, writer).await,
             StoreSubcommand::Status { verbose } => {
                 let args: Vec<String> = if verbose { vec!["-v".to_string()] } else { vec![] };
                 store_commands::cmd_store_status(node, store, mesh_network.as_deref(), &args, writer).await
