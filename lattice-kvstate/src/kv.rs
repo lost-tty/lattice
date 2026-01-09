@@ -181,8 +181,10 @@ impl KvState {
                 }
             }
 
-            // 1. Apply KV operations
-            for kv_op in &kv_payload.ops {
+            // 1. Apply KV operations in reverse order.
+            // This ensures "last op wins" for same-key operations within a batch,
+            // since all ops have the same HLC timestamp and apply_head uses first-wins.
+            for kv_op in kv_payload.ops.iter().rev() {
                 if let Some(op_type) = &kv_op.op_type {
                     match op_type {
                         operation::OpType::Put(put) => {
@@ -940,5 +942,120 @@ mod tests {
             timestamp: HLC::now(),
             prev_hash,
         }
+    }
+    
+    // Helper to create an Op with multiple ops in payload (for testing reverse iteration)
+    fn make_multi_op(ops: Vec<Operation>, hash: Hash, author: PubKey, deps: &[Hash], prev_hash: Hash) -> Op<'static> {
+        let payload = KvPayload { ops };
+        let payload_bytes: Vec<u8> = payload.encode_to_vec();
+        let deps_vec: Vec<Hash> = deps.to_vec();
+        
+        let payload_static: &'static [u8] = Box::leak(payload_bytes.into_boxed_slice());
+        let deps_static: &'static [Hash] = Box::leak(deps_vec.into_boxed_slice());
+        
+        Op {
+            id: hash,
+            causal_deps: deps_static,
+            payload: payload_static,
+            author,
+            timestamp: HLC::now(),
+            prev_hash,
+        }
+    }
+    
+    /// Test that apply_op with duplicate keys in payload uses last-wins (reverse iteration)
+    #[test]
+    fn test_apply_op_duplicate_keys_last_wins() {
+        let dir = tempdir().unwrap();
+        let store = KvState::open(dir.path()).unwrap();
+        
+        let key = b"test/key";
+        let author = PubKey::from([1u8; 32]);
+        let hash = Hash::from([2u8; 32]);
+        
+        // Create payload with same key twice: first=v1, second=v2
+        // With reverse iteration, last (v2) should win
+        let ops = vec![
+            Operation::put(key.as_slice(), b"first"),
+            Operation::put(key.as_slice(), b"second"),
+        ];
+        let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
+        store.apply(&op).unwrap();
+        
+        // Second put should win
+        let heads = store.get(key).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].value, b"second");
+    }
+    
+    /// Test that apply_op with put then delete on same key results in deletion
+    #[test]
+    fn test_apply_op_put_then_delete_same_key() {
+        let dir = tempdir().unwrap();
+        let store = KvState::open(dir.path()).unwrap();
+        
+        let key = b"test/key";
+        let author = PubKey::from([1u8; 32]);
+        let hash = Hash::from([2u8; 32]);
+        
+        // Create payload: put then delete same key
+        let ops = vec![
+            Operation::put(key.as_slice(), b"value"),
+            Operation::delete(key.as_slice()),
+        ];
+        let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
+        store.apply(&op).unwrap();
+        
+        // Delete should win (last op)
+        let heads = store.get(key).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert!(heads[0].tombstone, "Expected tombstone");
+    }
+    
+    /// Test that apply_op with delete then put on same key results in value
+    #[test]
+    fn test_apply_op_delete_then_put_same_key() {
+        let dir = tempdir().unwrap();
+        let store = KvState::open(dir.path()).unwrap();
+        
+        let key = b"test/key";
+        let author = PubKey::from([1u8; 32]);
+        let hash = Hash::from([2u8; 32]);
+        
+        // Create payload: delete then put same key
+        let ops = vec![
+            Operation::delete(key.as_slice()),
+            Operation::put(key.as_slice(), b"resurrected"),
+        ];
+        let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
+        store.apply(&op).unwrap();
+        
+        // Put should win (last op)
+        let heads = store.get(key).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert!(!heads[0].tombstone, "Expected live value, not tombstone");
+        assert_eq!(heads[0].value, b"resurrected");
+    }
+    
+    /// Test that empty keys are applied at apply_op level (validation is build-time only).
+    /// This ensures deterministic replay - once signed, always apply.
+    #[test]
+    fn test_apply_op_empty_key_allowed() {
+        let dir = tempdir().unwrap();
+        let store = KvState::open(dir.path()).unwrap();
+        
+        let author = PubKey::from([1u8; 32]);
+        let hash = Hash::from([2u8; 32]);
+        
+        // Create payload with empty key - should be applied (weird but deterministic)
+        let ops = vec![Operation::put(b"".as_slice(), b"value")];
+        let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
+        
+        store.apply(&op).expect("Empty key should be applied at apply_op level");
+        
+        // Verify it was stored
+        let heads = store.get(b"").unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].value, b"value");
     }
 }

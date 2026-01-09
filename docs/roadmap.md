@@ -95,62 +95,77 @@
 
 ---
 
-## Milestone 5: Multi-Store
+## Milestone 5: KvStore Transactions
+
+**Goal:** Atomic multi-key operations for consistent writes.
+
+### 5A: Local Atomic Batch
+- [x] `KvHandle::batch()` builder API: `batch().put(k1, v1).put(k2, v2).delete(k3).commit()`
+- [x] Single entry in sigchain containing all operations
+- [x] All-or-nothing semantics: either all ops apply or none
+
+### 5B: Batch Payload Format
+- [x] Extend `KvPayload` to support multiple operations per entry
+- [x] Maintain backward compatibility with single-op entries
+
+---
+
+## Milestone 6: Multi-Store
 
 **Goal:** Root store as control plane for declaring/managing additional stores.
 
-### 5A: Store Declarations in Root Store
-- [ ] Root store keys: `/stores/{uuid}/name`, `/stores/{uuid}/created_at`
-- [ ] CLI: `store create [name]`, `store delete <uuid>`, `store list`
+### 6A: Store Declarations in Root Store
+- [ ] Root store keys: `/stores/{uuid}/name`, `/stores/{uuid}/created_at`, `/stores/{uuid}/type`
+- [ ] CLI: `store create [name] --type <kvstore|chat|...>`, `store delete <uuid>`, `store list`
 
-### 5B: Store Watcher ("Cluster Manager")
+### 6B: Store Watcher ("Cluster Manager")
 
 - [ ] `app_stores: RwLock<HashMap<Uuid, Store>>` in `Node`
 - [ ] Initial Reconciliation: On startup, process `/stores/` snapshot
 - [ ] Live Reconciliation: Background task watching `/stores/` prefix
 - [ ] On Put: open new store; On Delete: close/archive store
 
-### 5C: Multi-Store Gossip
+### 6C: Multi-Store Gossip
 - [ ] `setup_for_store` called for each active store
 - [ ] Per-store gossip topics, verify store-id before applying
 
-### 5D: Shared Peer List (Ingest Guard)
+### 6D: Shared Peer List (Ingest Guard)
 - [ ] All stores use root store peer list for authorization
 - [ ] Check `/nodes/{pubkey}/status` on connect
 
-### 5E: Mesh-Based Join Model
+### 6E: Mesh-Based Join Model
 - [ ] A **mesh** = root store + subordinated stores
 - [ ] JoinRequest always targets the **mesh** (i.e., root store), not individual stores
-- [ ] After joining mesh, node gains access to all declared stores via 5B reconciliation
+- [ ] After joining mesh, node gains access to all declared stores via 6B reconciliation
 
 ---
 
-## Milestone 6: ChatRoom
+## Milestone 7: ChatRoom
 
 **Goal:** Create a specialized `ChatRoom` to demonstrate `lattice` as a messaging platform.
 
-### 6A: Chat Module
+### 7A: Chat Module
 - [ ] `ChatState`: Append-only list of messages (no KV overhead).
 - [ ] `post(text)`, `reply(ref, text)`, `react(ref, emoji)`.
 - [ ] Causal sorting: Ensure replies render after parents.
 
-### 6B: CLI Chat Client
+### 7B: CLI Chat Client
 - [ ] `chat post <msg>`, `chat ls` (render thread).
 - [ ] Real-time updates via `watch()`.
 
 ---
 
-## Milestone 7: Negentropy Sync Protocol
+## Milestone 8: Negentropy Sync Protocol
 
 **Goal:** Replace O(n) vector clock sync with sub-linear bandwidth using range-based set reconciliation.
 
 Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
-### 7A: Infrastructure
+### 8A: Infrastructure
 - [ ] Add hash→entry index (for efficient fetch-by-hash)
 - [ ] Implement negentropy fingerprint generation per store
 
-### 7B: Protocol Migration
+### 8B: Protocol Migration
 - [ ] Replace `SyncState` protocol with negentropy exchange
 - [ ] Decouple `seq` from network sync protocol (keep internal only)
 - [ ] Update `FetchRequest` to use hashes instead of seq ranges
@@ -171,33 +186,33 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 ---
 
-## Milestone 8: HTTP API (lattice-http)
+## Milestone 9: HTTP API (lattice-http)
 
 **Goal:** External access to stores via REST.
 
-### 8A: Access Tokens
+### 9A: Access Tokens
 - [ ] Token storage: `/tokens/{id}/store_id`, `/tokens/{id}/secret_hash`
 - [ ] CLI: `token create`, `token list`, `token revoke`
 
-### 8B: HTTP Server
+### 9B: HTTP Server
 - [ ] REST endpoints: `GET/PUT/DELETE /stores/{uuid}/keys/{key}`
 - [ ] Auth via `Authorization: Bearer {token_id}:{secret}`
 
 ---
 
-## Milestone 9: Content-Addressable Store (CAS) via Garage
+## Milestone 10: Content-Addressable Store (CAS) via Garage
 
 **Goal:** Blob storage using Garage as S3-compatible sidecar.
 
-### 9A: Garage Integration
+### 10A: Garage Integration
 - [ ] S3 client wrapper in `lattice-cas` crate
 - [ ] `put_blob(data) -> hash`, `get_blob(hash) -> data`
 
-### 9B: Metadata & Pinning
+### 10B: Metadata & Pinning
 - [ ] `/cas/pins/{node_id}/{hash}` in root store
 - [ ] Pin reconciler: watch pins, trigger Garage fetch
 
-### 9C: CLI
+### 10C: CLI
 - [ ] `cas put`, `cas get`, `cas pin`, `cas ls`
 
 ---
@@ -247,6 +262,37 @@ Mechanisms to handle millions of nodes and prevent gossip flooding from maliciou
 Ensure system resilience against malicious peers who may lie, omit messages, or attempt to corrupt state (beyond simple forks).
 - **Objective:** Validated consistency without a central authority or global consensus.
 - **Strategy:** Local verification of all data (SigChains), cryptographic prohibition of history rewriting, and detection/rejection of invalid CRDT merges.
+
+### Payload Validation Strategy (To Decide)
+
+**Problem:** Where should semantic payload validation occur, and what happens when validation fails?
+
+**Current state:**
+- Kernel layer validates: signature, chain structure (prev_hash), entry size
+- State machine layer (KvState) validates: empty keys (currently rejects, breaks chain)
+
+**The tension:**
+| Approach | Strictness | Availability |
+|----------|-----------|--------------|
+| Reject at apply_op | High | One bad entry bricks author forever |
+| Skip bad ops, advance chain | Low | Bad data ignored, chain continues |
+| Entry replacement/reorg | High | Complex, attack surface |
+
+**The deterministic replay problem:**
+If validation rules in `apply_op` can change between software versions, state diverges on replay:
+- Node A (v1 rules): skips empty key
+- Node B (v2 rules): applies empty key
+- → State divergence = broken system
+
+**Options to evaluate:**
+1. **Build-time only validation** - Validate at `BatchBuilder::commit()`, never at `apply_op()`. Once signed, always apply. Maintains deterministic replay.
+2. **Versioned validation rules** - Entry includes schema version. Validation tied to version. Complex.
+3. **Entry replacement protocol** - Allow authors to "supersede" bad entries with corrective entries. Fork resolution required.
+4. **Separate chain advancement from payload application** - Kernel advances chaintip (chain is valid), state machine skips bad ops (no effect). Entry exists in history but is a no-op.
+
+**Current test case:** `test_rejected_entry_breaks_chain` in `lattice-kvstate/src/kv.rs` demonstrates the chain break problem.
+
+**Decision needed:** Which validation model best fits lattice's goals of reliability, CRDT convergence, and security?
 
 ---
 

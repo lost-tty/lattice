@@ -17,6 +17,15 @@ use crate::{WatchEvent, WatchError};
 use std::future::Future;
 use std::pin::Pin;
 
+/// Validate a key for KV operations (build-time validation).
+/// Returns error if key is empty.
+fn validate_key(key: &[u8]) -> Result<(), StateWriterError> {
+    if key.is_empty() {
+        return Err(StateWriterError::SubmitFailed("Empty key not allowed".into()));
+    }
+    Ok(())
+}
+
 /// High-level KV handle with read/write operations
 /// 
 /// Generic over `W: StateWriter` to support different write backends:
@@ -281,6 +290,10 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
     /// Write a value for a key.
     /// Returns the operation hash (Entry Hash) upon successful submission.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
+        if let Err(e) = validate_key(key) {
+            return Box::pin(async { Err(e) });
+        }
+        
         let key = key.to_vec();
         let value = value.to_vec();
         
@@ -300,6 +313,10 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
 
     /// Delete a key.
     pub fn delete(&self, key: &[u8]) -> Pin<Box<dyn Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
+        if let Err(e) = validate_key(key) {
+            return Box::pin(async { Err(e) });
+        }
+        
         let key = key.to_vec();
         
         Box::pin(async move {
@@ -314,6 +331,102 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
             
             self.submit(payload, causal_deps).await
         })
+    }
+    
+    /// Start building a batch of operations.
+    /// All operations in the batch will be applied atomically as a single sigchain entry.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// kv.batch()
+    ///     .put(b"key1", b"value1")
+    ///     .put(b"key2", b"value2")
+    ///     .delete(b"key3")
+    ///     .commit().await?;
+    /// ```
+    pub fn batch(&self) -> BatchBuilder<'_, W> {
+        BatchBuilder::new(self)
+    }
+}
+
+/// Builder for atomic batch operations.
+/// 
+/// Collects multiple put/delete operations and commits them as a single sigchain entry.
+/// If the same key appears multiple times, only the last operation for that key is kept.
+pub struct BatchBuilder<'a, W: StateWriter + AsRef<KvState>> {
+    handle: &'a KvHandle<W>,
+    ops: Vec<Operation>,
+}
+
+impl<'a, W: StateWriter + AsRef<KvState>> BatchBuilder<'a, W> {
+    fn new(handle: &'a KvHandle<W>) -> Self {
+        Self {
+            handle,
+            ops: Vec::new(),
+        }
+    }
+    
+    /// Add a put operation to the batch.
+    pub fn put(mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Self {
+        self.ops.push(Operation::put(key.as_ref().to_vec(), value.as_ref().to_vec()));
+        self
+    }
+    
+    /// Add a delete operation to the batch.
+    pub fn delete(mut self, key: impl AsRef<[u8]>) -> Self {
+        self.ops.push(Operation::delete(key.as_ref().to_vec()));
+        self
+    }
+    
+    /// Commit all operations atomically.
+    /// If the same key appears multiple times, only the last operation is kept.
+    /// Returns the entry hash on success.
+    pub async fn commit(self) -> Result<Hash, StateWriterError> {
+        if self.ops.is_empty() {
+            return Err(StateWriterError::SubmitFailed("Empty batch".into()));
+        }
+        
+        // Validate: reject empty keys
+        for op in &self.ops {
+            if let Some(key) = op.key() {
+                validate_key(key)?;
+            }
+        }
+        
+        // Dedupe: keep only the last op per key
+        // Iterate in reverse, track seen keys, collect in reverse order
+        let mut seen_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut deduped_ops: Vec<Operation> = Vec::new();
+        
+        for op in self.ops.into_iter().rev() {
+            if let Some(key) = op.key() {
+                if seen_keys.insert(key.to_vec()) {
+                    deduped_ops.push(op);
+                }
+            }
+        }
+        
+        // Reverse back to original order (last occurrence preserved, earlier ones dropped)
+        deduped_ops.reverse();
+        
+        // Collect causal deps from all affected keys
+        let mut causal_deps = Vec::new();
+        for op in &deduped_ops {
+            if let Some(key) = op.key() {
+                if let Ok(heads) = self.handle.state().get(key) {
+                    for head in heads {
+                        if !causal_deps.contains(&head.hash) {
+                            causal_deps.push(head.hash);
+                        }
+                    }
+                }
+            }
+        }
+        
+        let kv_payload = KvPayload { ops: deduped_ops };
+        let payload = kv_payload.encode_to_vec();
+        
+        self.handle.submit(payload, causal_deps).await
     }
 }
 
@@ -885,13 +998,9 @@ mod tests {
 
         let empty_key = b"";
         
-        handle.put(empty_key, b"void").await.unwrap();
-        let heads = handle.get(empty_key).unwrap();
-        assert_eq!(heads[0].value, b"void");
-        
-        let list = handle.list().unwrap();
-        // Depends on implementation if empty key is returned in list(), assuming YES
-        assert!(list.iter().any(|(k, _)| k.is_empty()));
+        // Empty keys should be rejected
+        let result = handle.put(empty_key, b"void").await;
+        assert!(result.is_err(), "Empty key should be rejected");
     }
 
     #[tokio::test]

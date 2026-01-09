@@ -14,6 +14,15 @@ impl Operation {
     pub fn delete(key: impl Into<Vec<u8>>) -> Self {
         Self { op_type: Some(OpType::Delete(DeleteOp { key: key.into() })) }
     }
+    
+    /// Get the key affected by this operation
+    pub fn key(&self) -> Option<&[u8]> {
+        match &self.op_type {
+            Some(OpType::Put(p)) => Some(&p.key),
+            Some(OpType::Delete(d)) => Some(&d.key),
+            None => None,
+        }
+    }
 }
 
 /// Event emitted when a watched key changes

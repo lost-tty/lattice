@@ -218,27 +218,25 @@ impl Peer {
         Ok(Self::from_attributes(pubkey, attrs.iter().map(|(k, v)| (k.as_str(), v.as_str()))))
     }
     
-    /// Save a Peer to the store (multi-key write).
-    /// Save a Peer to the store (multi-key write).
+    /// Save a Peer to the store
     pub async fn save(&self, kv: &KvStore) -> Result<(), PeerManagerError> {
-        // Write status
-        kv.put(&Self::key_status(self.pubkey), self.status.as_str().as_bytes()).await?;
+        // Build batch with all peer attributes
+        let mut batch = kv.batch()
+            .put(Self::key_status(self.pubkey), self.status.as_str().as_bytes());
         
-        // Write name (if set)
         if let Some(ref name) = self.name {
-            kv.put(&Self::key_name(self.pubkey), name.as_bytes()).await?;
+            batch = batch.put(Self::key_name(self.pubkey), name.as_bytes());
         }
         
-        // Write added_at (if set)
         if let Some(added_at) = self.added_at {
-            kv.put(&Self::key_added_at(self.pubkey), added_at.to_string().as_bytes()).await?;
+            batch = batch.put(Self::key_added_at(self.pubkey), added_at.to_string().as_bytes());
         }
         
-        // Write added_by (if set)
         if let Some(added_by) = self.added_by {
-            kv.put(&Self::key_added_by(self.pubkey), hex::encode(added_by).as_bytes()).await?;
+            batch = batch.put(Self::key_added_by(self.pubkey), hex::encode(added_by).as_bytes());
         }
         
+        batch.commit().await?;
         Ok(())
     }
     
