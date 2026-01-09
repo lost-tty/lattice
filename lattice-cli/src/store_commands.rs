@@ -5,12 +5,12 @@ use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_
 use lattice_node::{Node, KvStore};
 use lattice_model::types::{PubKey, Hash};
 use lattice_model::{CommandDispatcher, FieldFormat, Introspectable};
-use lattice_net::MeshNetwork;
+use lattice_net::MeshService;
 use std::time::Instant;
 use std::io::Write;
 use prost_reflect::{DynamicMessage, Value, ReflectMessage};
 
-pub async fn cmd_store_status(node: &Node, store: Option<&KvStore>, mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_status(node: &Node, store: Option<&KvStore>, mesh: Option<&MeshService>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -26,7 +26,7 @@ pub async fn cmd_store_status(node: &Node, store: Option<&KvStore>, mesh: Option
     CommandResult::Ok
 }
 
-pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<std::sync::Arc<MeshNetwork>>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<std::sync::Arc<MeshService>>, _args: &[String], writer: Writer) -> CommandResult {
     let mesh = match mesh {
         Some(s) => s,
         None => {
@@ -54,7 +54,7 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<
     
     // Spawn the entire sync operation as a background task
     tokio::spawn(async move {
-        match mesh.engine().sync_all_by_id(store_id).await {
+        match mesh.sync_all_by_id(store_id).await {
             Ok(results) => {
                 let mut w = writer.clone();
                 if results.is_empty() {
@@ -74,7 +74,7 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<
     CommandResult::Ok
 }
 
-pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshService>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -92,7 +92,7 @@ pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&KvStore>, _mesh: Op
     CommandResult::Ok
 }
 
-pub async fn cmd_store_debug(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_debug(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshService>, _args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -205,7 +205,7 @@ fn format_message_inline(msg: &prost_reflect::DynamicMessage, formats: &std::col
     out.trim().to_string()
 }
 
-pub async fn cmd_author_state(node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_author_state(node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshService>, args: &[String], writer: Writer) -> CommandResult {
     let Some(store) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "Error: no store selected");
@@ -301,7 +301,7 @@ async fn fetch_author_states(store: &KvStore, target: Option<PubKey>) -> Result<
 
 
 
-pub async fn cmd_history(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_history(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshService>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
@@ -457,7 +457,7 @@ fn extract_field_value(msg: &prost_reflect::DynamicMessage, field_name: &str) ->
     None
 }
 
-pub async fn cmd_dynamic_exec(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_dynamic_exec(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshService>, args: &[String], writer: Writer) -> CommandResult {
     let Some(h) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");

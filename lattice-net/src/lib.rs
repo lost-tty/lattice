@@ -18,7 +18,7 @@ pub use error::LatticeNetError;
 pub use framing::{MessageSink, MessageStream};
 pub use lattice_kernel::proto::storage::SyncState;
 pub use lattice_kernel::proto::network::{StatusRequest, StatusResponse, FetchRequest, FetchResponse, AuthorRange};
-pub use mesh::{MeshNetwork, SyncResult};
+pub use mesh::{MeshService, SyncResult};
 pub use lattice_model::types::PubKey;
 
 /// Parse a PublicKey (NodeId) from hex or base32 string

@@ -8,7 +8,7 @@ use crate::commands::{CommandResult, Writer, MeshSubcommand};
 use crate::display_helpers::format_elapsed;
 use lattice_node::{Node, KvStore, PeerStatus, Mesh, token::Invite};
 use lattice_model::types::PubKey;
-use lattice_net::MeshNetwork;
+use lattice_net::MeshService;
 use chrono::DateTime;
 use owo_colors::OwoColorize;
 use std::time::Instant;
@@ -17,7 +17,7 @@ use std::io::Write;
 pub async fn handle_command(
     node: &Node,
     mesh: Option<&Mesh>,
-    network: Option<&MeshNetwork>,
+    network: Option<&MeshService>,
     cmd: MeshSubcommand,
     writer: Writer,
 ) -> CommandResult {
@@ -42,7 +42,7 @@ pub async fn handle_command(
 // ==================== Mesh Commands ====================
 
 /// Create a new mesh
-pub async fn cmd_create(node: &Node, _store: Option<&KvStore>, _mesh: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
+pub async fn cmd_create(node: &Node, _store: Option<&KvStore>, _mesh: Option<&MeshService>, writer: Writer) -> CommandResult {
     match node.create_mesh().await {
         Ok(store_id) => {
             let mut w = writer.clone();
@@ -193,7 +193,7 @@ pub async fn cmd_join(node: &Node, token: &str, writer: Writer) -> CommandResult
 }
 
 /// List all peers with authorization status + online state
-pub async fn cmd_peers(node: &Node, mesh: Option<&Mesh>, network: Option<&MeshNetwork>, writer: Writer) -> CommandResult {
+pub async fn cmd_peers(node: &Node, mesh: Option<&Mesh>, network: Option<&MeshService>, writer: Writer) -> CommandResult {
     // 1. Get POLICY from PeerManager (Who is authorized?)
     let mesh = match mesh {
         Some(m) => m,

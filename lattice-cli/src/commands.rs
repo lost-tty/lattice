@@ -2,7 +2,7 @@
 
 use crate::{mesh_commands, node_commands, store_commands};
 use lattice_node::{Node, KvStore, Mesh};
-use lattice_net::MeshNetwork;
+use lattice_net::MeshService;
 use clap::{Parser, Subcommand, CommandFactory};
 use lattice_model::CommandDispatcher;
 use rustyline_async::SharedWriter;
@@ -184,7 +184,7 @@ pub enum StoreSubcommand {
 pub async fn handle_command(
     node: &Node,
     store: Option<&KvStore>,
-    mesh_network: Option<Arc<MeshNetwork>>,
+    mesh_network: Option<Arc<MeshService>>,
     mesh: Option<&Mesh>,
     cli: LatticeCli,
     writer: Writer,

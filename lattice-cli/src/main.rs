@@ -8,7 +8,7 @@ mod display_helpers;
 mod graph_renderer;
 mod tracing_writer;
 
-use lattice_net::MeshNetwork;
+use lattice_net::MeshService;
 use commands::CommandResult;
 use lattice_node::KvStore;
 use lattice_node::NodeBuilder;
@@ -96,7 +96,7 @@ async fn main() {
     let current_mesh: Arc<RwLock<Option<Mesh>>> = Arc::new(RwLock::new(None));
     
     // Create server FIRST so it can receive StoreReady event from node.start()
-    let mesh_network: Option<Arc<MeshNetwork>> = match MeshNetwork::new_from_node(node.clone()).await {
+    let mesh_network: Option<Arc<MeshService>> = match MeshService::new_from_node(node.clone()).await {
         Ok(s) => {
             tracing::info!("Iroh: {} (listening)", s.endpoint().public_key().fmt_short());
             Some(s)

@@ -3,7 +3,7 @@
 //! Provides colored formatting functions for sync state display, author IDs,
 //! and delta indicators. Used by store and node commands.
 
-use lattice_net::MeshNetwork;
+use lattice_net::MeshService;
 use owo_colors::OwoColorize;
 use owo_colors::AnsiColors;
 use lattice_model::types::PubKey;
@@ -252,7 +252,7 @@ pub async fn write_orphan_details(w: &mut Writer, h: &KvStore) {
 }
 
 /// Write peer sync state matrix
-pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &KvStore, mesh: Option<&MeshNetwork>) {
+pub async fn write_peer_sync_matrix(w: &mut Writer, node: &Node, h: &KvStore, mesh: Option<&MeshService>) {
     let peer_states = if let Some(mesh) = mesh {
         if let Some(peer_store) = mesh.peer_stores().read().await.get(&h.id()) {
             peer_store.list_peer_sync_states().unwrap_or_default()

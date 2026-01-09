@@ -7,7 +7,7 @@ use lattice_node::{NodeBuilder, NodeEvent, Node, KvStore, token::Invite};
 use lattice_kvstate::Merge;
 use lattice_model::types::PubKey;
 use lattice_kernel::Uuid;
-use lattice_net::MeshNetwork;
+use lattice_net::MeshService;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -83,7 +83,7 @@ async fn test_production_flow_gossip() {
     // Node A: already initialized, will call start()
     let node_a = Arc::new(NodeBuilder { data_dir: data_a.clone() }.build().expect("node a session 2"));
     
-    let server_a = MeshNetwork::new_from_node(node_a.clone()).await.expect("server a");
+    let server_a = MeshService::new_from_node(node_a.clone()).await.expect("server a");
     node_a.start().await.expect("start a");  // Emits NetworkStore → gossip setup
     
     // Verify A's mesh is accessible
@@ -92,7 +92,7 @@ async fn test_production_flow_gossip() {
     
     // Node B: not yet initialized
     let node_b = Arc::new(NodeBuilder { data_dir: data_b.clone() }.build().expect("node b"));
-    let _server_b = MeshNetwork::new_from_node(node_b.clone()).await.expect("server b");
+    let _server_b = MeshService::new_from_node(node_b.clone()).await.expect("server b");
     
     // === Node A: Creates invite token for B ===
     let token_string = mesh_a.create_invite(node_a.node_id()).await.expect("create invite");
