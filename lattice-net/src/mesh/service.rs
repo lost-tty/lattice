@@ -116,29 +116,12 @@ impl MeshService {
             sync_engine,
         });
         
-        // Subscribe to node events and spawn handler
+        // Subscribe to node events (NetworkStoreReady, etc.)
         let event_rx = node.subscribe_events();
         let service_clone = service.clone();
         tokio::spawn(async move {
             Self::run_event_handler(service_clone, event_rx).await;
         });
-        
-        // CRITICAL: Register existing meshes that were loaded before this service started.
-        // Without this, we miss NetworkStoreReady events emitted during Node::new().
-        if let Ok(meshes) = node.meta().list_meshes() {
-            for (mesh_id, _) in meshes {
-                if let Some(mesh) = node.mesh_by_id(mesh_id) {
-                    let service_inner = service.clone();
-                    tokio::spawn(async move {
-                        tracing::info!(store_id = %mesh_id, "Startup: Registering existing store");
-                        service_inner.register_store(
-                            mesh.root_store().clone(), 
-                            mesh.peer_manager().clone()
-                        ).await;
-                    });
-                }
-            }
-        }
         
         Ok(service)
     }

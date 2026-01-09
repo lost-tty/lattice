@@ -340,8 +340,8 @@ impl Node {
             mesh.shutdown().await;
         }
         
-        // Shutdown registry (joins actor threads)
-        self.registry.shutdown();
+        // Shutdown registry (awaits actor tasks)
+        self.registry.shutdown().await;
     }
 
     /// Create a new mesh (multi-mesh: can be called multiple times).
@@ -683,6 +683,7 @@ mod tests {
                 .build()
                 .expect("create node");
             mesh_id = node.create_mesh().await.expect("create_mesh");
+            node.shutdown().await;  // Explicit shutdown to release DB
         } // End first session
         
         // Second session: mesh should persist in meta.db

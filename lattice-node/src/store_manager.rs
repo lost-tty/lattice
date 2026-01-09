@@ -239,7 +239,7 @@ impl StoreManager {
                             opened += 1;
                         }
                         Err(e) => {
-                            warn!(store_id = %decl.id, error = %e, "Failed to open store");
+                            warn!(store_id = %decl.id, error = ?e, "Failed to open store");
                         }
                     }
                 }

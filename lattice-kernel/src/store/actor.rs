@@ -144,87 +144,107 @@ impl<S: StateMachine> ReplicationController<S> {
         })
     }
 
-    /// Run the actor loop - processes commands until Shutdown received
-    /// Uses blocking_recv since redb is sync and we run in spawn_blocking
-    pub fn run(mut self) {
-        while let Some(cmd) = self.rx.blocking_recv() {
-            match cmd {
-                ReplicationControllerCmd::LogSeq { resp } => {
-                    let local_author = self.node.public_key();
-                    let len = self
-                        .chain_manager
-                        .get(&local_author)
-                        .map(|c| c.len())
-                        .unwrap_or(0);
-                    let _ = resp.send(len);
+    /// Run the actor loop - processes commands until Shutdown, cancellation, or channel closed
+    pub async fn run(mut self, shutdown_token: tokio_util::sync::CancellationToken) {
+        loop {
+            tokio::select! {
+                // Priority: Cancellation Token (Emergency Brake)
+                _ = shutdown_token.cancelled() => {
+                    break;
                 }
-                ReplicationControllerCmd::AppliedSeq { resp } => {
-                    let author = self.node.public_key();
-                    // Get tip from sigchain, not state machine
-                    let result = self
-                        .chain_manager
-                        .get(&author)
-                        .and_then(|chain| chain.tip())
-                        .map(|tip| tip.seq)
-                        .unwrap_or(0);
-                    let _ = resp.send(Ok(result));
+                
+                // Normal Message Processing
+                msg = self.rx.recv() => {
+                    match msg {
+                        Some(ReplicationControllerCmd::Shutdown) => {
+                            break;
+                        }
+                        Some(cmd) => self.handle_command(cmd),
+                        None => {
+                            break;
+                        }
+                    }
                 }
-                ReplicationControllerCmd::ChainTip { author, resp } => {
-                    // Get tip from sigchain, not state machine
-                    let result = self
-                        .chain_manager
-                        .get(&author)
-                        .and_then(|chain| chain.tip())
-                        .map(|tip| tip.clone().into());
-                    let _ = resp.send(Ok(result));
-                }
-                ReplicationControllerCmd::SyncState { resp } => {
-                    let _ = resp.send(Ok(self.chain_manager.sync_state()));
-                }
-                ReplicationControllerCmd::IngestEntry { entry, resp } => {
-                    let result = self.apply_ingested_entry(&entry).map_err(|e| match e {
+            }
+        }
+    }
+    
+    /// Handle a single command (keeps select! block clean)
+    fn handle_command(&mut self, cmd: ReplicationControllerCmd) {
+        match cmd {
+            ReplicationControllerCmd::LogSeq { resp } => {
+                let local_author = self.node.public_key();
+                let len = self
+                    .chain_manager
+                    .get(&local_author)
+                    .map(|c| c.len())
+                    .unwrap_or(0);
+                let _ = resp.send(len);
+            }
+            ReplicationControllerCmd::AppliedSeq { resp } => {
+                let author = self.node.public_key();
+                let result = self
+                    .chain_manager
+                    .get(&author)
+                    .and_then(|chain| chain.tip())
+                    .map(|tip| tip.seq)
+                    .unwrap_or(0);
+                let _ = resp.send(Ok(result));
+            }
+            ReplicationControllerCmd::ChainTip { author, resp } => {
+                let result = self
+                    .chain_manager
+                    .get(&author)
+                    .and_then(|chain| chain.tip())
+                    .map(|tip| tip.clone().into());
+                let _ = resp.send(Ok(result));
+            }
+            ReplicationControllerCmd::SyncState { resp } => {
+                let _ = resp.send(Ok(self.chain_manager.sync_state()));
+            }
+            ReplicationControllerCmd::IngestEntry { entry, resp } => {
+                let result = self.apply_ingested_entry(&entry).map_err(|e| match e {
+                    ReplicationControllerError::SigChain(e) => StateError::from(e),
+                    ReplicationControllerError::State(e) => e,
+                });
+                let _ = resp.send(result);
+            }
+            ReplicationControllerCmd::Submit { payload, causal_deps, resp } => {
+                let result = self
+                    .create_and_commit_local_entry(payload, causal_deps)
+                    .map_err(|e| match e {
                         ReplicationControllerError::SigChain(e) => StateError::from(e),
                         ReplicationControllerError::State(e) => e,
                     });
-                    let _ = resp.send(result);
-                }
-                ReplicationControllerCmd::Submit { payload, causal_deps, resp } => {
-                    let result = self
-                        .create_and_commit_local_entry(payload, causal_deps)
-                        .map_err(|e| match e {
-                            ReplicationControllerError::SigChain(e) => StateError::from(e),
-                            ReplicationControllerError::State(e) => e,
-                        });
-                    let _ = resp.send(result);
-                }
-                ReplicationControllerCmd::LogStats { resp } => {
-                    let _ = resp.send(self.chain_manager.log_stats());
-                }
-                ReplicationControllerCmd::LogPaths { resp } => {
-                    let _ = resp.send(self.chain_manager.log_paths());
-                }
-                ReplicationControllerCmd::OrphanList { resp } => {
-                    let _ = resp.send(self.chain_manager.orphan_list());
-                }
-                ReplicationControllerCmd::OrphanCleanup { resp } => {
-                    let removed = self.cleanup_stale_orphans();
-                    let _ = resp.send(removed);
-                }
-                ReplicationControllerCmd::SubscribeGaps { resp } => {
-                    let _ = resp.send(self.chain_manager.subscribe_gaps());
-                }
-                ReplicationControllerCmd::StreamEntriesInRange {
-                    author,
-                    from_seq,
-                    to_seq,
-                    resp,
-                } => {
-                    let result = self.do_stream_entries_in_range(&author, from_seq, to_seq);
-                    let _ = resp.send(result);
-                }
-                ReplicationControllerCmd::Shutdown => {
-                    break;
-                }
+                let _ = resp.send(result);
+            }
+            ReplicationControllerCmd::LogStats { resp } => {
+                let _ = resp.send(self.chain_manager.log_stats());
+            }
+            ReplicationControllerCmd::LogPaths { resp } => {
+                let _ = resp.send(self.chain_manager.log_paths());
+            }
+            ReplicationControllerCmd::OrphanList { resp } => {
+                let _ = resp.send(self.chain_manager.orphan_list());
+            }
+            ReplicationControllerCmd::OrphanCleanup { resp } => {
+                let removed = self.cleanup_stale_orphans();
+                let _ = resp.send(removed);
+            }
+            ReplicationControllerCmd::SubscribeGaps { resp } => {
+                let _ = resp.send(self.chain_manager.subscribe_gaps());
+            }
+            ReplicationControllerCmd::StreamEntriesInRange {
+                author,
+                from_seq,
+                to_seq,
+                resp,
+            } => {
+                let result = self.do_stream_entries_in_range(&author, from_seq, to_seq);
+                let _ = resp.send(result);
+            }
+            ReplicationControllerCmd::Shutdown => {
+                // Handled in select! above, but keep for completeness
             }
         }
     }
@@ -546,11 +566,12 @@ mod tests {
         store_id: Uuid,
         store_dir: std::path::PathBuf,
         node: NodeIdentity,
+        runtime: &tokio::runtime::Runtime,
     ) -> Result<
         (
             crate::store::Store<MockStateMachine>,
             crate::store::StoreInfo,
-            std::thread::JoinHandle<()>,
+            tokio::task::JoinHandle<()>,
         ),
         crate::store::StateError,
     > {
@@ -564,7 +585,34 @@ mod tests {
         )?;
         
         let (handle, info, runner) = opened.into_handle(node)?;
-        let join_handle = std::thread::spawn(move || runner.run());
+        let join_handle = runtime.spawn(async move { runner.run().await });
+        Ok((handle, info, join_handle))
+    }
+    
+    /// Async version for use in #[tokio::test] contexts (tokio::spawn works directly)
+    fn open_test_store_async(
+        store_id: Uuid,
+        store_dir: std::path::PathBuf,
+        node: NodeIdentity,
+    ) -> Result<
+        (
+            crate::store::Store<MockStateMachine>,
+            crate::store::StoreInfo,
+            tokio::task::JoinHandle<()>,
+        ),
+        crate::store::StateError,
+    > {
+        let state = Arc::new(MockStateMachine::new());
+        let logs_dir = store_dir.join("logs");
+        
+        let opened = crate::store::OpenedStore::new(
+            store_id,
+            logs_dir,
+            state.clone(),
+        )?;
+        
+        let (handle, info, runner) = opened.into_handle(node)?;
+        let join_handle = tokio::spawn(async move { runner.run().await });
         Ok((handle, info, join_handle))
     }
 
@@ -578,9 +626,8 @@ mod tests {
         let store_dir = tmp.path().to_path_buf();
 
         let node = NodeIdentity::generate();
-        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node.clone()).unwrap();
-
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node.clone(), &rt).unwrap();
 
         // Create entry1: first write to /key
         let clock1 = MockClock::new(1000);
@@ -629,9 +676,9 @@ mod tests {
         let node1 = NodeIdentity::generate(); 
         let node2 = NodeIdentity::generate(); 
         let node3 = NodeIdentity::generate(); 
-
-        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone()).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone(), &rt).unwrap();
 
         // Author1: entry_a
         let clock_a = MockClock::new(1000);
@@ -686,9 +733,9 @@ mod tests {
         let node1 = NodeIdentity::generate();
         let node2 = NodeIdentity::generate();
         let node3 = NodeIdentity::generate();
-
-        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone()).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone(), &rt).unwrap();
 
         // Setup entries A, B, C (see previous test)
         let clock_a = MockClock::new(1000);
@@ -745,12 +792,12 @@ mod tests {
         let node_b = NodeIdentity::generate();
         let node_c = NodeIdentity::generate();
         let node_d = NodeIdentity::generate();
+        let rt = tokio::runtime::Runtime::new().unwrap();
 
-        let (handle_a, _info_a, _join_a) = open_test_store(TEST_STORE, store_dir_a, node_a.clone()).unwrap();
-        let (handle_d, _info_d, _join_d) = open_test_store(TEST_STORE, store_dir_d, node_d.clone()).unwrap();
+        let (handle_a, _info_a, _join_a) = open_test_store(TEST_STORE, store_dir_a, node_a.clone(), &rt).unwrap();
+        let (handle_d, _info_d, _join_d) = open_test_store(TEST_STORE, store_dir_d, node_d.clone(), &rt).unwrap();
         
         let mut entry_rx_a = handle_a.subscribe_entries();
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let clock = MockClock::new(1000);
 
         // A, B, C write to same key.
@@ -833,8 +880,11 @@ mod tests {
         let opened = crate::store::OpenedStore::new(Uuid::new_v4(), logs_dir, state).unwrap();
         let (handle, _, runner) = opened.into_handle(node.clone()).unwrap();
         
-        // Spawn actor in thread
-        let join_handle = std::thread::spawn(move || runner.run());
+        // Spawn actor in thread (using std::thread to catch panic result)
+        let join_handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(runner.run());
+        });
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         // Create an entry
@@ -868,7 +918,7 @@ mod tests {
 
         // Phase 1: Write
         {
-            let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
+            let (handle, _info, _join) = open_test_store_async(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
             let h1 = handle.submit(b"x".to_vec(), vec![]).await.unwrap();
             let h2 = handle.submit(b"x".to_vec(), vec![]).await.unwrap();
             
@@ -878,13 +928,14 @@ mod tests {
             // Log check
             let log_seq = handle.log_seq().await;
             assert!(log_seq >= 2);
-            drop(handle);
-            let _ = _join.join();
+            handle.shutdown();
+            // Small delay to let actor finish cleanly
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
         // Phase 2: Re-open (simulate crash)
         {
-            let (handle, info, _join) = open_test_store(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
+            let (handle, info, _join) = open_test_store_async(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
             // Should have replayed entries from log
             assert!(info.entries_replayed >= 2, "Should replay from log");
             
@@ -892,8 +943,8 @@ mod tests {
              // Check value restored via replay count
              // (We can't easily check hashes without refactoring test setup to capture them)
              
-             drop(handle);
-             let _ = _join.join();
+             handle.shutdown();
+             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
              // Or better: Re-calculate hashes? No, random timestamps.
              // We can use SigChainManager to peek hashes.
@@ -915,9 +966,9 @@ mod tests {
         let node1 = NodeIdentity::generate();
         let node2 = NodeIdentity::generate();
         let node3 = NodeIdentity::generate();
-
-        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone()).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone(), &rt).unwrap();
 
         // A, B, C merging
         let clock_a = MockClock::new(1000);
@@ -949,8 +1000,8 @@ mod tests {
         assert!(rt.block_on(handle.ingest_entry(entry_b.clone())).is_ok());
 
         assert!(handle.state().has_applied(hash_c));
-        drop(handle);
-        let _ = _join.join();
+        // Use close() which properly awaits actor termination
+        rt.block_on(handle.close());
 
         let orphan_db_path = logs_dir.join("orphans.db");
         let orphan_store = crate::store::sigchain::orphan_store::OrphanStore::open(&orphan_db_path).unwrap();
@@ -969,12 +1020,12 @@ mod tests {
 
         // 1. Create full history (3 entries)
         {
-            let (handle, _, _join) = open_test_store(TEST_STORE_LOCAL, store_dir.clone(), node.clone()).unwrap();
+            let (handle, _, _join) = open_test_store_async(TEST_STORE_LOCAL, store_dir.clone(), node.clone()).unwrap();
             handle.submit(b"x".to_vec(), vec![]).await.unwrap();
             handle.submit(b"x".to_vec(), vec![]).await.unwrap();
             handle.submit(b"x".to_vec(), vec![]).await.unwrap();
-            drop(handle);
-            let _ = _join.join();
+            handle.shutdown();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
         // 2. Create state with PARTIAL history (simulating a snapshot or lagging state)

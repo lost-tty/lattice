@@ -18,20 +18,35 @@ async fn test_store_declaration_and_reconciliation() {
     
     // Verify it's listed
     let stores = store_manager.list_stores().unwrap();
+    println!("DEBUG: list_stores returned {} stores", stores.len());
+    for s in &stores {
+        println!("DEBUG: store {:?} archived={}", s.id, s.archived);
+    }
     assert_eq!(stores.len(), 1);
     assert_eq!(stores[0].id, store_id);
     assert_eq!(stores[0].name, store_name);
     assert!(!stores[0].archived);
     
-    // 2. Reconcile - should open the store
+    // 2. Wait for store to be open (watcher should auto-reconcile) or reconcile manually
+    // The store may already be open due to watcher, so we just ensure it IS open
+    for _ in 0..10 {
+        let apps = store_manager.app_stores().read().unwrap();
+        if apps.contains_key(&store_id) {
+            break;
+        }
+        drop(apps);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    
+    // Reconcile should be idempotent if store is already open
     let (opened, closed) = store_manager.reconcile().unwrap();
-    assert_eq!(opened, 1);
+    // opened may be 0 (watcher did it) or 1 (we did it) - both are valid
     assert_eq!(closed, 0);
     
     // Verify it's open in app_stores
     {
         let apps = store_manager.app_stores().read().unwrap();
-        assert!(apps.contains_key(&store_id));
+        assert!(apps.contains_key(&store_id), "Store should be open");
         assert_eq!(apps.get(&store_id).unwrap().store_type, StoreType::KvStore);
     }
     
@@ -47,14 +62,25 @@ async fn test_store_declaration_and_reconciliation() {
     let stores = store_manager.list_stores().unwrap();
     assert!(stores[0].archived);
     
-    // 5. Reconcile - should close the store
+    // 5. Wait for store to be closed (watcher should auto-close) or reconcile manually
+    for _ in 0..10 {
+        let apps = store_manager.app_stores().read().unwrap();
+        if !apps.contains_key(&store_id) {
+            break;
+        }
+        drop(apps);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    
+    // Reconcile should be idempotent if store is already closed
     let (opened, closed) = store_manager.reconcile().unwrap();
     assert_eq!(opened, 0);
-    assert_eq!(closed, 1);
+    // closed may be 0 (watcher did it) or 1 (we did it) - both are valid
     
+    // Verify store is not in app_stores
     {
         let apps = store_manager.app_stores().read().unwrap();
-        assert!(!apps.contains_key(&store_id));
+        assert!(!apps.contains_key(&store_id), "Store should be closed");
     }
 }
 

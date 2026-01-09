@@ -71,16 +71,9 @@ async fn test_targeted_author_sync() {
     // Allow some time for mDNS discovery
     sleep(Duration::from_millis(200)).await;
     
-    let store_b = match join_mesh_via_event(&node_b, a_pubkey, store_id, invite.secret).await {
-        Some(s) => s,
-        None => {
-            // Skip test if no network connectivity (CI/isolated environment)
-            eprintln!("Skipping test - no network connectivity or join failed");
-            let _ = std::fs::remove_dir_all(data_a.base());
-            let _ = std::fs::remove_dir_all(data_b.base());
-            return;
-        }
-    };
+    let store_b = join_mesh_via_event(&node_b, a_pubkey, store_id, invite.secret)
+        .await
+        .expect("B should successfully join A's mesh");
     
     sleep(Duration::from_millis(300)).await;
     
@@ -121,15 +114,9 @@ async fn test_sync_multiple_entries() {
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     sleep(Duration::from_millis(200)).await;
     
-    let store_b = match join_mesh_via_event(&node_b, a_pubkey, store_id, invite.secret).await {
-        Some(s) => s,
-        None => {
-            eprintln!("Skipping test - no network");
-            let _ = std::fs::remove_dir_all(data_a.base());
-            let _ = std::fs::remove_dir_all(data_b.base());
-            return;
-        }
-    };
+    let store_b = join_mesh_via_event(&node_b, a_pubkey, store_id, invite.secret)
+        .await
+        .expect("B should successfully join A's mesh");
     
     sleep(Duration::from_millis(300)).await;
     

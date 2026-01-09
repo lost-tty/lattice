@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_util::sync::CancellationToken;
 use futures_util::StreamExt;
 use lattice_model::replication::EntryStreamProvider;
 use prost::Message;
@@ -29,11 +30,17 @@ use std::any::Any;
 /// Marker trait for generic store handles to allow storage in registries
 pub trait StoreHandle: Send + Sync {
     fn as_any(&self) -> &dyn Any;
+    /// Request actor shutdown
+    fn shutdown(&self);
 }
 
 impl<S: StateMachine + Send + Sync + 'static> StoreHandle for Store<S> {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+    
+    fn shutdown(&self) {
+        Store::shutdown(self);
     }
 }
 
@@ -48,6 +55,7 @@ pub struct Store<S> {
     state: std::sync::Arc<S>,
     tx: mpsc::Sender<ReplicationControllerCmd>,
     entry_tx: broadcast::Sender<SignedEntry>,
+    shutdown_token: CancellationToken,
 }
 
 impl<S> Clone for Store<S> {
@@ -57,6 +65,7 @@ impl<S> Clone for Store<S> {
             state: self.state.clone(),
             tx: self.tx.clone(),
             entry_tx: self.entry_tx.clone(),
+            shutdown_token: self.shutdown_token.clone(),
         }
     }
 }
@@ -104,6 +113,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
     pub fn into_handle(self, node: NodeIdentity) -> Result<(Store<S>, StoreInfo, ActorRunner<S>), super::StateError> {
         let (tx, rx) = mpsc::channel(32);
         let (entry_tx, _entry_rx) = broadcast::channel(64);
+        let shutdown_token = CancellationToken::new();
 
         let state_for_actor = self.state.clone();
         
@@ -115,13 +125,14 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
             node, rx, entry_tx.clone(),
         )?;
         
-        let runner = ActorRunner { actor };
+        let runner = ActorRunner { actor, shutdown_token: shutdown_token.clone() };
 
         let handle = Store {
             store_id: self.store_id,
             state: self.state,
             tx,
             entry_tx,
+            shutdown_token,
         };
         let info = StoreInfo { store_id: self.store_id, entries_replayed: self.entries_replayed };
         Ok((handle, info, runner))
@@ -134,21 +145,53 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
     pub fn entries_replayed(&self) -> u64 { self.entries_replayed }
 }
 
-/// Runner for the replication actor. Must be spawned or run in a thread.
+/// Runner for the replication actor. Must be spawned as a tokio task.
 pub struct ActorRunner<S: StateMachine> {
     actor: ReplicationController<S>,
+    shutdown_token: CancellationToken,
 }
 
 impl<S: StateMachine + Send + Sync + 'static> ActorRunner<S> {
-    /// Run the actor loop. This blocks until the channel is closed or shutdown is received.
-    pub fn run(self) {
-        self.actor.run();
+    /// Run the actor loop. This is async and should be spawned via tokio::spawn.
+    pub async fn run(self) {
+        self.actor.run(self.shutdown_token).await;
     }
 }
 
 impl<S: StateMachine> Store<S> {
     pub fn id(&self) -> Uuid {
         self.store_id
+    }
+
+    /// Request actor shutdown (non-blocking).
+    /// 
+    /// 1. Tries to send a polite `Shutdown` command (preserves order).
+    /// 2. If the channel is full, cancels the `shutdown_token` (immediate stop).
+    pub fn shutdown(&self) {
+        use tokio::sync::mpsc::error::TrySendError;
+        
+        match self.tx.try_send(ReplicationControllerCmd::Shutdown) {
+            Ok(_) => {
+                // Sent successfully. Actor will process queue then stop.
+            }
+            Err(TrySendError::Full(_)) => {
+                // Channel is full! Pull the emergency brake.
+                self.shutdown_token.cancel();
+            }
+            Err(TrySendError::Closed(_)) => {
+                // Actor is already dead. Do nothing.
+            }
+        }
+    }
+    
+    /// Shuts down the store and waits for the background actor to exit.
+    /// 
+    /// This ensures the SigChain buffers are flushed to disk before returning.
+    /// Preferred over `shutdown()` when you can await.
+    pub async fn close(&self) {
+        self.shutdown();
+        // Wait for the actor to drop the receiver
+        self.tx.closed().await;
     }
 
     /// Direct read access to the state machine.

@@ -70,6 +70,7 @@ async fn wait_for_entry(store: &KvStore, key: &[u8], expected: &[u8]) -> bool {
 /// `daemon` invocation (simulated by rebuilding the node) calls `start()`.
 #[tokio::test]
 async fn test_production_flow_gossip() {
+    eprintln!("[TEST] Starting test_production_flow_gossip");
     let data_a = temp_data_dir("prod_flow_a");
     let data_b = temp_data_dir("prod_flow_b");
     
@@ -78,7 +79,7 @@ async fn test_production_flow_gossip() {
     {
         let node_a = Arc::new(NodeBuilder { data_dir: data_a.clone() }.build().expect("node a"));
         mesh_id = node_a.create_mesh().await.expect("init a");
-        // Node A exits after init - no daemon running
+        // Node A exits after init - explicit shutdown required for clean DB release
         node_a.shutdown().await;
     }
     
@@ -97,6 +98,9 @@ async fn test_production_flow_gossip() {
     let node_b = Arc::new(NodeBuilder { data_dir: data_b.clone() }.build().expect("node b"));
     let _server_b = MeshService::new_from_node(node_b.clone()).await.expect("server b");
     
+    // Allow time for mDNS discovery between nodes (local network announcement)
+    sleep(Duration::from_millis(500)).await;
+    
     // === Node A: Creates invite token for B ===
     let token_string = mesh_a.create_invite(node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");
@@ -104,8 +108,9 @@ async fn test_production_flow_gossip() {
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     
     // B joins A via event flow with secret
-    let store_b = join_mesh_via_event(&node_b, a_pubkey, mesh_id, invite.secret).await
-        .expect("Join failed or timed out - check network connectivity and token validity");
+    let store_b = join_mesh_via_event(&node_b, a_pubkey, mesh_id, invite.secret)
+        .await
+        .expect("B should successfully join A's mesh");
     
     
     // Verify gossip is connected

@@ -21,8 +21,8 @@ pub struct StoreRegistry {
     meta: Arc<MetaStore>,
     node: Arc<NodeIdentity>,
     stores: RwLock<HashMap<Uuid, Box<dyn StoreHandle>>>,
-    /// Tracked actor thread handles for clean shutdown
-    handles: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Tracked actor task handles for clean shutdown
+    handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl StoreRegistry {
@@ -93,12 +93,12 @@ impl StoreRegistry {
         let opened = OpenedStore::new(store_id, sigchain_dir, state)?;
         let (store_handle, info, runner) = opened.into_handle((*self.node).clone())?;
         
-        // Spawn the actor runner (detached thread)
-        let thread_handle = std::thread::spawn(move || runner.run());
+        // Spawn the actor runner as tokio task
+        let task_handle = tokio::spawn(async move { runner.run().await });
         
         // Track the handle
         if let Ok(mut handles) = self.handles.lock() {
-            handles.push(thread_handle);
+            handles.push(task_handle);
         }
         
         // Cache original handle (owns actor thread), return a clone
@@ -140,15 +140,21 @@ impl StoreRegistry {
         }
     }
 
-    /// Shutdown the registry, joining all tracked actor threads.
-    pub fn shutdown(&self) {
-        // 1. Drop all StoreHandles to close command channels.
-        // This causes the ActorRunner loops to exit.
+    /// Shutdown the registry, joining all tracked actor tasks.
+    pub async fn shutdown(&self) {
+        // 1. Shutdown all actors via shutdown() (sends Shutdown command or cancels token)
+        if let Ok(stores) = self.stores.read() {
+            for store in stores.values() {
+                store.shutdown();
+            }
+        }
+        
+        // 2. Drop all StoreHandles to close command channels.
         if let Ok(mut stores) = self.stores.write() {
             stores.clear();
         }
 
-        // 2. Take handles and join them
+        // 3. Take handles and await them (actors should exit quickly now)
         let handles = {
             if let Ok(mut guard) = self.handles.lock() {
                 std::mem::take(&mut *guard)
@@ -158,7 +164,7 @@ impl StoreRegistry {
         };
 
         for handle in handles {
-            let _ = handle.join();
+            let _ = handle.await;
         }
     }
 }

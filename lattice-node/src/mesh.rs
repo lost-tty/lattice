@@ -216,8 +216,9 @@ impl Mesh {
         self.peer_manager.clear_bootstrap_authors()
     }
 
-    /// Shutdown the mesh and its components (stops PeerManager watcher)
+    /// Shutdown the mesh and its components (stops PeerManager and StoreManager watchers)
     pub async fn shutdown(&self) {
+        self.store_manager.shutdown();
         self.peer_manager.shutdown().await;
     }
 }

@@ -27,6 +27,7 @@ bs58 = { version = "0.5", features = ["check"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 futures-core = "0.3.31"
 futures-util.workspace = true
+tokio-util = "0.7"
 
 [dev-dependencies]
 tokio-test = { workspace = true }
