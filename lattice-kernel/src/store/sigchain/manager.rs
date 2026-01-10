@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
+use crate::MAX_CAUSAL_DEPS;
+
 /// Errors that can occur during sigchain operations
 #[derive(Error, Debug)]
 pub enum SigChainError {
@@ -37,6 +39,9 @@ pub enum SigChainError {
 
     #[error("Orphan store error: {0}")]
     OrphanStore(#[from] super::orphan_store::OrphanStoreError),
+
+    #[error("Too many causal dependencies: {count} exceeds limit of {limit}")]
+    TooManyCausalDeps { count: usize, limit: usize },
 
     #[error("Internal error: {0}")]
     Internal(String),
@@ -646,6 +651,15 @@ impl SigChainManager {
         &mut self,
         entry: &SignedEntry,
     ) -> Result<Vec<ReadyEntry>, SigChainError> {
+        // Validate causal_deps limit (DoS prevention)
+        let deps_count = entry.entry.causal_deps.len();
+        if deps_count > MAX_CAUSAL_DEPS {
+            return Err(SigChainError::TooManyCausalDeps {
+                count: deps_count,
+                limit: MAX_CAUSAL_DEPS,
+            });
+        }
+        
         // Internal tracking for cleanup operations
         #[derive(Clone)]
         enum CleanupMeta {
@@ -1394,6 +1408,63 @@ mod tests {
 
         // Verify hash matches
         assert_eq!(ready_3[0].hash, hash_3);
+
+        let _ = std::fs::remove_dir_all(&logs_dir);
+    }
+
+    /// Test that entries with too many causal_deps are rejected (DoS prevention).
+    #[test]
+    fn test_rejects_too_many_causal_deps() {
+        let logs_dir = tempfile::tempdir()
+            .expect("tempdir")
+            .path()
+            .join("lattice_too_many_deps_test");
+        let _ = std::fs::remove_dir_all(&logs_dir);
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        let node = NodeIdentity::generate();
+        let clock = MockClock::new(1000);
+
+        let mut manager = SigChainManager::new(&logs_dir).unwrap();
+
+        // Create entry with MAX_CAUSAL_DEPS + 1 deps (over limit)
+        let too_many_deps: Vec<Hash> = (0..=crate::MAX_CAUSAL_DEPS)
+            .map(|i| Hash::from([i as u8; 32]))
+            .collect();
+
+        let entry = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
+            .causal_deps(too_many_deps.clone())
+            .payload(b"test".to_vec())
+            .sign(&node);
+
+        // Should be rejected
+        let result = manager.ingest_entry(&entry);
+        assert!(result.is_err(), "Entry with too many deps should be rejected");
+        
+        match result.unwrap_err() {
+            SigChainError::TooManyCausalDeps { count, limit } => {
+                assert_eq!(count, crate::MAX_CAUSAL_DEPS + 1);
+                assert_eq!(limit, crate::MAX_CAUSAL_DEPS);
+            }
+            e => panic!("Expected TooManyCausalDeps error, got {:?}", e),
+        }
+
+        // Verify that exactly MAX_CAUSAL_DEPS works (boundary test)
+        let max_deps: Vec<Hash> = (0..crate::MAX_CAUSAL_DEPS)
+            .map(|i| Hash::from([i as u8; 32]))
+            .collect();
+
+        let entry_ok = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
+            .causal_deps(max_deps)
+            .payload(b"test".to_vec())
+            .sign(&node);
+
+        // This should be buffered (deps don't exist) but NOT rejected for count
+        let result = manager.ingest_entry(&entry_ok);
+        // It will be orphaned since deps don't exist, but that's OK - no TooManyCausalDeps error
+        assert!(result.is_ok(), "Entry with exactly MAX_CAUSAL_DEPS should not be rejected for count");
 
         let _ = std::fs::remove_dir_all(&logs_dir);
     }

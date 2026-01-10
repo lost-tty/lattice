@@ -98,7 +98,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
         // Ensure sigchain directory exists
         std::fs::create_dir_all(&sigchain_dir)?;
         
-        // TODO: Crash recovery - replay sigchain logs
+        // Open sigchain manager and replay any entries not yet applied to state
         let mut chain_manager = SigChainManager::new(&sigchain_dir)?;
         let entries_replayed = replay_sigchains(&mut chain_manager, &state)?;
         

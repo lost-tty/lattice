@@ -69,8 +69,11 @@ Root store as control plane: store declarations in `/stores/`, StoreManager with
 ### Other Remaining Items
 
 - [x] **Refactor Orphan Resolution**: Moved recursive dependency logic from `StoreActor` into `SigChainManager::ingest_entry()`. Actor now receives ready entries via simple iteration. `commit_entry` reduced from 140 to 30 lines.
-- [ ] **Lattice-Kernel Audit**: Thorough review of `lattice-kernel` to ensure architectural cleanliness, proper visibility, and minimal dependencies before declaring it stable.
-  - [ ] **Enforce strict limit on causal_deps**: Prevent DoS by capping `entry.causal_deps` len (e.g. 1024).
+- [x] **Lattice-Kernel Audit**: Thorough review of `lattice-kernel` to ensure architectural cleanliness, proper visibility, and minimal dependencies before declaring it stable.
+  - [x] **Enforce strict limit on causal_deps**: Added `MAX_CAUSAL_DEPS = 1024` constant, `TooManyCausalDeps` error, validation in `ingest_entry()`. Test: `test_rejects_too_many_causal_deps`.
+  - [x] **Remove unused dependencies**: Cleaned up Cargo.toml - removed `regex`, `regex-syntax`, `serde_json`, `bs58`, `zeroize`, `dirs`.
+  - [x] **Code quality verification**: No `.unwrap()`/`.expect()` in production code. Single intentional panic for WAL/state divergence (fail-stop). Removed stale TODO (crash recovery already implemented).
+  - [x] **Architecture review**: Clean module hierarchy (store → actor/handle/sigchain), proper visibility, well-organized error types.
 - [x] **Proactive Store Reconciliation**: Verified that all nodes automatically create/open app stores when declared in root store. StoreManager reconciles on startup and on live changes via watcher. Tests: `test_synced_store_declaration_auto_opened`, `test_stores_opened_on_startup`.
 
 ---

@@ -15,6 +15,8 @@ pub mod sync_provider;
 // Constants
 /// Maximum size of a serialized SignedEntry (32 KiB)
 pub const MAX_ENTRY_SIZE: usize = 32 * 1024;
+/// Maximum number of causal dependencies allowed per entry (DoS prevention)
+pub const MAX_CAUSAL_DEPS: usize = 1024;
 
 // Core exports - NodeIdentity now comes from lattice-model
 pub use entry::{Entry, SignedEntry};

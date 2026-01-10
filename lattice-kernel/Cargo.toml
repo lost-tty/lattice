@@ -13,17 +13,11 @@ rand = { workspace = true }
 prost = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
-dirs = { workspace = true }
 blake3 = { workspace = true }
 hex = { workspace = true }
 redb = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
-serde_json = "1"
-regex = "1"
-regex-syntax = "0.8"
-zeroize = "1.8.2"
-bs58 = { version = "0.5", features = ["check"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 futures-core = "0.3.31"
 futures-util.workspace = true
