@@ -3,7 +3,7 @@
 use crate::{LatticeEndpoint, ToLattice};
 use super::error::GossipError;
 use lattice_model::{PeerStatus, PeerEvent, PeerProvider, Uuid, types::PubKey};
-use lattice_node::NetworkStore;
+use lattice_net_types::NetworkStore;
 use lattice_kernel::proto::storage::PeerSyncInfo;
 use lattice_kernel::proto::network::GossipMessage;
 use lattice_kernel::SyncNeeded;
@@ -52,11 +52,11 @@ impl GossipManager {
         &self.gossip
     }
     
-    /// Setup gossip for a store - uses supplied PeerManager for auth and SessionTracker for online state
+    /// Setup gossip for a store - uses supplied PeerProvider trait for auth and SessionTracker for online state
     #[tracing::instrument(skip(self, pm, sessions, store), fields(store_id = %store.id()))]
     pub async fn setup_for_store(
         &self,
-        pm: std::sync::Arc<lattice_node::PeerManager>,
+        pm: std::sync::Arc<dyn PeerProvider>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
         store: NetworkStore,
         peer_store: std::sync::Arc<PeerSyncStore>,
@@ -64,9 +64,8 @@ impl GossipManager {
     ) -> Result<(), GossipError> {
         let store_id = store.id();
         
-        // Get initial peers from peer manager and subscribe to changes
-        let peers = pm.list_peers().await
-            .map_err(|e| GossipError::Watch(format!("{:?}", e)))?;
+        // Get initial peers from peer provider trait (sync method using cache) and subscribe to changes
+        let peers = pm.list_peers();
         let rx = pm.subscribe_peer_events();
         
         tracing::debug!(initial_peers = peers.len(), "Peer list snapshot");
@@ -108,7 +107,7 @@ impl GossipManager {
         &self,
         store: NetworkStore,
         mut rx: iroh_gossip::api::GossipReceiver,
-        pm: std::sync::Arc<lattice_node::PeerManager>,
+        pm: std::sync::Arc<dyn PeerProvider>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
         pending_syncstate: Arc<AtomicBool>,
         peer_store: std::sync::Arc<PeerSyncStore>,

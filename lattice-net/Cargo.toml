@@ -6,9 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-lattice-node = { workspace = true }
 lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
+lattice-net-types = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
 prost = { workspace = true }
@@ -28,3 +28,6 @@ ed25519-dalek.workspace = true
 [dev-dependencies]
 tokio-test = { workspace = true }
 lattice-kvstate = { workspace = true }
+lattice-node = { workspace = true }
+rand = { workspace = true }
+async-trait = "0.1"

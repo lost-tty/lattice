@@ -193,7 +193,7 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<
                 if results.is_empty() {
                     let _ = writeln!(w, "[Sync] No active peers.");
                 } else {
-                    let total: u64 = results.iter().map(|r| r.entries_applied).sum();
+                    let total: u64 = results.iter().map(|r| r.entries_received).sum();
                     let _ = writeln!(w, "[Sync] Complete! Applied {} entries from {} peer(s).", total, results.len());
                 }
             }

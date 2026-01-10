@@ -1,11 +1,11 @@
 //! Protocol handlers for incoming network requests.
 //!
 //! Extracted from MeshService to keep concerns separated.
-//! These handlers receive only the context they need (stores, node), not the entire service.
+//! These handlers receive only the context they need (provider trait), not the entire service.
 
 use crate::{MessageSink, MessageStream, LatticeNetError};
 use super::service::PeerStoreRegistry;
-use lattice_node::{Node, NetworkStoreRegistry, NetworkStore};
+use lattice_net_types::{NetworkStoreRegistry, NetworkStore, NodeProviderExt};
 use lattice_kernel::proto::network::{peer_message, StatusRequest, JoinResponse, PeerMessage};
 use lattice_model::{Uuid, types::PubKey};
 use iroh::endpoint::Connection;
@@ -21,7 +21,7 @@ pub fn lookup_store(registry: &dyn NetworkStoreRegistry, store_id: Uuid) -> Resu
 
 /// Handle a single incoming connection (keep accepting streams)
 pub async fn handle_connection(
-    node: Arc<Node>,
+    provider: Arc<dyn NodeProviderExt>,
     peer_stores: PeerStoreRegistry,
     conn: Connection,
 ) -> Result<(), LatticeNetError> {
@@ -35,10 +35,10 @@ pub async fn handle_connection(
     loop {
         match conn.accept_bi().await {
             Ok((send, recv)) => {
-                let node = node.clone();
+                let provider = provider.clone();
                 let peer_stores = peer_stores.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_stream(node, peer_stores, remote_pubkey, send, recv).await {
+                    if let Err(e) = handle_stream(provider, peer_stores, remote_pubkey, send, recv).await {
                         tracing::debug!("Stream handler error: {}", e);
                     }
                 });
@@ -54,7 +54,7 @@ pub async fn handle_connection(
 
 /// Handle a single bidirectional stream on a connection
 async fn handle_stream(
-    node: Arc<Node>,
+    provider: Arc<dyn NodeProviderExt>,
     peer_stores: PeerStoreRegistry,
     remote_pubkey: PubKey,
     send: iroh::endpoint::SendStream,
@@ -81,14 +81,14 @@ async fn handle_stream(
         
         match msg.message {
             Some(peer_message::Message::JoinRequest(req)) => {
-                handle_join_request(&node, &remote_pubkey, req, &mut sink).await?;
+                handle_join_request(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
                 break;  // Join protocol complete for this stream
             }
             Some(peer_message::Message::StatusRequest(req)) => {
-                handle_status_request(&node, peer_stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
+                handle_status_request(provider.as_ref(), peer_stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
             }
             Some(peer_message::Message::FetchRequest(req)) => {
-                handle_fetch_request(&node, &remote_pubkey, req, &mut sink).await?;
+                handle_fetch_request(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
             }
             _ => {
                 tracing::debug!("Unexpected message type");
@@ -101,7 +101,7 @@ async fn handle_stream(
 
 /// Handle a join request from an invited peer
 async fn handle_join_request(
-    node: &Node,
+    provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
     req: lattice_kernel::proto::network::JoinRequest,
     sink: &mut MessageSink,
@@ -112,8 +112,8 @@ async fn handle_join_request(
     let mesh_id = Uuid::from_slice(&req.mesh_id)
         .map_err(|_| LatticeNetError::Connection("Invalid mesh_id in JoinRequest".into()))?;
 
-    // Accept the join - verifies token, checks mesh_id matches, sets active, returns store ID & authors
-    let acceptance = node.accept_join(*remote_pubkey, mesh_id, &req.invite_secret).await
+    // Accept the join via trait - verifies token, checks mesh_id matches, sets active, returns store ID & authors
+    let acceptance = provider.accept_join(*remote_pubkey, mesh_id, &req.invite_secret).await
         .map_err(|e| LatticeNetError::Sync(format!("Join failed: {}", e)))?;
     
     // Convert to Vec<Vec<u8>> for protobuf
@@ -127,7 +127,7 @@ async fn handle_join_request(
     let resp = PeerMessage {
         message: Some(peer_message::Message::JoinResponse(JoinResponse {
             mesh_id: acceptance.store_id.as_bytes().to_vec(),
-            inviter_pubkey: node.node_id().to_vec(),
+            inviter_pubkey: provider.node_id().to_vec(),
             authorized_authors,
         })),
     };
@@ -139,7 +139,7 @@ async fn handle_join_request(
 
 /// Handle an incoming status request using symmetric SyncSession
 async fn handle_status_request(
-    node: &Node,
+    provider: &dyn NodeProviderExt,
     peer_stores: PeerStoreRegistry,
     remote_pubkey: &PubKey,
     req: StatusRequest,
@@ -151,8 +151,8 @@ async fn handle_status_request(
     
     tracing::debug!("[Status] Received status request for store {}", store_id);
     
-    // Lookup store from node's store_manager
-    let authorized_store = lookup_store(node.store_manager().as_ref(), store_id)?;
+    // Lookup store from provider's store_registry
+    let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
     let peer_store = peer_stores.read().await.get(&store_id).cloned()
         .ok_or_else(|| LatticeNetError::Connection(format!("PeerStore {} not registered", store_id)))?;
     
@@ -177,7 +177,7 @@ async fn handle_status_request(
 
 /// Handle a FetchRequest - streams entries in chunks
 async fn handle_fetch_request(
-    node: &Node,
+    provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
     req: lattice_kernel::proto::network::FetchRequest,
     sink: &mut MessageSink,
@@ -185,8 +185,8 @@ async fn handle_fetch_request(
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
-    // Lookup store from node's store_manager
-    let authorized_store = lookup_store(node.store_manager().as_ref(), store_id)?;
+    // Lookup store from provider's store_registry
+    let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
     
     // Verify peer can connect (using store's peer provider)
     if !authorized_store.can_connect(remote_pubkey) {

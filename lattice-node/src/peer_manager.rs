@@ -79,6 +79,13 @@ impl PeerCache {
             .collect()
     }
     
+    fn list_all(&self) -> Vec<(PubKey, PeerStatus)> {
+        let Ok(cache) = self.inner.read() else { return Vec::new() };
+        cache.iter()
+            .map(|(pubkey, peer)| (*pubkey, peer.status.clone()))
+            .collect()
+    }
+    
     /// Update the cache and return an event if state changed.
     fn update(&self, pubkey: PubKey, status: Option<PeerStatus>) -> Option<PeerEvent> {
         let Ok(mut cache) = self.inner.write() else { return None };
@@ -632,5 +639,13 @@ impl PeerProvider for PeerManager {
         let rx = self.peer_event_tx.subscribe();
         Box::pin(tokio_stream::wrappers::BroadcastStream::new(rx)
             .filter_map(|r| async move { r.ok() }))
+    }
+    
+    fn list_peers(&self) -> Vec<lattice_model::GossipPeer> {
+        // Return cached peers for gossip bootstrap (sync method using cache)
+        self.peers.list_all()
+            .into_iter()
+            .map(|(pubkey, status)| lattice_model::GossipPeer { pubkey, status })
+            .collect()
     }
 }

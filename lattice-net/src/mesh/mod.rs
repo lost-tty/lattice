@@ -13,6 +13,9 @@ mod sync_session;
 mod session;
 mod handlers;
 
+#[cfg(test)]
+mod service_tests;
+
 pub use service::{MeshService, SyncResult, PeerStoreRegistry};
 pub use error::{ServerError, GossipError};
 pub use sync_session::SyncSession;

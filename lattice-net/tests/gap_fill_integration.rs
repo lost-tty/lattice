@@ -13,6 +13,13 @@ fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     lattice_node::DataDir::new(path)
 }
 
+/// Test helper: Create MeshService from Node (replaces removed new_from_node)
+async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<MeshService>, Box<dyn std::error::Error>> {
+    let endpoint = lattice_net::LatticeEndpoint::new(node.signing_key().clone()).await?;
+    let event_rx = node.subscribe_net_events();
+    Ok(MeshService::new_with_provider(node, endpoint, event_rx).await?)
+}
+
 /// Helper: Join mesh via node.join() and wait for MeshReady event
 async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<KvStore> {
     // Subscribe before requesting join
@@ -50,11 +57,11 @@ async fn test_targeted_author_sync() {
     let data_a = temp_data_dir("author_sync_a2");
     let data_b = temp_data_dir("author_sync_b2");
     
-    let node_a = Arc::new(NodeBuilder { data_dir: data_a.clone() }.build().expect("node a"));
-    let node_b = Arc::new(NodeBuilder { data_dir: data_b.clone() }.build().expect("node b"));
+    let node_a = Arc::new(NodeBuilder::new().data_dir(data_a.clone()).build().expect("node a"));
+    let node_b = Arc::new(NodeBuilder::new().data_dir(data_b.clone()).build().expect("node b"));
     
-    let server_a = MeshService::new_from_node(node_a.clone()).await.expect("server a");
-    let server_b = MeshService::new_from_node(node_b.clone()).await.expect("server b");
+    let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
+    let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
     
     // Node A inits and creates invite token
     let store_id = node_a.create_mesh().await.expect("init a");
@@ -98,11 +105,11 @@ async fn test_sync_multiple_entries() {
     let data_a = temp_data_dir("multi_sync_a");
     let data_b = temp_data_dir("multi_sync_b");
     
-    let node_a = Arc::new(NodeBuilder { data_dir: data_a.clone() }.build().expect("node a"));
-    let node_b = Arc::new(NodeBuilder { data_dir: data_b.clone() }.build().expect("node b"));
+    let node_a = Arc::new(NodeBuilder::new().data_dir(data_a.clone()).build().expect("node a"));
+    let node_b = Arc::new(NodeBuilder::new().data_dir(data_b.clone()).build().expect("node b"));
     
-    let server_a = MeshService::new_from_node(node_a.clone()).await.expect("server a");
-    let server_b = MeshService::new_from_node(node_b.clone()).await.expect("server b");
+    let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
+    let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
     
     let store_id = node_a.create_mesh().await.expect("init a");
     let (store_a_raw, _) = node_a.open_root_store(store_id).expect("open a");

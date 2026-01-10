@@ -13,7 +13,7 @@ pub enum ServerError {
     Gossip(#[from] GossipError),
     
     #[error("node: {0}")]
-    Node(#[from] lattice_node::NodeError),
+    Node(#[from] lattice_model::NodeError),
 }
 
 /// Gossip subsystem errors

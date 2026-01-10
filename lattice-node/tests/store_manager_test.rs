@@ -7,7 +7,7 @@ async fn test_store_declaration_and_reconciliation() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
     
-    let node = NodeBuilder::new().with_data_dir(data_dir.base()).build().unwrap();
+    let node = NodeBuilder::new().data_dir(DataDir::new(data_dir.base())).build().unwrap();
     let mesh_id = node.create_mesh().await.unwrap();
     let mesh = node.mesh_by_id(mesh_id).unwrap();
     let store_manager = mesh.store_manager();
@@ -73,7 +73,7 @@ async fn test_watcher_reacts_to_changes() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
     
-    let node = NodeBuilder::new().with_data_dir(data_dir.base()).build().unwrap();
+    let node = NodeBuilder::new().data_dir(DataDir::new(data_dir.base())).build().unwrap();
     let mesh_id = node.create_mesh().await.unwrap();
     let mesh = node.mesh_by_id(mesh_id).unwrap();
     let store_manager = mesh.store_manager();
@@ -118,7 +118,7 @@ async fn test_store_emits_network_event() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
     
-    let node = NodeBuilder::new().with_data_dir(data_dir.base()).build().unwrap();
+    let node = NodeBuilder::new().data_dir(DataDir::new(data_dir.base())).build().unwrap();
     let mesh_id = node.create_mesh().await.unwrap();
     let mesh = node.mesh_by_id(mesh_id).unwrap();
     let store_manager = mesh.store_manager();
@@ -157,4 +157,55 @@ async fn test_store_emits_network_event() {
     }
     
     assert!(found, "Did not receive NetEvent::StoreReady event for opened store");
+}
+
+/// Test that archived stores are hidden from the network layer.
+/// The network layer should not be able to access archived stores
+/// via get_network_store() - this ensures the network can't sync/gossip
+/// for stores that have been deleted.
+#[tokio::test]
+async fn test_archived_store_hidden_from_network() {
+    use lattice_net_types::NetworkStoreRegistry;
+    
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = DataDir::new(tmp.path().to_path_buf());
+    
+    let node = NodeBuilder::new().data_dir(DataDir::new(data_dir.base())).build().unwrap();
+    let mesh_id = node.create_mesh().await.unwrap();
+    let mesh = node.mesh_by_id(mesh_id).unwrap();
+    let store_manager = mesh.store_manager();
+    
+    // Create a store via Mesh
+    let store_id = mesh.create_store(None, StoreType::KvStore).await.unwrap();
+    
+    // Wait for watcher to open the store
+    for _ in 0..20 {
+        if store_manager.stores().read().unwrap().contains_key(&store_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    
+    // Verify it's visible to the network layer
+    assert!(
+        node.store_manager().get_network_store(&store_id).is_some(),
+        "Store should be visible to network layer before archiving"
+    );
+    
+    // Archive the store
+    mesh.delete_store(store_id).await.unwrap();
+    
+    // Wait for watcher to close the store
+    for _ in 0..20 {
+        if !store_manager.stores().read().unwrap().contains_key(&store_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    
+    // Verify it's NO LONGER visible to the network layer
+    assert!(
+        node.store_manager().get_network_store(&store_id).is_none(),
+        "Archived store should NOT be visible to network layer"
+    );
 }

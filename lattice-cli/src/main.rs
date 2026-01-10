@@ -84,7 +84,11 @@ async fn main() {
     let _ = writeln!(writer, "Lattice CLI v{}", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(writer, "Type 'help' for commands, 'quit' to exit.\n");
     
-    let node = match NodeBuilder::new().build() {
+    // Create net channel first - network layer owns it
+    let (net_tx, net_rx) = MeshService::create_net_channel();
+    
+    // Build node with net_tx so it can emit events to network layer
+    let node = match NodeBuilder::new().with_net_tx(net_tx).build() {
         Ok(n) => Arc::new(n),
         Err(e) => {
             let _ = writeln!(writer, "Failed to initialize: {}", e);
@@ -95,15 +99,27 @@ async fn main() {
     let current_store = Arc::new(RwLock::new(None));
     let current_mesh: Arc<RwLock<Option<Mesh>>> = Arc::new(RwLock::new(None));
     
-    // Create server FIRST so it can receive StoreReady event from node.start()
-    let mesh_network: Option<Arc<MeshService>> = match MeshService::new_from_node(node.clone()).await {
-        Ok(s) => {
-            tracing::info!("Iroh: {} (listening)", s.endpoint().public_key().fmt_short());
-            Some(s)
-        }
-        Err(e) => {
-            tracing::error!("Iroh failed to start: {}", e);
-            None
+    // Create MeshService with the receiver
+    let mesh_network: Option<Arc<MeshService>> = {
+        // Create endpoint from node's signing key
+        let endpoint = match lattice_net::LatticeEndpoint::new(node.signing_key().clone()).await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("Iroh endpoint failed to start: {}", e);
+                // Skip creating MeshService if endpoint fails
+                return;
+            }
+        };
+        
+        match MeshService::new_with_provider(node.clone(), endpoint, net_rx).await {
+            Ok(s) => {
+                tracing::info!("Iroh: {} (listening)", s.endpoint().public_key().fmt_short());
+                Some(s)
+            }
+            Err(e) => {
+                tracing::error!("Iroh failed to start: {}", e);
+                None
+            }
         }
     };
     

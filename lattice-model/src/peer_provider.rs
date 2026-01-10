@@ -21,6 +21,13 @@ pub enum PeerEvent {
     Removed { pubkey: PubKey },
 }
 
+/// Peer info for gossip bootstrap
+#[derive(Clone, Debug)]
+pub struct GossipPeer {
+    pub pubkey: PubKey,
+    pub status: PeerStatus,
+}
+
 /// Trait for verifying peer authorization (persistent policy).
 /// 
 /// This trait is only for authorization policy, NOT ephemeral network state.
@@ -40,4 +47,7 @@ pub trait PeerProvider: Send + Sync {
     
     /// Subscribe to peer status change events.
     fn subscribe_peer_events(&self) -> PeerEventStream;
+    
+    /// List all known peers with their status (for gossip bootstrap).
+    fn list_peers(&self) -> Vec<GossipPeer>;
 }

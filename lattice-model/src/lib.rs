@@ -13,6 +13,7 @@ pub mod node_identity;
 pub mod introspection;
 pub mod peer_provider;
 pub mod net_event;
+pub mod node_provider;
 
 // Re-exports from dependencies
 pub use uuid::Uuid;
@@ -32,5 +33,6 @@ pub use replication::{
     GapInfo, SyncNeeded, PeerSyncInfo, EntryStream,
 };
 pub use node_identity::{NodeIdentity, NodeError, PeerStatus};
-pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream};
+pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream, GossipPeer};
 pub use net_event::NetEvent;
+pub use node_provider::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};

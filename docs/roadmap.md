@@ -47,11 +47,14 @@ Root store as control plane: store declarations in `/stores/`, StoreManager with
 - [x] MeshService subscribes to `NetEvent`, handles store registration and sync internally
 - [x] Remove network-related variants from `NodeEvent` (keep only CLI-facing events: `StoreReady`, `MeshReady`, `JoinFailed`)
 
-**Phase 2: NodeProvider Trait**
-- [ ] Define `NodeProvider` trait in `lattice-model` with methods MeshService needs (e.g., `get_store()`, `pubkey()`, `mesh_ids()`)
-- [ ] Node implements `NodeProvider`
-- [ ] MeshService depends on `dyn NodeProvider`, not `Arc<Node>`
-- [ ] Eliminates `Arc<Self>` patterns and tight coupling
+**Phase 2: NodeProvider Trait** ✓
+- [x] Define `NodeProvider` trait in `lattice-model` with `node_id()`, `emit_user_event()`
+- [x] Define `NodeProviderAsync` trait (async_trait) with `process_join_response()`, `accept_join()`
+- [x] Define `NodeProviderExt` trait in `lattice-node` extending with `store_registry()`, `store_manager()`
+- [x] Node implements all three traits
+- [x] MeshService depends on `Arc<dyn NodeProviderExt>`, not `Arc<Node>`
+- [x] Handlers use provider trait, not concrete Node type
+- [ ] Net layer owns NetEvent channel (sender passed to Node) - future enhancement
 
 ---
 

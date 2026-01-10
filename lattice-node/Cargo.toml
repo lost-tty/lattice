@@ -9,6 +9,7 @@ license.workspace = true
 lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
 lattice-kvstate = { workspace = true }
+lattice-net-types = { workspace = true }
 ed25519-dalek = { workspace = true }
 prost = { workspace = true }
 thiserror = { workspace = true }

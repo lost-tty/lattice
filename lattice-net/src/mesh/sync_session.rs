@@ -8,7 +8,7 @@ use crate::{MessageSink, MessageStream};
 use crate::error::LatticeNetError;
 use lattice_kernel::SyncState;
 use lattice_model::types::PubKey;
-use lattice_node::NetworkStore;
+use lattice_net_types::NetworkStore;
 use lattice_kernel::proto::storage::SignedEntry;
 use lattice_kernel::proto::network::{PeerMessage, peer_message, AuthorRange, FetchRequest, FetchResponse, StatusRequest, StatusResponse};
 use crate::peer_sync_store::PeerSyncStore;

@@ -4,6 +4,7 @@ members = [
     "lattice-kernel",
     "lattice-node",
     "lattice-net",
+    "lattice-net-types",
     "lattice-cli",
     "lattice-model",
     "lattice-kvstate",
@@ -22,6 +23,7 @@ lattice-net = { path = "lattice-net" }
 lattice-cli = { path = "lattice-cli" }
 lattice-model = { path = "lattice-model" }
 lattice-kvstate = { path = "lattice-kvstate" }
+lattice-net-types = { path = "lattice-net-types" }
 lattice-proto = { path = "lattice-proto" }
 
 # CLI

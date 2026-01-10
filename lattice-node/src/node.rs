@@ -2,7 +2,6 @@
 
 use crate::{
     DataDir, MetaStore, Uuid,
-    auth::PeerProvider,
     meta_store::MetaStoreError,
     store_registry::StoreRegistry,
     mesh::Mesh,
@@ -120,15 +119,27 @@ pub enum NodeEvent {
 
 pub struct NodeBuilder {
     pub data_dir: DataDir,
+    /// Optional net event sender - if not provided, a dummy one is created.
+    /// For production use, the network layer (MeshService) should create this
+    /// and pass it to ensure proper ownership.
+    net_tx: Option<broadcast::Sender<NetEvent>>,
 }
 
 impl NodeBuilder {
     pub fn new() -> Self {
-        Self { data_dir: DataDir::default() }
+        Self { data_dir: DataDir::default(), net_tx: None }
     }
     
-    pub fn with_data_dir<P: AsRef<Path>>(mut self, path: P) -> Self {
-        self.data_dir = DataDir::new(path.as_ref().to_path_buf());
+    /// Set data directory
+    pub fn data_dir(mut self, data_dir: DataDir) -> Self {
+        self.data_dir = data_dir;
+        self
+    }
+    
+    /// Set the network event sender (owned by the network layer).
+    /// This inverts the dependency so the network layer owns the channel.
+    pub fn with_net_tx(mut self, net_tx: broadcast::Sender<NetEvent>) -> Self {
+        self.net_tx = Some(net_tx);
         self
     }
 
@@ -155,7 +166,8 @@ impl NodeBuilder {
         }
         
         let (event_tx, _) = broadcast::channel(16);
-        let (net_tx, _) = broadcast::channel(64);
+        // Use provided net_tx or create a fallback (for testing/non-networked usage)
+        let net_tx = self.net_tx.unwrap_or_else(|| broadcast::channel(64).0);
 
         let node = std::sync::Arc::new(node);
         let meta = std::sync::Arc::new(meta);
@@ -535,6 +547,66 @@ impl Node {
     }
 }
 
+// ==================== NodeProvider Implementation ====================
+
+use lattice_model::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
+
+impl NodeProvider for Node {
+    fn node_id(&self) -> PubKey {
+        self.node.public_key()
+    }
+    
+    fn emit_user_event(&self, event: UserEvent) {
+        match event {
+            UserEvent::JoinFailed { mesh_id, reason } => {
+                let _ = self.event_tx.send(NodeEvent::JoinFailed { mesh_id, reason });
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl NodeProviderAsync for Node {
+    async fn process_join_response(
+        &self, 
+        mesh_id: Uuid, 
+        authorized_authors: Vec<Vec<u8>>, 
+        via_peer: PubKey
+    ) -> Result<(), NodeProviderError> {
+        self.process_join_response(mesh_id, authorized_authors, via_peer).await
+            .map(|_| ())
+            .map_err(|e| NodeProviderError::Join(e.to_string()))
+    }
+    
+    async fn accept_join(
+        &self,
+        peer_pubkey: PubKey,
+        mesh_id: Uuid,
+        invite_secret: &[u8],
+    ) -> Result<JoinAcceptanceInfo, NodeProviderError> {
+        let acceptance = self.accept_join(peer_pubkey, mesh_id, invite_secret).await
+            .map_err(|e| NodeProviderError::Join(e.to_string()))?;
+        
+        Ok(JoinAcceptanceInfo {
+            store_id: acceptance.store_id,
+            authorized_authors: acceptance.authorized_authors,
+        })
+    }
+}
+
+use lattice_net_types::{NodeProviderExt, NetworkStoreRegistry};
+use lattice_model::PeerProvider;
+
+impl NodeProviderExt for Node {
+    fn store_registry(&self) -> std::sync::Arc<dyn NetworkStoreRegistry> {
+        self.store_manager.clone()
+    }
+    
+    fn get_peer_provider(&self, store_id: &Uuid) -> Option<std::sync::Arc<dyn PeerProvider>> {
+        self.store_manager.get(store_id).map(|m| m.peer_manager as std::sync::Arc<dyn PeerProvider>)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,7 +618,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder { data_dir: data_dir.clone() }
+        let node = NodeBuilder::new().data_dir(data_dir.clone())
             .build()
             .expect("Failed to create node");
         
@@ -569,7 +641,7 @@ mod tests {
     async fn test_store_isolation() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder { data_dir: data_dir.clone() }
+        let node = NodeBuilder::new().data_dir(data_dir.clone())
             .build()
             .expect("Failed to create node");
         
@@ -593,7 +665,7 @@ mod tests {
     async fn test_init_creates_root_store() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder { data_dir: data_dir.clone() }
+        let node = NodeBuilder::new().data_dir(data_dir.clone())
             .build()
             .expect("create node");
         
@@ -611,7 +683,7 @@ mod tests {
     async fn test_create_multiple_meshes() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder { data_dir: data_dir.clone() }
+        let node = NodeBuilder::new().data_dir(data_dir.clone())
             .build()
             .expect("create node");
         
@@ -633,7 +705,7 @@ mod tests {
         // First session: create mesh
         let mesh_id;
         {
-            let node = NodeBuilder { data_dir: data_dir.clone() }
+            let node = NodeBuilder::new().data_dir(data_dir.clone())
                 .build()
                 .expect("create node");
             mesh_id = node.create_mesh().await.expect("create_mesh");
@@ -641,7 +713,7 @@ mod tests {
         } // End first session
         
         // Second session: mesh should persist in meta.db
-        let node = NodeBuilder { data_dir: data_dir.clone() }
+        let node = NodeBuilder::new().data_dir(data_dir.clone())
             .build()
             .expect("reload node");
         
@@ -657,7 +729,7 @@ mod tests {
     async fn test_set_name_updates_store() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder { data_dir: data_dir.clone() }
+        let node = NodeBuilder::new().data_dir(data_dir.clone())
             .build()
             .expect("create node");
         
@@ -698,7 +770,7 @@ mod tests {
     async fn test_create_invite_token() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder { data_dir: data_dir.clone() }
+        let node = NodeBuilder::new().data_dir(data_dir.clone())
             .build()
             .expect("create node");
         
@@ -720,7 +792,7 @@ mod tests {
     async fn test_accept_join() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder { data_dir: data_dir.clone() }
+        let node = NodeBuilder::new().data_dir(data_dir.clone())
             .build()
             .expect("create node");
         
@@ -753,10 +825,10 @@ mod tests {
         let tmp_b = tempfile::tempdir().unwrap();
         let data_dir_b = DataDir::new(tmp_b.path().to_path_buf());
         
-        let node_a = NodeBuilder { data_dir: data_dir_a.clone() }
+        let node_a = NodeBuilder::new().data_dir(data_dir_a.clone())
             .build()
             .expect("create node A");
-        let node_b = NodeBuilder { data_dir: data_dir_b.clone() }
+        let node_b = NodeBuilder::new().data_dir(data_dir_b.clone())
             .build()
             .expect("create node B");
         

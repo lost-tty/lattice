@@ -8,7 +8,7 @@
 //! knowing about Mesh.
 
 use crate::{KvStore, StoreType, StoreRegistry, peer_manager::PeerManager, NodeEvent};
-use crate::network_store_registry::{NetworkStoreRegistry, NetworkStore};
+use lattice_net_types::{NetworkStoreRegistry, NetworkStore};
 use lattice_model::{NetEvent, Uuid};
 use lattice_kvstate::{KvState, KvHandle};
 use std::collections::HashMap;

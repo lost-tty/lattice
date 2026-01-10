@@ -17,12 +17,10 @@ pub mod data_dir;
 pub mod token;
 pub mod store_type;
 pub mod store_manager;
-pub mod network_store_registry;
 pub use token::Invite;
 pub use store_type::StoreType;
 pub use store_manager::{StoreManager, StoreManagerError, ManagedStore};
 pub use store_registry::StoreRegistry;
-pub use network_store_registry::{NetworkStoreRegistry, NetworkStore};
 
 // Re-export from lattice-kernel (replication engine)
 pub use lattice_kernel::{
@@ -34,8 +32,12 @@ pub use lattice_kernel::{
     MAX_ENTRY_SIZE,
 };
 
+// Re-export from lattice-net-types (network layer types)
+pub use lattice_net_types::{NetworkStore, NetworkStoreRegistry, NodeProviderExt};
+
 // Re-export from lattice-model (types)
 pub use lattice_model::{Uuid, SigningKey};
+pub use lattice_model::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
 
 // Node-level exports
 pub use node::{Node, NodeBuilder, NodeInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, parse_peer_status_key, PEER_STATUS_PATTERN};

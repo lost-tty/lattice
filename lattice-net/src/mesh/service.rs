@@ -4,8 +4,8 @@
 //! Provides sync, status, and join protocol operations.
 
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
-use lattice_node::{Node, NodeEvent, NodeError, NetworkStore, NetworkStoreRegistry};
-use lattice_model::{NetEvent, Uuid};
+use lattice_net_types::{NetworkStore, NodeProviderExt};
+use lattice_model::{NetEvent, Uuid, UserEvent};
 use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinRequest, StatusRequest};
 use lattice_model::types::PubKey;
 use iroh::endpoint::Connection;
@@ -18,17 +18,19 @@ use crate::peer_sync_store::PeerSyncStore;
 
 /// Result of a sync operation with a peer
 pub struct SyncResult {
-    pub entries_applied: u64,
-    pub entries_sent_by_peer: u64,
+    /// Number of entries received from peer
+    pub entries_received: u64,
+    /// Number of entries sent to peer
+    pub entries_sent: u64,
 }
 
-/// Type alias for the peer stores registry (network-layer specific)
+/// Registry of peer-side sync stores, keyed by store_id
 pub type PeerStoreRegistry = Arc<RwLock<HashMap<Uuid, Arc<PeerSyncStore>>>>;
 
-/// MeshService wraps Node + Endpoint + Gossip and provides mesh networking methods.
-/// It unifies inbound (server) and outbound (engine) capabilities.
+/// Central service for mesh networking.
+/// Combines routing, gossip, and sync into a unified API.
 pub struct MeshService {
-    node: Arc<Node>,
+    provider: Arc<dyn NodeProviderExt>,
     endpoint: LatticeEndpoint,
     gossip_manager: Arc<super::gossip_manager::GossipManager>,
     peer_stores: PeerStoreRegistry,
@@ -36,10 +38,11 @@ pub struct MeshService {
     router: Router,
 }
 
-/// Protocol handler for lattice sync connections
-struct SyncProtocol {
-    node: Arc<Node>,
-    peer_stores: PeerStoreRegistry,
+/// Protocol handler for the main LATTICE_ALPN protocol.
+/// This is used with iroh's Router for accepting incoming connections.
+pub struct SyncProtocol {
+    pub(crate) provider: Arc<dyn NodeProviderExt>,
+    pub(crate) peer_stores: PeerStoreRegistry,
 }
 
 impl std::fmt::Debug for SyncProtocol {
@@ -50,10 +53,10 @@ impl std::fmt::Debug for SyncProtocol {
 
 impl ProtocolHandler for SyncProtocol {
     fn accept(&self, conn: Connection) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
-        let node = self.node.clone();
+        let provider = self.provider.clone();
         let peer_stores = self.peer_stores.clone();
         Box::pin(async move {
-            if let Err(e) = super::handlers::handle_connection(node, peer_stores, conn).await {
+            if let Err(e) = super::handlers::handle_connection(provider, peer_stores, conn).await {
                 tracing::error!(error = %e, "Connection handler error");
             }
             Ok(())
@@ -62,24 +65,40 @@ impl ProtocolHandler for SyncProtocol {
 }
 
 impl MeshService {
-    /// Create a new MeshService from just a Node (creates endpoint internally).
-    #[tracing::instrument(skip(node))]
-    pub async fn new_from_node(node: Arc<Node>) -> Result<Arc<Self>, super::error::ServerError> {
-        let endpoint = LatticeEndpoint::new(node.signing_key().clone()).await
-            .map_err(|e| super::error::ServerError::Endpoint(e.to_string()))?;
-        Self::new(node, endpoint).await
+    /// Create the NetEvent channel that the network layer owns.
+    /// 
+    /// Returns (sender, receiver):
+    /// - `sender`: Pass to `NodeBuilder::with_net_tx()` so Node can emit events
+    /// - `receiver`: Pass to `MeshService::new_with_provider()` to handle events
+    /// 
+    /// This pattern ensures the network layer owns the event flow.
+    pub fn create_net_channel() -> (broadcast::Sender<NetEvent>, broadcast::Receiver<NetEvent>) {
+        let (tx, rx) = broadcast::channel(64);
+        (tx, rx)
     }
     
-    /// Create a new MeshService with existing endpoint.
-    #[tracing::instrument(skip(node, endpoint))]
-    pub async fn new(node: Arc<Node>, endpoint: LatticeEndpoint) -> Result<Arc<Self>, super::error::ServerError> {
+    /// Create a new MeshService with trait-based provider (decoupled constructor).
+    /// 
+    /// The recommended pattern is:
+    /// ```ignore
+    /// let (net_tx, net_rx) = MeshService::create_net_channel();
+    /// let node = NodeBuilder::new().with_net_tx(net_tx).build()?;
+    /// let endpoint = LatticeEndpoint::new(node.signing_key().clone()).await?;
+    /// let service = MeshService::new_with_provider(Arc::new(node), endpoint, net_rx).await?;
+    /// ```
+    #[tracing::instrument(skip(provider, endpoint, event_rx))]
+    pub async fn new_with_provider(
+        provider: Arc<dyn NodeProviderExt>,
+        endpoint: LatticeEndpoint,
+        event_rx: broadcast::Receiver<NetEvent>,
+    ) -> Result<Arc<Self>, super::error::ServerError> {
         let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint));
         
         // Create peer stores registry (network-layer specific)
         let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashMap::new()));
         
         let sync_protocol = SyncProtocol { 
-            node: node.clone(), 
+            provider: provider.clone(), 
             peer_stores: peer_stores.clone(),
         };
         let router = Router::builder(endpoint.endpoint().clone())
@@ -90,7 +109,7 @@ impl MeshService {
         let sessions = Arc::new(super::session::SessionTracker::new());
         
         let service = Arc::new(Self { 
-            node: node.clone(), 
+            provider,
             endpoint,
             gossip_manager: gossip_manager.clone(),
             peer_stores,
@@ -99,7 +118,6 @@ impl MeshService {
         });
         
         // Subscribe to network events (NetEvent channel)
-        let event_rx = node.subscribe_net_events();
         let service_clone = service.clone();
         tokio::spawn(async move {
             Self::run_net_event_handler(service_clone, event_rx).await;
@@ -108,9 +126,9 @@ impl MeshService {
         Ok(service)
     }
     
-    /// Access the underlying node
-    pub fn node(&self) -> &Node {
-        &self.node
+    /// Access the provider (trait object)
+    pub fn provider(&self) -> &dyn NodeProviderExt {
+        self.provider.as_ref()
     }
     
     /// Access the underlying endpoint
@@ -148,7 +166,7 @@ impl MeshService {
     
     /// Get a registered store by ID
     pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
-        self.node.store_manager().get_network_store(&store_id)
+        self.provider.store_registry().get_network_store(&store_id)
     }
     
     /// Wait for a store to be registered (handles async registration race).
@@ -205,46 +223,47 @@ impl MeshService {
 
     /// Handle JoinRequested event - does network protocol (outbound)
     #[tracing::instrument(skip(self, secret), fields(peer = %peer_id.fmt_short()))]
-    pub async fn handle_join_request_event(&self, peer_id: iroh::PublicKey, mesh_id: Uuid, secret: Vec<u8>) -> Result<iroh::endpoint::Connection, NodeError> {
+    pub async fn handle_join_request_event(&self, peer_id: iroh::PublicKey, mesh_id: Uuid, secret: Vec<u8>) -> Result<iroh::endpoint::Connection, LatticeNetError> {
         tracing::info!("Join protocol: connecting to peer");
         
         let conn = self.endpoint.connect(peer_id).await
             .map_err(|e| {
                 tracing::error!(error = %e, "Join failed: connection error");
-                NodeError::Actor(format!("Connection failed: {}", e))
+                LatticeNetError::Connection(format!("Connection failed: {}", e))
             })?;
         
         tracing::debug!("Join protocol: connection established, opening stream");
         
         let (send, recv) = conn.open_bi().await
-            .map_err(|e| NodeError::Actor(format!("Failed to open stream: {}", e)))?;
+            .map_err(|e| LatticeNetError::Connection(format!("Failed to open stream: {}", e)))?;
         
         let mut sink = MessageSink::new(send);
         let mut stream = MessageStream::new(recv);
         
         let req = PeerMessage {
             message: Some(peer_message::Message::JoinRequest(JoinRequest {
-                node_pubkey: self.node.node_id().to_vec(),
+                node_pubkey: self.provider.node_id().to_vec(),
                 mesh_id: mesh_id.as_bytes().to_vec(),
                 invite_secret: secret,
             })),
         };
-        sink.send(&req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
-        sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
+        sink.send(&req).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+        sink.finish().await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
         
         let msg = stream.recv().await
-            .map_err(|e| NodeError::Actor(e.to_string()))?
-            .ok_or_else(|| NodeError::Actor("Peer closed stream".to_string()))?;
+            .map_err(|e| LatticeNetError::Sync(e.to_string()))?
+            .ok_or_else(|| LatticeNetError::Connection("Peer closed stream".to_string()))?;
         
         match msg.message {
             Some(peer_message::Message::JoinResponse(resp)) => {
                 let mesh_id = Uuid::from_slice(&resp.mesh_id)
-                    .map_err(|_| NodeError::Actor("Invalid UUID from peer".to_string()))?;
+                    .map_err(|_| LatticeNetError::Connection("Invalid UUID from peer".to_string()))?;
                 
                 let via_peer = PubKey::from(*peer_id.as_bytes());
                 
                 tracing::info!(mesh_id = %mesh_id, "Join protocol: processing join response");
-                self.node.process_join_response(mesh_id, resp.authorized_authors, via_peer).await?;
+                self.provider.process_join_response(mesh_id, resp.authorized_authors, via_peer).await
+                    .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
                 
                 // Mark peer as online so sync can find them immediately
                 let _ = self.sessions.mark_online(via_peer);
@@ -255,7 +274,7 @@ impl MeshService {
             }
             _ => {
                 tracing::error!("Join protocol: unexpected response from peer");
-                Err(NodeError::Actor("Unexpected response".to_string()))
+                Err(LatticeNetError::Connection("Unexpected response".to_string()))
             }
         }
     }
@@ -369,8 +388,8 @@ impl MeshService {
         tracing::info!(entries = result.entries_received, "Sync: complete");
         
         Ok(SyncResult { 
-            entries_applied: result.entries_received, 
-            entries_sent_by_peer: result.entries_received,
+            entries_received: result.entries_received, 
+            entries_sent: result.entries_sent,
         })
     }
     
@@ -415,7 +434,7 @@ impl MeshService {
         }
         
         let results = self.sync_peers(store, &peer_ids, &[author]).await;
-        Ok(results.iter().map(|r| r.entries_applied).sum())
+        Ok(results.iter().map(|r| r.entries_received).sum())
     }
     
     /// Sync with all active peers in parallel
@@ -484,16 +503,15 @@ impl MeshService {
                         match service.handle_join_request_event(iroh_peer_id, mesh_id, secret).await {
                             Ok(conn) => {
                                 tracing::info!(peer = %iroh_peer_id.fmt_short(), "Join successful, keeping connection active");
-                                let node = service.node.clone();
+                                let provider = service.provider.clone();
                                 let peer_stores = service.peer_stores.clone();
-                                if let Err(e) = super::handlers::handle_connection(node, peer_stores, conn).await {
+                                if let Err(e) = super::handlers::handle_connection(provider, peer_stores, conn).await {
                                     tracing::debug!("Join connection handler error: {}", e);
                                 }
                             }
                             Err(e) => {
                                 tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "NetEvent::Join → join failed");
-                                // Emit NodeEvent::JoinFailed for CLI feedback
-                                service.node.emit(NodeEvent::JoinFailed { mesh_id, reason: e.to_string() });
+                                service.provider.emit_user_event(UserEvent::JoinFailed { mesh_id, reason: e.to_string() });
                             }
                         }
                     });
@@ -501,12 +519,12 @@ impl MeshService {
                 NetEvent::StoreReady { store_id } => {
                     tokio::spawn(async move {
                         tracing::info!(store_id = %store_id, "NetEvent::StoreReady → registering store");
-                        // Get peer_manager from Node's StoreManager for gossip setup
-                        let Some(managed) = service.node.store_manager().get(&store_id) else {
-                            tracing::warn!(store_id = %store_id, "Store not found in StoreManager");
+                        // Get peer_provider from provider for gossip setup
+                        let Some(peer_provider) = service.provider.get_peer_provider(&store_id) else {
+                            tracing::warn!(store_id = %store_id, "PeerProvider not found for store");
                             return;
                         };
-                        service.register_store_by_id(store_id, managed.peer_manager).await;
+                        service.register_store_by_id(store_id, peer_provider).await;
                     });
                 }
                 NetEvent::SyncWithPeer { store_id, peer } => {
@@ -525,7 +543,7 @@ impl MeshService {
                             Ok(result) => tracing::info!(
                                 store_id = %store_id,
                                 peer = %iroh_peer_id.fmt_short(),
-                                entries = result.entries_applied,
+                                entries = result.entries_received,
                                 "NetEvent::SyncWithPeer → complete"
                             ),
                             Err(e) => tracing::warn!(
@@ -543,7 +561,7 @@ impl MeshService {
                         if service.get_store(store_id).is_some() {
                             match service.sync_all_by_id(store_id).await {
                                 Ok(results) if !results.is_empty() => {
-                                    let total: u64 = results.iter().map(|r| r.entries_applied).sum();
+                                    let total: u64 = results.iter().map(|r| r.entries_received).sum();
                                     tracing::info!(
                                         store_id = %store_id,
                                         entries = total, 
@@ -565,16 +583,16 @@ impl MeshService {
     
     /// Register a store for network access.
     /// The store must already be registered in Node's StoreManager.
-    pub async fn register_store_by_id(self: &Arc<Self>, store_id: Uuid, pm: std::sync::Arc<lattice_node::PeerManager>) {
+    pub async fn register_store_by_id(self: &Arc<Self>, store_id: Uuid, pm: std::sync::Arc<dyn lattice_model::PeerProvider>) {
         // Check if already registered for network (using peer_stores as indicator)
         if self.peer_stores.read().await.contains_key(&store_id) {
             tracing::debug!(store_id = %store_id, "Store already registered for network");
             return;
         }
         
-        // Get NetworkStore from node's StoreManager (single source of truth)
-        let Some(network_store) = self.node.store_manager().get_network_store(&store_id) else {
-            tracing::warn!(store_id = %store_id, "Store not found in StoreManager");
+        // Get NetworkStore from provider's StoreRegistry (single source of truth)
+        let Some(network_store) = self.provider.store_registry().get_network_store(&store_id) else {
+            tracing::warn!(store_id = %store_id, "Store not found in StoreRegistry");
             return;
         };
         
@@ -612,10 +630,6 @@ impl MeshService {
                 match service.active_peer_ids().await {
                     Ok(peers) if !peers.is_empty() => {
                         tracing::info!(store_id = %store_id, peers = peers.len(), "Boot Sync: Triggering initial sync");
-                        // Emit NetEvent::SyncAll via the node's net_tx
-                        let _ = service.node.subscribe_net_events(); // Get access to send
-                        // Actually, we can't easily emit to net_tx from here
-                        // Instead, just call sync directly
                         let _ = service.sync_all_by_id(store_id).await;
                         break;
                     }
