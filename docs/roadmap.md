@@ -55,6 +55,14 @@ Root store as control plane: store declarations in `/stores/`, StoreManager with
 
 ---
 
+### Unified Store Management ✓
+
+- [x] **StoreManager manages all stores** - root + app stores in unified `stores` collection
+- [x] **`NetEvent::StoreReady` centralized** - emitted only from StoreManager
+- [x] **Mesh simplified** - delegates to StoreManager.root_store() instead of holding store directly
+
+---
+
 ### Other Remaining Items
 
 - [ ] **Refactor Orphan Resolution**: Move recursive dependency logic from `StoreActor` into `SigChainManager`. Actor receives "Ready Entries", doesn't manage work_queues.

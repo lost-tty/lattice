@@ -4,9 +4,8 @@
 //! These handlers receive only the context they need (stores, node), not the entire service.
 
 use crate::{MessageSink, MessageStream, LatticeNetError};
-use super::service::{StoresRegistry, PeerStoreRegistry};
-use lattice_node::Node;
-use crate::network_store::NetworkStore;
+use super::service::PeerStoreRegistry;
+use lattice_node::{Node, NetworkStoreRegistry, NetworkStore};
 use lattice_kernel::proto::network::{peer_message, StatusRequest, JoinResponse, PeerMessage};
 use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
@@ -14,8 +13,8 @@ use iroh::endpoint::Connection;
 use std::sync::Arc;
 
 /// Helper to lookup store from registry
-pub async fn lookup_store(stores: &StoresRegistry, store_id: Uuid) -> Result<NetworkStore, LatticeNetError> {
-    stores.read().await.get(&store_id).cloned()
+pub fn lookup_store(registry: &dyn NetworkStoreRegistry, store_id: Uuid) -> Result<NetworkStore, LatticeNetError> {
+    registry.get_network_store(&store_id)
         .ok_or_else(|| LatticeNetError::Connection(format!("Store {} not registered", store_id)))
 }
 
@@ -24,7 +23,6 @@ pub async fn lookup_store(stores: &StoresRegistry, store_id: Uuid) -> Result<Net
 /// Handle a single incoming connection (keep accepting streams)
 pub async fn handle_connection(
     node: Arc<Node>,
-    stores: StoresRegistry,
     peer_stores: PeerStoreRegistry,
     conn: Connection,
 ) -> Result<(), LatticeNetError> {
@@ -39,10 +37,9 @@ pub async fn handle_connection(
         match conn.accept_bi().await {
             Ok((send, recv)) => {
                 let node = node.clone();
-                let stores = stores.clone();
                 let peer_stores = peer_stores.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_stream(node, stores, peer_stores, remote_pubkey, send, recv).await {
+                    if let Err(e) = handle_stream(node, peer_stores, remote_pubkey, send, recv).await {
                         tracing::debug!("Stream handler error: {}", e);
                     }
                 });
@@ -59,7 +56,6 @@ pub async fn handle_connection(
 /// Handle a single bidirectional stream on a connection
 async fn handle_stream(
     node: Arc<Node>,
-    stores: StoresRegistry,
     peer_stores: PeerStoreRegistry,
     remote_pubkey: PubKey,
     send: iroh::endpoint::SendStream,
@@ -90,10 +86,10 @@ async fn handle_stream(
                 break;  // Join protocol complete for this stream
             }
             Some(peer_message::Message::StatusRequest(req)) => {
-                handle_status_request(stores.clone(), peer_stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
+                handle_status_request(&node, peer_stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
             }
             Some(peer_message::Message::FetchRequest(req)) => {
-                handle_fetch_request(stores.clone(), &remote_pubkey, req, &mut sink).await?;
+                handle_fetch_request(&node, &remote_pubkey, req, &mut sink).await?;
             }
             _ => {
                 tracing::debug!("Unexpected message type");
@@ -144,7 +140,7 @@ async fn handle_join_request(
 
 /// Handle an incoming status request using symmetric SyncSession
 async fn handle_status_request(
-    stores: StoresRegistry,
+    node: &Node,
     peer_stores: PeerStoreRegistry,
     remote_pubkey: &PubKey,
     req: StatusRequest,
@@ -156,8 +152,8 @@ async fn handle_status_request(
     
     tracing::debug!("[Status] Received status request for store {}", store_id);
     
-    // Lookup store from registry - only respond to registered stores
-    let authorized_store = lookup_store(&stores, store_id).await?;
+    // Lookup store from node's store_manager
+    let authorized_store = lookup_store(node.store_manager().as_ref(), store_id)?;
     let peer_store = peer_stores.read().await.get(&store_id).cloned()
         .ok_or_else(|| LatticeNetError::Connection(format!("PeerStore {} not registered", store_id)))?;
     
@@ -182,7 +178,7 @@ async fn handle_status_request(
 
 /// Handle a FetchRequest - streams entries in chunks
 async fn handle_fetch_request(
-    stores: StoresRegistry,
+    node: &Node,
     remote_pubkey: &PubKey,
     req: lattice_kernel::proto::network::FetchRequest,
     sink: &mut MessageSink,
@@ -190,8 +186,8 @@ async fn handle_fetch_request(
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
-    // Lookup store from registry - only respond to registered stores
-    let authorized_store = lookup_store(&stores, store_id).await?;
+    // Lookup store from node's store_manager
+    let authorized_store = lookup_store(node.store_manager().as_ref(), store_id)?;
     
     // Verify peer can connect (using store's peer provider)
     if !authorized_store.can_connect(remote_pubkey) {

@@ -33,7 +33,7 @@ pub async fn cmd_store_create(_node: &Node, mesh: Option<&Mesh>, name: &Option<S
         }
     };
     
-    match mesh.store_manager().create_store(name.clone(), store_type).await {
+    match mesh.create_store(name.clone(), store_type).await {
         Ok(store_id) => {
             let display_name = name.as_ref().map(|n| format!(" ({})", n)).unwrap_or_default();
             let _ = writeln!(w, "Created store: {}{}", store_id, display_name);
@@ -59,7 +59,7 @@ pub async fn cmd_store_list(_node: &Node, mesh: Option<&Mesh>, writer: Writer) -
         }
     };
     
-    match mesh.store_manager().list_stores() {
+    match mesh.list_stores() {
         Ok(stores) => {
             let _ = writeln!(w, "Stores:");
             
@@ -129,7 +129,7 @@ pub async fn cmd_store_delete(_node: &Node, mesh: Option<&Mesh>, uuid_str: &str,
         }
     };
     
-    match mesh.store_manager().delete_store(store_id).await {
+    match mesh.delete_store(store_id).await {
         Ok(()) => {
             let _ = writeln!(w, "Archived store: {}", store_id);
         }

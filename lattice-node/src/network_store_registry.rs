@@ -1,36 +1,36 @@
-//! NetworkStore - Network layer's view of a replicated store
+//! Network Store - Network layer's view of a replicated store
 //!
-//! Wraps a SyncProvider + PeerProvider pair for use in lattice-net.
-//! This replaces AuthorizedStore to decouple from lattice-node.
+//! Combines a SyncProvider (data access) with a PeerProvider (authorization).
+//! Used by lattice-net for sync, gossip, and handlers.
 
 use lattice_kernel::SyncProvider;
-use lattice_model::{PeerProvider, PubKey};
-use lattice_kernel::Uuid;
 use lattice_kernel::store::{SyncState, StateError, GapInfo};
 use lattice_kernel::SignedEntry;
+use lattice_model::{PeerProvider, PubKey};
+use uuid::Uuid;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
 /// Network layer's view of a replicated store.
 /// 
 /// Combines a SyncProvider (data access) with a PeerProvider (authorization).
-/// Used by SyncEngine, GossipManager, and handlers.
 #[derive(Clone)]
 pub struct NetworkStore {
+    id: Uuid,
     sync: Arc<dyn SyncProvider>,
     peer: Arc<dyn PeerProvider>,
 }
 
 impl NetworkStore {
     /// Create a new NetworkStore from trait objects
-    pub fn new(sync: Arc<dyn SyncProvider>, peer: Arc<dyn PeerProvider>) -> Self {
-        Self { sync, peer }
+    pub fn new(id: Uuid, sync: Arc<dyn SyncProvider>, peer: Arc<dyn PeerProvider>) -> Self {
+        Self { id, sync, peer }
     }
     
     // ==================== SyncProvider delegation ====================
     
     pub fn id(&self) -> Uuid {
-        self.sync.id()
+        self.id
     }
     
     pub async fn sync_state(&self) -> Result<SyncState, StateError> {
@@ -83,4 +83,14 @@ impl NetworkStore {
     pub fn list_acceptable_authors(&self) -> Vec<PubKey> {
         self.peer.list_acceptable_authors()
     }
+}
+
+/// Trait for looking up stores by ID.
+/// Implemented by StoreManager, used by the network layer.
+pub trait NetworkStoreRegistry: Send + Sync {
+    /// Get a store for network operations.
+    fn get_network_store(&self, id: &Uuid) -> Option<NetworkStore>;
+    
+    /// List all registered store IDs.
+    fn list_store_ids(&self) -> Vec<Uuid>;
 }

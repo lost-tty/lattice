@@ -13,7 +13,7 @@ use lattice_kernel::{
     store::{StateError, LogError, Store},
 };
 use crate::KvStore;
-use lattice_kvstate::{KvHandle, KvHandleError, KvState};
+use lattice_kvstate::{KvHandleError, KvState};
 use lattice_model::{types::PubKey, NetEvent};
 use std::collections::HashMap;
 use std::path::Path;
@@ -160,12 +160,14 @@ impl NodeBuilder {
         let node = std::sync::Arc::new(node);
         let meta = std::sync::Arc::new(meta);
         let registry = std::sync::Arc::new(StoreRegistry::new(self.data_dir.clone(), meta.clone(), node.clone()));
+        let store_manager = std::sync::Arc::new(crate::StoreManager::new(registry.clone(), event_tx.clone(), net_tx.clone()));
 
         Ok(Node {
             data_dir: self.data_dir,
             node,
             meta,
             registry,
+            store_manager,
             event_tx,
             net_tx,
             meshes: RwLock::new(HashMap::new()),
@@ -184,6 +186,8 @@ pub struct Node {
     node: std::sync::Arc<NodeIdentity>,
     meta: std::sync::Arc<MetaStore>,
     registry: std::sync::Arc<StoreRegistry>,
+    /// Store manager (shared by all meshes)
+    store_manager: std::sync::Arc<crate::StoreManager>,
     /// Events for CLI/UI listeners
     event_tx: broadcast::Sender<NodeEvent>,
     /// Events for network layer (MeshService)
@@ -210,6 +214,11 @@ impl Node {
     /// Get access to MetaStore for querying mesh metadata
     pub fn meta(&self) -> &MetaStore {
         &self.meta
+    }
+    
+    /// Get access to the shared StoreManager
+    pub fn store_manager(&self) -> &std::sync::Arc<crate::StoreManager> {
+        &self.store_manager
     }
 
     pub fn node_id(&self) -> PubKey {
@@ -274,7 +283,7 @@ impl Node {
             .ok_or_else(|| NodeError::Actor(format!("Mesh {} not found", mesh_id)))?;
         if let Some(name) = self.name() {
             let name_key = Peer::key_name(self.node.public_key());
-            mesh.kv().put(&name_key, name.as_bytes()).await?;
+            mesh.root_store().put(&name_key, name.as_bytes()).await?;
         }
         Ok(())
     }
@@ -288,47 +297,35 @@ impl Node {
     fn emit_net(&self, event: NetEvent) {
         let _ = self.net_tx.send(event);
     }
+    
+    /// Store a mesh in the meshes map and register its root store.
+    fn activate_mesh(&self, mesh: Mesh) -> Result<(), NodeError> {
+        let mesh_id = mesh.id();
+        
+        {
+            let mut guard = self.meshes.write()
+                .map_err(|_| NodeError::LockPoisoned)?;
+            guard.insert(mesh_id, mesh.clone());
+        }
+        
+        mesh.register_root_store()
+            .map_err(|e| NodeError::Actor(e.to_string()))
+    }
 
     /// Start the node - loads all meshes from meta.db and emits NetworkStore events.
     pub async fn start(&self) -> Result<(), NodeError> {
-        let meshes = self.meta.list_meshes()?;
-        if meshes.is_empty() {
-            return Ok(()); // No meshes to load
-        }
-        
-        for (mesh_id, _info) in meshes {
-            // Check if already loaded to avoid race with concurrent create or duplicate start
+        for (mesh_id, _info) in self.meta.list_meshes()? {
+            // Skip if already loaded
             if self.meshes.read().map(|m| m.contains_key(&mesh_id)).unwrap_or(false) {
                 continue;
             }
 
-            let (store, _) = self.open_root_store(mesh_id)?;
-            let handle = KvHandle::new(store);
-            
-            // Create Mesh (handles PeerManager creation internally)
-            let mesh = Mesh::create(handle, &self.node, self.registry.clone(), self.net_tx.clone()).await
+            let mesh = Mesh::open(mesh_id, &self.node, self.store_manager.clone()).await
                 .map_err(|e| NodeError::Actor(e.to_string()))?;
             
-            // Store mesh in node
-            {
-                let mut meshes_guard = self.meshes.write()
-                    .map_err(|_| NodeError::Actor("Meshes lock poisoned".to_string()))?;
-                
-                // Double-check to avoid overwriting if a race occurred
-                if meshes_guard.contains_key(&mesh_id) {
-                    continue;
-                }
-                
-                meshes_guard.insert(mesh_id, mesh.clone());
-            }
-            
-            // Emit events for listeners
-            let _ = self.event_tx.send(NodeEvent::StoreReady { store_id: mesh_id });
-            // Network events
-            self.emit_net(NetEvent::StoreReady { store_id: mesh_id });
+            self.activate_mesh(mesh)?;
             self.emit_net(NetEvent::SyncStore { store_id: mesh_id });
         }
-        
         Ok(())
     }
 
@@ -355,54 +352,30 @@ impl Node {
     /// Create a new mesh (multi-mesh: can be called multiple times).
     /// Returns the mesh ID (same as root store ID).
     pub async fn create_mesh(&self) -> Result<Uuid, NodeError> {
-        let store_id = self.registry.create(Uuid::new_v4(), |path| {
-            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
-        })?;
-        
-        // Register mesh in meta.db
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let mesh_info = lattice_kernel::proto::storage::MeshInfo {
-            joined_at: now_ms,
-            is_creator: true,
-        };
-        self.meta.add_mesh(store_id, &mesh_info)?;
-        
-        // Open the store and write our node info as separate keys
-        let (store, _) = self.registry.get_or_open(store_id, |path| {
-            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
-        })?;
-        let kv = KvHandle::new(store.clone());
-        
-        // Store node metadata as separate keys
-        if let Some(name) = self.name() {
-            kv.put(&Peer::key_name(self.node.public_key()), name.as_bytes()).await?;
-        }
-        
-        let added_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        kv.put(&Peer::key_added_at(self.node.public_key()), added_at.to_string().as_bytes()).await?;
-        let _ = kv.put(&Peer::key_status(self.node.public_key()), PeerStatus::Active.as_str().as_bytes()).await;
-        
-        // Create Mesh (handles PeerManager creation internally)
-        let mesh = Mesh::create(kv.clone(), &self.node, self.registry.clone(), self.net_tx.clone()).await
+        let mesh = Mesh::create_new(&self.node, self.store_manager.clone()).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
+        let mesh_id = mesh.id();
         
-        // Store mesh in node
-        {
-            let mut meshes_guard = self.meshes.write()
-                .map_err(|_| NodeError::Actor("Meshes lock poisoned".to_string()))?;
-            meshes_guard.insert(store_id, mesh.clone());
+        // Record in meta.db and activate
+        self.meta.add_mesh(mesh_id, &lattice_kernel::proto::storage::MeshInfo {
+            joined_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64).unwrap_or(0),
+            is_creator: true,
+        })?;
+        self.activate_mesh(mesh.clone())?;
+        
+        // Write our node info to root store
+        let kv = mesh.root_store();
+        let pubkey = self.node.public_key();
+        if let Some(name) = self.name() {
+            kv.put(&Peer::key_name(pubkey), name.as_bytes()).await?;
         }
-        
-        // Emit NetEvent::StoreReady - server will register for networking
-        self.emit_net(NetEvent::StoreReady { store_id });
-        
-        Ok(store_id)
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0);
+        kv.put(&Peer::key_added_at(pubkey), now.to_string().as_bytes()).await?;
+        kv.put(&Peer::key_status(pubkey), PeerStatus::Active.as_str().as_bytes()).await?;
+
+        Ok(mesh_id)
     }
     
     /// Request to join a mesh via the given peer.
@@ -463,54 +436,28 @@ impl Node {
     /// Called after receiving store_id from peer's JoinResponse.
     /// If `via_peer` is provided, server will sync with that peer after registration.
     pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<KvStore, NodeError> {
-        // Create local store with that UUID
+        // Create local store file with that UUID (store_manager.open will use it)
         self.registry.create(store_id, |path| {
             KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
         })?;
         
-        // Register mesh in meta.db (as a member, not creator)
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let mesh_info = lattice_kernel::proto::storage::MeshInfo {
-            joined_at: now_ms,
+        // Record in meta.db (as member)
+        self.meta.add_mesh(store_id, &lattice_kernel::proto::storage::MeshInfo {
+            joined_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64).unwrap_or(0),
             is_creator: false,
-        };
-        self.meta.add_mesh(store_id, &mesh_info)?;
-        
-        // Open and cache the handle (registry caches it)
-        let (store, _) = self.registry.get_or_open(store_id, |path| {
-            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
         })?;
-        let handle = KvHandle::new(store);
         
-        // Create Mesh (handles PeerManager creation internally)
-        let mesh = Mesh::create(handle.clone(), &self.node, self.registry.clone(), self.net_tx.clone()).await
+        let mesh = Mesh::open(store_id, &self.node, self.store_manager.clone()).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
-        
-        // Store mesh in node
-        {
-            let mut meshes_guard = self.meshes.write()
-                .map_err(|_| NodeError::Actor("Meshes lock poisoned".to_string()))?;
-            meshes_guard.insert(store_id, mesh.clone());
-        }
-        
-        // Publish our name to the store
+        self.activate_mesh(mesh.clone())?;
         let _ = self.publish_name_to(store_id).await;
         
-        // Emit StoreReady for listeners waiting on join completion (like CLI)
-        let _ = self.event_tx.send(NodeEvent::StoreReady { store_id });
-        
-        // Emit NetEvent::StoreReady - server will register for networking
-        self.emit_net(NetEvent::StoreReady { store_id });
-        
-        // If we joined via a specific peer, emit SyncWithPeer to get initial data
         if let Some(peer) = via_peer {
             self.emit_net(NetEvent::SyncWithPeer { store_id, peer });
         }
         
-        Ok(handle)
+        Ok(mesh.root_store())
     }
     
     /// Accept a peer's join request - verifies they're invited, sets active, returns join info
@@ -678,7 +625,6 @@ mod tests {
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
-
 
     #[tokio::test]
     async fn test_mesh_persists_across_sessions() {

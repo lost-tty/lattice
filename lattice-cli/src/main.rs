@@ -120,7 +120,7 @@ async fn main() {
         if let Some((mesh_id, _)) = meshes.into_iter().min_by_key(|(_, info)| info.joined_at) {
             if let Some(mesh) = node.mesh_by_id(mesh_id) {
                 if let Ok(mut guard) = current_store.write() {
-                    *guard = Some(mesh.kv().clone());
+                    *guard = Some(mesh.root_store().clone());
                 }
                 if let Ok(mut guard) = current_mesh.write() {
                     *guard = Some(mesh);
@@ -141,9 +141,9 @@ async fn main() {
                 match event {
                     lattice_node::NodeEvent::MeshReady { mesh_id } => {
                         if let Some(mesh) = node_clone.mesh_by_id(mesh_id) {
-                            wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.kv().id());
+                            wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.root_store().id());
                             if let Ok(mut guard) = current_store.write() {
-                                *guard = Some(mesh.kv().clone());
+                                *guard = Some(mesh.root_store().clone());
                             }
                             if let Ok(mut guard) = current_mesh.write() {
                                 *guard = Some(mesh);

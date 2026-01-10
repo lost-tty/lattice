@@ -7,9 +7,9 @@
 //! - Store registry management
 
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, ToLattice};
-use super::service::{StoresRegistry, PeerStoreRegistry, SyncResult};
+use super::service::{PeerStoreRegistry, SyncResult};
 use super::session::SessionTracker;
-use crate::network_store::NetworkStore;
+use lattice_node::{Node, NetworkStore, NetworkStoreRegistry};
 use lattice_kernel::proto::network::{PeerMessage, peer_message, StatusRequest};
 use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
@@ -20,7 +20,7 @@ use std::collections::HashMap;
 /// It uses the endpoint for connections but doesn't manage transport lifecycle.
 pub struct SyncEngine {
     endpoint: LatticeEndpoint,
-    stores: StoresRegistry,
+    node: Arc<Node>,
     peer_stores: PeerStoreRegistry,
     sessions: Arc<SessionTracker>,
 }
@@ -29,18 +29,18 @@ impl SyncEngine {
     /// Create a new SyncEngine
     pub fn new(
         endpoint: LatticeEndpoint,
-        stores: StoresRegistry,
+        node: Arc<Node>,
         peer_stores: PeerStoreRegistry,
         sessions: Arc<SessionTracker>,
     ) -> Self {
-        Self { endpoint, stores, peer_stores, sessions }
+        Self { endpoint, node, peer_stores, sessions }
     }
     
     // ==================== Store Registry ====================
     
     /// Get a registered store by ID
-    pub async fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
-        self.stores.read().await.get(&store_id).cloned()
+    pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
+        self.node.store_manager().get_network_store(&store_id)
     }
     
     // ==================== Peer Discovery ====================
@@ -255,14 +255,14 @@ impl SyncEngine {
     
     /// Sync with all active peers for a store (by ID)
     pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, LatticeNetError> {
-        let store = self.get_store(store_id).await
+        let store = self.get_store(store_id)
             .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered", store_id)))?;
         self.sync_all(&store).await
     }
     
     /// Sync a specific author with all active peers (by store ID)
     pub async fn sync_author_all_by_id(&self, store_id: Uuid, author: PubKey) -> Result<u64, LatticeNetError> {
-        let store = self.get_store(store_id).await
+        let store = self.get_store(store_id)
             .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered", store_id)))?;
         self.sync_author_all(&store, author).await
     }
@@ -274,7 +274,7 @@ impl SyncEngine {
         peer_id: iroh::PublicKey, 
         authors: &[PubKey]
     ) -> Result<SyncResult, LatticeNetError> {
-        let store = self.get_store(store_id).await
+        let store = self.get_store(store_id)
             .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered", store_id)))?;
         self.sync_with_peer(&store, peer_id, authors).await
     }

@@ -4,11 +4,10 @@
 //! Integrates `MeshEngine` logic directly into the service to avoid state duplication.
 
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN};
-use lattice_node::{Node, NodeEvent, NodeError};
+use lattice_node::{Node, NodeEvent, NodeError, NetworkStore, NetworkStoreRegistry};
 use lattice_model::NetEvent;
 use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
-use crate::network_store::NetworkStore;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
@@ -24,8 +23,7 @@ pub struct SyncResult {
     pub entries_sent_by_peer: u64,
 }
 
-/// Type alias for the stores registry
-pub type StoresRegistry = Arc<RwLock<HashMap<Uuid, NetworkStore>>>;
+/// Type alias for the peer stores registry (network-layer specific)
 pub type PeerStoreRegistry = Arc<RwLock<HashMap<Uuid, Arc<PeerSyncStore>>>>;
 
 /// MeshService wraps Node + Endpoint + Gossip and provides mesh networking methods.
@@ -34,7 +32,6 @@ pub struct MeshService {
     node: Arc<Node>,
     endpoint: LatticeEndpoint,
     gossip_manager: Arc<super::gossip_manager::GossipManager>,
-    stores: StoresRegistry,
     peer_stores: PeerStoreRegistry,
     sessions: Arc<super::session::SessionTracker>,
     router: Router,
@@ -44,7 +41,6 @@ pub struct MeshService {
 /// Protocol handler for lattice sync connections
 struct SyncProtocol {
     node: Arc<Node>,
-    stores: StoresRegistry,
     peer_stores: PeerStoreRegistry,
 }
 
@@ -57,10 +53,9 @@ impl std::fmt::Debug for SyncProtocol {
 impl ProtocolHandler for SyncProtocol {
     fn accept(&self, conn: Connection) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
         let node = self.node.clone();
-        let stores = self.stores.clone();
         let peer_stores = self.peer_stores.clone();
         Box::pin(async move {
-            if let Err(e) = super::handlers::handle_connection(node, stores, peer_stores, conn).await {
+            if let Err(e) = super::handlers::handle_connection(node, peer_stores, conn).await {
                 tracing::error!(error = %e, "Connection handler error");
             }
             Ok(())
@@ -82,13 +77,11 @@ impl MeshService {
     pub async fn new(node: Arc<Node>, endpoint: LatticeEndpoint) -> Result<Arc<Self>, super::error::ServerError> {
         let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint));
         
-        // Create shared stores registry
-        let stores: StoresRegistry = Arc::new(RwLock::new(HashMap::new()));
+        // Create peer stores registry (network-layer specific)
         let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashMap::new()));
         
         let sync_protocol = SyncProtocol { 
             node: node.clone(), 
-            stores: stores.clone(),
             peer_stores: peer_stores.clone(),
         };
         let router = Router::builder(endpoint.endpoint().clone())
@@ -98,10 +91,10 @@ impl MeshService {
         
         let sessions = Arc::new(super::session::SessionTracker::new());
         
-        // Create SyncEngine (owns sync protocol logic)
+        // Create SyncEngine (uses Node's StoreManager for store lookups)
         let sync_engine = super::sync_engine::SyncEngine::new(
             endpoint.clone(),
-            stores.clone(),
+            node.clone(),
             peer_stores.clone(),
             sessions.clone(),
         );
@@ -110,7 +103,6 @@ impl MeshService {
             node: node.clone(), 
             endpoint,
             gossip_manager: gossip_manager.clone(),
-            stores,
             peer_stores,
             sessions: sessions.clone(),
             router,
@@ -259,8 +251,8 @@ impl MeshService {
     }
     
     /// Get a registered store by ID
-    pub async fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
-        self.sync_engine.get_store(store_id).await
+    pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
+        self.sync_engine.get_store(store_id)
     }
     
     /// Sync with all active peers for a store (by ID)
@@ -298,9 +290,8 @@ impl MeshService {
                             Ok(conn) => {
                                 tracing::info!(peer = %iroh_peer_id.fmt_short(), "Join successful, keeping connection active");
                                 let node = service.node.clone();
-                                let stores = service.stores.clone();
                                 let peer_stores = service.peer_stores.clone();
-                                if let Err(e) = super::handlers::handle_connection(node, stores, peer_stores, conn).await {
+                                if let Err(e) = super::handlers::handle_connection(node, peer_stores, conn).await {
                                     tracing::debug!("Join connection handler error: {}", e);
                                 }
                             }
@@ -315,14 +306,12 @@ impl MeshService {
                 NetEvent::StoreReady { store_id } => {
                     tokio::spawn(async move {
                         tracing::info!(store_id = %store_id, "NetEvent::StoreReady → registering store");
-                        // Look up store and peer_manager from node
-                        let Some(mesh) = service.node.mesh_by_id(store_id) else {
-                            tracing::warn!(store_id = %store_id, "Mesh not found for StoreReady");
+                        // Get peer_manager from Node's StoreManager for gossip setup
+                        let Some(managed) = service.node.store_manager().get(&store_id) else {
+                            tracing::warn!(store_id = %store_id, "Store not found in StoreManager");
                             return;
                         };
-                        let store = mesh.root_store().clone();
-                        let peer_manager = mesh.peer_manager().clone();
-                        service.register_store(store, peer_manager).await;
+                        service.register_store_by_id(store_id, managed.peer_manager).await;
                     });
                 }
                 NetEvent::SyncWithPeer { store_id, peer } => {
@@ -356,7 +345,7 @@ impl MeshService {
                 NetEvent::SyncStore { store_id } => {
                     tokio::spawn(async move {
                         tracing::info!(store_id = %store_id, "NetEvent::SyncStore → syncing with all peers");
-                        if service.get_store(store_id).await.is_some() {
+                        if service.get_store(store_id).is_some() {
                             match service.sync_all_by_id(store_id).await {
                                 Ok(results) if !results.is_empty() => {
                                     let total: u64 = results.iter().map(|r| r.entries_applied).sum();
@@ -380,25 +369,23 @@ impl MeshService {
     }
     
     /// Register a store for network access.
-    pub async fn register_store(self: &Arc<Self>, store: lattice_node::KvStore, pm: std::sync::Arc<lattice_node::PeerManager>) {
-        let store_id = store.id();
-        
-        // Check if already registered
-        if self.stores.read().await.contains_key(&store_id) {
-            tracing::debug!(store_id = %store_id, "Store already registered");
+    /// The store must already be registered in Node's StoreManager.
+    pub async fn register_store_by_id(self: &Arc<Self>, store_id: Uuid, pm: std::sync::Arc<lattice_node::PeerManager>) {
+        // Check if already registered for network (using peer_stores as indicator)
+        if self.peer_stores.read().await.contains_key(&store_id) {
+            tracing::debug!(store_id = %store_id, "Store already registered for network");
             return;
         }
         
+        // Get NetworkStore from node's StoreManager (single source of truth)
+        let Some(network_store) = self.node.store_manager().get_network_store(&store_id) else {
+            tracing::warn!(store_id = %store_id, "Store not found in StoreManager");
+            return;
+        };
+        
         tracing::info!(store_id = %store_id, "Registering store for network");
         
-        // Create NetworkStore (combines SyncProvider + PeerProvider)
-        let inner_store = store.writer().clone(); 
-        let network_store = NetworkStore::new(Arc::new(inner_store), pm.clone());
-        
-        // Register in store registry
-        self.stores.write().await.insert(store_id, network_store.clone());
-        
-        // Create PeerSyncStore (in-memory)
+        // Create PeerSyncStore (in-memory, network-layer specific)
         let peer_store = Arc::new(PeerSyncStore::new());
         self.peer_stores.write().await.insert(store_id, peer_store.clone());
         

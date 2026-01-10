@@ -10,7 +10,7 @@ use std::str::FromStr;
 pub enum StoreType {
     /// Key-Value store (KvState)
     KvStore,
-    // Future: Chat, Counter, etc.
+    // Future: Chatroom, Counter, etc.
 }
 
 /// Error parsing a store type from string

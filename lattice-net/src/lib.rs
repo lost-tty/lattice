@@ -12,7 +12,6 @@ pub mod error;
 pub mod framing;
 pub mod mesh;
 pub mod peer_sync_store;
-pub mod network_store;
 
 pub use endpoint::{LatticeEndpoint, PublicKey, LATTICE_ALPN};
 pub use error::LatticeNetError;

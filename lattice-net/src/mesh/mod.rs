@@ -15,7 +15,7 @@ mod sync_session;
 mod session;
 mod handlers;
 
-pub use service::{MeshService, SyncResult, StoresRegistry, PeerStoreRegistry};
+pub use service::{MeshService, SyncResult, PeerStoreRegistry};
 pub use sync_engine::SyncEngine;
 pub use error::{ServerError, GossipError};
 pub use sync_session::SyncSession;

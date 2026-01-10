@@ -51,7 +51,7 @@ pub async fn cmd_create(node: &Node, _store: Option<&KvStore>, _mesh: Option<&Me
             drop(w);
             // Use the created mesh
             match node.mesh_by_id(store_id) {
-                Some(mesh) => CommandResult::SwitchTo(mesh.kv().clone()),
+                Some(mesh) => CommandResult::SwitchTo(mesh.root_store().clone()),
                 None => CommandResult::Ok,
             }
         }
@@ -117,7 +117,7 @@ pub async fn cmd_use(node: &Node, mesh_id_prefix: &str, writer: Writer) -> Comma
             match node.mesh_by_id(*mesh_id) {
                 Some(mesh) => {
                     let _ = writeln!(w, "Switched to mesh {}", mesh_id);
-                    CommandResult::SwitchTo(mesh.kv().clone())
+                    CommandResult::SwitchTo(mesh.root_store().clone())
                 }
                 None => {
                     let _ = writeln!(w, "Mesh {} not loaded. Run 'node start' first.", mesh_id);

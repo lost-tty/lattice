@@ -32,4 +32,3 @@ pub use replication::{
 pub use node_identity::{NodeIdentity, NodeError, PeerStatus};
 pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream};
 pub use net_event::NetEvent;
-

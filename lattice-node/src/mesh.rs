@@ -8,6 +8,7 @@
 //! The Mesh struct provides:
 //! - Type safety: distinguishes mesh controller from data channel
 //! - Semantic API: peer management methods
+//! - Store watcher: automatically opens/closes stores declared in root
 //! - Single point for mesh-wide policies
 
 use crate::{
@@ -16,12 +17,15 @@ use crate::{
     token::Invite,
     PeerInfo,
     KvStore,
+    StoreType,
 };
-use lattice_kernel::{NodeIdentity, Uuid, store::Store};
+use lattice_kernel::{NodeIdentity, Uuid};
 use lattice_model::types::PubKey;
-use lattice_kvstate::{KvState, Merge};
+use lattice_kvstate::Merge;
 use rand::RngCore;
 use std::sync::Arc;
+use tokio::sync::broadcast;
+use tracing::{info, warn, debug};
 
 /// Error type for Mesh operations
 #[derive(Debug, thiserror::Error)]
@@ -43,49 +47,98 @@ pub enum MeshError {
 /// A Mesh represents a group of nodes sharing a root store and peer list.
 ///
 /// The Mesh acts as a high-level controller for:
-/// - The Root Store (KvStore for KV ops)
+/// - The Root Store (via StoreManager)
 /// - The PeerManager (peer cache + operations)
-/// - The StoreManager (store declarations)
+/// - The Store Watcher (monitors root for /stores/* declarations)
 ///
-/// Use `mesh.kv()` for KV data operations.
-/// Use `mesh.store()` for replication operations (id, sync_state, etc).
+/// Use `mesh.root_store()` for data operations.
 /// Use `mesh.peer_manager()` for network layer integration.
-/// Use `mesh.store_manager()` for store operations.
-#[derive(Clone)]
 pub struct Mesh {
-    store: KvStore,
+    root_store_id: Uuid,
     peer_manager: Arc<PeerManager>,
     store_manager: Arc<StoreManager>,
-    root_store_id: Uuid,
+    /// Shutdown signal for watcher
+    shutdown_tx: broadcast::Sender<()>,
 }
 
+impl Clone for Mesh {
+    fn clone(&self) -> Self {
+        Self {
+            root_store_id: self.root_store_id,
+            peer_manager: self.peer_manager.clone(),
+            store_manager: self.store_manager.clone(),
+            shutdown_tx: self.shutdown_tx.clone(),
+        }
+    }
+}
 
 impl Mesh {
-    /// Create a new Mesh from an open store handle
-    pub async fn create(
-        store: KvStore, 
+    /// Create a new Mesh with a fresh root store.
+    /// Note: Does NOT register the root store. Call `register_root_store()` after
+    /// storing the mesh in Node.meshes.
+    pub async fn create_new(
         node: &Arc<NodeIdentity>, 
-        registry: Arc<crate::StoreRegistry>,
-        net_tx: tokio::sync::broadcast::Sender<lattice_model::NetEvent>
+        store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
-        let root_store_id = store.id();
-        let peer_manager = PeerManager::new(store.clone(), node)
-            .await?;
-        let store_manager = Arc::new(StoreManager::new(
-            store.clone(), 
-            registry, 
-            net_tx
-        ));
-
-        // Start watcher to automatically open/close stores declared in root store
-        store_manager.start_watcher();
-            
-        Ok(Self {
-            store,
+        // Create the root store file (but don't register yet)
+        let root_store = store_manager.create()?;
+        let root_store_id = root_store.id();
+        
+        let peer_manager = PeerManager::new(root_store, node).await?;
+        
+        let (shutdown_tx, _) = broadcast::channel(1);
+        
+        let mesh = Self {
+            root_store_id,
             peer_manager,
             store_manager,
-            root_store_id,
-        })
+            shutdown_tx,
+        };
+            
+        Ok(mesh)
+    }
+    
+    /// Open an existing Mesh by root store ID.
+    /// Note: Does NOT register the root store. Call `register_root_store()` after
+    /// storing the mesh in Node.meshes.
+    pub async fn open(
+        store_id: Uuid,
+        node: &Arc<NodeIdentity>, 
+        store_manager: Arc<StoreManager>
+    ) -> Result<Self, MeshError> {
+        // Open the root store file (but don't register yet)
+        let root_store = store_manager.open(store_id)?;
+        
+        let peer_manager = PeerManager::new(root_store, node).await?;
+        
+        let (shutdown_tx, _) = broadcast::channel(1);
+        
+        let mesh = Self {
+            root_store_id: store_id,
+            peer_manager,
+            store_manager,
+            shutdown_tx,
+        };
+            
+        Ok(mesh)
+    }
+    
+    /// Register the root store in StoreManager.
+    /// Call this after the mesh is stored in Node.meshes.
+    /// This emits NetEvent::StoreReady.
+    pub fn register_root_store(&self) -> Result<(), MeshError> {
+        // Open the store file (already created in create_new/open)
+        let root_store = self.store_manager.open(self.root_store_id)?;
+        self.store_manager.register(
+            root_store, 
+            StoreType::KvStore,
+            self.peer_manager.clone()
+        )?;
+        
+        // Start watcher to automatically open/close stores declared in root store
+        self.start_watcher();
+        
+        Ok(())
     }
     
     /// Get the mesh ID (root store UUID).
@@ -93,19 +146,10 @@ impl Mesh {
         self.root_store_id
     }
     
-    /// Get the KvHandle for KV data operations and replication access.
-    pub fn kv(&self) -> &KvStore {
-        &self.store
-    }
-    
-    /// Get the raw Store for replication operations.
-    pub fn store(&self) -> &Store<KvState> {
-        &self.store
-    }
-
-    /// Get a handle to the root store
-    pub fn root_store(&self) -> &KvStore {
-        &self.store
+    /// Get a handle to the root store.
+    pub fn root_store(&self) -> KvStore {
+        self.store_manager.get_store(&self.root_store_id)
+            .expect("root store should exist in store_manager")
     }
     
     /// Get peer manager for network layer integration.
@@ -119,32 +163,221 @@ impl Mesh {
     }
 
     /// Resolve a store alias (UUID string or prefix) to a store handle.
-    /// Checks Root Store first, then delegates to StoreManager.
     pub fn resolve_store(&self, id_or_prefix: &str) -> Result<KvStore, MeshError> {
-        let root_match = self.root_store_id.to_string().starts_with(id_or_prefix);
+        // Check all stores including root
+        let stores = self.store_manager.stores().read()
+            .map_err(|_| MeshError::Other("lock poisoned".into()))?;
         
-        match self.store_manager.resolve_store(id_or_prefix) {
-            Ok(store) => {
-                // If conflict with root, ambiguous
-                if root_match {
-                    Err(MeshError::Other(format!("Ambiguous ID '{}' (matches Root and App Store)", id_or_prefix)))
-                } else {
-                    Ok(store)
-                }
-            }
-            Err(crate::StoreManagerError::NotFound(_)) => {
-                if root_match {
-                    Ok(self.store.clone())
-                } else {
-                    Err(MeshError::Other(format!("Store '{}' not found", id_or_prefix)))
-                }
-            }
-            Err(crate::StoreManagerError::Watch(msg)) => {
-                // Ambiguous in App Stores
-                Err(MeshError::Other(msg))
-            }
-            Err(e) => Err(MeshError::Other(e.to_string()))
+        let matches: Vec<_> = stores.values()
+            .filter(|s| s.id.to_string().starts_with(id_or_prefix))
+            .collect();
+        
+        match matches.len() {
+            0 => Err(MeshError::Other(format!("Store '{}' not found", id_or_prefix))),
+            1 => Ok(matches[0].store.clone()),
+            _ => Err(MeshError::Other(format!("Ambiguous ID '{}'", id_or_prefix))),
         }
+    }
+    
+    // ==================== Store Watcher ====================
+    
+    /// Start the watcher task that monitors `/stores/` prefix in root and reconciles.
+    fn start_watcher(&self) {
+        let store_manager = self.store_manager.clone();
+        let root_store_id = self.root_store_id;
+        let peer_manager = self.peer_manager.clone();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        
+        let Some(root_store) = self.store_manager.get_store(&self.root_store_id) else {
+            warn!("Cannot start store watcher: root store not available");
+            return;
+        };
+        
+        tokio::spawn(async move {
+            // Watch for changes to /stores/ prefix
+            let watch_result = root_store.watch("^/stores/").await;
+            let (_initial, mut rx) = match watch_result {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(error = %e, "Failed to start store watcher");
+                    return;
+                }
+            };
+            
+            debug!("Store watcher started for mesh {}", root_store_id);
+            
+            // Initial reconciliation to open existing stores
+            if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager) {
+                warn!(error = %e, "Initial reconcile failed");
+            }
+            
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        debug!("Store watcher shutting down");
+                        break;
+                    }
+                    event = rx.recv() => {
+                        match event {
+                            Ok(_evt) => {
+                                // Reconcile on any change
+                                if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager) {
+                                    warn!(error = %e, "Reconcile failed");
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        });
+    }
+    
+    /// Reconcile stores with declarations in root store.
+    fn reconcile_stores(
+        store_manager: &Arc<StoreManager>, 
+        root: &KvStore, 
+        root_store_id: Uuid,
+        peer_manager: &Arc<PeerManager>
+    ) -> Result<(), MeshError> {
+        let declarations = Self::list_declarations(root)?;
+        
+        // Get current store IDs (excluding root)
+        let current_ids: Vec<Uuid> = {
+            let stores = store_manager.stores().read()
+                .map_err(|_| MeshError::Other("lock poisoned".into()))?;
+            stores.keys().cloned().filter(|id| *id != root_store_id).collect()
+        };
+        
+        // Open stores that should be open but aren't
+        for decl in &declarations {
+            if decl.archived {
+                // Should be closed - close if open
+                if current_ids.contains(&decl.id) {
+                    let _ = store_manager.close(&decl.id);
+                    info!(store_id = %decl.id, "Closed archived store");
+                }
+            } else {
+                // Should be open - open if not open
+                if !current_ids.contains(&decl.id) {
+                    match store_manager.open(decl.id) {
+                        Ok(store) => {
+                            // Register with same peer_manager as root store
+                            if let Err(e) = store_manager.register(store, decl.store_type, peer_manager.clone()) {
+                                warn!(store_id = %decl.id, error = ?e, "Failed to register store");
+                            } else {
+                                info!(store_id = %decl.id, store_type = %decl.store_type, "Opened store");
+                            }
+                        }
+                        Err(e) => {
+                            warn!(store_id = %decl.id, error = ?e, "Failed to open store");
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Close stores that are open but no longer declared
+        let declared_ids: Vec<Uuid> = declarations.iter().map(|d| d.id).collect();
+        for id in &current_ids {
+            if !declared_ids.contains(id) {
+                let _ = store_manager.close(id);
+                info!(store_id = %id, "Closed undeclared store");
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// List store declarations from root store.
+    fn list_declarations(root: &KvStore) -> Result<Vec<StoreDeclaration>, MeshError> {
+        let entries = root.list()
+            .map_err(|e| MeshError::Other(e.to_string()))?;
+        
+        let declarations = entries.iter()
+            .filter(|(k, _)| k.starts_with(b"/stores/") && k.ends_with(b"/type"))
+            .filter_map(|(k, _)| Self::parse_declaration(root, k))
+            .collect();
+        
+        Ok(declarations)
+    }
+    
+    /// Parse a store declaration from a `/stores/{uuid}/type` key.
+    fn parse_declaration(root: &KvStore, type_key: &[u8]) -> Option<StoreDeclaration> {
+        let key_str = String::from_utf8_lossy(type_key);
+        let uuid_str = key_str.split('/').nth(2)?;
+        let id = Uuid::parse_str(uuid_str).ok()?;
+        
+        let get_str = |suffix: &str| -> Option<String> {
+            let key = format!("/stores/{}/{}", uuid_str, suffix);
+            root.get(key.as_bytes()).ok()?.lww().map(|v| String::from_utf8_lossy(&v).to_string())
+        };
+        
+        Some(StoreDeclaration {
+            id,
+            store_type: get_str("type")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(StoreType::KvStore),
+            name: get_str("name"),
+            archived: get_str("archived").is_some(),
+        })
+    }
+    
+    // ==================== Store Management ====================
+    
+    /// List all store declarations in this mesh.
+    /// Returns all stores declared in /stores/* (excludes root store).
+    pub fn list_stores(&self) -> Result<Vec<StoreDeclaration>, MeshError> {
+        Self::list_declarations(&self.root_store())
+    }
+    
+    /// Create a new store declaration in root store.
+    /// Returns the new store's UUID.
+    pub async fn create_store(&self, name: Option<String>, store_type: StoreType) -> Result<Uuid, MeshError> {
+        let root = self.root_store();
+        let store_id = Uuid::new_v4();
+        
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        
+        // Atomically write all store declaration keys
+        let type_key = format!("/stores/{}/type", store_id);
+        let created_key = format!("/stores/{}/created_at", store_id);
+        
+        let mut batch = root.batch()
+            .put(type_key.as_bytes(), store_type.as_str().as_bytes())
+            .put(created_key.as_bytes(), now_secs.to_string().as_bytes());
+        
+        if let Some(ref name) = name {
+            let name_key = format!("/stores/{}/name", store_id);
+            batch = batch.put(name_key.as_bytes(), name.as_bytes());
+        }
+        
+        batch.commit().await?;
+        
+        info!(store_id = %store_id, "Created store declaration");
+        Ok(store_id)
+    }
+    
+    /// Archive (soft-delete) a store.
+    pub async fn delete_store(&self, store_id: Uuid) -> Result<(), MeshError> {
+        let root = self.root_store();
+        
+        // Verify store exists
+        let type_key = format!("/stores/{}/type", store_id);
+        if root.get(type_key.as_bytes()).unwrap_or_default().lww().is_none() {
+            return Err(MeshError::Other(format!("Store {} not found", store_id)));
+        }
+        
+        // Write archived flag
+        let archived_key = format!("/stores/{}/archived", store_id);
+        root.put(archived_key.as_bytes(), b"true").await?;
+        
+        info!(store_id = %store_id, "Archived store");
+        Ok(())
     }
     
     // ==================== Peer Management ====================
@@ -160,39 +393,25 @@ impl Mesh {
     }
     
     /// Create a one-time join token.
-    /// 
-    /// Generates a random secret, stores its hash, and returns a Base58Check encoded token
-    /// containing (Inviter PubKey, Mesh ID, Secret).
     pub async fn create_invite(&self, inviter: PubKey) -> Result<String, MeshError> {
-        // 1. Generate Secret
         let mut secret = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut secret);
         
-        // 2. Store Hash
         let hash = blake3::hash(&secret);
         let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
-        self.store.put(key.as_bytes(), b"valid").await?;
+        self.root_store().put(key.as_bytes(), b"valid").await?;
         
-        // 3. Create Token
-        let invite = Invite::new(
-            inviter,
-            self.id(),
-            secret.to_vec(),
-        );
-        
-        // 4. Encode
+        let invite = Invite::new(inviter, self.id(), secret.to_vec());
         Ok(invite.to_string())
     }
     
     /// Validate and consume an invite secret.
-    /// Returns true if valid and consumed, false otherwise.
     pub async fn consume_invite_secret(&self, secret: &[u8]) -> Result<bool, MeshError> {
         let hash = blake3::hash(secret);
         let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
         
-        if let Ok(Some(_)) = self.store.get(key.as_bytes()).map(|h| h.lww()) {
-            // Valid! Delete it (one-time use)
-            self.store.delete(key.as_bytes()).await?;
+        if let Ok(Some(_)) = self.root_store().get(key.as_bytes()).map(|h| h.lww()) {
+            self.root_store().delete(key.as_bytes()).await?;
             Ok(true)
         } else {
             Ok(false)
@@ -216,11 +435,19 @@ impl Mesh {
         self.peer_manager.clear_bootstrap_authors()
     }
 
-    /// Shutdown the mesh and its components (stops PeerManager and StoreManager watchers)
+    /// Shutdown the mesh and its components (stops watcher and PeerManager)
     pub async fn shutdown(&self) {
-        self.store_manager.shutdown();
+        let _ = self.shutdown_tx.send(());
         self.peer_manager.shutdown().await;
     }
+}
+
+/// Store declaration (parsed from root store)
+pub struct StoreDeclaration {
+    pub id: Uuid,
+    pub store_type: StoreType,
+    pub name: Option<String>,
+    pub archived: bool,
 }
 
 impl std::fmt::Debug for Mesh {

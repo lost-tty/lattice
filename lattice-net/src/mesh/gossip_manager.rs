@@ -5,7 +5,7 @@ use super::error::GossipError;
 use lattice_model::{PeerStatus, PeerEvent, PeerProvider};
 use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
-use crate::network_store::NetworkStore;
+use lattice_node::NetworkStore;
 use lattice_kernel::proto::storage::PeerSyncInfo;
 use lattice_kernel::proto::network::GossipMessage;
 use lattice_kernel::SyncNeeded;
