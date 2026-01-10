@@ -18,7 +18,7 @@ fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     lattice_node::DataDir::new(path)
 }
 
-/// Helper: Join mesh via node.join() and wait for StoreReady event
+/// Helper: Join mesh via node.join() and wait for MeshReady event
 async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<KvStore> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
@@ -28,14 +28,16 @@ async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, se
         return None;
     }
     
-    // Wait for StoreReady event (join complete)
+    // Wait for MeshReady event (join complete)
     let timeout = tokio::time::Duration::from_secs(10);
     match tokio::time::timeout(timeout, async {
         while let Ok(event) = events.recv().await {
-            if let NodeEvent::StoreReady { store_id } = event {
-                // Look up the store by ID
-                if let Some(mesh) = node.mesh_by_id(store_id) {
-                    return Some(mesh.root_store().clone());
+            // MeshReady is emitted by process_join_response after join completes
+            if let NodeEvent::MeshReady { mesh_id: ready_id } = event {
+                if ready_id == mesh_id {
+                    if let Some(mesh) = node.mesh_by_id(ready_id) {
+                        return Some(mesh.root_store().clone());
+                    }
                 }
             }
         }
@@ -95,10 +97,10 @@ async fn test_production_flow_gossip() {
     
     // Node B: not yet initialized
     let node_b = Arc::new(NodeBuilder { data_dir: data_b.clone() }.build().expect("node b"));
-    let _server_b = MeshService::new_from_node(node_b.clone()).await.expect("server b");
+    let server_b = MeshService::new_from_node(node_b.clone()).await.expect("server b");
     
-    // Allow time for mDNS discovery between nodes (local network announcement)
-    sleep(Duration::from_millis(500)).await;
+    // Add A's address to B's discovery for reliable connection
+    server_b.endpoint().add_peer_addr(server_a.endpoint().addr());
     
     // === Node A: Creates invite token for B ===
     let token_string = mesh_a.create_invite(node_a.node_id()).await.expect("create invite");

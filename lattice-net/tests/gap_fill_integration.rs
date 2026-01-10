@@ -5,8 +5,6 @@ use lattice_kvstate::Merge;
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::sleep;
 
 /// Helper to create a temp data dir for testing
 fn temp_data_dir(name: &str) -> lattice_node::DataDir {
@@ -15,7 +13,7 @@ fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     lattice_node::DataDir::new(path)
 }
 
-/// Helper: Join mesh via node.join() and wait for StoreReady event
+/// Helper: Join mesh via node.join() and wait for MeshReady event
 async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<KvStore> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
@@ -25,14 +23,16 @@ async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, se
         return None;
     }
     
-    // Wait for StoreReady event (join complete)
+    // Wait for MeshReady event (join complete)
     let timeout = tokio::time::Duration::from_secs(10);
     match tokio::time::timeout(timeout, async {
         while let Ok(event) = events.recv().await {
-            if let NodeEvent::StoreReady { store_id } = event {
-                // Look up the store by ID
-                if let Some(mesh) = node.mesh_by_id(store_id) {
-                    return Some(mesh.root_store().clone());
+            // MeshReady is emitted by process_join_response after join completes
+            if let NodeEvent::MeshReady { mesh_id: ready_id } = event {
+                if ready_id == mesh_id {
+                    if let Some(mesh) = node.mesh_by_id(ready_id) {
+                        return Some(mesh.root_store().clone());
+                    }
                 }
             }
         }
@@ -67,23 +67,24 @@ async fn test_targeted_author_sync() {
     // B joins via event-driven flow with secret
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     
-    // Allow some time for mDNS discovery
-    sleep(Duration::from_millis(200)).await;
+    // Add A's address to B's discovery for reliable connection (bypasses mDNS timing)
+    server_b.endpoint().add_peer_addr(server_a.endpoint().addr());
     
     let store_b = join_mesh_via_event(&node_b, a_pubkey, store_id, invite.secret)
         .await
         .expect("B should successfully join A's mesh");
     
-    sleep(Duration::from_millis(300)).await;
-    
     // A writes entries AFTER B joined
     store_a.put(b"/data", b"test").await.expect("put");
     
-    // B syncs specifically for A's author
+    // Verify gap exists (B doesn't have A's data yet - gossip wouldn't have propagated)
+    assert!(store_b.get(b"/data").expect("get").lww().is_none(), "B should not have data before sync");
+    
+    // B syncs specifically for A's author (synchronous RPC pull)
     let author = PubKey::from(*node_a.node_id());
     let _applied = server_b.sync_author_all_by_id(store_b.id(), author).await.expect("sync author");
     
-    // Verify entry arrived after sync
+    // Verify entry arrived after sync - no sleep needed, proves RPC pull worked
     let val = store_b.get(b"/data").expect("get").lww();
     assert_eq!(val, Some(b"test".to_vec()));
     
@@ -111,23 +112,26 @@ async fn test_sync_multiple_entries() {
     let invite = Invite::parse(&token_string).expect("parse token");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
-    sleep(Duration::from_millis(200)).await;
+    
+    // Add A's address to B's discovery for reliable connection (bypasses mDNS timing)
+    server_b.endpoint().add_peer_addr(server_a.endpoint().addr());
     
     let store_b = join_mesh_via_event(&node_b, a_pubkey, store_id, invite.secret)
         .await
         .expect("B should successfully join A's mesh");
-    
-    sleep(Duration::from_millis(300)).await;
     
     // A writes multiple entries AFTER B joined
     for i in 1..=5 {
         store_a.put(format!("/key{}", i).as_bytes(), format!("value{}", i).as_bytes()).await.expect("put");
     }
     
-    // B syncs to get the new entries
+    // Verify gap exists (B doesn't have A's data yet - gossip wouldn't have propagated)
+    assert!(store_b.get(b"/key1").expect("get").lww().is_none(), "B should not have data before sync");
+    
+    // B syncs to get the new entries (synchronous RPC pull)
     let _results = server_b.sync_all_by_id(store_b.id()).await.expect("sync");
     
-    // Verify all entries synced
+    // Verify all entries synced - no sleep needed, proves RPC pull worked
     for i in 1..=5 {
         let key = format!("/key{}", i);
         let expected = format!("value{}", i);

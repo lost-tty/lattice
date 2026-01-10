@@ -615,7 +615,16 @@ impl PeerProvider for PeerManager {
     }
     
     fn list_acceptable_authors(&self) -> Vec<PubKey> {
-        self.peers.list_acceptable_authors()
+        let mut authors = self.peers.list_acceptable_authors();
+        // Also include bootstrap authors (trusted during initial sync)
+        if let Ok(bootstrap) = self.bootstrap_authors.read() {
+            for pk in bootstrap.iter() {
+                if !authors.contains(pk) {
+                    authors.push(*pk);
+                }
+            }
+        }
+        authors
     }
     
     fn subscribe_peer_events(&self) -> lattice_model::PeerEventStream {

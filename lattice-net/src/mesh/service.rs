@@ -150,6 +150,24 @@ impl MeshService {
     pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
         self.node.store_manager().get_network_store(&store_id)
     }
+    
+    /// Wait for a store to be registered (handles async registration race).
+    /// Returns None if store not available after timeout.
+    async fn wait_for_store(&self, store_id: Uuid) -> Option<NetworkStore> {
+        // Try immediately first
+        if let Some(store) = self.get_store(store_id) {
+            return Some(store);
+        }
+        
+        // Poll briefly (async registration should complete quickly)
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            if let Some(store) = self.get_store(store_id) {
+                return Some(store);
+            }
+        }
+        None
+    }
 
     // ==================== Peer Discovery ====================
     
@@ -227,6 +245,10 @@ impl MeshService {
                 
                 tracing::info!(mesh_id = %mesh_id, "Join protocol: processing join response");
                 self.node.process_join_response(mesh_id, resp.authorized_authors, via_peer).await?;
+                
+                // Mark peer as online so sync can find them immediately
+                let _ = self.sessions.mark_online(via_peer);
+                
                 tracing::info!("Join protocol: complete");
 
                 Ok(conn)
@@ -413,29 +435,33 @@ impl MeshService {
     
     // ==================== Convenience Methods (by ID) ====================
     
-    /// Sync with all active peers for a store (by ID)
+    /// Sync with all active peers for a store (by ID).
+    /// Waits briefly for store registration if not immediately available.
     pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, LatticeNetError> {
-        let store = self.get_store(store_id)
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered", store_id)))?;
+        // Wait for store to be registered (async registration from NetEvent::StoreReady)
+        let store = self.wait_for_store(store_id).await
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
         self.sync_all(&store).await
     }
     
-    /// Sync a specific author with all active peers (by store ID)
+    /// Sync a specific author with all active peers (by store ID).
+    /// Waits briefly for store registration if not immediately available.
     pub async fn sync_author_all_by_id(&self, store_id: Uuid, author: PubKey) -> Result<u64, LatticeNetError> {
-        let store = self.get_store(store_id)
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered", store_id)))?;
+        let store = self.wait_for_store(store_id).await
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
         self.sync_author_all(&store, author).await
     }
     
-    /// Sync with a specific peer (by store ID)
+    /// Sync with a specific peer (by store ID).
+    /// Waits briefly for store registration if not immediately available.
     pub async fn sync_with_peer_by_id(
         &self, 
         store_id: Uuid, 
         peer_id: iroh::PublicKey, 
         authors: &[PubKey]
     ) -> Result<SyncResult, LatticeNetError> {
-        let store = self.get_store(store_id)
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered", store_id)))?;
+        let store = self.wait_for_store(store_id).await
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
         self.sync_with_peer(&store, peer_id, authors).await
     }
 
