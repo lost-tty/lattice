@@ -48,7 +48,7 @@ We believe software should be as resilient as the hardware it runs on. Most mode
 1. **Create a mesh on the first node**:
    ```bash
    cargo run --package lattice-cli
-   lattice:no-store> mesh create
+   lattice:no-mesh> mesh create
    ```
 
 2. **Generate an invite token**:
@@ -59,7 +59,7 @@ We believe software should be as resilient as the hardware it runs on. Most mode
 
 3. **Join the mesh** (on second node):
    ```bash
-   lattice:no-store> mesh join <token>
+   lattice:no-mesh> mesh join <token>
    ```
 
 ## CLI Commands
@@ -102,10 +102,14 @@ We believe software should be as resilient as the hardware it runs on. Most mode
 
 | Crate | Purpose |
 |-------|---------|
-| `lattice-core` | **The kernel**. Implements Node, SigChain, HLC, and redb storage logic. |
-| `lattice-net` | **The networking layer**. Handles Iroh endpoints, Gossipsub, and Sync protocols. |
+| `lattice-model` | **Shared types**. Core types, traits, and protocol definitions used across crates. |
+| `lattice-kernel` | **The replication engine**. Implements Store, SigChain, HLC, and entry validation. |
+| `lattice-kvstate` | **KV state machine**. LWW-based key-value state with atomic batch operations. |
+| `lattice-node` | **Application layer**. Node, Mesh, PeerManager orchestration and store lifecycle. |
+| `lattice-net` | **Networking layer**. Iroh endpoints, Gossip, and Sync protocols. |
+| `lattice-net-types` | **Network abstractions**. Shared traits for decoupling net from node. |
 | `lattice-cli` | **Interactive shell** for managing nodes and debugging state. |
-| `proto` | **Protocol Buffers** definitions for wire format and disk storage. |
+| `lattice-proto` | **Protocol Buffers** definitions for wire format and disk storage. |
 
 ## Data Directory
 
