@@ -66,7 +66,7 @@ impl Mesh {
         store: KvStore, 
         node: &Arc<NodeIdentity>, 
         registry: Arc<crate::StoreRegistry>,
-        event_tx: tokio::sync::broadcast::Sender<crate::NodeEvent>
+        net_tx: tokio::sync::broadcast::Sender<lattice_model::NetEvent>
     ) -> Result<Self, MeshError> {
         let root_store_id = store.id();
         let peer_manager = PeerManager::new(store.clone(), node)
@@ -74,7 +74,7 @@ impl Mesh {
         let store_manager = Arc::new(StoreManager::new(
             store.clone(), 
             registry, 
-            event_tx
+            net_tx
         ));
 
         // Start watcher to automatically open/close stores declared in root store

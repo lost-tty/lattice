@@ -5,7 +5,8 @@
 //! - Store instantiation and lifecycle via watcher
 //! - Declarative: stores in root store → automatically instantiated
 
-use crate::{KvStore, StoreType, StoreRegistry, NodeEvent};
+use crate::{KvStore, StoreType, StoreRegistry};
+use lattice_model::NetEvent;
 use lattice_kernel::Uuid;
 use lattice_kvstate::{Merge, KvState};
 use std::collections::HashMap;
@@ -49,7 +50,7 @@ pub struct AppStore {
 pub struct StoreManager {
     root_store: KvStore,
     registry: Arc<StoreRegistry>,
-    event_tx: broadcast::Sender<NodeEvent>,
+    net_tx: broadcast::Sender<NetEvent>,
     /// Live application stores (non-archived)
     app_stores: RwLock<HashMap<Uuid, AppStore>>,
     /// Shutdown signal
@@ -61,13 +62,13 @@ impl StoreManager {
     pub fn new(
         root_store: KvStore, 
         registry: Arc<StoreRegistry>, 
-        event_tx: broadcast::Sender<NodeEvent>
+        net_tx: broadcast::Sender<NetEvent>
     ) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
         Self { 
             root_store,
             registry,
-            event_tx,
+            net_tx,
             app_stores: RwLock::new(HashMap::new()),
             shutdown_tx,
         }
@@ -179,8 +180,8 @@ impl StoreManager {
                          store_type: decl.store_type,
                      });
                      
-                     // Emit NetworkStoreReady event
-                     let _ = self.event_tx.send(NodeEvent::NetworkStoreReady {
+                     // Emit NetEvent::StoreReady for network registration
+                     let _ = self.net_tx.send(NetEvent::StoreReady {
                         store_id: target_id,
                      });
                      
@@ -230,8 +231,8 @@ impl StoreManager {
                                 store_type: decl.store_type,
                             });
                             
-                            // Emit NetworkStoreReady event for peer syncing
-                            let _ = self.event_tx.send(NodeEvent::NetworkStoreReady {
+                            // Emit NetEvent::StoreReady for network registration
+                            let _ = self.net_tx.send(NetEvent::StoreReady {
                                 store_id: decl.id,
                             });
                             

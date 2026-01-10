@@ -138,20 +138,20 @@ async fn test_store_emits_network_event() {
     let mesh = node.mesh_by_id(mesh_id).unwrap();
     let store_manager = mesh.store_manager();
     
-    // Subscribe to events
-    let mut rx = node.subscribe();
+    // Subscribe to network events (NetEvent channel)
+    let mut rx = node.subscribe_net_events();
     
     // Create and reconcile store
     let store_id = store_manager.create_store(None, StoreType::KvStore).await.unwrap();
     store_manager.reconcile().unwrap();
     
-    // Check for NetworkStoreReady event
+    // Check for NetEvent::StoreReady event
     let mut found = false;
-    // We might get other events (like SyncRequested), so drain a few
+    // We might get other events (like SyncAll), so drain a few
     for _ in 0..10 {
         match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
             Ok(Ok(event)) => {
-                if let lattice_node::NodeEvent::NetworkStoreReady { store_id: id } = event {
+                if let lattice_model::NetEvent::StoreReady { store_id: id } = event {
                     if id == store_id {
                         found = true;
                         break;
@@ -162,5 +162,5 @@ async fn test_store_emits_network_event() {
         }
     }
     
-    assert!(found, "Did not receive NetworkStoreReady event for opened store");
+    assert!(found, "Did not receive NetEvent::StoreReady event for opened store");
 }

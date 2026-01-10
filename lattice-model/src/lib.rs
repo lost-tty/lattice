@@ -12,6 +12,7 @@ pub mod replication;
 pub mod node_identity;
 pub mod introspection;
 pub mod peer_provider;
+pub mod net_event;
 
 // Re-exports
 pub use types::{Hash, PubKey, Signature};
@@ -30,4 +31,5 @@ pub use replication::{
 };
 pub use node_identity::{NodeIdentity, NodeError, PeerStatus};
 pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream};
+pub use net_event::NetEvent;
 

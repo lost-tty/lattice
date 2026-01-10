@@ -154,7 +154,6 @@ async fn main() {
                     lattice_node::NodeEvent::JoinFailed { mesh_id, reason } => {
                         wout!(writer, "\nError: Join failed for mesh {}: {}", mesh_id, reason);
                     }
-                    _ => {}
                 }
             }
         });

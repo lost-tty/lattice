@@ -5,6 +5,7 @@
 
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN};
 use lattice_node::{Node, NodeEvent, NodeError};
+use lattice_model::NetEvent;
 use lattice_kernel::Uuid;
 use lattice_model::types::PubKey;
 use crate::network_store::NetworkStore;
@@ -116,11 +117,11 @@ impl MeshService {
             sync_engine,
         });
         
-        // Subscribe to node events (NetworkStoreReady, etc.)
-        let event_rx = node.subscribe_events();
+        // Subscribe to network events (NetEvent channel)
+        let event_rx = node.subscribe_net_events();
         let service_clone = service.clone();
         tokio::spawn(async move {
-            Self::run_event_handler(service_clone, event_rx).await;
+            Self::run_net_event_handler(service_clone, event_rx).await;
         });
         
         Ok(service)
@@ -279,19 +280,19 @@ impl MeshService {
 
     // ==================== Event Handling & Lifecycle ====================
 
-    /// Handle node events - spawns dedicated tasks for each event
-    async fn run_event_handler(service: Arc<Self>, mut event_rx: tokio::sync::broadcast::Receiver<NodeEvent>) {
+    /// Handle network events - spawns dedicated tasks for each event
+    async fn run_net_event_handler(service: Arc<Self>, mut event_rx: tokio::sync::broadcast::Receiver<NetEvent>) {
         while let Ok(event) = event_rx.recv().await {
             let service = service.clone();
             
             match event {
-                NodeEvent::JoinRequested { peer, mesh_id, secret } => {
+                NetEvent::Join { peer, mesh_id, secret } => {
                     tokio::spawn(async move {
                         let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
-                            tracing::error!(peer = %PubKey::from(peer), "JoinRequested: invalid PubKey");
+                            tracing::error!(peer = %PubKey::from(peer), "Join: invalid PubKey");
                             return;
                         };
-                        tracing::info!(peer = %iroh_peer_id.fmt_short(), mesh = %mesh_id, "Event: JoinRequested → starting join protocol");
+                        tracing::info!(peer = %iroh_peer_id.fmt_short(), mesh = %mesh_id, "NetEvent::Join → starting join protocol");
                         
                         match service.handle_join_request_event(iroh_peer_id, mesh_id, secret).await {
                             Ok(conn) => {
@@ -304,18 +305,19 @@ impl MeshService {
                                 }
                             }
                             Err(e) => {
-                                tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "Event: JoinRequested → join failed");
+                                tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "NetEvent::Join → join failed");
+                                // Emit NodeEvent::JoinFailed for CLI feedback
                                 service.node.emit(NodeEvent::JoinFailed { mesh_id, reason: e.to_string() });
                             }
                         }
                     });
                 }
-                NodeEvent::NetworkStoreReady { store_id } => {
+                NetEvent::StoreReady { store_id } => {
                     tokio::spawn(async move {
-                        tracing::info!(store_id = %store_id, "Event: NetworkStoreReady → registering store");
+                        tracing::info!(store_id = %store_id, "NetEvent::StoreReady → registering store");
                         // Look up store and peer_manager from node
                         let Some(mesh) = service.node.mesh_by_id(store_id) else {
-                            tracing::warn!(store_id = %store_id, "Mesh not found for NetworkStoreReady");
+                            tracing::warn!(store_id = %store_id, "Mesh not found for StoreReady");
                             return;
                         };
                         let store = mesh.root_store().clone();
@@ -323,7 +325,7 @@ impl MeshService {
                         service.register_store(store, peer_manager).await;
                     });
                 }
-                NodeEvent::SyncWithPeer { store_id, peer } => {
+                NetEvent::SyncWithPeer { store_id, peer } => {
                     tokio::spawn(async move {
                         let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
                             tracing::error!("SyncWithPeer: invalid PubKey");
@@ -332,7 +334,7 @@ impl MeshService {
                         tracing::info!(
                             store_id = %store_id, 
                             peer = %iroh_peer_id.fmt_short(), 
-                            "Event: SyncWithPeer → starting targeted sync"
+                            "NetEvent::SyncWithPeer → starting targeted sync"
                         );
                         
                         match service.sync_with_peer_by_id(store_id, iroh_peer_id, &[]).await {
@@ -340,20 +342,20 @@ impl MeshService {
                                 store_id = %store_id,
                                 peer = %iroh_peer_id.fmt_short(),
                                 entries = result.entries_applied,
-                                "Event: SyncWithPeer → complete"
+                                "NetEvent::SyncWithPeer → complete"
                             ),
                             Err(e) => tracing::warn!(
                                 store_id = %store_id,
                                 peer = %iroh_peer_id.fmt_short(),
                                 error = %e,
-                                "Event: SyncWithPeer → failed"
+                                "NetEvent::SyncWithPeer → failed"
                             ),
                         }
                     });
                 }
-                NodeEvent::SyncRequested(store_id) => {
+                NetEvent::SyncStore { store_id } => {
                     tokio::spawn(async move {
-                        tracing::info!(store_id = %store_id, "Event: SyncRequested → syncing with all peers");
+                        tracing::info!(store_id = %store_id, "NetEvent::SyncStore → syncing with all peers");
                         if service.get_store(store_id).await.is_some() {
                             match service.sync_all_by_id(store_id).await {
                                 Ok(results) if !results.is_empty() => {
@@ -362,19 +364,16 @@ impl MeshService {
                                         store_id = %store_id,
                                         entries = total, 
                                         peers = results.len(), 
-                                        "Event: SyncRequested → complete"
+                                        "NetEvent::SyncStore → complete"
                                     );
                                 }
-                                Ok(_) => tracing::debug!(store_id = %store_id, "Event: SyncRequested → no peers to sync"),
-                                Err(e) => tracing::warn!(store_id = %store_id, error = %e, "Event: SyncRequested → failed"),
+                                Ok(_) => tracing::debug!(store_id = %store_id, "NetEvent::SyncStore → no peers to sync"),
+                                Err(e) => tracing::warn!(store_id = %store_id, error = %e, "NetEvent::SyncStore → failed"),
                             }
                         } else {
-                            tracing::warn!(store_id = %store_id, "Event: SyncRequested → store not registered");
+                            tracing::warn!(store_id = %store_id, "NetEvent::SyncStore → store not registered");
                         }
                     });
-                }
-                _ => {
-                    // Ignored events don't need tasks
                 }
             }
         }
@@ -431,7 +430,11 @@ impl MeshService {
                 match service.sync_engine.active_peer_ids().await {
                     Ok(peers) if !peers.is_empty() => {
                         tracing::info!(store_id = %store_id, peers = peers.len(), "Boot Sync: Triggering initial sync");
-                        service.node.emit(NodeEvent::SyncRequested(store_id));
+                        // Emit NetEvent::SyncAll via the node's net_tx
+                        let _ = service.node.subscribe_net_events(); // Get access to send
+                        // Actually, we can't easily emit to net_tx from here
+                        // Instead, just call sync directly
+                        let _ = service.sync_all_by_id(store_id).await;
                         break;
                     }
                     _ => {}

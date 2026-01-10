@@ -39,19 +39,28 @@ Root store as control plane: store declarations in `/stores/`, StoreManager with
 
 ## Remaining Work (M4/M6 Era)
 
+### Node/Net Decoupling (Two Phases)
+
+**Phase 1: Separate NetEvent Channel** ✓
+- [x] Create `NetEvent` enum in `lattice-node` for network-specific events (`StoreReady`, `SyncAll`, `Join`, `SyncWithPeer`)
+- [x] Add `net_tx: broadcast::Sender<NetEvent>` channel in Node, with `subscribe_net_events()` method
+- [x] MeshService subscribes to `NetEvent`, handles store registration and sync internally
+- [x] Remove network-related variants from `NodeEvent` (keep only CLI-facing events: `StoreReady`, `MeshReady`, `JoinFailed`)
+
+**Phase 2: NodeProvider Trait**
+- [ ] Define `NodeProvider` trait in `lattice-model` with methods MeshService needs (e.g., `get_store()`, `pubkey()`, `mesh_ids()`)
+- [ ] Node implements `NodeProvider`
+- [ ] MeshService depends on `dyn NodeProvider`, not `Arc<Node>`
+- [ ] Eliminates `Arc<Self>` patterns and tight coupling
+
+---
+
+### Other Remaining Items
+
 - [ ] **Refactor Orphan Resolution**: Move recursive dependency logic from `StoreActor` into `SigChainManager`. Actor receives "Ready Entries", doesn't manage work_queues.
-- [ ] **Clear Store Ownership**: Node owns store lifecycle, MeshService owns NetworkStore wrappers. Registration via explicit `NetRequest::RegisterStore` message, no duplicate source-of-truth. Timing: Node sends RegisterStore after store is fully initialized and accessible.
-- [ ] **Loose Coupling: lattice-net / lattice-node**: Refactor to eliminate `Arc<Self>` patterns and tight coupling between networking and node layers. Goals:
-  - Node methods use `&self`, not `Arc<Self>`
-  - Store registration uses simple channels, no spawning inside methods
-  - MeshService remains autonomous, Node provides data via traits
-  - No duplicate store tracking between layers
 - [ ] **Lattice-Kernel Audit**: Thorough review of `lattice-kernel` to ensure architectural cleanliness, proper visibility, and minimal dependencies before declaring it stable.
   - [ ] **Enforce strict limit on causal_deps**: Prevent DoS by capping `entry.causal_deps` len (e.g. 1024).
 - [ ] **Proactive Store Reconciliation**: Verify that all nodes automatically create/open app stores when declared in root store, not just when first used. StoreManager should reconcile on startup and on live changes.
-- [ ] **Complete Store Registration Flow**: `net_tx` added to Node but `set_net_channel()` and `send_register_store()` not implemented. Node must send `NetRequest::RegisterStore` when stores are ready.
-- [ ] **Initial Sync After Join**: `SyncWithPeer` event removed but no replacement. After `complete_join`, node needs to sync with `via_peer` to get initial data.
-- [ ] **Join Protocol Wiring**: `JoinRequested` event removed. CLI/network layer must directly call network protocol for mesh join instead of relying on events.
 
 ---
 

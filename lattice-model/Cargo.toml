@@ -13,6 +13,7 @@ ed25519-dalek = { workspace = true }
 rand = "0.8"
 zeroize = "1"
 prost-reflect = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

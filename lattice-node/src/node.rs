@@ -14,7 +14,7 @@ use lattice_kernel::{
 };
 use crate::KvStore;
 use lattice_kvstate::{KvHandle, KvHandleError, KvState};
-use lattice_model::types::PubKey;
+use lattice_model::{types::PubKey, NetEvent};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::RwLock;
@@ -107,23 +107,15 @@ pub struct PeerInfo {
     pub status: PeerStatus,
 }
 
-/// Events emitted by Node for interested listeners (e.g., MeshNetwork)
+/// Events emitted by Node for CLI/UI listeners
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
-    /// Store is ready (opened and available) - informational only
+    /// Store is ready (opened and available)
     StoreReady { store_id: Uuid },
     /// Mesh is fully initialized and ready (store + network + perms)
     MeshReady { mesh_id: Uuid },
-    /// Network store opened and ready for sync
-    NetworkStoreReady { store_id: Uuid },
-    /// Sync requested (catch up with peers)
-    SyncRequested(Uuid),
-    /// Request to join a mesh
-    JoinRequested { peer: PubKey, mesh_id: Uuid, secret: Vec<u8> },
-    /// Join failed (emitted by network layer)
+    /// Join failed (emitted by network layer for CLI feedback)
     JoinFailed { mesh_id: Uuid, reason: String },
-    /// Sync with a specific peer (used after joining to get initial data)
-    SyncWithPeer { store_id: Uuid, peer: PubKey },
 }
 
 pub struct NodeBuilder {
@@ -163,6 +155,7 @@ impl NodeBuilder {
         }
         
         let (event_tx, _) = broadcast::channel(16);
+        let (net_tx, _) = broadcast::channel(64);
 
         let node = std::sync::Arc::new(node);
         let meta = std::sync::Arc::new(meta);
@@ -174,6 +167,7 @@ impl NodeBuilder {
             meta,
             registry,
             event_tx,
+            net_tx,
             meshes: RwLock::new(HashMap::new()),
             pending_joins: RwLock::new(std::collections::HashSet::new()),
         })
@@ -190,7 +184,10 @@ pub struct Node {
     node: std::sync::Arc<NodeIdentity>,
     meta: std::sync::Arc<MetaStore>,
     registry: std::sync::Arc<StoreRegistry>,
+    /// Events for CLI/UI listeners
     event_tx: broadcast::Sender<NodeEvent>,
+    /// Events for network layer (MeshService)
+    net_tx: broadcast::Sender<NetEvent>,
     /// All active meshes by ID (multi-mesh support)
     meshes: RwLock<HashMap<Uuid, Mesh>>,
     /// Set of mesh IDs currently being joined
@@ -222,6 +219,11 @@ impl Node {
     /// Subscribe to node events (e.g., root store activation)
     pub fn subscribe_events(&self) -> broadcast::Receiver<NodeEvent> {
         self.event_tx.subscribe()
+    }
+    
+    /// Subscribe to network events (for MeshService)
+    pub fn subscribe_net_events(&self) -> broadcast::Receiver<NetEvent> {
+        self.net_tx.subscribe()
     }
     
     /// Set bootstrap authors for a mesh - trusted for initial sync before peer list is synced.
@@ -281,6 +283,11 @@ impl Node {
     pub fn emit(&self, event: NodeEvent) {
         let _ = self.event_tx.send(event);
     }
+    
+    /// Emit a network event (for MeshService)
+    fn emit_net(&self, event: NetEvent) {
+        let _ = self.net_tx.send(event);
+    }
 
     /// Start the node - loads all meshes from meta.db and emits NetworkStore events.
     pub async fn start(&self) -> Result<(), NodeError> {
@@ -299,7 +306,7 @@ impl Node {
             let handle = KvHandle::new(store);
             
             // Create Mesh (handles PeerManager creation internally)
-            let mesh = Mesh::create(handle, &self.node, self.registry.clone(), self.event_tx.clone()).await
+            let mesh = Mesh::create(handle, &self.node, self.registry.clone(), self.net_tx.clone()).await
                 .map_err(|e| NodeError::Actor(e.to_string()))?;
             
             // Store mesh in node
@@ -315,10 +322,11 @@ impl Node {
                 meshes_guard.insert(mesh_id, mesh.clone());
             }
             
-            // Emit events for listeners - NetworkStoreReady triggers server registration
+            // Emit events for listeners
             let _ = self.event_tx.send(NodeEvent::StoreReady { store_id: mesh_id });
-            let _ = self.event_tx.send(NodeEvent::NetworkStoreReady { store_id: mesh_id });
-            let _ = self.event_tx.send(NodeEvent::SyncRequested(mesh_id));
+            // Network events
+            self.emit_net(NetEvent::StoreReady { store_id: mesh_id });
+            self.emit_net(NetEvent::SyncStore { store_id: mesh_id });
         }
         
         Ok(())
@@ -381,7 +389,7 @@ impl Node {
         let _ = kv.put(&Peer::key_status(self.node.public_key()), PeerStatus::Active.as_str().as_bytes()).await;
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = Mesh::create(kv.clone(), &self.node, self.registry.clone(), self.event_tx.clone()).await
+        let mesh = Mesh::create(kv.clone(), &self.node, self.registry.clone(), self.net_tx.clone()).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node
@@ -391,8 +399,8 @@ impl Node {
             meshes_guard.insert(store_id, mesh.clone());
         }
         
-        // Emit NetworkStoreReady event - server will register for networking
-        let _ = self.event_tx.send(NodeEvent::NetworkStoreReady { store_id });
+        // Emit NetEvent::StoreReady - server will register for networking
+        self.emit_net(NetEvent::StoreReady { store_id });
         
         Ok(store_id)
     }
@@ -416,7 +424,7 @@ impl Node {
             pending.insert(mesh_id);
         }
         
-        let _ = self.event_tx.send(NodeEvent::JoinRequested { peer: peer_id, mesh_id, secret });
+        self.emit_net(NetEvent::Join { peer: peer_id, mesh_id, secret });
         Ok(())
     }
     
@@ -478,7 +486,7 @@ impl Node {
         let handle = KvHandle::new(store);
         
         // Create Mesh (handles PeerManager creation internally)
-        let mesh = Mesh::create(handle.clone(), &self.node, self.registry.clone(), self.event_tx.clone()).await
+        let mesh = Mesh::create(handle.clone(), &self.node, self.registry.clone(), self.net_tx.clone()).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         
         // Store mesh in node
@@ -494,12 +502,12 @@ impl Node {
         // Emit StoreReady for listeners waiting on join completion (like CLI)
         let _ = self.event_tx.send(NodeEvent::StoreReady { store_id });
         
-        // Emit NetworkStoreReady event - server will register for networking
-        let _ = self.event_tx.send(NodeEvent::NetworkStoreReady { store_id });
+        // Emit NetEvent::StoreReady - server will register for networking
+        self.emit_net(NetEvent::StoreReady { store_id });
         
         // If we joined via a specific peer, emit SyncWithPeer to get initial data
         if let Some(peer) = via_peer {
-            let _ = self.event_tx.send(NodeEvent::SyncWithPeer { store_id, peer });
+            self.emit_net(NetEvent::SyncWithPeer { store_id, peer });
         }
         
         Ok(handle)
