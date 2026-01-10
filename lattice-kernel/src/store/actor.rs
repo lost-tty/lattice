@@ -4,7 +4,7 @@
 
 use crate::store::{
     sigchain::{
-        GapInfo, Log, OrphanInfo, SigChainError, SigChainManager, SigchainValidation,
+        GapInfo, Log, OrphanInfo, SigChainError, SigChainManager,
         SyncState,
     },
     StateError,
@@ -320,139 +320,32 @@ impl<S: StateMachine> ReplicationController<S> {
     /// - Applies to State via StateMachine::apply
     /// - Commits to SigChain log
     /// - Broadcasts to listeners
+    /// 
+    /// The work_queue/orphan cascading logic is now delegated to SigChainManager::ingest_entry.
     fn commit_entry(&mut self, signed_entry: &SignedEntry) -> Result<(), ReplicationControllerError> {
-        use lattice_model::Op;
-
-        // Work queue for processing orphans that become ready
-        // Tuple: (entry, cleanup_meta: Option<(DeletionType)>)
-        // DeletionType: SigChainOrphan(author, prev_hash, entry_hash) OR DagOrphan(key, parent_hash, entry_hash)
-        #[derive(Clone)]
-        enum CleanupMeta {
-            SigChain { author: PubKey, prev_hash: Hash, entry_hash: Hash },
-            Dag { parent_hash: Hash, entry_hash: Hash },
-        }
-
-        let mut work_queue: Vec<(SignedEntry, Option<CleanupMeta>)> = vec![(signed_entry.clone(), None)];
-        let mut is_primary_entry = true;
-
-        while let Some((current, cleanup_meta)) = work_queue.pop() {
-            match self.chain_manager.validate_entry(&current)? {
-                SigchainValidation::Valid => {
-                    // Check DAG dependencies (Causal Delivery)
-                    let entry_hash = current.hash();
-                    let mut missing_dep = None;
-                    
-                    for dep_bytes in &current.entry.causal_deps {
-                        if let Ok(dep) = <[u8; 32]>::try_from(dep_bytes.as_slice()).map(Hash::from) {
-                            if !self.chain_manager.hash_exists(&dep) {
-                                missing_dep = Some(dep);
-                                break;
-                            }
-                        }
-                    }
-
-                    if let Some(parent) = missing_dep {
-                        // Buffer as DAG orphan (generic, no key)
-                        self.chain_manager.buffer_dag_orphan(&current, &parent)?;
-                        // STOP processing this entry
-                         if let Some(meta) = cleanup_meta {
-                            // If it came from buffer, we might need to delete from OLD buffer?
-                            // No, if it came from buffer, it means we thought it was ready.
-                            // But if it's missing another dep, we should re-buffer?
-                            // buffer_dag_orphan will insert it.
-                            // We should delete the old reference?
-                            match meta {
-                                CleanupMeta::SigChain { author, prev_hash, entry_hash } => {
-                                    self.chain_manager.delete_sigchain_orphan(&author, &prev_hash, &entry_hash);
-                                }
-                                CleanupMeta::Dag { parent_hash, entry_hash } => {
-                                    self.chain_manager.delete_dag_orphan(&parent_hash, &entry_hash);
-                                }
-                            }
-                        }
-                        return Ok(());
-                    }
-
-                    // Deps satisfied - Proceed to Apply
-                    let causal_deps: Vec<Hash> = current
-                        .entry
-                        .causal_deps
-                        .iter()
-                        .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok().map(Hash::from))
-                        .collect();
-
-                    let op = Op {
-                        id: entry_hash,
-                        causal_deps: &causal_deps,
-                        payload: &current.entry.payload,
-                        author: current.author(),
-                        timestamp: current.entry.timestamp,
-                        prev_hash: Hash::try_from(current.entry.prev_hash.as_slice()).unwrap_or(Hash::ZERO),
-                    };
-
-                    let ready_sigchain_orphans = self.chain_manager.commit_entry(&current)?;
-
-                    if let Err(e) = self.state.apply(&op) {
-                        // CRITICAL: WAL advanced but State update failed.
-                        // Fail-stop immediately to prevent divergence. Restarting will repair state via replay.
-                        let msg = format!(
-                            "FATAL: State divergence! WAL committed entry {} (author {}) but State::apply failed: {}. Node must restart to repair state from WAL.",
-                            entry_hash, current.author(), e
-                        );
-                        eprintln!("{}", msg);
-                        panic!("{}", msg);
-                    }
-
-                    // Delete source orphan entry if applicable
-                    if let Some(meta) = cleanup_meta {
-                        match meta {
-                            CleanupMeta::SigChain { author, prev_hash, entry_hash } => {
-                                self.chain_manager.delete_sigchain_orphan(&author, &prev_hash, &entry_hash);
-                            }
-                            CleanupMeta::Dag { parent_hash, entry_hash } => {
-                                self.chain_manager.delete_dag_orphan(&parent_hash, &entry_hash);
-                            }
-                        }
-                    }
-
-                    // Broadcast
-                    let _ = self.entry_tx.send(current.clone());
-
-                    // Queue ready SigChain orphans
-                    for (orphan, author, prev_hash, orphan_hash) in ready_sigchain_orphans {
-                        work_queue.push((orphan, Some(CleanupMeta::SigChain { author, prev_hash, entry_hash: orphan_hash })));
-                    }
-
-                    // Queue ready DAG orphans
-                    let ready_dag_orphans = self.chain_manager.find_dag_orphans(&entry_hash);
-                    for (orphan, orphan_hash) in ready_dag_orphans {
-                        work_queue.push((orphan, Some(CleanupMeta::Dag { parent_hash: entry_hash, entry_hash: orphan_hash })));
-                    }
-                }
-                SigchainValidation::Orphan { gap, prev_hash } => {
-                    self.chain_manager.buffer_sigchain_orphan(
-                        &current,
-                        gap.author,
-                        prev_hash,
-                        gap.to_seq,
-                        gap.from_seq,
-                        gap.last_known_hash.unwrap_or(Hash::ZERO),
-                    )?;
-                }
-                SigchainValidation::Duplicate => {
-                    // Ignore
-                }
-                SigchainValidation::Error(e) => {
-                    if is_primary_entry {
-                        return Err(ReplicationControllerError::SigChain(e));
-                    } else {
-                        eprintln!("[warn] Cascaded orphan failed sigchain validation: {:?}", e);
-                    }
-                }
+        // Delegate validation, buffering, and orphan cascading to SigChainManager
+        let ready_entries = self.chain_manager.ingest_entry(signed_entry)?;
+        
+        // Apply each ready entry to state and broadcast
+        for ready in ready_entries {
+            // Build Op using helper (deps already validated during ingest)
+            let op = ready.to_op();
+            
+            if let Err(e) = self.state.apply(&op) {
+                // CRITICAL: WAL advanced but State update failed.
+                // Fail-stop immediately to prevent divergence. Restarting will repair state via replay.
+                let msg = format!(
+                    "FATAL: State divergence! WAL committed entry {} (author {}) but State::apply failed: {}. Node must restart to repair state from WAL.",
+                    ready.hash, ready.entry.author(), e
+                );
+                eprintln!("{}", msg);
+                panic!("{}", msg);
             }
-            is_primary_entry = false;
+            
+            // Broadcast to listeners
+            let _ = self.entry_tx.send(ready.entry);
         }
-
+        
         Ok(())
     }
 

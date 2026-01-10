@@ -8,7 +8,7 @@ use super::orphan_store::{GapInfo, OrphanInfo, OrphanStore};
 use super::sync_state::SyncState;
 use crate::entry::{ChainTip, Entry, SignedEntry};
 use lattice_model::types::{Hash, PubKey};
-use lattice_model::NodeIdentity;
+use lattice_model::{LogEntry, NodeIdentity};
 
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -626,6 +626,164 @@ impl SigChainManager {
     pub fn orphan_list(&self) -> Vec<OrphanInfo> {
         self.orphan_store.list_all().unwrap_or_default()
     }
+    
+    /// Ingest an entry: validate, buffer if orphaned, and return entries ready for application.
+    /// 
+    /// This method encapsulates the complete entry processing pipeline:
+    /// 1. Validates sigchain position
+    /// 2. Checks DAG dependencies (causal_deps)
+    /// 3. Buffers as orphan if dependencies not satisfied
+    /// 4. Commits to sigchain if ready
+    /// 5. Recursively processes any orphans that become ready
+    /// 
+    /// Returns a Vec of ReadyEntry items that are committed and ready for state application.
+    /// Caller should iterate and apply each to StateMachine, then broadcast.
+    /// 
+    /// # Errors
+    /// Returns error only for fatal validation failures on the primary entry.
+    /// Cascaded orphan failures are logged but don't fail the overall operation.
+    pub fn ingest_entry(
+        &mut self,
+        entry: &SignedEntry,
+    ) -> Result<Vec<ReadyEntry>, SigChainError> {
+        // Internal tracking for cleanup operations
+        #[derive(Clone)]
+        enum CleanupMeta {
+            SigChain { author: PubKey, prev_hash: Hash, entry_hash: Hash },
+            Dag { parent_hash: Hash, entry_hash: Hash },
+        }
+        
+        let mut work_queue: Vec<(SignedEntry, Option<CleanupMeta>)> = vec![(entry.clone(), None)];
+        let mut ready_entries: Vec<ReadyEntry> = Vec::new();
+        let mut is_primary_entry = true;
+        
+        while let Some((current, cleanup_meta)) = work_queue.pop() {
+            match self.validate_entry(&current)? {
+                SigchainValidation::Valid => {
+                    // Check DAG dependencies (Causal Delivery)
+                    let entry_hash = current.hash();
+                    let mut missing_dep = None;
+                    
+                    for dep_bytes in &current.entry.causal_deps {
+                        if let Ok(dep) = <[u8; 32]>::try_from(dep_bytes.as_slice()).map(Hash::from) {
+                            if !self.hash_exists(&dep) {
+                                missing_dep = Some(dep);
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(parent) = missing_dep {
+                        // Buffer as DAG orphan
+                        self.buffer_dag_orphan(&current, &parent)?;
+                        
+                        // Clean up source if this came from buffer
+                        if let Some(meta) = cleanup_meta {
+                            match meta {
+                                CleanupMeta::SigChain { author, prev_hash, entry_hash } => {
+                                    self.delete_sigchain_orphan(&author, &prev_hash, &entry_hash);
+                                }
+                                CleanupMeta::Dag { parent_hash, entry_hash } => {
+                                    self.delete_dag_orphan(&parent_hash, &entry_hash);
+                                }
+                            }
+                        }
+                        // Stop processing this entry (it's rebuffered)
+                        continue;
+                    }
+
+                    // Deps satisfied - Commit to sigchain
+                    let ready_sigchain_orphans = self.commit_entry(&current)?;
+
+                    // Parse causal_deps for state machine access
+                    let causal_deps: Vec<Hash> = current
+                        .entry
+                        .causal_deps
+                        .iter()
+                        .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok().map(Hash::from))
+                        .collect();
+
+                    // Record as ready for state application
+                    ready_entries.push(ReadyEntry {
+                        entry: current.clone(),
+                        hash: entry_hash,
+                        causal_deps,
+                    });
+
+                    // Clean up source orphan if applicable
+                    if let Some(meta) = cleanup_meta {
+                        match meta {
+                            CleanupMeta::SigChain { author, prev_hash, entry_hash } => {
+                                self.delete_sigchain_orphan(&author, &prev_hash, &entry_hash);
+                            }
+                            CleanupMeta::Dag { parent_hash, entry_hash } => {
+                                self.delete_dag_orphan(&parent_hash, &entry_hash);
+                            }
+                        }
+                    }
+
+                    // Queue ready SigChain orphans
+                    for (orphan, author, prev_hash, orphan_hash) in ready_sigchain_orphans {
+                        work_queue.push((orphan, Some(CleanupMeta::SigChain { author, prev_hash, entry_hash: orphan_hash })));
+                    }
+
+                    // Queue ready DAG orphans
+                    let ready_dag_orphans = self.find_dag_orphans(&entry_hash);
+                    for (orphan, orphan_hash) in ready_dag_orphans {
+                        work_queue.push((orphan, Some(CleanupMeta::Dag { parent_hash: entry_hash, entry_hash: orphan_hash })));
+                    }
+                }
+                SigchainValidation::Orphan { gap, prev_hash } => {
+                    self.buffer_sigchain_orphan(
+                        &current,
+                        gap.author,
+                        prev_hash,
+                        gap.to_seq,
+                        gap.from_seq,
+                        gap.last_known_hash.unwrap_or(Hash::ZERO),
+                    )?;
+                }
+                SigchainValidation::Duplicate => {
+                    // Ignore duplicates silently
+                }
+                SigchainValidation::Error(e) => {
+                    if is_primary_entry {
+                        return Err(e);
+                    } else {
+                        eprintln!("[warn] Cascaded orphan failed sigchain validation: {:?}", e);
+                    }
+                }
+            }
+            is_primary_entry = false;
+        }
+        
+        Ok(ready_entries)
+    }
+}
+
+/// An entry that has been validated and committed, ready for state application.
+#[derive(Debug, Clone)]
+pub struct ReadyEntry {
+    /// The committed entry
+    pub entry: SignedEntry,
+    /// Hash of the entry
+    pub hash: Hash,
+    /// Parsed causal dependencies (owned for lifetime safety)
+    pub causal_deps: Vec<Hash>,
+}
+
+impl ReadyEntry {
+    /// Build an Op for StateMachine::apply()
+    pub fn to_op(&self) -> lattice_model::Op<'_> {
+        lattice_model::Op {
+            id: self.hash,
+            causal_deps: &self.causal_deps,
+            payload: &self.entry.entry.payload,
+            author: self.entry.author(),
+            timestamp: self.entry.entry.timestamp,
+            prev_hash: Hash::try_from(self.entry.entry.prev_hash.as_slice()).unwrap_or(Hash::ZERO),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1161,5 +1319,82 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&logs_dir_a);
         let _ = std::fs::remove_dir_all(&logs_dir_b);
+    }
+
+    /// Test that ingest_entry correctly populates causal_deps in ReadyEntry.
+    /// This is critical for CRDTs that rely on the causal graph.
+    #[test]
+    fn test_ingest_preserves_causal_deps() {
+        let logs_dir = tempfile::tempdir()
+            .expect("tempdir")
+            .path()
+            .join("lattice_causal_deps_test");
+        let _ = std::fs::remove_dir_all(&logs_dir);
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let clock = MockClock::new(1000);
+
+        let mut manager = SigChainManager::new(&logs_dir).unwrap();
+
+        // Entry 1 from node A (root)
+        let entry_1 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
+            .payload(b"a1".to_vec())
+            .sign(&node_a);
+        let hash_1 = entry_1.hash();
+
+        // Entry 2 from node B (root, independent)
+        let entry_2 = Entry::next_after(None)
+            .timestamp(HLC::now_with_clock(&clock))
+            .payload(b"b1".to_vec())
+            .sign(&node_b);
+        let hash_2 = entry_2.hash();
+
+        // Ingest both roots
+        let ready_1 = manager.ingest_entry(&entry_1).unwrap();
+        assert_eq!(ready_1.len(), 1);
+        assert!(ready_1[0].causal_deps.is_empty(), "Root entry has no deps");
+        
+        let ready_2 = manager.ingest_entry(&entry_2).unwrap();
+        assert_eq!(ready_2.len(), 1);
+        assert!(ready_2[0].causal_deps.is_empty(), "Root entry has no deps");
+
+        // Entry 3 from node A merges both (cites hash_1 and hash_2)
+        let entry_3 = Entry::next_after(Some(&ChainTip::from(&entry_1)))
+            .timestamp(HLC::now_with_clock(&clock))
+            .causal_deps(vec![hash_1, hash_2])  // Explicit causal deps
+            .payload(b"a2-merge".to_vec())
+            .sign(&node_a);
+        let hash_3 = entry_3.hash();
+
+        let ready_3 = manager.ingest_entry(&entry_3).unwrap();
+        assert_eq!(ready_3.len(), 1);
+        
+        // CRITICAL: Verify causal_deps are preserved
+        assert_eq!(
+            ready_3[0].causal_deps.len(), 2,
+            "Merge entry should have 2 causal deps"
+        );
+        assert!(
+            ready_3[0].causal_deps.contains(&hash_1),
+            "Should contain hash_1"
+        );
+        assert!(
+            ready_3[0].causal_deps.contains(&hash_2),
+            "Should contain hash_2"
+        );
+
+        // Verify to_op() also returns the deps
+        let op = ready_3[0].to_op();
+        assert_eq!(op.causal_deps.len(), 2, "Op should have 2 causal deps");
+        assert!(op.causal_deps.contains(&hash_1), "Op should contain hash_1");
+        assert!(op.causal_deps.contains(&hash_2), "Op should contain hash_2");
+
+        // Verify hash matches
+        assert_eq!(ready_3[0].hash, hash_3);
+
+        let _ = std::fs::remove_dir_all(&logs_dir);
     }
 }
