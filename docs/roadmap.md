@@ -19,124 +19,39 @@
 
 ---
 
-## Milestone 4: Replicated State Machine Platform
+## Milestone 4: Replicated State Machine Platform ✓
 
-**Goal:** Transform lattice from a specific Key-Value store into a generic Replicated State Machine platform.
+Transformed lattice from KV store to generic RSM platform: extracted `lattice-model` and `lattice-kvstate` crates, generified ReplicationController, direct client access to state machines, WAL-first persistence, dynamic CLI via gRPC introspection.
 
-### 4A: Reliability & Consistency (Pre-Pivot Cleanup)
+---
 
-- [x] **Transactional Atomicity**: Ensure disk write (Log) and DB update (State) use WAL pattern. Prevents inconsistent states after crash.
+## Milestone 5: KvStore Transactions ✓
+
+Atomic multi-key batch API: `batch().put(k1,v1).put(k2,v2).commit()` with single sigchain entry.
+
+---
+
+## Milestone 6: Multi-Store ✓
+
+Root store as control plane: store declarations in `/stores/`, StoreManager with live reconciliation, per-store gossip, mesh-based join model.
+
+---
+
+## Remaining Work (M4/M6 Era)
+
 - [ ] **Refactor Orphan Resolution**: Move recursive dependency logic from `StoreActor` into `SigChainManager`. Actor receives "Ready Entries", doesn't manage work_queues.
-- [ ] **Unify Store Registries**: Remove `StoresRegistry` from lattice-net. Make `Node` single source of truth for active replicas.
-
-### 4B: Architectural Pivot (Decoupling)
-
-**Goal:** Clients use `StateMachine` (e.g., KvState) directly for reads/writes. Replication engine handles only log/sync operations.
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                        Client (CLI)                             │
-└──────────────────────────┬─────────────────────────────────────┘
-                           │ read/write directly
-                           ▼
-┌────────────────────────────────────────────────────────────────┐
-│                   lattice-kvstate                              │
-│  KvState implementing StateMachine                             │
-│  - get(key) → Vec<Head>       (local read, no network)        │
-│  - put(key, value) → submits payload to ReplicationEngine     │
-│  - list() → local read                                        │
-│  - apply(&Op) ← receives from ReplicationEngine               │
-└──────────────────────────┬─────────────────────────────────────┘
-                           │ submit(payload) / apply(Op)
-                           ▼
-┌────────────────────────────────────────────────────────────────┐
-│                   lattice-core (ReplicationEngine)             │
-│  - submit(payload) → signs entry, commits to log, broadcasts  │
-│  - ingest(entry) → validates, commits, calls S::apply()       │
-│  - sync_state() → meta-operation for reconciliation           │
-│  - NO get/list/watch commands (state machine specific)        │
-└────────────────────────────────────────────────────────────────┘
-```
-
-- [x] **Extract lattice-model Crate**: `HLC`, `PubKey`, `Hash`, `Op`, `StateMachine` trait.
-- [x] **Create lattice-kvstate Crate**: `KvState` implementing `StateMachine`, with KV-specific read/write methods.
-- [x] **Rename Core Components**: `StoreActor` → `ReplicationController` (conceptually), `StoreHandle` → `Store`.
-- [x] **Generify ReplicationController**: Works with `S: StateMachine` (`Store<S>`), handles only log/sync.
-- [x] **Direct Client Access**: Clients call `KvState.get()` directly (no actor channel).
-- [x] **StateWriter Trait Update**: Update `submit(payload)` to `submit(payload, parent_hashes)` to support DAG causality.
-- [x] **Submit Path**: `KvHandle.put()` → `StateWriter.submit(payload)` → signs, logs, broadcasts.
-- [x] **Apply Path**: `Store` receives entries → validates → calls `StateMachine::apply()`.
-
-### 4C: Protocol Evolution (Type Agnosticism)
-
-- [x] **Refactor KvState as Plugin**: Move Put/Delete decoding inside `KvState::apply()`. Core agnostic to data type.
-
-### 4D: Lifecycle & Optimization
-
-- [x] **Typed Store API**: `node.open_store::<MyCustomCRDT>(uuid)` (Enabled via Generic `StoreRegistry`)
-
-### 4E: Generic CLI & Introspection (Next Up)
-
-- [x] **Store Command Introspection (gRPC)**: `StateMachine` exposes a `ServiceDescriptor`.
-- [x] **Dynamic CLI**: `lattice-cli` uses `prost-reflect` to dynamically build commands and decode log payloads.
-
-### 4F: Lattice-Kernel Audit & Stability
-
-- [x] Move `PeerSyncStore` out of `lattice-kernel` and into `lattice-net`.
+- [ ] **Clear Store Ownership**: Node owns store lifecycle, MeshService owns NetworkStore wrappers. Registration via explicit `NetRequest::RegisterStore` message, no duplicate source-of-truth. Timing: Node sends RegisterStore after store is fully initialized and accessible.
+- [ ] **Loose Coupling: lattice-net / lattice-node**: Refactor to eliminate `Arc<Self>` patterns and tight coupling between networking and node layers. Goals:
+  - Node methods use `&self`, not `Arc<Self>`
+  - Store registration uses simple channels, no spawning inside methods
+  - MeshService remains autonomous, Node provides data via traits
+  - No duplicate store tracking between layers
 - [ ] **Lattice-Kernel Audit**: Thorough review of `lattice-kernel` to ensure architectural cleanliness, proper visibility, and minimal dependencies before declaring it stable.
   - [ ] **Enforce strict limit on causal_deps**: Prevent DoS by capping `entry.causal_deps` len (e.g. 1024).
-  - [x] **Rename ReplicatedState to ReplicationController**: Align code name with architectural concept.
-  - [x] **Environmental Agnosticism**: Removed `hostname` dependency.
-  - [x] **Runtime Decoupling**: "Ownership Inversion" for threading (Node spawns threads).
-- [x] **Transactional Atomicity (Dual Commit Problem)**: `StoreActor::commit_entry` writes to two storage mediums (filesystem log via `SigChainManager`, redb via `KvState`) without unified transaction. If log succeeds but state fails, runtime inconsistency until restart.
-  - [x] **Fix WAL Inversion**: Current order (State then Log) is unsafe. Must be **Log (WAL) then State**. Log is source of truth.
-  - [x] Solutions: (1) Store ChainTips in redb within same transaction as KV updates, (2) Enforce strict WAL pattern where file log is single source of truth, (3) Don't update state.db until file flush confirms success.
-- [x] **Encapsulation of Orphan Resolution Logic**: `OrphanStore` currently requires a `key` argument, coupling it to KV-semantics. Refactor `OrphanStore` and `SigChainManager` to strictly use `causal_deps` (hashes) for DAG orphan detection. This enables generic buffering for any StateMachine (e.g. Chat/Counter) without decoding payloads. Solutions: (1) Remove `key` from `DagOrphanKey` in `redb`, (2) Create `SigChainManager::ingest_and_resolve` that handles recursion internally.
-
----
-
-## Milestone 5: KvStore Transactions
-
-**Goal:** Atomic multi-key operations for consistent writes.
-
-### 5A: Local Atomic Batch
-- [x] `KvHandle::batch()` builder API: `batch().put(k1, v1).put(k2, v2).delete(k3).commit()`
-- [x] Single entry in sigchain containing all operations
-- [x] All-or-nothing semantics: either all ops apply or none
-
-### 5B: Batch Payload Format
-- [x] Extend `KvPayload` to support multiple operations per entry
-- [x] Maintain backward compatibility with single-op entries
-
----
-
-## Milestone 6: Multi-Store
-
-**Goal:** Root store as control plane for declaring/managing additional stores.
-
-### 6A: Store Declarations in Root Store
-- [x] Root store keys: `/stores/{uuid}/name`, `/stores/{uuid}/created_at`, `/stores/{uuid}/type`
-- [x] CLI: `store create [name] --type <kvstore|chat|...>`, `store delete <uuid>`, `store list`
-
-### 6B: Store Watcher ("Cluster Manager")
-
-- [x] `app_stores: RwLock<HashMap<Uuid, Store>>` in `StoreManager`
-- [x] Initial Reconciliation: On startup, process `/stores/` snapshot
-- [x] Live Reconciliation: Background task watching `/stores/` prefix
-- [x] On Put: open new store; On Delete: close/archive store
-
-### 6C: Multi-Store Gossip
-- [x] `setup_for_store` called for each active store
-- [x] Per-store gossip topics, verify store-id before applying
-
-### 6D: Shared Peer List (Ingest Guard)
-- [x] All stores use root store peer list for authorization (`AuthorizedStore`)
-- [x] Check `/nodes/{pubkey}/status` on connect
-
-### 6E: Mesh-Based Join Model
-- [x] A **mesh** = root store + subordinated stores
-- [x] JoinRequest always targets the **mesh** (i.e., root store), not individual stores
-- [x] After joining mesh, node gains access to all declared stores via 6B reconciliation
+- [ ] **Proactive Store Reconciliation**: Verify that all nodes automatically create/open app stores when declared in root store, not just when first used. StoreManager should reconcile on startup and on live changes.
+- [ ] **Complete Store Registration Flow**: `net_tx` added to Node but `set_net_channel()` and `send_register_store()` not implemented. Node must send `NetRequest::RegisterStore` when stores are ready.
+- [ ] **Initial Sync After Join**: `SyncWithPeer` event removed but no replacement. After `complete_join`, node needs to sync with `via_peer` to get initial data.
+- [ ] **Join Protocol Wiring**: `JoinRequested` event removed. CLI/network layer must directly call network protocol for mesh join instead of relying on events.
 
 ---
 
