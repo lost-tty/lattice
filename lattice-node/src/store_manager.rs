@@ -9,8 +9,7 @@
 
 use crate::{KvStore, StoreType, StoreRegistry, peer_manager::PeerManager, NodeEvent};
 use crate::network_store_registry::{NetworkStoreRegistry, NetworkStore};
-use lattice_model::NetEvent;
-use lattice_kernel::Uuid;
+use lattice_model::{NetEvent, Uuid};
 use lattice_kvstate::{KvState, KvHandle};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

@@ -19,8 +19,9 @@ use crate::{
     KvStore,
     StoreType,
 };
-use lattice_kernel::{NodeIdentity, Uuid};
+use lattice_kernel::NodeIdentity;
 use lattice_model::types::PubKey;
+use crate::Uuid;
 use lattice_kvstate::Merge;
 use rand::RngCore;
 use std::sync::Arc;

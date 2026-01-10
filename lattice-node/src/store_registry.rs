@@ -5,9 +5,9 @@
 //! - Caches opened store handles
 //! - Lists registered stores from meta.db
 
-use crate::{DataDir, MetaStore};
+use crate::{DataDir, MetaStore, Uuid};
 use lattice_kernel::{
-    NodeIdentity, Uuid,
+    NodeIdentity,
     store::{OpenedStore, Store, StoreInfo, StateError, StoreHandle},
 };
 use lattice_model::StateMachine;

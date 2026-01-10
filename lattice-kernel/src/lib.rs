@@ -25,7 +25,3 @@ pub use store::{LogError, MissingRange, SyncDiscrepancy, SyncNeeded, SyncState};
 pub use store::{OpenedStore, Store, StoreInfo, StateError};
 pub use store::{ReplicationController, ReplicationControllerCmd, ReplicationControllerError};
 pub use sync_provider::SyncProvider;
-
-// Re-exports from dependencies
-pub use ed25519_dalek::SigningKey;
-pub use uuid::Uuid;

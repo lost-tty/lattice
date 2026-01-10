@@ -14,7 +14,9 @@ pub mod introspection;
 pub mod peer_provider;
 pub mod net_event;
 
-// Re-exports
+// Re-exports from dependencies
+pub use uuid::Uuid;
+pub use ed25519_dalek::SigningKey;
 pub use types::{Hash, PubKey, Signature};
 pub use hlc::HLC;
 pub use clock::{Clock, SystemClock, MockClock};

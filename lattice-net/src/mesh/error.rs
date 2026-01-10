@@ -1,6 +1,7 @@
 //! Error types for mesh networking
 
 use thiserror::Error;
+use lattice_model::Uuid;
 
 /// Server-level errors
 #[derive(Error, Debug)]
@@ -28,5 +29,5 @@ pub enum GossipError {
     Broadcast(String),
     
     #[error("no sender for store {0}")]
-    NoSender(lattice_kernel::Uuid),
+    NoSender(Uuid),
 }

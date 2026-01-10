@@ -2,7 +2,7 @@
 
 use crate::commands::{CommandResult, Writer};
 use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
-use lattice_node::{Node, KvStore, Mesh, StoreType};
+use lattice_node::{Node, KvStore, Mesh, StoreType, Uuid};
 use lattice_model::types::{PubKey, Hash};
 use lattice_model::{CommandDispatcher, FieldFormat, Introspectable};
 use lattice_net::MeshService;
@@ -121,7 +121,7 @@ pub async fn cmd_store_delete(_node: &Node, mesh: Option<&Mesh>, uuid_str: &str,
     };
     
     // Parse UUID
-    let store_id = match lattice_kernel::Uuid::parse_str(uuid_str) {
+    let store_id = match Uuid::parse_str(uuid_str) {
         Ok(id) => id,
         Err(_) => {
             let _ = writeln!(w, "Invalid UUID: {}", uuid_str);

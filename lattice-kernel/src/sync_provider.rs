@@ -6,8 +6,9 @@
 
 use crate::{
     store::{GapInfo, StoreError, SyncState},
-    SignedEntry, Uuid,
+    SignedEntry,
 };
+use lattice_model::Uuid;
 use lattice_model::types::PubKey;
 use std::future::Future;
 use std::pin::Pin;

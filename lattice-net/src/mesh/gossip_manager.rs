@@ -2,9 +2,7 @@
 
 use crate::{LatticeEndpoint, ToLattice};
 use super::error::GossipError;
-use lattice_model::{PeerStatus, PeerEvent, PeerProvider};
-use lattice_kernel::Uuid;
-use lattice_model::types::PubKey;
+use lattice_model::{PeerStatus, PeerEvent, PeerProvider, Uuid, types::PubKey};
 use lattice_node::NetworkStore;
 use lattice_kernel::proto::storage::PeerSyncInfo;
 use lattice_kernel::proto::network::GossipMessage;

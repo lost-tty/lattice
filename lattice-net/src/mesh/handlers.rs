@@ -7,8 +7,7 @@ use crate::{MessageSink, MessageStream, LatticeNetError};
 use super::service::PeerStoreRegistry;
 use lattice_node::{Node, NetworkStoreRegistry, NetworkStore};
 use lattice_kernel::proto::network::{peer_message, StatusRequest, JoinResponse, PeerMessage};
-use lattice_kernel::Uuid;
-use lattice_model::types::PubKey;
+use lattice_model::{Uuid, types::PubKey};
 use iroh::endpoint::Connection;
 use std::sync::Arc;
 

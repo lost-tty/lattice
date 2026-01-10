@@ -1,7 +1,7 @@
 //! Local Lattice node API with multi-store support
 
 use crate::{
-    DataDir, MetaStore,
+    DataDir, MetaStore, Uuid,
     auth::PeerProvider,
     meta_store::MetaStoreError,
     store_registry::StoreRegistry,
@@ -9,7 +9,7 @@ use crate::{
     peer_manager::{PeerManager, PeerManagerError, Peer},
 };
 use lattice_kernel::{
-    NodeIdentity, NodeError as IdentityError, PeerStatus, Uuid,
+    NodeIdentity, NodeError as IdentityError, PeerStatus,
     store::{StateError, LogError, Store},
 };
 use crate::KvStore;

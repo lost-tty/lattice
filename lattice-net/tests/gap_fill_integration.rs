@@ -1,10 +1,9 @@
 //! Integration tests for gap filling between networked peers
 
-use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, KvStore, KvHandle};
+use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, KvStore, KvHandle, Uuid};
 use lattice_kvstate::Merge;
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
-use lattice_kernel::Uuid;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;

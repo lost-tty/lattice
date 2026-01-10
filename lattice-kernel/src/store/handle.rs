@@ -3,7 +3,7 @@
 use super::actor::{ReplicationController, ReplicationControllerCmd};
 use super::error::StoreError;
 use crate::entry::SignedEntry;
-use crate::Uuid;
+use lattice_model::Uuid;
 use lattice_model::types::PubKey;
 use lattice_model::NodeIdentity;
 use lattice_model::{StateMachine, Op, LogEntry};

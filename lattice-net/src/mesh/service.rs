@@ -1,19 +1,18 @@
 //! MeshService - Unified Mesh Networking
 //!
 //! Handles both inbound (server) and outbound (client) mesh operations.
-//! Integrates `MeshEngine` logic directly into the service to avoid state duplication.
+//! Provides sync, status, and join protocol operations.
 
-use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN};
+use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
 use lattice_node::{Node, NodeEvent, NodeError, NetworkStore, NetworkStoreRegistry};
-use lattice_model::NetEvent;
-use lattice_kernel::Uuid;
+use lattice_model::{NetEvent, Uuid};
+use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinRequest, StatusRequest};
 use lattice_model::types::PubKey;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
-use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinRequest};
 use tokio::sync::broadcast;
 use crate::peer_sync_store::PeerSyncStore;
 
@@ -35,7 +34,6 @@ pub struct MeshService {
     peer_stores: PeerStoreRegistry,
     sessions: Arc<super::session::SessionTracker>,
     router: Router,
-    sync_engine: super::sync_engine::SyncEngine,
 }
 
 /// Protocol handler for lattice sync connections
@@ -91,14 +89,6 @@ impl MeshService {
         
         let sessions = Arc::new(super::session::SessionTracker::new());
         
-        // Create SyncEngine (uses Node's StoreManager for store lookups)
-        let sync_engine = super::sync_engine::SyncEngine::new(
-            endpoint.clone(),
-            node.clone(),
-            peer_stores.clone(),
-            sessions.clone(),
-        );
-        
         let service = Arc::new(Self { 
             node: node.clone(), 
             endpoint,
@@ -106,7 +96,6 @@ impl MeshService {
             peer_stores,
             sessions: sessions.clone(),
             router,
-            sync_engine,
         });
         
         // Subscribe to network events (NetEvent channel)
@@ -144,11 +133,6 @@ impl MeshService {
         &self.peer_stores
     }
     
-    /// Access the sync engine for sync operations
-    pub fn sync_engine(&self) -> &super::sync_engine::SyncEngine {
-        &self.sync_engine
-    }
-    
     /// Get currently connected peers with last-seen timestamp.
     pub fn connected_peers(&self) -> Result<std::collections::HashMap<PubKey, std::time::Instant>, String> {
         self.sessions.online_peers()
@@ -160,7 +144,46 @@ impl MeshService {
         self.router.shutdown().await.map_err(|e| e.to_string())
     }
 
-    // ==================== Outbound Logic (Transferred from MeshEngine) ====================
+    // ==================== Store Registry ====================
+    
+    /// Get a registered store by ID
+    pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
+        self.node.store_manager().get_network_store(&store_id)
+    }
+
+    // ==================== Peer Discovery ====================
+    
+    /// Get active peer IDs for a specific store (excluding self).
+    /// Only returns peers that are both online AND in this store's acceptable authors.
+    pub async fn active_peer_ids_for_store(&self, store: &NetworkStore) -> Result<Vec<iroh::PublicKey>, LatticeNetError> {
+        let my_pubkey = self.endpoint.public_key();
+        
+        let online_peers = self.sessions.online_peers()
+            .map_err(|e| LatticeNetError::Sync(e))?;
+        
+        let acceptable_authors = store.list_acceptable_authors();
+        
+        Ok(online_peers.keys()
+            .filter(|pk| acceptable_authors.contains(pk))
+            .filter_map(|pk| iroh::PublicKey::from_bytes(pk).ok())
+            .filter(|id| *id != my_pubkey)
+            .collect())
+    }
+    
+    /// Get all active peer IDs (excluding self)
+    pub async fn active_peer_ids(&self) -> Result<Vec<iroh::PublicKey>, LatticeNetError> {
+        let my_pubkey = self.endpoint.public_key();
+        
+        let peers = self.sessions.online_peers()
+            .map_err(|e| LatticeNetError::Sync(e))?;
+        
+        Ok(peers.keys()
+            .filter_map(|pk| iroh::PublicKey::from_bytes(pk).ok())
+            .filter(|id| *id != my_pubkey)
+            .collect())
+    }
+
+    // ==================== Outbound Logic (Join Protocol) ====================
 
     /// Handle JoinRequested event - does network protocol (outbound)
     #[tracing::instrument(skip(self, secret), fields(peer = %peer_id.fmt_short()))]
@@ -181,7 +204,6 @@ impl MeshService {
         let mut sink = MessageSink::new(send);
         let mut stream = MessageStream::new(recv);
         
-        // Send JoinRequest - all fields mandatory
         let req = PeerMessage {
             message: Some(peer_message::Message::JoinRequest(JoinRequest {
                 node_pubkey: self.node.node_id().to_vec(),
@@ -192,24 +214,19 @@ impl MeshService {
         sink.send(&req).await.map_err(|e| NodeError::Actor(e.to_string()))?;
         sink.finish().await.map_err(|e| NodeError::Actor(e.to_string()))?;
         
-        // Receive JoinResponse
         let msg = stream.recv().await
             .map_err(|e| NodeError::Actor(e.to_string()))?
             .ok_or_else(|| NodeError::Actor("Peer closed stream".to_string()))?;
         
         match msg.message {
             Some(peer_message::Message::JoinResponse(resp)) => {
-                let mesh_id = lattice_kernel::Uuid::from_slice(&resp.mesh_id)
+                let mesh_id = Uuid::from_slice(&resp.mesh_id)
                     .map_err(|_| NodeError::Actor("Invalid UUID from peer".to_string()))?;
                 
-                // Convert iroh::PublicKey to PubKey for complete_join
                 let via_peer = PubKey::from(*peer_id.as_bytes());
                 
                 tracing::info!(mesh_id = %mesh_id, "Join protocol: processing join response");
-                
-                // Delegate core logic to Node (creates mesh, sets bootstrap authors)
                 self.node.process_join_response(mesh_id, resp.authorized_authors, via_peer).await?;
-                
                 tracing::info!("Join protocol: complete");
 
                 Ok(conn)
@@ -221,53 +238,205 @@ impl MeshService {
         }
     }
 
+    // ==================== Status Operations ====================
+
     /// Request status from a single peer
-    pub async fn status_peer(&self, peer_id: iroh::PublicKey, store_id: Uuid, our_sync_state: Option<lattice_kernel::proto::storage::SyncState>) 
-        -> Result<(u64, Option<lattice_kernel::proto::storage::SyncState>), LatticeNetError> 
-    {
-        self.sync_engine.status_peer(peer_id, store_id, our_sync_state).await
+    pub async fn status_peer(
+        &self, 
+        peer_id: iroh::PublicKey, 
+        store_id: Uuid, 
+        our_sync_state: Option<lattice_kernel::proto::storage::SyncState>
+    ) -> Result<(u64, Option<lattice_kernel::proto::storage::SyncState>), LatticeNetError> {
+        let start = std::time::Instant::now();
+        
+        let conn = self.endpoint.connect(peer_id).await
+            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
+        let (send, recv) = conn.open_bi().await
+            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
+        
+        let mut sink = MessageSink::new(send);
+        let mut stream = MessageStream::new(recv);
+        
+        let req = PeerMessage {
+            message: Some(peer_message::Message::StatusRequest(StatusRequest {
+                store_id: store_id.as_bytes().to_vec(),
+                sync_state: our_sync_state,
+            })),
+        };
+        sink.send(&req).await?;
+        
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.recv()
+        ).await
+            .map_err(|_| LatticeNetError::Connection("Status request timed out".into()))?
+            ?
+            .ok_or_else(|| LatticeNetError::Connection("No status response".into()))?;
+        
+        let sync_state = match resp.message {
+            Some(peer_message::Message::StatusResponse(res)) => res.sync_state,
+            _ => return Err(LatticeNetError::Connection("Expected StatusResponse".into())),
+        };
+        
+        let rtt_ms = start.elapsed().as_millis() as u64;
+        Ok((rtt_ms, sync_state))
     }
     
-    /// Request status from all known active peers
-    pub async fn status_all(&self, store_id: Uuid, our_sync_state: Option<lattice_kernel::proto::storage::SyncState>) 
-        -> HashMap<iroh::PublicKey, Result<(u64, Option<lattice_kernel::proto::storage::SyncState>), String>> 
-    {
-        self.sync_engine.status_all(store_id, our_sync_state).await
+    /// Request status from all active peers
+    pub async fn status_all(
+        &self, 
+        store_id: Uuid, 
+        our_sync_state: Option<lattice_kernel::proto::storage::SyncState>
+    ) -> HashMap<iroh::PublicKey, Result<(u64, Option<lattice_kernel::proto::storage::SyncState>), String>> {
+        use futures_util::StreamExt;
+        
+        let peer_ids = match self.active_peer_ids().await {
+            Ok(ids) => ids,
+            Err(_) => return HashMap::new(),
+        };
+        
+        let futures = peer_ids.into_iter().map(|peer_id| {
+            let sync_state = our_sync_state.clone();
+            async move {
+                let result = self.status_peer(peer_id, store_id, sync_state).await
+                    .map_err(|e| e.to_string());
+                (peer_id, result)
+            }
+        });
+        
+        futures_util::stream::iter(futures)
+            .buffer_unordered(10)
+            .collect()
+            .await
     }
+
+    // ==================== Sync Operations ====================
     
     /// Sync with a peer using symmetric SyncSession protocol
-    pub async fn sync_with_peer(&self, store: &NetworkStore, peer_id: iroh::PublicKey, authors: &[PubKey]) -> Result<SyncResult, LatticeNetError> {
-        self.sync_engine.sync_with_peer(store, peer_id, authors).await
+    #[tracing::instrument(skip(self, store, _authors), fields(store_id = %store.id(), peer = %peer_id.fmt_short()))]
+    pub async fn sync_with_peer(
+        &self, 
+        store: &NetworkStore, 
+        peer_id: iroh::PublicKey, 
+        _authors: &[PubKey]
+    ) -> Result<SyncResult, LatticeNetError> {
+        tracing::debug!("Sync: connecting to peer");
+        let conn = self.endpoint.connect(peer_id).await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "Sync: connection failed");
+                LatticeNetError::Sync(format!("Connection failed: {}", e))
+            })?;
+        
+        let (send, recv) = conn.open_bi().await
+            .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
+        
+        let mut sink = MessageSink::new(send);
+        let mut stream = MessageStream::new(recv);
+        
+        let peer_pubkey: PubKey = peer_id.to_lattice();
+        
+        let store_id = store.id();
+        let peer_store = self.peer_stores.read().await.get(&store_id).cloned()
+            .ok_or_else(|| LatticeNetError::Sync(format!("PeerStore {} not registered during sync", store_id)))?;
+            
+        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_pubkey, &peer_store);
+        let result = session.run_as_initiator().await?;
+        
+        sink.finish().await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+        
+        tracing::info!(entries = result.entries_received, "Sync: complete");
+        
+        Ok(SyncResult { 
+            entries_applied: result.entries_received, 
+            entries_sent_by_peer: result.entries_received,
+        })
     }
     
-    /// Sync a specific author with all active peers (for gap filling)
+    /// Sync with specific peers in parallel
+    async fn sync_peers(
+        &self, 
+        store: &NetworkStore, 
+        peer_ids: &[iroh::PublicKey], 
+        authors: &[PubKey]
+    ) -> Vec<SyncResult> {
+        use futures_util::future::join_all;
+        use std::time::Duration;
+        
+        const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+        
+        let futures = peer_ids.iter().map(|&peer_id| {
+            let store = store.clone();
+            let authors = authors.to_vec();
+            async move {
+                match tokio::time::timeout(SYNC_TIMEOUT, self.sync_with_peer(&store, peer_id, &authors)).await {
+                    Ok(Ok(result)) => Some(result),
+                    Ok(Err(e)) => {
+                        tracing::debug!(peer = %peer_id.fmt_short(), error = %e, "Sync failed");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::debug!(peer = %peer_id.fmt_short(), "Sync timed out");
+                        None
+                    }
+                }
+            }
+        });
+        
+        join_all(futures).await.into_iter().flatten().collect()
+    }
+    
+    /// Sync a specific author with all active peers for this store
     pub async fn sync_author_all(&self, store: &NetworkStore, author: PubKey) -> Result<u64, LatticeNetError> {
-        self.sync_engine.sync_author_all(store, author).await
+        let peer_ids = self.active_peer_ids_for_store(store).await?;
+        if peer_ids.is_empty() {
+            return Ok(0);
+        }
+        
+        let results = self.sync_peers(store, &peer_ids, &[author]).await;
+        Ok(results.iter().map(|r| r.entries_applied).sum())
     }
     
     /// Sync with all active peers in parallel
     pub async fn sync_all(&self, store: &NetworkStore) -> Result<Vec<SyncResult>, LatticeNetError> {
-        self.sync_engine.sync_all(store).await
+        let peer_ids = self.active_peer_ids_for_store(store).await?;
+        if peer_ids.is_empty() {
+            tracing::debug!("[Sync] No active peers");
+            return Ok(Vec::new());
+        }
+        
+        tracing::debug!("[Sync] Syncing with {} peers...", peer_ids.len());
+        let results = self.sync_peers(store, &peer_ids, &[]).await;
+        tracing::info!("[Sync] Complete: {}/{} peers", results.len(), peer_ids.len());
+        
+        Ok(results)
     }
     
-    /// Get a registered store by ID
-    pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
-        self.sync_engine.get_store(store_id)
-    }
+    // ==================== Convenience Methods (by ID) ====================
     
     /// Sync with all active peers for a store (by ID)
     pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, LatticeNetError> {
-        self.sync_engine.sync_all_by_id(store_id).await
+        let store = self.get_store(store_id)
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered", store_id)))?;
+        self.sync_all(&store).await
     }
     
     /// Sync a specific author with all active peers (by store ID)
     pub async fn sync_author_all_by_id(&self, store_id: Uuid, author: PubKey) -> Result<u64, LatticeNetError> {
-        self.sync_engine.sync_author_all_by_id(store_id, author).await
+        let store = self.get_store(store_id)
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered", store_id)))?;
+        self.sync_author_all(&store, author).await
     }
     
     /// Sync with a specific peer (by store ID)
-    pub async fn sync_with_peer_by_id(&self, store_id: Uuid, peer_id: iroh::PublicKey, authors: &[PubKey]) -> Result<SyncResult, LatticeNetError> {
-        self.sync_engine.sync_with_peer_by_id(store_id, peer_id, authors).await
+    pub async fn sync_with_peer_by_id(
+        &self, 
+        store_id: Uuid, 
+        peer_id: iroh::PublicKey, 
+        authors: &[PubKey]
+    ) -> Result<SyncResult, LatticeNetError> {
+        let store = self.get_store(store_id)
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered", store_id)))?;
+        self.sync_with_peer(&store, peer_id, authors).await
     }
 
     // ==================== Event Handling & Lifecycle ====================
@@ -414,7 +583,7 @@ impl MeshService {
                 }
                 
                 // Active peer check
-                match service.sync_engine.active_peer_ids().await {
+                match service.active_peer_ids().await {
                     Ok(peers) if !peers.is_empty() => {
                         tracing::info!(store_id = %store_id, peers = peers.len(), "Boot Sync: Triggering initial sync");
                         // Emit NetEvent::SyncAll via the node's net_tx

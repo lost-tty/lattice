@@ -31,9 +31,11 @@ pub use lattice_kernel::{
     StateError, Store, StoreInfo, OpenedStore,
     ReplicationController, ReplicationControllerCmd, ReplicationControllerError,
     LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded,
-    Uuid, SigningKey,
     MAX_ENTRY_SIZE,
 };
+
+// Re-export from lattice-model (types)
+pub use lattice_model::{Uuid, SigningKey};
 
 // Node-level exports
 pub use node::{Node, NodeBuilder, NodeInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, parse_peer_status_key, PEER_STATUS_PATTERN};
