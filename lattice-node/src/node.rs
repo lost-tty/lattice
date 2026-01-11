@@ -318,14 +318,19 @@ impl Node {
     fn activate_mesh(&self, mesh: Mesh) -> Result<(), NodeError> {
         let mesh_id = mesh.id();
         
+        // Register root store with StoreManager (starts watcher)
+        // MUST be done before exposing the mesh in `meshes` map to prevent
+        // race conditions where consumers call methods relying on root_store()
+        mesh.register_root_store()
+            .map_err(|e| NodeError::Actor(e.to_string()))?;
+
         {
             let mut guard = self.meshes.write()
                 .map_err(|_| NodeError::LockPoisoned)?;
             guard.insert(mesh_id, mesh.clone());
         }
         
-        mesh.register_root_store()
-            .map_err(|e| NodeError::Actor(e.to_string()))
+        Ok(())
     }
 
     /// Start the node - loads all meshes from meta.db and emits NetworkStore events.
