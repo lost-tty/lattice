@@ -56,9 +56,9 @@ pub use mesh::{Mesh, MeshError, StoreDeclaration};
 pub use data_dir::DataDir;
 pub use meta_store::MetaStore;
 
-// Re-export from lattice-kvstate
-use lattice_kvstate::KvState;
-pub use lattice_kvstate::{Head, KvHandle};
+// Re-export from lattice-kvstore
+use lattice_kvstore::KvState;
+pub use lattice_kvstore::{Head, KvHandle};
 
 /// Type alias for the KvHandle wrapping a Store.
 pub type KvStore = KvHandle<Store<KvState>>;

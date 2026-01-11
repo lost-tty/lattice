@@ -114,7 +114,7 @@ The system is composed of strictly layered crates to separate concerns:
 - **Content**: `HLC`, `Hash`, `PubKey`, `Op`, `StateMachine` trait, `LogEntry` trait, `LogManager` trait.
 - **Dependencies**: None (pure Rust).
 
-### 2. `lattice-kvstate` (State Machine)
+### 2. `lattice-kvstore` (State Machine)
 - **Responsibility**: Concrete Key-Value state machine implementation.
 - **Content**: `KvState` implementing `StateMachine`, `KvStateActor`, `KvStateHandle`.
 - **Client API**: `get()`, `list()`, `put()`, `delete()`, `watch()` - clients interact directly.
@@ -908,7 +908,7 @@ To ensure the `StateMachine` is truly independent of the replication log (enabli
     - **ReplicatedState**: Manages `SigChain` (logs), `Gossip`, and P2P sync.
     - Decodes `SignedEntry` -> calls `StateMachine::apply()`.
 
-3.  **`lattice-kvstate`** (State Implementation):
+3.  **`lattice-kvstore`** (State Implementation):
     - Depends on `lattice-model`.
     - **KvState**: Implements `StateMachine` using `redb`.
     - **Isolation**: Does not import `lattice-kernel` or `Entry` protobufs. Purely materializes state from payload bytes.

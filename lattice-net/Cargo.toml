@@ -27,7 +27,7 @@ ed25519-dalek.workspace = true
 
 [dev-dependencies]
 tokio-test = { workspace = true }
-lattice-kvstate = { workspace = true }
+lattice-kvstore = { workspace = true }
 lattice-node = { workspace = true }
 rand = { workspace = true }
 async-trait = "0.1"

@@ -1,6 +1,6 @@
 //! Tests for KvHandle batch operations
 
-use lattice_kvstate::{KvState, KvHandle, Merge};
+use lattice_kvstore::{KvState, KvHandle, Merge};
 use lattice_model::{StateWriterError, types::Hash, HLC};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;

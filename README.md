@@ -2,7 +2,7 @@
 
 _Building a future with clear skies._
 
-Lattice is a local-first, mesh-native key-value store designed for the edge. It is built to replace fragile centralized APIs with rock-solid local infrastructure, providing resilient synchronization and offline-first durability running entirely on localhost.
+Lattice is a local-first, mesh-native replicated state machine platform designed for the edge. It provides a pluggable store architecture (key-value, append-only logs, and custom CRDTs) with rock-solid local infrastructure, resilient synchronization, and offline-first durability running entirely on localhost.
 
 <p align="center">
   <img src="docs/mergetree.png" alt="Lattice Merge Tree Visualization">
@@ -104,7 +104,8 @@ We believe software should be as resilient as the hardware it runs on. Most mode
 |-------|---------|
 | `lattice-model` | **Shared types**. Core types, traits, and protocol definitions used across crates. |
 | `lattice-kernel` | **The replication engine**. Implements Store, SigChain, HLC, and entry validation. |
-| `lattice-kvstate` | **KV state machine**. LWW-based key-value state with atomic batch operations. |
+| `lattice-kvstore` | **KV state machine**. LWW-based key-value state with atomic batch operations. |
+| `lattice-logstore` | **Log state machine**. Append-only log with HLC-ordered persistence. |
 | `lattice-node` | **Application layer**. Node, Mesh, PeerManager orchestration and store lifecycle. |
 | `lattice-net` | **Networking layer**. Iroh endpoints, Gossip, and Sync protocols. |
 | `lattice-net-types` | **Network abstractions**. Shared traits for decoupling net from node. |

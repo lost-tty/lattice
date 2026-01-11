@@ -12,7 +12,7 @@ use lattice_kernel::{
     store::{StateError, LogError, Store},
 };
 use crate::KvStore;
-use lattice_kvstate::{KvHandleError, KvState};
+use lattice_kvstore::{KvHandleError, KvState};
 use lattice_model::{types::PubKey, NetEvent};
 use std::collections::HashMap;
 use std::path::Path;
@@ -615,7 +615,7 @@ impl NodeProviderExt for Node {
 mod tests {
     use super::*;
     use lattice_model::types::PubKey;
-    use lattice_kvstate::{KvHandle, Merge};
+    use lattice_kvstore::{KvHandle, Merge};
 
     #[tokio::test]
     async fn test_create_and_open_store() {

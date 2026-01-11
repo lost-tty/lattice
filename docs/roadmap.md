@@ -21,7 +21,7 @@
 
 ## Milestone 4: Replicated State Machine Platform ✓
 
-Transformed lattice from KV store to generic RSM platform: extracted `lattice-model` and `lattice-kvstate` crates, generified ReplicationController, direct client access to state machines, WAL-first persistence, dynamic CLI via gRPC introspection.
+Transformed lattice from KV store to generic RSM platform: extracted `lattice-model` and `lattice-kvstore` crates, generified ReplicationController, direct client access to state machines, WAL-first persistence, dynamic CLI via gRPC introspection.
 
 ---
 
@@ -101,7 +101,6 @@ Root store as control plane: store declarations in `/stores/`, StoreManager with
 ### 7D: IRC Gateway
 - [ ] TCP Server listening on 6667.
 - [ ] Translate IRC commands (`JOIN`, `PRIVMSG`) to Lattice ops.
-
 
 ---
 
@@ -264,7 +263,7 @@ If validation rules in `apply_op` can change between software versions, state di
 3. **Entry replacement protocol** - Allow authors to "supersede" bad entries with corrective entries. Fork resolution required.
 4. **Separate chain advancement from payload application** - Kernel advances chaintip (chain is valid), state machine skips bad ops (no effect). Entry exists in history but is a no-op.
 
-**Current test case:** `test_rejected_entry_breaks_chain` in `lattice-kvstate/src/kv.rs` demonstrates the chain break problem.
+**Current test case:** `test_rejected_entry_breaks_chain` in `lattice-kvstore/src/kv.rs` demonstrates the chain break problem.
 
 **Decision needed:** Which validation model best fits lattice's goals of reliability, CRDT convergence, and security?
 

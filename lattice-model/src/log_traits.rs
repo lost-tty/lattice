@@ -1,6 +1,6 @@
 //! Log abstraction traits for decoupling state machines from log implementations.
 //!
-//! These traits allow `lattice-kvstate` to work with any log implementation
+//! These traits allow `lattice-kvstore` to work with any log implementation
 //! without depending on concrete types like `SignedEntry` or `SigChain`.
 
 use crate::{HLC, PubKey, Hash};

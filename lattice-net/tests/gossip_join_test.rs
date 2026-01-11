@@ -4,7 +4,7 @@
 //! They rely purely on the event-driven flow that happens in the CLI.
 
 use lattice_node::{NodeBuilder, NodeEvent, Node, KvStore, token::Invite, Uuid};
-use lattice_kvstate::Merge;
+use lattice_kvstore::Merge;
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
 use std::sync::Arc;

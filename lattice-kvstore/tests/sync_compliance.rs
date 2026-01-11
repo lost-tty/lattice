@@ -1,4 +1,4 @@
-use lattice_kvstate::{KvState, KvPayload, Operation, Head};
+use lattice_kvstore::{KvState, KvPayload, Operation, Head};
 use lattice_model::{StateMachine, Op};
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::hlc::HLC;
@@ -6,7 +6,7 @@ use tempfile::tempdir;
 use prost::Message;
 
 // Access generated proto structs via public module
-use lattice_kvstate::kv_types::{HeadList, HeadInfo};
+use lattice_kvstore::kv_types::{HeadList, HeadInfo};
 
 fn create_test_op(key: &[u8], value: &[u8], author: PubKey, id: Hash, timestamp: HLC, prev_hash: Hash) -> Op<'static> {
     let kv_op = Operation::put(key, value);

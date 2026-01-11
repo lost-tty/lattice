@@ -1,4 +1,4 @@
-//! lattice-kvstate - KV state layer for Lattice
+//! lattice-kvstore - KV state layer for Lattice
 //!
 //! This crate provides the key-value state layer implementing
 //! DAG-based conflict resolution and merge strategies.

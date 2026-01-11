@@ -13,7 +13,7 @@ use crate::{
     PeerInfo,
 };
 use lattice_kernel::{NodeIdentity, PeerStatus};
-use lattice_kvstate::Merge;
+use lattice_kvstore::Merge;
 use crate::KvStore;
 use lattice_model::types::PubKey;
 use std::collections::{HashMap, HashSet};
@@ -24,15 +24,15 @@ use tokio::sync::broadcast;
 #[derive(Debug, thiserror::Error)]
 pub enum PeerManagerError {
     #[error("Store error: {0}")]
-    Store(#[from] lattice_kvstate::KvHandleError),
+    Store(#[from] lattice_kvstore::KvHandleError),
     #[error("State writer error: {0}")]
     StateWriter(#[from] lattice_model::StateWriterError),
     #[error("State error: {0}")]
     State(#[from] lattice_kernel::store::StateError),
     #[error("KV State error: {0}")]
-    KvState(#[from] lattice_kvstate::StateError),
+    KvState(#[from] lattice_kvstore::StateError),
     #[error("Watch error: {0}")]
-    Watch(#[from] lattice_kvstate::WatchError),
+    Watch(#[from] lattice_kvstore::WatchError),
     #[error("Lock poisoned")]
     LockPoisoned,
     #[error("Peer not found: {0}")]
@@ -525,7 +525,7 @@ impl PeerManager {
     }
 
     /// Parse peer state from KV entry (helper for initial load and updates)
-    fn parse_peer_state(key: &[u8], heads: &[lattice_kvstate::Head]) -> Option<(PubKey, PeerStatus)> {
+    fn parse_peer_state(key: &[u8], heads: &[lattice_kvstore::Head]) -> Option<(PubKey, PeerStatus)> {
         let pubkey_hex = parse_peer_status_key(key)?;
         let pubkey_bytes = hex::decode(&pubkey_hex).ok()?;
         let pubkey = PubKey::try_from(pubkey_bytes).ok()?;
@@ -539,20 +539,20 @@ impl PeerManager {
 
     /// Handle a single watch event to update cache and notify listeners
     fn handle_watch_event(
-        event: lattice_kvstate::WatchEvent,
+        event: lattice_kvstore::WatchEvent,
         peers: &Arc<PeerCache>,
         notify: &broadcast::Sender<PeerEvent>
     ) {
-        let lattice_kvstate::WatchEvent { key, kind } = event;
+        let lattice_kvstore::WatchEvent { key, kind } = event;
 
         let (pubkey, new_status) = match kind {
-            lattice_kvstate::WatchEventKind::Update { heads } => {
+            lattice_kvstore::WatchEventKind::Update { heads } => {
                 match Self::parse_peer_state(&key, &heads) {
                     Some((pk, status)) => (pk, Some(status)),
                     None => return, // Malformed or irrelevant update
                 }
             }
-            lattice_kvstate::WatchEventKind::Delete => {
+            lattice_kvstore::WatchEventKind::Delete => {
                  // Try to recover pubkey from key even without value
                  if let Some(pubkey_hex) = parse_peer_status_key(&key) {
                     if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {

@@ -11,7 +11,7 @@ use crate::{KvStore, LogStore};
 use crate::StoreHandle;
 use lattice_kernel::{Store, SyncProvider};
 use lattice_model::{Uuid, CommandDispatcher, StoreType};
-use lattice_kvstate::{KvState, KvHandle};
+use lattice_kvstore::{KvState, KvHandle};
 use lattice_logstore::{LogState, LogHandle};
 use lattice_kernel::StoreInspector;
 use std::sync::Arc;

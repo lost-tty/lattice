@@ -1,5 +1,5 @@
 [package]
-name = "lattice-kvstate"
+name = "lattice-kvstore"
 description = "KV state layer for Lattice - implements StateMachine for key-value storage"
 version.workspace = true
 edition.workspace = true

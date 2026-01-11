@@ -1,4 +1,4 @@
-use lattice_kvstate::{KvState, KvHandle};
+use lattice_kvstore::{KvState, KvHandle};
 use lattice_model::Op;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::hlc::HLC;
@@ -6,11 +6,11 @@ use tempfile::tempdir;
 use std::sync::Arc;
 use tokio::time::Duration;
 
-use lattice_kvstate::kv_handle::MockWriter;
+use lattice_kvstore::kv_handle::MockWriter;
 
 // Helper op creator
 fn create_put_op(key: &[u8], val: &[u8], id: Hash, author: PubKey) -> Op<'static> {
-    use lattice_kvstate::{Operation, KvPayload};
+    use lattice_kvstore::{Operation, KvPayload};
     use prost::Message;
     
     let kv_op = Operation::put(key, val);

@@ -22,7 +22,7 @@ use crate::{
 use lattice_kernel::NodeIdentity;
 use lattice_model::types::PubKey;
 use crate::Uuid;
-use lattice_kvstate::Merge;
+use lattice_kvstore::Merge;
 use rand::RngCore;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -32,7 +32,7 @@ use tracing::{info, warn, debug};
 #[derive(Debug, thiserror::Error)]
 pub enum MeshError {
     #[error("Store error: {0}")]
-    Store(#[from] lattice_kvstate::KvHandleError),
+    Store(#[from] lattice_kvstore::KvHandleError),
     #[error("Actor error: {0}")]
     Actor(String),
     #[error("PeerManager error: {0}")]
