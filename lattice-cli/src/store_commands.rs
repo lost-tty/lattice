@@ -1,13 +1,13 @@
 //! Store commands - direct KV operations
 
-use crate::commands::{CommandResult, Writer};
-use crate::display_helpers::{write_store_summary, write_log_files, write_orphan_details, write_peer_sync_matrix};
-use lattice_node::{Node, KvStore, Mesh, StoreType, Uuid};
+use crate::commands::{CommandResult, Writer, StoreHandle};
+use lattice_node::{Node, Mesh, StoreType, Uuid};
 use lattice_model::types::{PubKey, Hash};
-use lattice_model::{CommandDispatcher, FieldFormat, Introspectable};
+use lattice_model::FieldFormat;
 use lattice_net::MeshService;
-use std::time::Instant;
 use std::io::Write;
+use std::sync::Arc;
+use std::time::Instant;
 use prost_reflect::{DynamicMessage, Value, ReflectMessage};
 
 // ==================== Multi-Store Commands (M5) ====================
@@ -28,7 +28,7 @@ pub async fn cmd_store_create(_node: &Node, mesh: Option<&Mesh>, name: &Option<S
     let store_type: StoreType = match type_str.parse() {
         Ok(t) => t,
         Err(_) => {
-            let _ = writeln!(w, "Error: Unknown store type '{}'. Supported: kvstore", type_str);
+            let _ = writeln!(w, "Error: Unknown store type '{}'. Supported: {}", type_str, StoreType::all_names());
             return CommandResult::Ok;
         }
     };
@@ -96,10 +96,18 @@ pub async fn cmd_store_use(_node: &Node, mesh: Option<&Mesh>, uuid_str: &str, wr
         }
     };
     
-    match mesh.resolve_store(uuid_str) {
-        Ok(store) => {
-             let _ = writeln!(w, "Switching to Store {}", store.id());
-             CommandResult::SwitchTo(store)
+    match mesh.resolve_store_info(uuid_str) {
+        Ok((id, _store_type)) => {
+             let _ = writeln!(w, "Switching to store {}", id);
+             // Get StoreHandle from store_manager
+             let store_handle = match mesh.store_manager().get_handle(&id) {
+                 Some(h) => h,
+                 None => {
+                     let _ = writeln!(w, "Error: Store not found in manager");
+                     return CommandResult::Ok;
+                 }
+             };
+             CommandResult::SwitchTo(store_handle)
         }
         Err(e) => {
              let _ = writeln!(w, "Error: {}", e);
@@ -143,23 +151,41 @@ pub async fn cmd_store_delete(_node: &Node, mesh: Option<&Mesh>, uuid_str: &str,
 
 // ==================== Existing Store Commands ====================
 
-pub async fn cmd_store_status(node: &Node, store: Option<&KvStore>, mesh: Option<&MeshService>, _args: &[String], writer: Writer) -> CommandResult {
-    let Some(h) = store else {
+pub async fn cmd_store_status(_node: &Node, store: Option<Arc<dyn StoreHandle>>, _mesh: Option<&MeshService>, _args: &[String], writer: Writer) -> CommandResult {
+    let Some(ctx) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     
     let mut w = writer.clone();
-    write_store_summary(&mut w, h).await;
-    write_log_files(&mut w, h).await;
-    write_orphan_details(&mut w, h).await;
-    write_peer_sync_matrix(&mut w, node, h, mesh).await;
+    let inspector = ctx.as_inspector();
+    
+    // Basic info from StoreHandle
+    let _ = writeln!(w, "Store ID: {}", ctx.id());
+    let _ = writeln!(w, "Type:     {}", ctx.store_type());
+    
+    // Sync state from inspector (works for all stores)
+    if let Ok(sync_state) = inspector.sync_state().await {
+        let _ = writeln!(w, "Authors:  {}", sync_state.authors().len());
+        if let Some(hlc) = sync_state.common_hlc() {
+            let _ = writeln!(w, "HLC:      {}", hlc);
+        }
+    }
+    
+    // Log stats from inspector (works for all stores)
+    let stats = inspector.log_stats().await;
+    if stats.file_count > 0 {
+        let _ = writeln!(w, "Logs:     {} files, {} bytes", stats.file_count, stats.total_bytes);
+    }
+    if stats.orphan_count > 0 {
+        let _ = writeln!(w, "Orphans:  {} (pending parent entries)", stats.orphan_count);
+    }
     
     CommandResult::Ok
 }
 
-pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<std::sync::Arc<MeshService>>, _args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_store_sync(_node: &Node, store: Option<Arc<dyn StoreHandle>>, mesh: Option<std::sync::Arc<MeshService>>, _args: &[String], writer: Writer) -> CommandResult {
     let mesh = match mesh {
         Some(s) => s,
         None => {
@@ -169,8 +195,8 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<
         }
     };
     
-    let store = match store {
-        Some(s) => s.clone(),
+    let ctx = match store {
+        Some(s) => s,
         None => {
             let mut w = writer.clone();
             let _ = writeln!(w, "No store open. Use 'init' or 'join' first.");
@@ -178,7 +204,8 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<
         }
     };
     
-    let store_id = store.id();
+    let store_id = ctx.id();
+    let writer_clone = writer.clone();
     
     {
         let mut w = writer.clone();
@@ -189,7 +216,7 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<
     tokio::spawn(async move {
         match mesh.sync_all_by_id(store_id).await {
             Ok(results) => {
-                let mut w = writer.clone();
+                let mut w = writer_clone.clone();
                 if results.is_empty() {
                     let _ = writeln!(w, "[Sync] No active peers.");
                 } else {
@@ -198,7 +225,7 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<
                 }
             }
             Err(e) => {
-                let mut w = writer.clone();
+                let mut w = writer_clone.clone();
                 let _ = writeln!(w, "[Sync] Failed: {}", e);
             }
         }
@@ -207,15 +234,16 @@ pub async fn cmd_store_sync(_node: &Node, store: Option<&KvStore>, mesh: Option<
     CommandResult::Ok
 }
 
-pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshService>, _args: &[String], writer: Writer) -> CommandResult {
-    let Some(h) = store else {
+pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<Arc<dyn StoreHandle>>, _mesh: Option<&MeshService>, _args: &[String], writer: Writer) -> CommandResult {
+    let Some(ctx) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     
     let mut w = writer.clone();
-    let removed = h.orphan_cleanup().await;
+    let inspector = ctx.as_inspector();
+    let removed = inspector.orphan_cleanup().await;
     if removed > 0 {
         let _ = writeln!(w, "Cleaned up {} stale orphan(s)", removed);
     } else {
@@ -225,17 +253,19 @@ pub async fn cmd_orphan_cleanup(_node: &Node, store: Option<&KvStore>, _mesh: Op
     CommandResult::Ok
 }
 
-pub async fn cmd_store_debug(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshService>, _args: &[String], writer: Writer) -> CommandResult {
-    let Some(h) = store else {
+pub async fn cmd_store_debug(_node: &Node, store: Option<Arc<dyn StoreHandle>>, _mesh: Option<&MeshService>, _args: &[String], writer: Writer) -> CommandResult {
+    let Some(ctx) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     
     let mut w = writer.clone();
+    let inspector = ctx.as_inspector();
+    let dispatcher = ctx.as_dispatcher();
     
-    // Get sync state to find all authors
-    let sync_state = match h.sync_state().await {
+    // Use inspector for sync_state
+    let sync_state = match inspector.sync_state().await {
         Ok(s) => s,
         Err(e) => {
             let _ = writeln!(w, "Error getting sync state: {}", e);
@@ -244,7 +274,7 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&KvStore>, _mesh: Optio
     };
     
     let authors = sync_state.authors();
-    let _ = writeln!(w, "Store {} - {} authors\n", h.id(), authors.len());
+    let _ = writeln!(w, "Store {} - {} authors\n", ctx.id(), authors.len());
     
     // Sort authors by their hex-encoded key for consistent output
     let mut sorted_authors: Vec<_> = authors.into_iter().collect();
@@ -255,8 +285,8 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&KvStore>, _mesh: Optio
         let hash_short = hex::encode(&info.hash[..8]);
         let _ = writeln!(w, "Author {} (seq: {}, hash: {})", author_short, info.seq, hash_short);
         
-        // Stream entries for this author
-        let mut rx = match h.stream_entries_in_range(&author, 1, 0).await {
+        // Use inspector for stream_entries_in_range
+        let mut rx = match inspector.stream_entries_in_range(*author, 1, 0).await {
             Ok(rx) => rx,
             Err(e) => {
                 let _ = writeln!(w, "  Error reading entries: {}", e);
@@ -273,11 +303,10 @@ pub async fn cmd_store_debug(_node: &Node, store: Option<&KvStore>, _mesh: Optio
             
             let hlc = format!("{}.{}", e.timestamp.wall_time, e.timestamp.counter);
             
-            // Format ops
+            // Use dispatcher for payload introspection (via CommandDispatcher extending Introspectable)
             let payload_bytes = &e.payload[..];
-            // Format ops
-            let summary = match h.state().decode_payload(payload_bytes) {
-                Ok(msg) => format_message_inline(&msg, &h.field_formats()),
+            let summary = match dispatcher.decode_payload(payload_bytes) {
+                Ok(msg) => format_message_inline(&msg, &dispatcher.field_formats()),
                 Err(_) => "[decode error]".to_string(),
             };
 
@@ -338,8 +367,8 @@ fn format_message_inline(msg: &prost_reflect::DynamicMessage, formats: &std::col
     out.trim().to_string()
 }
 
-pub async fn cmd_author_state(node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshService>, args: &[String], writer: Writer) -> CommandResult {
-    let Some(store) = store else {
+pub async fn cmd_author_state(node: &Node, store: Option<Arc<dyn StoreHandle>>, _mesh: Option<&MeshService>, args: &[String], writer: Writer) -> CommandResult {
+    let Some(ctx) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "Error: no store selected");
         return CommandResult::Ok;
@@ -368,15 +397,32 @@ pub async fn cmd_author_state(node: &Node, store: Option<&KvStore>, _mesh: Optio
     };
 
     let mut w = writer.clone();
+    let inspector = ctx.as_inspector();
     
-    // Fetch data
-    let data = match fetch_author_states(store, target).await {
-        Ok(d) => d,
+    // Get sync state from inspector
+    let sync_state = match inspector.sync_state().await {
+        Ok(s) => s,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
             return CommandResult::Ok;
         }
     };
+    
+    // Build data from sync_state
+    let mut data: Vec<(PubKey, u64, Vec<u8>)> = Vec::new();
+    
+    if let Some(author) = target {
+        // Single author: filter from sync state
+        if let Some(info) = sync_state.authors().get(&author) {
+            data.push((author, info.seq, info.hash.to_vec()));
+        }
+    } else {
+        // All authors
+        for (author, info) in sync_state.authors() {
+            data.push((*author, info.seq, info.hash.to_vec()));
+        }
+        data.sort_by(|a, b| a.0.cmp(&b.0));
+    }
 
     if data.is_empty() {
         if show_all {
@@ -409,40 +455,13 @@ pub async fn cmd_author_state(node: &Node, store: Option<&KvStore>, _mesh: Optio
     CommandResult::Ok
 }
 
-/// Helper to fetch state for one or all authors
-async fn fetch_author_states(store: &KvStore, target: Option<PubKey>) -> Result<Vec<(PubKey, u64, Vec<u8>)>, String> {
-    let mut data = Vec::new();
-    
-    if let Some(author) = target {
-        // Single author: check chain tip
-        if let Some(state) = store.chain_tip(&author).await.map_err(|e| e.to_string())? {
-            data.push((author, state.seq, state.hash));
-        }
-    } else {
-        // All authors: check sync state
-        let state = store.sync_state().await.map_err(|e| e.to_string())?;
-        for (author, info) in state.authors() {
-            data.push((*author, info.seq, info.hash.to_vec()));
-        }
-        data.sort_by(|a, b| a.0.cmp(&b.0));
-    }
-    
-    Ok(data)
-}
-
-
-
-
-
-pub async fn cmd_history(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshService>, args: &[String], writer: Writer) -> CommandResult {
-    let Some(h) = store else {
+pub async fn cmd_history(_node: &Node, store: Option<Arc<dyn StoreHandle>>, _mesh: Option<&MeshService>, args: &[String], writer: Writer) -> CommandResult {
+    let Some(ctx) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
     };
     
-    // Usage: matches <filter> or <key=val>
-    // If no args, shows full history (might be huge, so perhaps we cap it or warn?)
     let (filter_key, filter_val) = if args.is_empty() {
         (None, None)
     } else {
@@ -450,15 +469,15 @@ pub async fn cmd_history(_node: &Node, store: Option<&KvStore>, _mesh: Option<&M
         if let Some((k, v)) = arg.split_once('=') {
             (Some(k.to_string()), Some(v.to_string()))
         } else {
-            // "Heuristic": If single arg, assume it's filtering for "key"
             (Some("key".to_string()), Some(arg.to_string()))
         }
     };
     
     let mut w = writer.clone();
+    let inspector = ctx.as_inspector();
+    let dispatcher = ctx.as_dispatcher();
     
-    // Get sync state to find all authors
-    let sync_state = match h.sync_state().await {
+    let sync_state = match inspector.sync_state().await {
         Ok(s) => s,
         Err(e) => {
             let _ = writeln!(w, "Error getting sync state: {}", e);
@@ -466,18 +485,10 @@ pub async fn cmd_history(_node: &Node, store: Option<&KvStore>, _mesh: Option<&M
         }
     };
     
-    // Collect entries matching filter
-    // We need to render a DAG. The DAG renderer needs: Hash -> {parents, ...}
-    // We will collect ALL entries that match, plus their ancestors? 
-    // Actually, DAG rendering usually requires the connected graph. 
-    // If we only pick matching entries, they might be disjoint.
-    // For now, let's collect ALL entries, but only "highlight" or "show" ones matching filter?
-    // OR: Standard behavior: Show history *of a key*. This implies we trace the causal history of operations touching that key.
-    
     let mut entries: std::collections::HashMap<Hash, crate::graph_renderer::RenderEntry> = std::collections::HashMap::new();
     
     for (author, _info) in sync_state.authors() {
-        let mut rx = match h.stream_entries_in_range(&author, 1, 0).await {
+        let mut rx = match inspector.stream_entries_in_range(*author, 1, 0).await {
             Ok(rx) => rx,
             Err(_) => continue,
         };
@@ -486,55 +497,39 @@ pub async fn cmd_history(_node: &Node, store: Option<&KvStore>, _mesh: Option<&M
             let decoded = &entry.entry;
             let payload_bytes = &decoded.payload[..];
             
-            // Generic check: Does this entry contain the key?
-            // Expensive decoding for every entry, but necessary for generic history
-            match h.state().decode_payload(payload_bytes) {
+            match dispatcher.decode_payload(payload_bytes) {
                 Ok(msg) => {
-                     // Check filter using authorization form State Machine
-                     let matches = match (&filter_key, &filter_val) {
-                         // If user typed key=val, we use val as the filter and trust the SM to match it.
-                         // Actually, matches_filter only takes "filter". The SM decides what that applies to (e.g. key).
-                         // If user types "foo", we pass "foo".
-                         // If user types "key=foo", we pass "foo" (pragmatic).
-                         // The Introspection trait signature is (payload, filter).
-                         (Some(_k), Some(v)) => h.state().matches_filter(&msg, v),
-                         (Some(v), None) => h.state().matches_filter(&msg, v), // user typed "history foo" -> k="key", v="foo"
-                         (None, None) => true, // No filter = show all
-                         _ => true
-                     };
+                    let matches = match (&filter_key, &filter_val) {
+                        (Some(_k), Some(v)) => dispatcher.matches_filter(&msg, v),
+                        (Some(v), None) => dispatcher.matches_filter(&msg, v),
+                        (None, None) => true,
+                        _ => true
+                    };
                      
-                     if matches {
-                         let hash = Hash::from(entry.hash());
-                         let hlc = (decoded.timestamp.wall_time << 16) | decoded.timestamp.counter as u64;
-                         let causal_deps = decoded.causal_deps.clone();
+                    if matches {
+                        let hash = Hash::from(entry.hash());
+                        let hlc = (decoded.timestamp.wall_time << 16) | decoded.timestamp.counter as u64;
+                        let causal_deps = decoded.causal_deps.clone();
+                        let summaries = dispatcher.summarize_payload(&msg);
                          
-                         // Determine value for display (heuristic: "value" field or "val" or provided key)
-                         // Used for the graph node label. 
-                         // We can still try to extract *some* value for the graph label even if generic.
-                         // Structured extraction of KV details via Introspection
-                         let summaries = h.state().summarize_payload(&msg);
+                        let label = if !summaries.is_empty() {
+                            summaries.join(", ")
+                        } else {
+                            let key_bytes = extract_field_value(&msg, "key").unwrap_or_default();
+                            let val_bytes = extract_field_value(&msg, "value").unwrap_or_default();
+                            let key_str = String::from_utf8_lossy(&key_bytes);
+                            let val_str = String::from_utf8_lossy(&val_bytes);
+                            format!("{}={}", key_str, val_str)
+                        };
                          
-                         // Determine display label
-                         // If we have summaries, join them.
-                         // If not, try to reconstruct "key=value" from raw fields as fallback.
-                         let label = if !summaries.is_empty() {
-                             summaries.join(", ")
-                         } else {
-                             let key_bytes = extract_field_value(&msg, "key").unwrap_or_default();
-                             let val_bytes = extract_field_value(&msg, "value").unwrap_or_default();
-                             let key_str = String::from_utf8_lossy(&key_bytes);
-                             let val_str = String::from_utf8_lossy(&val_bytes);
-                             format!("{}={}", key_str, val_str)
-                         };
-                         
-                         entries.insert(hash, crate::graph_renderer::RenderEntry {
-                             label,
-                             author: *author,
-                             hlc,
-                             causal_deps: causal_deps.clone(),
-                             is_merge: causal_deps.len() > 1,
-                         });
-                     }
+                        entries.insert(hash, crate::graph_renderer::RenderEntry {
+                            label,
+                            author: *author,
+                            hlc,
+                            causal_deps: causal_deps.clone(),
+                            is_merge: causal_deps.len() > 1,
+                        });
+                    }
                 },
                 Err(_) => continue,
             }
@@ -553,8 +548,6 @@ pub async fn cmd_history(_node: &Node, store: Option<&KvStore>, _mesh: Option<&M
     
     CommandResult::Ok
 }
-
-
 
 // Extra helper to extract a value byte vector for display
 fn extract_field_value(msg: &prost_reflect::DynamicMessage, field_name: &str) -> Option<Vec<u8>> {
@@ -590,8 +583,37 @@ fn extract_field_value(msg: &prost_reflect::DynamicMessage, field_name: &str) ->
     None
 }
 
-pub async fn cmd_dynamic_exec(_node: &Node, store: Option<&KvStore>, _mesh: Option<&MeshService>, args: &[String], writer: Writer) -> CommandResult {
-    let Some(h) = store else {
+/// Parse a string value into the appropriate protobuf Value based on field type
+fn parse_value_for_field(field: &prost_reflect::FieldDescriptor, s: &str) -> Value {
+    use prost_reflect::Kind;
+    match field.kind() {
+        Kind::String => Value::String(s.to_string()),
+        Kind::Bytes => Value::Bytes(s.as_bytes().to_vec().into()),
+        Kind::Bool => Value::Bool(s.parse().unwrap_or(false)),
+        Kind::Uint64 => Value::U64(s.parse().unwrap_or(0)),
+        Kind::Uint32 => Value::U32(s.parse().unwrap_or(0)),
+        Kind::Int64 | Kind::Sint64 | Kind::Sfixed64 => Value::I64(s.parse().unwrap_or(0)),
+        Kind::Int32 | Kind::Sint32 | Kind::Sfixed32 => Value::I32(s.parse().unwrap_or(0)),
+        Kind::Fixed64 => Value::U64(s.parse().unwrap_or(0)),
+        Kind::Fixed32 => Value::U32(s.parse().unwrap_or(0)),
+        Kind::Float => Value::F32(s.parse().unwrap_or(0.0)),
+        Kind::Double => Value::F64(s.parse().unwrap_or(0.0)),
+        Kind::Enum(e) => {
+            // Try numeric first, then name lookup
+            if let Ok(num) = s.parse::<i32>() {
+                Value::EnumNumber(num)
+            } else if let Some(val) = e.get_value_by_name(s) {
+                Value::EnumNumber(val.number())
+            } else {
+                Value::EnumNumber(0)
+            }
+        }
+        _ => Value::String(s.to_string()), // Fallback for message types etc.
+    }
+}
+
+pub async fn cmd_dynamic_exec(_node: &Node, store: Option<Arc<dyn StoreHandle>>, _mesh: Option<&MeshService>, args: &[String], writer: Writer) -> CommandResult {
+    let Some(ctx) = store else {
         let mut w = writer.clone();
         let _ = writeln!(w, "No store selected. Use 'init' or 'use <uuid>'");
         return CommandResult::Ok;
@@ -601,10 +623,10 @@ pub async fn cmd_dynamic_exec(_node: &Node, store: Option<&KvStore>, _mesh: Opti
     if args.is_empty() {
         let mut w = writer.clone();
         let _ = writeln!(w, "Usage: exec <Command> [key=value]...");
-        let _ = writeln!(w, "Available commands for {:?}:", h.id());
+        let _ = writeln!(w, "Available commands for {}:", ctx.id());
         
         // Introspect capabilities
-        let desc = h.service_descriptor();
+        let desc = ctx.as_dispatcher().service_descriptor();
         for method in desc.methods() {
             let _ = writeln!(w, "  {}", method.name());
         }
@@ -615,7 +637,7 @@ pub async fn cmd_dynamic_exec(_node: &Node, store: Option<&KvStore>, _mesh: Opti
     let method_args = &args[1..];
     
     // 1. Get Method Descriptor (case-insensitive lookup)
-    let service = h.service_descriptor();
+    let service = ctx.as_dispatcher().service_descriptor();
     let method = match service.methods().find(|m| m.name().eq_ignore_ascii_case(method_name)) {
         Some(m) => m,
         None => {
@@ -637,23 +659,13 @@ pub async fn cmd_dynamic_exec(_node: &Node, store: Option<&KvStore>, _mesh: Opti
         // Try key=value format first
         if let Some((k, v)) = arg.split_once('=') {
             if let Some(field) = input_desc.get_field_by_name(k) {
-                let value = match field.kind() {
-                    prost_reflect::Kind::String => Value::String(v.to_string()),
-                    prost_reflect::Kind::Bytes => Value::Bytes(v.as_bytes().to_vec().into()),
-                    prost_reflect::Kind::Bool => Value::Bool(v.parse().unwrap_or(false)),
-                     _ => Value::String(v.to_string()),
-                };
+                let value = parse_value_for_field(&field, v);
                 dynamic_msg.set_field(&field, value);
             }
         } else if positional_index < field_names.len() {
             // Positional argument - map to next field
             if let Some(field) = input_desc.get_field_by_name(&field_names[positional_index]) {
-                let value = match field.kind() {
-                    prost_reflect::Kind::String => Value::String(arg.to_string()),
-                    prost_reflect::Kind::Bytes => Value::Bytes(arg.as_bytes().to_vec().into()),
-                    prost_reflect::Kind::Bool => Value::Bool(arg.parse().unwrap_or(false)),
-                    _ => Value::String(arg.to_string()),
-                };
+                let value = parse_value_for_field(&field, arg);
                 dynamic_msg.set_field(&field, value);
                 positional_index += 1;
             }
@@ -664,9 +676,9 @@ pub async fn cmd_dynamic_exec(_node: &Node, store: Option<&KvStore>, _mesh: Opti
     let mut w = writer.clone();
     
     // 3. Dispatch (async - handle supports both reads and writes)
-    match h.dispatch(method.name(), dynamic_msg).await {
+    match ctx.as_dispatcher().dispatch(method.name(), dynamic_msg).await {
         Ok(response) => {
-            let formats = h.field_formats();
+            let formats = ctx.as_dispatcher().field_formats();
             format_dynamic_response(&response, &mut w, &formats);
             let _ = writeln!(w, "({:.2?})", start.elapsed());
         },

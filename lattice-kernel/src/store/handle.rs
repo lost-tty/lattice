@@ -463,6 +463,57 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
     }
 
 }
+
+// ==================== StoreInspector implementation ====================
+
+use crate::store_inspector::{StoreInspector, LogStats, LogPathInfo};
+
+impl<S: StateMachine + 'static> StoreInspector for Store<S> {
+    fn id(&self) -> Uuid {
+        self.store_id
+    }
+
+    fn sync_state(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<super::SyncState, StoreError>> + Send + '_>> {
+        Box::pin(Store::sync_state(self))
+    }
+
+    fn log_stats(&self) -> Pin<Box<dyn Future<Output = LogStats> + Send + '_>> {
+        Box::pin(async move {
+            let (file_count, total_bytes, orphan_count) = Store::log_stats(self).await;
+            LogStats { file_count, total_bytes, orphan_count }
+        })
+    }
+
+    fn log_paths(&self) -> Pin<Box<dyn Future<Output = Vec<LogPathInfo>> + Send + '_>> {
+        Box::pin(async move {
+            Store::log_paths(self).await.into_iter().map(|(name, size, path)| {
+                LogPathInfo { name, size, path }
+            }).collect()
+        })
+    }
+
+    fn orphan_list(&self) -> Pin<Box<dyn Future<Output = Vec<super::OrphanInfo>> + Send + '_>> {
+        Box::pin(Store::orphan_list(self))
+    }
+
+    fn orphan_cleanup(&self) -> Pin<Box<dyn Future<Output = usize> + Send + '_>> {
+        Box::pin(Store::orphan_cleanup(self))
+    }
+
+    fn stream_entries_in_range(
+        &self,
+        author: PubKey,
+        from_seq: u64,
+        to_seq: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<mpsc::Receiver<SignedEntry>, StoreError>> + Send + '_>> {
+        Box::pin(async move {
+            Store::stream_entries_in_range(self, &author, from_seq, to_seq).await
+        })
+    }
+}
+
 // ==================== EntryStreamProvider implementation ====================
 
 impl<S: StateMachine + Send + Sync + 'static> EntryStreamProvider for Store<S> {

@@ -27,6 +27,16 @@ impl fmt::Display for ParseStoreTypeError {
 impl std::error::Error for ParseStoreTypeError {}
 
 impl StoreType {
+    /// All supported store type variants
+    pub const fn variants() -> &'static [StoreType] {
+        &[Self::KvStore, Self::LogStore]
+    }
+    
+    /// Comma-separated list of all variant names (for error messages)
+    pub fn all_names() -> String {
+        Self::variants().iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
+    }
+    
     /// Convert to string for storage
     pub const fn as_str(&self) -> &'static str {
         match self {

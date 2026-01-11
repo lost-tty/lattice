@@ -81,9 +81,10 @@ impl Mesh {
         node: &Arc<NodeIdentity>, 
         store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
-        // Create the root store file (but don't register yet)
-        let root_store = store_manager.create()?;
-        let root_store_id = root_store.id();
+        // Create a fresh store via store_manager
+        let (root_store_id, opened) = store_manager.create(StoreType::KvStore)?;
+        let root_store: KvStore = *opened.typed_handle.downcast()
+            .map_err(|_| MeshError::Other("Failed to downcast KvStore".into()))?;
         
         let peer_manager = PeerManager::new(root_store, node).await?;
         
@@ -99,16 +100,15 @@ impl Mesh {
         Ok(mesh)
     }
     
-    /// Open an existing Mesh by root store ID.
-    /// Note: Does NOT register the root store. Call `register_root_store()` after
-    /// storing the mesh in Node.meshes.
     pub async fn open(
         store_id: Uuid,
         node: &Arc<NodeIdentity>, 
         store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
-        // Open the root store file (but don't register yet)
-        let root_store = store_manager.open(store_id)?;
+        // Open existing store via store_manager
+        let opened = store_manager.open(store_id, StoreType::KvStore)?;
+        let root_store: KvStore = *opened.typed_handle.downcast()
+            .map_err(|_| MeshError::Other("Failed to downcast KvStore".into()))?;
         
         let peer_manager = PeerManager::new(root_store, node).await?;
         
@@ -128,12 +128,13 @@ impl Mesh {
     /// Call this after the mesh is stored in Node.meshes.
     /// This emits NetEvent::StoreReady.
     pub fn register_root_store(&self) -> Result<(), MeshError> {
-        // Open the store file (already created in create_new/open)
-        let root_store = self.store_manager.open(self.root_store_id)?;
+        // Open store via store_manager and register
+        let opened = self.store_manager.open(self.root_store_id, StoreType::KvStore)?;
         self.store_manager.register(
-            root_store, 
+            self.root_store_id,
+            opened,
             StoreType::KvStore,
-            self.peer_manager.clone()
+            self.peer_manager.clone(),
         )?;
         
         // Start watcher to automatically open/close stores declared in root store
@@ -149,7 +150,7 @@ impl Mesh {
     
     /// Get a handle to the root store.
     pub fn root_store(&self) -> KvStore {
-        self.store_manager.get_store(&self.root_store_id)
+        self.store_manager.get::<KvStore>(&self.root_store_id)
             .expect("root store should exist in store_manager")
     }
     
@@ -163,21 +164,33 @@ impl Mesh {
         self.store_manager.clone()
     }
 
-    /// Resolve a store alias (UUID string or prefix) to a store handle.
-    pub fn resolve_store(&self, id_or_prefix: &str) -> Result<KvStore, MeshError> {
-        // Check all stores including root
-        let stores = self.store_manager.stores().read()
-            .map_err(|_| MeshError::Other("lock poisoned".into()))?;
-        
-        let matches: Vec<_> = stores.values()
-            .filter(|s| s.id.to_string().starts_with(id_or_prefix))
+    /// Resolve a store alias (UUID string or prefix) to store info.
+    /// Returns the store ID and type.
+    pub fn resolve_store_info(&self, id_or_prefix: &str) -> Result<(Uuid, StoreType), MeshError> {
+        // Find matching store IDs
+        let matches: Vec<(Uuid, StoreType)> = self.store_manager.list()
+            .into_iter()
+            .filter(|(id, _)| id.to_string().starts_with(id_or_prefix))
             .collect();
         
         match matches.len() {
             0 => Err(MeshError::Other(format!("Store '{}' not found", id_or_prefix))),
-            1 => Ok(matches[0].store.clone()),
+            1 => Ok(matches[0]),
             _ => Err(MeshError::Other(format!("Ambiguous ID '{}'", id_or_prefix))),
         }
+    }
+
+    /// Resolve a store alias (UUID string or prefix) to a KvStore handle.
+    /// Note: Only works for KvStore type. For other types, use resolve_store_info().
+    pub fn resolve_store(&self, id_or_prefix: &str) -> Result<KvStore, MeshError> {
+        let (id, store_type) = self.resolve_store_info(id_or_prefix)?;
+        
+        if store_type != StoreType::KvStore {
+            return Err(MeshError::Other(format!("Store '{}' is a {} (expected KvStore)", id_or_prefix, store_type)));
+        }
+        
+        self.store_manager.get::<KvStore>(&id)
+            .ok_or_else(|| MeshError::Other(format!("Store '{}' not found in manager", id_or_prefix)))
     }
     
     // ==================== Store Watcher ====================
@@ -189,7 +202,7 @@ impl Mesh {
         let peer_manager = self.peer_manager.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         
-        let Some(root_store) = self.store_manager.get_store(&self.root_store_id) else {
+        let Some(root_store) = self.store_manager.get::<KvStore>(&self.root_store_id) else {
             warn!("Cannot start store watcher: root store not available");
             return;
         };
@@ -245,11 +258,10 @@ impl Mesh {
         let declarations = Self::list_declarations(root)?;
         
         // Get current store IDs (excluding root)
-        let current_ids: Vec<Uuid> = {
-            let stores = store_manager.stores().read()
-                .map_err(|_| MeshError::Other("lock poisoned".into()))?;
-            stores.keys().cloned().filter(|id| *id != root_store_id).collect()
-        };
+        let current_ids: Vec<Uuid> = store_manager.store_ids()
+            .into_iter()
+            .filter(|id| *id != root_store_id)
+            .collect();
         
         // Open stores that should be open but aren't
         for decl in &declarations {
@@ -262,10 +274,10 @@ impl Mesh {
             } else {
                 // Should be open - open if not open
                 if !current_ids.contains(&decl.id) {
-                    match store_manager.open(decl.id) {
-                        Ok(store) => {
+                    match store_manager.open(decl.id, decl.store_type) {
+                        Ok(opened) => {
                             // Register with same peer_manager as root store
-                            if let Err(e) = store_manager.register(store, decl.store_type, peer_manager.clone()) {
+                            if let Err(e) = store_manager.register(decl.id, opened, decl.store_type, peer_manager.clone()) {
                                 warn!(store_id = %decl.id, error = ?e, "Failed to register store");
                             } else {
                                 info!(store_id = %decl.id, store_type = %decl.store_type, "Opened store");

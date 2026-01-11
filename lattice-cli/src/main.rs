@@ -9,8 +9,7 @@ mod graph_renderer;
 mod tracing_writer;
 
 use lattice_net::MeshService;
-use commands::CommandResult;
-use lattice_node::KvStore;
+use commands::{CommandResult, StoreHandle};
 use lattice_node::NodeBuilder;
 use lattice_node::mesh::Mesh;
 use rustyline_async::{Readline, ReadlineEvent};
@@ -18,7 +17,7 @@ use std::io::Write;
 use std::sync::{Arc, RwLock};
 use tracing_subscriber::EnvFilter;
 
-fn make_prompt(mesh: Option<&Mesh>, store: Option<&KvStore>) -> String {
+fn make_prompt(mesh: Option<&Mesh>, store: Option<&Arc<dyn StoreHandle>>) -> String {
     use owo_colors::OwoColorize;
     
     match (mesh, store) {
@@ -96,7 +95,7 @@ async fn main() {
         }
     };
 
-    let current_store = Arc::new(RwLock::new(None));
+    let current_store: Arc<RwLock<Option<Arc<dyn StoreHandle>>>> = Arc::new(RwLock::new(None));
     let current_mesh: Arc<RwLock<Option<Mesh>>> = Arc::new(RwLock::new(None));
     
     // Create MeshService with the receiver
@@ -128,7 +127,7 @@ async fn main() {
     }
     
     // Show node status (after server so gossip is set up)
-    let _ = node_commands::cmd_status(&node, None, mesh_network.as_deref(), writer.clone()).await;
+    let _ = node_commands::cmd_status(&node, mesh_network.as_deref(), writer.clone()).await;
     
     // Update current store/mesh based on oldest mesh (deterministic)
     if let Ok(meshes) = node.meta().list_meshes() {
@@ -136,7 +135,11 @@ async fn main() {
         if let Some((mesh_id, _)) = meshes.into_iter().min_by_key(|(_, info)| info.joined_at) {
             if let Some(mesh) = node.mesh_by_id(mesh_id) {
                 if let Ok(mut guard) = current_store.write() {
-                    *guard = Some(mesh.root_store().clone());
+                    let root_id = mesh.root_store().id();
+                    let store_handle = mesh.store_manager()
+                        .get_handle(&root_id)
+                        .expect("Root store should be registered");
+                    *guard = Some(store_handle);
                 }
                 if let Ok(mut guard) = current_mesh.write() {
                     *guard = Some(mesh);
@@ -157,9 +160,13 @@ async fn main() {
                 match event {
                     lattice_node::NodeEvent::MeshReady { mesh_id } => {
                         if let Some(mesh) = node_clone.mesh_by_id(mesh_id) {
-                            wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.root_store().id());
+                            wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.id());
                             if let Ok(mut guard) = current_store.write() {
-                                *guard = Some(mesh.root_store().clone());
+                                let root_id = mesh.root_store().id();
+                                let store_handle = mesh.store_manager()
+                                    .get_handle(&root_id)
+                                    .expect("Root store should be registered");
+                                *guard = Some(store_handle);
                             }
                             if let Ok(mut guard) = current_mesh.write() {
                                 *guard = Some(mesh);
@@ -219,7 +226,7 @@ async fn main() {
                             let Ok(mesh_guard) = current_mesh.read() else { continue };
                             let result = handle_command(
                                 &node, 
-                                store_guard.as_ref(), 
+                                store_guard.clone(), 
                                 mesh_network.clone(),
                                 mesh_guard.as_ref(), // mesh
                                 cli,
@@ -255,7 +262,7 @@ async fn main() {
                             tokio::spawn(async move {
                                 let _ = handle_command(
                                     &node, 
-                                    store.as_ref(), 
+                                    store, 
                                     server, 
                                     mesh.as_ref(),
                                     cli,

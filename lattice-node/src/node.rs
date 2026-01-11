@@ -173,6 +173,10 @@ impl NodeBuilder {
         let meta = std::sync::Arc::new(meta);
         let registry = std::sync::Arc::new(StoreRegistry::new(self.data_dir.clone(), meta.clone(), node.clone()));
         let store_manager = std::sync::Arc::new(crate::StoreManager::new(registry.clone(), event_tx.clone(), net_tx.clone()));
+        
+        // Register built-in store openers
+        store_manager.register_opener(crate::StoreType::KvStore, Box::new(crate::KvStoreOpener));
+        store_manager.register_opener(crate::StoreType::LogStore, Box::new(crate::LogStoreOpener));
 
         Ok(Node {
             data_dir: self.data_dir,
@@ -603,7 +607,7 @@ impl NodeProviderExt for Node {
     }
     
     fn get_peer_provider(&self, store_id: &Uuid) -> Option<std::sync::Arc<dyn PeerProvider>> {
-        self.store_manager.get(store_id).map(|m| m.peer_manager as std::sync::Arc<dyn PeerProvider>)
+        self.store_manager.get_peer_manager(store_id).map(|pm| pm as std::sync::Arc<dyn PeerProvider>)
     }
 }
 

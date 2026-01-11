@@ -1,16 +1,13 @@
 //! Store Manager - manages a registry of open stores
 //!
-//! Lives at Node level (shared by all meshes). Each registered store has:
-//! - The store handle
-//! - The associated PeerManager
-//!
-//! This allows the network layer to get everything it needs without
-//! knowing about Mesh.
+//! Uses factory registration pattern: register StoreOpener for each type,
+//! then call open(id, type) to get handles.
 
-use crate::{KvStore, StoreType, StoreRegistry, peer_manager::PeerManager, NodeEvent};
+use crate::{StoreType, StoreRegistry, peer_manager::PeerManager, NodeEvent};
+use crate::StoreHandle;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore};
 use lattice_model::{NetEvent, Uuid};
-use lattice_kvstate::{KvState, KvHandle};
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
@@ -27,25 +24,38 @@ pub enum StoreManagerError {
     Registry(String),
     #[error("Lock error: {0}")]
     Lock(String),
+    #[error("No opener registered for type: {0}")]
+    NoOpener(StoreType),
 }
 
-/// A managed store with its associated peer manager
-pub struct ManagedStore {
+/// Result of opening a store - contains both typed handle and StoreHandle
+pub struct OpenedStore {
+    /// Typed handle for downcasting (e.g., KvHandle<Store<KvState>>)
+    pub typed_handle: Box<dyn Any + Send + Sync>,
+    /// Type-erased StoreHandle for generic access
+    pub store_handle: Arc<dyn StoreHandle>,
+}
+
+/// Trait for opening stores of a specific type
+pub trait StoreOpener: Send + Sync {
+    /// Open or create a store by ID, returning both typed handle and StoreHandle
+    fn open(&self, registry: &Arc<StoreRegistry>, store_id: Uuid) -> Result<OpenedStore, StoreManagerError>;
+}
+
+/// Metadata about a managed store
+#[derive(Clone)]
+pub struct StoreInfo {
     pub id: Uuid,
-    pub store: KvStore,
     pub store_type: StoreType,
     pub peer_manager: Arc<PeerManager>,
 }
 
-impl Clone for ManagedStore {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id,
-            store: self.store.clone(),
-            store_type: self.store_type,
-            peer_manager: self.peer_manager.clone(),
-        }
-    }
+/// A stored entry with both typed and type-erased handles
+struct StoredEntry {
+    typed_handle: Box<dyn Any + Send + Sync>,
+    store_handle: Arc<dyn StoreHandle>,
+    store_type: StoreType,
+    peer_manager: Arc<PeerManager>,
 }
 
 /// A store registry that holds open stores.
@@ -54,7 +64,8 @@ pub struct StoreManager {
     registry: Arc<StoreRegistry>,
     event_tx: broadcast::Sender<NodeEvent>,
     net_tx: broadcast::Sender<NetEvent>,
-    stores: RwLock<HashMap<Uuid, ManagedStore>>,
+    stores: RwLock<HashMap<Uuid, StoredEntry>>,
+    openers: RwLock<HashMap<StoreType, Box<dyn StoreOpener>>>,
 }
 
 impl StoreManager {
@@ -64,28 +75,55 @@ impl StoreManager {
         event_tx: broadcast::Sender<NodeEvent>,
         net_tx: broadcast::Sender<NetEvent>
     ) -> Self {
-        Self { 
+        Self {
             registry,
             event_tx,
             net_tx,
             stores: RwLock::new(HashMap::new()),
+            openers: RwLock::new(HashMap::new()),
         }
     }
     
-    /// Get access to all managed stores
-    pub fn stores(&self) -> &RwLock<HashMap<Uuid, ManagedStore>> {
-        &self.stores
+    /// Get the underlying registry for direct store access
+    pub fn registry(&self) -> &Arc<StoreRegistry> {
+        &self.registry
     }
     
-    /// Register a store with its peer_manager. Emits NetEvent::StoreReady.
+    /// Register an opener for a store type.
+    pub fn register_opener(&self, store_type: StoreType, opener: Box<dyn StoreOpener>) {
+        if let Ok(mut openers) = self.openers.write() {
+            openers.insert(store_type, opener);
+        }
+    }
+    
+    /// Open a store by ID and type using the registered opener.
+    /// Does NOT register the store - call register() after.
+    pub fn open(&self, store_id: Uuid, store_type: StoreType) -> Result<OpenedStore, StoreManagerError> {
+        let openers = self.openers.read()
+            .map_err(|_| StoreManagerError::Lock("openers lock poisoned".into()))?;
+        
+        let opener = openers.get(&store_type)
+            .ok_or_else(|| StoreManagerError::NoOpener(store_type))?;
+        
+        opener.open(&self.registry, store_id)
+    }
+    
+    /// Create a new store with a fresh UUID.
+    /// Does NOT register the store - call register() after.
+    pub fn create(&self, store_type: StoreType) -> Result<(Uuid, OpenedStore), StoreManagerError> {
+        let store_id = Uuid::new_v4();
+        let opened = self.open(store_id, store_type)?;
+        Ok((store_id, opened))
+    }
+    
+    /// Register an opened store with its peer_manager. Emits NetEvent::StoreReady.
     pub fn register(
         &self, 
-        store: KvStore, 
+        store_id: Uuid,
+        opened: OpenedStore,
         store_type: StoreType,
-        peer_manager: Arc<PeerManager>
+        peer_manager: Arc<PeerManager>,
     ) -> Result<(), StoreManagerError> {
-        let store_id = store.id();
-        
         {
             let mut stores = self.stores.write()
                 .map_err(|_| StoreManagerError::Lock("stores lock poisoned".into()))?;
@@ -94,14 +132,14 @@ impl StoreManager {
                 return Ok(()); // Already registered
             }
             
-            stores.insert(store_id, ManagedStore {
-                id: store_id,
-                store,
+            stores.insert(store_id, StoredEntry {
+                typed_handle: opened.typed_handle,
+                store_handle: opened.store_handle,
                 store_type,
                 peer_manager,
             });
             
-            info!(store_id = %store_id, "Registered store");
+            info!(store_id = %store_id, store_type = %store_type, "Registered store");
         }
         
         // Emit events (outside lock)
@@ -111,20 +149,48 @@ impl StoreManager {
         Ok(())
     }
     
-    /// Get a managed store by ID.
-    pub fn get(&self, store_id: &Uuid) -> Option<ManagedStore> {
+    /// Get a typed handle by ID. Returns None if not found or wrong type.
+    pub fn get<H: Any + Clone + 'static>(&self, store_id: &Uuid) -> Option<H> {
         let stores = self.stores.read().ok()?;
-        stores.get(store_id).cloned()
+        let entry = stores.get(store_id)?;
+        entry.typed_handle.downcast_ref::<H>().cloned()
     }
     
-    /// Get just the store handle by ID.
-    pub fn get_store(&self, store_id: &Uuid) -> Option<KvStore> {
-        self.get(store_id).map(|m| m.store)
+    /// Get a StoreHandle by ID. Returns None if not found.
+    pub fn get_handle(&self, store_id: &Uuid) -> Option<Arc<dyn StoreHandle>> {
+        let stores = self.stores.read().ok()?;
+        let entry = stores.get(store_id)?;
+        Some(entry.store_handle.clone())
+    }
+    
+    /// Get store metadata by ID.
+    pub fn get_info(&self, store_id: &Uuid) -> Option<StoreInfo> {
+        let stores = self.stores.read().ok()?;
+        let entry = stores.get(store_id)?;
+        Some(StoreInfo {
+            id: *store_id,
+            store_type: entry.store_type,
+            peer_manager: entry.peer_manager.clone(),
+        })
     }
     
     /// Get the peer_manager for a store.
     pub fn get_peer_manager(&self, store_id: &Uuid) -> Option<Arc<PeerManager>> {
-        self.get(store_id).map(|m| m.peer_manager)
+        self.get_info(store_id).map(|info| info.peer_manager)
+    }
+    
+    /// List all store IDs.
+    pub fn store_ids(&self) -> Vec<Uuid> {
+        self.stores.read()
+            .map(|s| s.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+    
+    /// List all stores with their types.
+    pub fn list(&self) -> Vec<(Uuid, StoreType)> {
+        self.stores.read()
+            .map(|s| s.iter().map(|(id, entry)| (*id, entry.store_type)).collect())
+            .unwrap_or_default()
     }
     
     /// Close a store (remove from registry).
@@ -138,37 +204,17 @@ impl StoreManager {
         info!(store_id = %store_id, "Closed store");
         Ok(())
     }
-    
-    /// Open a store by ID via the registry (does NOT register).
-    pub fn open(&self, store_id: Uuid) -> Result<KvStore, StoreManagerError> {
-        let (store, _) = self.registry.get_or_open(store_id, |path| {
-            KvState::open(path).map_err(|e| lattice_kernel::store::StateError::Backend(e.to_string()))
-        }).map_err(|e| StoreManagerError::Registry(e.to_string()))?;
-        
-        Ok(KvHandle::new(store))
-    }
-    
-    /// Create a new store with a fresh UUID (does NOT register).
-    pub fn create(&self) -> Result<KvStore, StoreManagerError> {
-        let store_id = Uuid::new_v4();
-        self.open(store_id)
-    }
 }
 
 impl NetworkStoreRegistry for StoreManager {
     fn get_network_store(&self, id: &Uuid) -> Option<NetworkStore> {
         let stores = self.stores.read().ok()?;
-        let managed = stores.get(id)?;
+        let entry = stores.get(id)?;
         
-        let sync = std::sync::Arc::new(managed.store.writer().clone());
-        let peer = managed.peer_manager.clone();
-        
-        Some(NetworkStore::new(*id, sync, peer))
+        Some(NetworkStore::new(*id, entry.store_handle.as_sync_provider(), entry.peer_manager.clone()))
     }
     
     fn list_store_ids(&self) -> Vec<Uuid> {
-        self.stores.read()
-            .map(|s| s.keys().cloned().collect())
-            .unwrap_or_default()
+        self.store_ids()
     }
 }

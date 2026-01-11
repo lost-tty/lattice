@@ -17,18 +17,25 @@ pub mod data_dir;
 pub mod token;
 pub mod store_type;
 pub mod store_manager;
+pub mod store_openers;
+pub mod store_handle;
+
 pub use token::Invite;
-pub use store_type::StoreType;
-pub use store_manager::{StoreManager, StoreManagerError, ManagedStore};
+pub use store_manager::{StoreManager, StoreManagerError, StoreOpener, OpenedStore};
+pub use store_openers::{KvStoreOpener, LogStoreOpener};
 pub use store_registry::StoreRegistry;
+pub use store_handle::StoreHandle;
+
+// Re-export StoreType from lattice-model (canonical location)
+pub use lattice_model::StoreType;
 
 // Re-export from lattice-kernel (replication engine)
 pub use lattice_kernel::{
     NodeIdentity, PeerStatus,
     Entry, SignedEntry,
-    StateError, Store, StoreInfo, OpenedStore,
+    StateError, Store, StoreInfo,
     ReplicationController, ReplicationControllerCmd, ReplicationControllerError,
-    LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded,
+    LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded, SyncProvider,
     MAX_ENTRY_SIZE,
 };
 
@@ -55,3 +62,10 @@ pub use lattice_kvstate::{Head, KvHandle};
 
 /// Type alias for the KvHandle wrapping a Store.
 pub type KvStore = KvHandle<Store<KvState>>;
+
+// Re-export from lattice-logstore
+use lattice_logstore::LogState;
+pub use lattice_logstore::LogHandle;
+
+/// Type alias for the LogHandle wrapping a Store.
+pub type LogStore = LogHandle<Store<LogState>>;

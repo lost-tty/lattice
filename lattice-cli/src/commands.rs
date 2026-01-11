@@ -1,10 +1,9 @@
 //! CLI command handlers
 
 use crate::{mesh_commands, node_commands, store_commands};
-use lattice_node::{Node, KvStore, Mesh};
+use lattice_node::{Node, Mesh};
 use lattice_net::MeshService;
 use clap::{Parser, Subcommand, CommandFactory};
-use lattice_model::CommandDispatcher;
 use rustyline_async::SharedWriter;
 use std::sync::Arc;
 use std::io::Write;
@@ -22,12 +21,15 @@ macro_rules! wout {
 /// Shared writer type for async output - SharedWriter is already Clone and internally synchronized
 pub type Writer = SharedWriter;
 
+// Re-export StoreHandle for CLI use - provides id(), store_type(), as_dispatcher(), as_sync_provider()
+pub use lattice_node::StoreHandle;
+
 /// Result of a command that may switch stores or exit
 pub enum CommandResult {
     /// No store change
     Ok,
     /// Switch to this store
-    SwitchTo(KvStore),
+    SwitchTo(Arc<dyn StoreHandle>),
     /// Exit the CLI
     Quit,
 }
@@ -203,7 +205,7 @@ pub enum StoreSubcommand {
 
 pub async fn handle_command(
     node: &Node,
-    store: Option<&KvStore>,
+    store: Option<Arc<dyn StoreHandle>>,
     mesh_network: Option<Arc<MeshService>>,
     mesh: Option<&Mesh>,
     cli: LatticeCli,
@@ -215,12 +217,13 @@ pub async fn handle_command(
             let cmd = LatticeCli::command();
             format_recursive_help(&cmd, "", &mut output);
             
-            // Add dynamic commands from store introspection
-            if let Some(h) = store {
+            // Add dynamic commands from store introspection (works for any store type)
+            if let Some(ctx) = store.as_ref() {
                 use std::fmt::Write;
-                let _ = writeln!(output, "\nStore Operations:");
-                let service = h.service_descriptor();
-                let docs = h.command_docs();
+                let _ = writeln!(output, "\nStore Operations ({}):", ctx.store_type());
+                let dispatcher = ctx.as_dispatcher();
+                let service = dispatcher.service_descriptor();
+                let docs = dispatcher.command_docs();
                 for method in service.methods() {
                     let name = method.name();
                     let name_lower = name.to_lowercase();
@@ -235,11 +238,11 @@ pub async fn handle_command(
             CommandResult::Ok
         }
         LatticeCommand::Node { subcommand } => match subcommand {
-            NodeSubcommand::Status => node_commands::cmd_status(node, store, mesh_network.as_deref(), writer).await,
-            NodeSubcommand::SetName { name } => node_commands::cmd_set_name(node, store, mesh_network.as_deref(), &name, writer).await,
+            NodeSubcommand::Status => node_commands::cmd_status(node, mesh_network.as_deref(), writer).await,
+            NodeSubcommand::SetName { name } => node_commands::cmd_set_name(node, mesh_network.as_deref(), &name, writer).await,
         },
         LatticeCommand::Mesh { subcommand } => match subcommand {
-            MeshSubcommand::Create => mesh_commands::cmd_create(node, store, mesh_network.as_deref(), writer).await,
+            MeshSubcommand::Create => mesh_commands::cmd_create(node, mesh_network.as_deref(), writer).await,
             MeshSubcommand::Join { token } => mesh_commands::cmd_join(node, &token, writer).await,
             other => {
                 // Use passed Mesh (context-aware)

@@ -6,7 +6,7 @@
 
 use crate::commands::{CommandResult, Writer, MeshSubcommand};
 use crate::display_helpers::format_elapsed;
-use lattice_node::{Node, KvStore, PeerStatus, Mesh, token::Invite};
+use lattice_node::{Node, PeerStatus, Mesh, token::Invite};
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
 use chrono::DateTime;
@@ -42,7 +42,7 @@ pub async fn handle_command(
 // ==================== Mesh Commands ====================
 
 /// Create a new mesh
-pub async fn cmd_create(node: &Node, _store: Option<&KvStore>, _mesh: Option<&MeshService>, writer: Writer) -> CommandResult {
+pub async fn cmd_create(node: &Node, _mesh: Option<&MeshService>, writer: Writer) -> CommandResult {
     match node.create_mesh().await {
         Ok(store_id) => {
             let mut w = writer.clone();
@@ -51,7 +51,14 @@ pub async fn cmd_create(node: &Node, _store: Option<&KvStore>, _mesh: Option<&Me
             drop(w);
             // Use the created mesh
             match node.mesh_by_id(store_id) {
-                Some(mesh) => CommandResult::SwitchTo(mesh.root_store().clone()),
+                Some(mesh) => {
+                    // Get StoreHandle from store manager (root store is always registered)
+                    let root_id = mesh.root_store().id();
+                    let store_handle = mesh.store_manager()
+                        .get_handle(&root_id)
+                        .expect("Root store should be registered");
+                    CommandResult::SwitchTo(store_handle)
+                }
                 None => CommandResult::Ok,
             }
         }
@@ -117,7 +124,11 @@ pub async fn cmd_use(node: &Node, mesh_id_prefix: &str, writer: Writer) -> Comma
             match node.mesh_by_id(*mesh_id) {
                 Some(mesh) => {
                     let _ = writeln!(w, "Switched to mesh {}", mesh_id);
-                    CommandResult::SwitchTo(mesh.root_store().clone())
+                    let root_id = mesh.root_store().id();
+                    let store_handle = mesh.store_manager()
+                        .get_handle(&root_id)
+                        .expect("Root store should be registered");
+                    CommandResult::SwitchTo(store_handle)
                 }
                 None => {
                     let _ = writeln!(w, "Mesh {} not loaded. Run 'node start' first.", mesh_id);

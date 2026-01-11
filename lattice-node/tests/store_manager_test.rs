@@ -29,19 +29,16 @@ async fn test_store_declaration_and_reconciliation() {
     
     // 2. Wait for store to be open (watcher should auto-reconcile)
     for _ in 0..20 {
-        let stores = store_manager.stores().read().unwrap();
-        if stores.contains_key(&store_id) {
+        if store_manager.store_ids().contains(&store_id) {
             break;
         }
-        drop(stores);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     
     // Verify it's open in stores
-    {
-        let stores = store_manager.stores().read().unwrap();
-        assert!(stores.contains_key(&store_id), "Store should be open");
-        assert_eq!(stores.get(&store_id).unwrap().store_type, StoreType::KvStore);
+    assert!(store_manager.store_ids().contains(&store_id), "Store should be open");
+    if let Some(info) = store_manager.get_info(&store_id) {
+        assert_eq!(info.store_type, StoreType::KvStore);
     }
     
     // 4. Archive the store (via Mesh)
@@ -53,19 +50,14 @@ async fn test_store_declaration_and_reconciliation() {
     
     // 5. Wait for store to be closed (watcher should auto-close)
     for _ in 0..20 {
-        let stores = store_manager.stores().read().unwrap();
-        if !stores.contains_key(&store_id) {
+        if !store_manager.store_ids().contains(&store_id) {
             break;
         }
-        drop(stores);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     
     // Verify store is not in stores (watcher closed it)
-    {
-        let stores = store_manager.stores().read().unwrap();
-        assert!(!stores.contains_key(&store_id), "Store should be closed");
-    }
+    assert!(!store_manager.store_ids().contains(&store_id), "Store should be closed");
 }
 
 #[tokio::test]
@@ -89,7 +81,7 @@ async fn test_watcher_reacts_to_changes() {
     // Wait for eventual consistency
     let mut found = false;
     for _ in 0..20 {
-        if store_manager.stores().read().unwrap().contains_key(&store_id) {
+        if store_manager.store_ids().contains(&store_id) {
             found = true;
             break;
         }
@@ -102,7 +94,7 @@ async fn test_watcher_reacts_to_changes() {
     
     let mut closed = false;
     for _ in 0..20 {
-        if !store_manager.stores().read().unwrap().contains_key(&store_id) {
+        if !store_manager.store_ids().contains(&store_id) {
             closed = true;
             break;
         }
@@ -134,7 +126,7 @@ async fn test_store_emits_network_event() {
     
     // Wait for watcher to reconcile and open the store
     for _ in 0..20 {
-        if store_manager.stores().read().unwrap().contains_key(&store_id) {
+        if store_manager.store_ids().contains(&store_id) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -180,7 +172,7 @@ async fn test_archived_store_hidden_from_network() {
     
     // Wait for watcher to open the store
     for _ in 0..20 {
-        if store_manager.stores().read().unwrap().contains_key(&store_id) {
+        if store_manager.store_ids().contains(&store_id) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -197,7 +189,7 @@ async fn test_archived_store_hidden_from_network() {
     
     // Wait for watcher to close the store
     for _ in 0..20 {
-        if !store_manager.stores().read().unwrap().contains_key(&store_id) {
+        if !store_manager.store_ids().contains(&store_id) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -247,7 +239,7 @@ async fn test_synced_store_declaration_auto_opened() {
     // Wait for watcher to react to the root store change
     let mut opened = false;
     for _ in 0..30 {
-        if store_manager.stores().read().unwrap().contains_key(&foreign_store_id) {
+        if store_manager.store_ids().contains(&foreign_store_id) {
             opened = true;
             break;
         }
@@ -284,7 +276,7 @@ async fn test_stores_opened_on_startup() {
         
         // Wait for store to be opened
         for _ in 0..20 {
-            if mesh.store_manager().stores().read().unwrap().contains_key(&store_id) {
+            if mesh.store_manager().store_ids().contains(&store_id) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -306,7 +298,7 @@ async fn test_stores_opened_on_startup() {
         
         let mut opened = false;
         for _ in 0..30 {
-            if mesh.store_manager().stores().read().unwrap().contains_key(&store_id) {
+            if mesh.store_manager().store_ids().contains(&store_id) {
                 opened = true;
                 break;
             }

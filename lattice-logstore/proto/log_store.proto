@@ -1,0 +1,41 @@
+syntax = "proto3";
+package lattice.log;
+
+// The Log Store Service - append-only log
+service LogStore {
+    rpc Append (AppendRequest) returns (AppendResponse);
+    rpc Cat (CatRequest) returns (CatResponse);
+    rpc Tail (TailRequest) returns (TailResponse);
+}
+
+// --- Service Request/Response ---
+
+message AppendRequest {
+    bytes content = 1;
+}
+
+message AppendResponse {
+    bytes hash = 1;
+}
+
+message CatRequest {
+    // Empty - returns all entries
+}
+
+message CatResponse {
+    repeated string entries = 1;
+}
+
+message TailRequest {
+    uint64 n = 1;  // Number of entries to return
+}
+
+message TailResponse {
+    repeated string entries = 1;
+}
+
+// --- Payload Type (log entry format) ---
+
+message LogPayload {
+    bytes content = 1;
+}

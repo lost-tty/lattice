@@ -151,51 +151,10 @@ pub trait EntryStreamProvider: Send + Sync {
     fn subscribe_entries(&self) -> Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + Unpin>;
 }
 
-/// The ReplicationEngine trait - core replication + diagnostics.
-/// 
-/// Used by CLI and internal components for log inspection and entry management.
-/// Independent of StateWriter and SyncProvider.
-pub trait ReplicationEngine: Send + Sync {
-    /// Ingest an entry received from the network.
-    /// Validates signature, checks chain continuity, applies to state.
-    fn ingest(&self, entry_bytes: &[u8]) -> Result<IngestResult, ReplicationError>;
-
-    /// Get current sync state for reconciliation.
-    fn sync_state(&self) -> SyncState;
-
-    // --- Log Inspection ---
-
-    /// Get log statistics (authors, entries, orphans)
-    fn log_stats(&self) -> LogStats;
-
-    /// Get list of log files with their paths
-    fn log_paths(&self) -> Vec<LogFileInfo>;
-
-    /// Get chain tip for a specific author (None if author unknown)
-    fn chain_tip(&self, author: &PubKey) -> Option<ChainTip>;
-
-    /// Stream entries in a sequence range for an author.
-    /// If to_seq is 0, stream all entries from from_seq to end.
-    fn stream_entries_in_range(
-        &self,
-        author: &PubKey,
-        from_seq: u64,
-        to_seq: u64,
-    ) -> Result<EntryStream<'_>, ReplicationError>;
-
-    // --- Orphan Management ---
-
-    /// List all orphaned entries
-    fn orphan_list(&self) -> Vec<OrphanInfo>;
-
-    /// Clean up stale orphans, returns count removed
-    fn orphan_cleanup(&self) -> usize;
-}
-
 /// The SyncProvider trait - subscriptions and peer sync state.
 /// 
 /// Used by the network layer for gossip and sync coordination.
-/// Independent of StateWriter and ReplicationEngine.
+/// Independent of StateWriter.
 pub trait SyncProvider: Send + Sync {
     /// Store ID (UUID bytes)
     fn id(&self) -> [u8; 16];

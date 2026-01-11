@@ -11,6 +11,7 @@ pub mod entry;
 pub mod proto;
 pub mod store;
 pub mod sync_provider;
+pub mod store_inspector;
 
 // Constants
 /// Maximum size of a serialized SignedEntry (32 KiB)
@@ -23,7 +24,8 @@ pub use entry::{Entry, SignedEntry};
 pub use lattice_model::{NodeError, NodeIdentity, PeerStatus};
 
 // Store exports (replication engine)
-pub use store::{LogError, MissingRange, SyncDiscrepancy, SyncNeeded, SyncState};
+pub use store::{LogError, MissingRange, SyncDiscrepancy, SyncNeeded, SyncState, OrphanInfo, GapInfo};
 pub use store::{OpenedStore, Store, StoreInfo, StateError};
 pub use store::{ReplicationController, ReplicationControllerCmd, ReplicationControllerError};
 pub use sync_provider::SyncProvider;
+pub use store_inspector::{StoreInspector, LogStats, LogPathInfo};

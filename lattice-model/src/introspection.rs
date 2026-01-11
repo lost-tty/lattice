@@ -59,17 +59,9 @@ pub trait Introspectable: Send + Sync {
 /// Execute commands dynamically against a state machine.
 ///
 /// Implemented by handles (e.g., `KvHandle`) that combine read access (via state)
-/// and write access (via StateWriter). This is the unified interface for CLI/API.
-pub trait CommandDispatcher: Send + Sync {
-    /// Returns the service descriptor for introspection.
-    fn service_descriptor(&self) -> ServiceDescriptor;
-
-    /// Returns documentation for available commands.
-    fn command_docs(&self) -> std::collections::HashMap<String, String>;
-
-    /// Returns specific formatting hints for fields.
-    fn field_formats(&self) -> std::collections::HashMap<String, FieldFormat>;
-
+/// and write access (via StateWriter). Extends Introspectable so all introspection
+/// methods are available via CommandDispatcher.
+pub trait CommandDispatcher: Introspectable {
     /// Execute a command dynamically.
     ///
     /// Takes a method name (e.g., "Put", "Get") and a DynamicMessage request.

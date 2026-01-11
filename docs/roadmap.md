@@ -82,14 +82,26 @@ Root store as control plane: store declarations in `/stores/`, StoreManager with
 
 **Goal:** Create a specialized `ChatRoom` to demonstrate `lattice` as a messaging platform.
 
-### 7A: Chat Module
-- [ ] `ChatState`: Append-only list of messages (no KV overhead).
-- [ ] `post(text)`, `reply(ref, text)`, `react(ref, emoji)`.
-- [ ] Causal sorting: Ensure replies render after parents.
+**Design Document:** [`docs/chatroom.md`](docs/chatroom.md)
 
-### 7B: CLI Chat Client
-- [ ] `chat post <msg>`, `chat ls` (render thread).
-- [ ] Real-time updates via `watch()`.
+### 7A: Chat Engine (`lattice-chat`)
+- [ ] Create `lattice-chat` crate.
+- [ ] Implement `ChatState` (custom `StateMachine`, not `KvState`).
+- [ ] Implement `apply()` for `Post`, `Reply`, `React`.
+- [ ] `ChatRoom` API wrapper for managing `Store<ChatState>`.
+
+### 7B: Channel Directory
+- [ ] Schema for channel registry in Root Store (`/channels/{name}`).
+- [ ] `ChannelManager`: `create_channel`, `join_channel`, `list_channels`.
+
+### 7C: CLI Client
+- [ ] `lattice chat join #channel`, `lattice chat msg #channel`.
+- [ ] TUI (Text User Interface) or watch-mode output.
+
+### 7D: IRC Gateway
+- [ ] TCP Server listening on 6667.
+- [ ] Translate IRC commands (`JOIN`, `PRIVMSG`) to Lattice ops.
+
 
 ---
 

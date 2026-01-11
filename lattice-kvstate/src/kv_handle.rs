@@ -147,10 +147,28 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
     }
 }
 
-// Implement CommandDispatcher trait for KvHandle (Roadmap 4E)
+// Implement CommandDispatcher trait for KvHandle (only dispatch - introspection via Introspectable)
 impl<W: StateWriter + AsRef<KvState> + Send + Sync> CommandDispatcher for KvHandle<W> {
+    fn dispatch<'a>(
+        &'a self,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+        Box::pin(async move {
+            // Delegate to the inherent async method
+            KvHandle::dispatch(self, method_name, request).await
+        })
+    }
+}
+
+// Implement Introspectable trait for KvHandle (delegates to state)
+impl<W: StateWriter + AsRef<KvState> + Send + Sync> lattice_model::Introspectable for KvHandle<W> {
     fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
         self.state().service_descriptor()
+    }
+
+    fn decode_payload(&self, payload: &[u8]) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+        self.state().decode_payload(payload)
     }
 
     fn command_docs(&self) -> std::collections::HashMap<String, String> {
@@ -161,15 +179,12 @@ impl<W: StateWriter + AsRef<KvState> + Send + Sync> CommandDispatcher for KvHand
         self.state().field_formats()
     }
 
-    fn dispatch<'a>(
-        &'a self,
-        method_name: &'a str,
-        request: prost_reflect::DynamicMessage,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
-        Box::pin(async move {
-            // Delegate to the inherent async method
-            KvHandle::dispatch(self, method_name, request).await
-        })
+    fn matches_filter(&self, payload: &prost_reflect::DynamicMessage, filter: &str) -> bool {
+        self.state().matches_filter(payload, filter)
+    }
+
+    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<String> {
+        self.state().summarize_payload(payload)
     }
 }
 

@@ -5,6 +5,7 @@
 
 use std::fmt::Write;
 use lattice_model::types::{PubKey, Hash};
+use crate::display_helpers::{author_color, ansi_code};
 
 // Character codes for grid cells
 pub const SPACE: u8 = 0;
@@ -510,9 +511,8 @@ pub fn render_dag(
         let col = hash_to_col[hash];
         let grid_x = col * 2;
         
-        // Generate color based on author hash (use first bytes to pick from 6 colors)
-        // Avoid black (30) and white (37) for better visibility
-        let color_code = 31 + (entry.author[0] % 6); // 31-36: red, green, yellow, blue, magenta, cyan
+        // Generate consistent color based on author (via display_helpers)
+        let color_code = ansi_code(author_color(&entry.author));
         
         // Count parents in our entry set (not all parents may be in filtered history)
         let parents_in_set: Vec<Hash> = entry.causal_deps.iter()

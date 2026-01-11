@@ -14,6 +14,7 @@ pub mod introspection;
 pub mod peer_provider;
 pub mod net_event;
 pub mod node_provider;
+pub mod store_type;
 
 // Re-exports from dependencies
 pub use uuid::Uuid;
@@ -26,7 +27,7 @@ pub use log_traits::{LogEntry, LogManager, ChainTipInfo, LogValidation, Identity
 pub use introspection::{Introspectable, CommandDispatcher, FieldFormat};
 pub use replication::{
     // Traits
-    ReplicationEngine, SyncProvider,
+    SyncProvider,
     // Types
     ReplicationError, IngestResult, SyncState,
     ChainTip, OrphanInfo, LogFileInfo, LogStats,
@@ -36,3 +37,4 @@ pub use node_identity::{NodeIdentity, NodeError, PeerStatus};
 pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream, GossipPeer};
 pub use net_event::NetEvent;
 pub use node_provider::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
+pub use store_type::{StoreType, ParseStoreTypeError};
