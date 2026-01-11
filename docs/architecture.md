@@ -1,6 +1,18 @@
 # Architecture
 
-## Ideas
+## Terminology
+
+- **Lattice**: The distributed storage system (this software)
+- **Mesh**: A group of nodes sharing a root store + subordinated stores (the cluster they form)
+- **Node**: A single Lattice instance with its own identity (keypair)
+- **Store**: A replicated key-value store with SigChain entries
+- **Root Store**: The mesh control plane containing peer list, store declarations, and configuration
+- **Subordinated Store**: Application stores declared in root store, sharing the mesh peer list
+- **SigChain**: An append-only, hash-chained log of signed entries per author
+- **Entry**: A signed, timestamped operation in a SigChain
+- **MeshNetwork**: The network layer providing sync/gossip/join operations
+
+## Design Principles
 
 **Core:**
 - SigChains: Ed25519-signed, hash-chained append-only logs per node.
@@ -9,105 +21,62 @@
 
 **State:**
 - Log-Based State: KV store derived from entries. Watermarks enable pruning + snapshots.
-- Merkle-ized State: state.db as Merkle tree. O(1) sync checks, efficient diffing, light clients.
 - DAG Conflict Resolution: Entries track ancestry. Forks merge on next write. Tips only in state.db.
-- KV Snapshots: Point-in-time snapshots for log pruning, fast bootstrap, time travel.
-
-**Action-Based Mutation (Monoid Action):**
-- **State Space (S):** The persistent store (KV, Graph, etc.).
-- **Patch Monoid (P):** A description of changes (deltas) that can be combined (`p1 + p2`). Identity = empty patch.
-- **Action (⋅):** Application of patch to state (`S × P → S`).
-- **Plan Phase (Functional):** Logic reads `S`, calculates `P`. Pure, functional, parallelizable.
-- **Commit Phase (Imperative):** `StateBackend` performs the action `S' = S ⋅ P` atomically.
-- **Benefit:** Decouples logical intent (Patch) from storage mechanics (Backend). Enables complex CRDT merges vs simple KV puts.
 
 **Operations:**
 - Atomic Batch Writes: Multiple key updates as single entry.
 - Conditional Updates (CAS): Update only if current value matches expected hash.
 
-**Content-Addressable Store (CAS):** Pressure-based blob storage with automatic caching.
-
-- Separate `lattice-cas` crate for clean boundaries.
-- Optional per-node blob storage by content hash.
-- Not all nodes required to store blobs (heterogeneous storage).
-
-**Two-Tier Storage:**
-
-| Tier   | Status         | KV State                            | Deletion Policy                             |
-|--------|----------------|-------------------------------------|---------------------------------------------|
-| Tier 1 | Pinned         | Key `/cas/pins/{me}/{hash}` exists  | Protected. Never deleted automatically.     |
-| Tier 2 | Cached         | No pin key exists, but file on disk | Volatile. Deleted only under disk pressure. |
-
-**Pin Map Schema** (`/cas/pins/{node_id}/{hash}`):
-- `pending` = "Please fetch this." (Trigger download)
-- `stored` = "I have this and it is Pinned." (Protected)
-- [Key Deleted] = "I no longer require this." (Demotion to cache)
-
-**Demotion Logic**: When pin removed, file is NOT deleted—just demoted to Tier 2 cache. Survives until disk pressure evicts it.
-
-**Garbage Collector** (LRU):
-- Config: `storage_quota` (soft limit), `min_free_space` (hard limit)
-- Trigger: `(TotalData > quota) OR (DiskFree < min_free_space)`
-- Algorithm:
-  1. List all blob files
-  2. Filter out pinned blobs (have `/cas/pins/{me}/{hash}` key)
-  3. Sort by access time (atime/mtime)
-  4. Delete oldest until pressure relieved
-  5. Update `/blobs/{hash}/nodes/{me}` (global discovery)
-
-**Access Time Tracking**: `cas.get(hash)` must "touch" file to update atime for LRU.
-
-**Zombie Redundancy** (network benefit):
-- Pin on 3 nodes → 3 protected copies
-- Other 97 nodes may have cached copies (Tier 2)
-- If all 3 pinned nodes offline → data still alive on cache nodes until they need space
-- Effective redundancy exceeds explicit pin count
-
-**Manifests** (for scale):
-
-Decouples file count from KV entry count. Instead of 1M files = 1M KV entries, use lightweight manifest blobs.
-
-- **Manifest Blob**: Content-addressed list of hashes (like Git Trees)
-  ```
-  hash: blake3(content)
-  content: [hash1, hash2, hash3, ...]  // or nested manifest hashes
-  ```
-- **Recursive Pinning**: Pinning a manifest implicitly pins all referenced blobs
-  - Pin `/cas/pins/{me}/{manifest_hash}` → protect manifest + all children
-  - No need for individual pin entries per file
-- **Graph-Aware GC**: Before deleting any blob, GC walks pinned manifests
-  - Build reachability set from all pinned manifest roots
-  - Only evict blobs not in reachability set
-  - Prevents orphaning files referenced by manifests
-- **Use Cases**: 
-  - Directory snapshots (manifest = list of file hashes)
-  - Large datasets (manifest = chunks of a file)
-  - Backup sets (manifest = collection of snapshots)
-
 **CRDTs:**
 - LWW-Register: Last-writer-wins for single values.
 - LWW-Element-Set: Set with add/remove, element present if add > remove timestamp.
-
-## Terminology
-
-- **Lattice**: The distributed storage system (this software)
-- **Mesh**: A group of nodes sharing a root store + subordinated stores (the cluster they form)
-- **Node**: A single Lattice instance with its own identity (keypair)
-- **Store**: A replicated key-value store with SigChain entries
-- **Root Store**: The mesh control plane containing peer list and store declarations
-- **Subordinated Store**: Application stores declared in root store, sharing the mesh peer list
-- **MeshNetwork**: The network layer providing sync/gossip/join operations
-- **MeshEngine**: Component handling outbound sync and connection operations
 
 ## Concepts
 
 - Transitive Pairing: Nodes can introduce new nodes to the mesh.
 - Multi-Mesh: A node can participate in multiple meshes (clusters). Each mesh is a group of nodes sharing data.
-- Manifest Store: Joining a mesh means joining a special KV store of type "manifest" that defines the mesh membership. The manifest contains node info (`/nodes/{pubkey}/...`).
+- Root Store: Joining a mesh means joining the Root Store which defines mesh membership. Contains node info (`/nodes/{pubkey}/...`).
 
 ## Crate Architecture
 
 The system is composed of strictly layered crates to separate concerns:
+
+```mermaid
+graph TB
+    subgraph "Executables"
+        CLI["lattice-cli<br/>(gRPC client)"]
+        DAEMON["lattice-daemon<br/>(orchestrator)"]
+    end
+    
+    subgraph "Runtime"
+        NODE["lattice-node<br/>(composition)"]
+        NET["lattice-net<br/>(P2P/gossip)"]
+        RPC["lattice-rpc<br/>(gRPC server)"]
+    end
+    
+    subgraph "Core"
+        KERNEL["lattice-kernel<br/>(replication)"]
+        KV["lattice-kvstore<br/>(state machine)"]
+    end
+    
+    subgraph "Foundation"
+        MODEL["lattice-model<br/>(types/traits)"]
+        PROTO["lattice-proto<br/>(protobuf)"]
+    end
+    
+    CLI --> RPC
+    DAEMON --> NODE
+    DAEMON --> NET
+    DAEMON --> RPC
+    NODE --> KERNEL
+    NODE --> KV
+    NODE --> NET
+    NET --> PROTO
+    KERNEL --> MODEL
+    KV --> MODEL
+    KV --> PROTO
+    RPC --> PROTO
+```
 
 ### 1. `lattice-model` (Base)
 - **Responsibility**: Pure data types and traits.
@@ -118,9 +87,65 @@ The system is composed of strictly layered crates to separate concerns:
 - **Responsibility**: Concrete Key-Value state machine implementation.
 - **Content**: `KvState` implementing `StateMachine`, `KvStateActor`, `KvStateHandle`.
 - **Client API**: `get()`, `list()`, `put()`, `delete()`, `watch()` - clients interact directly.
-- **Storage**: Uses `redb` for persistent local state.
+- **Storage**: Uses `StorageBackend` trait (see below). Default: `RedbBackend`.
 - **Logic**: Handles KV-specific conflicts (LWW, Tombstones, DAG resolution).
 - **Dependencies**: `lattice-model`, `lattice-proto`.
+
+### 2b. `StorageBackend` Trait (Planned - M8)
+
+Both `lattice-kvstore` and `lattice-kernel` use a generic storage interface instead of `redb` directly:
+
+```
+┌─────────────────────────────────────────┐
+│  State Machines (LogStore, KvStore)     │  → writes Collection::Data
+├─────────────────────────────────────────┤
+│  Kernel (SigChainManager)               │  → writes Collection::Meta
+├─────────────────────────────────────────┤
+│  StorageBackend trait + Collections     │  ← Defined in lattice-model
+├─────────────────────────────────────────┤
+│  RedbBackend │ MemoryBackend │ Flash    │  ← Swappable implementations
+└─────────────────────────────────────────┘
+```
+
+**Column Families (Namespace Isolation):**
+
+| Collection | ID | Purpose | Who writes |
+|------------|----|---------|------------|
+| `Data`     | 0  | User key-value space | State machine |
+| `Meta`     | 1  | Frontiers, tips, state hash | Kernel |
+| `Index`    | 2  | Sidecar indexes (Negentropy) | Kernel |
+
+**Traits:**
+- **`StorageBackend`**: `get(col, key)`, `transaction()`
+- **`StorageTransaction`**: `get`, `set`, `delete`, `scan`, `commit`
+
+**Implementations:**
+- `RedbBackend`: Maps collections to separate redb tables
+- `MemoryBackend`: Prefix-encodes collection ID `[col_id][key]`
+- `FlashBackend`: Embedded/RP2350 (sequential-storage)
+
+**Kernel-Owns-Meta Pattern:**
+
+After `state_machine.apply_op()` returns, the kernel writes chain metadata:
+
+```rust
+fn ingest_entry(&mut self, entry: SignedEntry, txn: &mut dyn StorageTransaction) {
+    // State machine writes to Collection::Data
+    self.state_machine.apply_op(&entry.payload, txn);
+    
+    // Kernel writes to Collection::Meta (state machine can't touch this)
+    txn.set(Collection::Meta, &tip_key, &entry.hash)?;
+    txn.set(Collection::Meta, &seq_key, &entry.seq.to_le_bytes())?;
+    
+    txn.commit()?;  // Atomic: both Data and Meta committed together
+}
+```
+
+**Benefits:**
+- User keys can never collide with system metadata
+- Wasm guests only see `Collection::Data` — sandboxed
+- Atomic consistency between user data and chain state
+- Same abstraction works on redb (tables) and embedded (prefix encoding)
 
 ### 3. `lattice-kernel` (Replication Engine)
 - **Responsibility**: Replication, log management, sync protocol.
@@ -136,9 +161,35 @@ The system is composed of strictly layered crates to separate concerns:
 - **Dependencies**: `lattice-proto`, `iroh`.
 
 ### 5. `lattice-node` (The Glue)
-- **Responsibility**: Runtime composition.
+- **Responsibility**: Runtime composition. Pure library, embeddable in iOS/GUI apps.
 - **Action**: Instantiates `ReplicatedState<KvState>`, connects to `Network`.
 - **Dependencies**: All above.
+
+### 6. `lattice-daemon` (The Executable)
+- **Responsibility**: Thin orchestration layer for headless operation.
+- **Content**: Config loading, component wiring, lifecycle management, signal handling.
+- **NOT responsible for**: Business logic, networking, storage, RPC handling.
+- **Dependencies**: `lattice-node`, `lattice-net`, `lattice-rpc`.
+
+```rust
+// Conceptually ~200-500 lines
+async fn main() {
+    let node = Node::open(&config.data_dir).await?;
+    let mesh = MeshService::new(node.clone()).await?;
+    let rpc = RpcServer::new(node.clone(), &socket_path)?;
+    
+    tokio::select! {
+        _ = mesh.run() => {},
+        _ = rpc.run() => {},
+        _ = shutdown_signal() => {},
+    }
+}
+```
+
+### 7. `lattice-cli` (The Client)
+- **Responsibility**: Thin gRPC client for user interaction.
+- **Content**: Command parsing, RPC calls, output formatting.
+- **Dependencies**: `lattice-rpc` (client stubs only).
 
 ### Compositional Pattern: ReplicatedState
 
@@ -635,50 +686,19 @@ Fast path (1-3): durable + distributed. Background (4): queryable state.
 - If a new entry references a parent that was pruned, accept it only if strictly newer than snapshot timestamp.
 - Snapshots act as the base; entries referencing parents older than snapshot are roots relative to that snapshot.
 
-### Rich CRDTs (Future)
+### Custom CRDTs via Wasm (M11)
 
-Instead of a generic scripting language, use specific data types that merge better than LWW.
+With Wasm state machines (Roadmap M11), applications can implement custom CRDTs beyond the built-in LWW:
 
-Extend value types in redb:
+- **PN-Counters**: Increment/decrement with automatic merge
+- **OR-Sets**: Observed-Remove Sets for group membership
+- **Custom merge logic**: Any CRDT expressible in Wasm
 
-```rust
-enum ReplicatedValue {
-    LWW(Vec<u8>),          // Standard Last-Write-Wins (current model)
-    Counter(i64),          // PN-Counter (Increment/Decrement)
-    Set(HashSet<Vec<u8>>), // OR-Set (Observed-Remove Set)
-}
-```
+The kernel provides LWW registers and append-only logs. Applications build richer data types on top via Wasm state machines.
 
-**Counter** (for "storage used" etc.):
-- State is `{node_id: value}` map. Merge = sum all nodes. No conflicts possible.
+## Compute Model (Future)
 
-**OR-Set** (for group membership etc.):
-- Merge = union. Element present if add timestamp > remove timestamp.
-
-**Op Code Compromise**: Use commutative operations instead of a VM:
-
-```protobuf
-message Entry {
-  oneof operation {
-    PutOp put = 1;
-    DeleteOp delete = 2;
-    MergeOp merge = 3;
-  }
-}
-
-message MergeOp {
-  string key = 1;
-  oneof payload {
-    int64 counter_delta = 2;
-    bytes set_add_member = 3;
-    bytes set_remove_member = 4;
-  }
-}
-```
-
-Recommendation: Use Put/Delete for 90% of data. Add CRDT primitives only when needed (concurrent counters, lists) rather than a scripting language.
-
-## Worker Pattern: Remote StateMachines
+### Remote StateMachines (Workers)
 
 **Concept**: Decoupling the `ReplicaController` (P2P/Logs) from the `StateMachine` (Logic) allows for **Headless Workers**.
 
@@ -701,9 +721,9 @@ A Worker Node is a compute unit that does not run the full P2P stack. It connect
 - **Independent Scaling**: Scale compute (workers) separately from networking (gateways).
 - **Security**: Workers can run in isolated environments (containers/Lambdas).
 
-## Open Questions
+## Security Model
 
-### Two-Layer Security Model
+### Two-Layer Security
 
 Since the Core (Network/Log) doesn't understand the Data (State), security splits into two layers:
 
@@ -765,11 +785,17 @@ impl StateMachine for FileSystemState {
 
 **Q:** If StateMachine rejects a write, shouldn't we delete it from the log?
 
-**A:** No. In a DAG system, future valid operations may causally depend on that entry. Deleting creates orphans.
+**A:** No. This is a *State Machine Rejection*, not a *SigChain Rejection*.
+
+- **SigChain accepts it**: The entry is validly signed, has correct sequence number, and links to its parent. The SigChain is append-only and cannot reject a cryptographically valid entry.
+- **State Machine ignores it**: The entry violates business logic (e.g., unauthorized operation). It is treated as a no-op — no state change occurs, but the entry remains in the log.
+
+**Why keep rejected entries?**
+In a DAG system, future valid operations may causally depend on that entry. Deleting it would create orphans and break causal consistency.
 
 **Correct Approach:** 
 - Entry stays in log (cryptographically valid, causally linked)
-- StateMachine renders it invisible (consumes space, produces no state)
+- StateMachine renders it invisible (consumes space, produces no state effect)
 
 #### Read Permissions
 
@@ -778,7 +804,7 @@ Read permissions are not cryptographically enforceable:
 - Encryption adds a layer but doesn't solve revocation
 - Read-only nodes replicate and verify but can't contribute entries
 
-### Zero-Knowledge of Peer Authorization (ACLs) - IMPLEMENTED
+### PeerProvider Architecture
 
 **Solution:** Registry + Dependency Injection with `PeerProvider` trait.
 
@@ -798,7 +824,6 @@ The Root Store acts as the **Identity Provider** (Kernel), providing "User Space
                     │              │ (HashMap)       ││
                     │              ▼                 ││
                     │  ┌─────────────────────────┐   ││
-                    │  │  PeerProvider trait     │◀──┘│
                     │  │  verify_peer_status()   │    │
                     │  └───────────┬─────────────┘    │
                     │              │ injected via Arc │
@@ -841,7 +866,9 @@ The Root Store acts as the **Identity Provider** (Kernel), providing "User Space
 - **Thin Subordinates**: Focus on their domain, delegate auth to Root
 - **Protocol Agnostic**: UUIDs route to appropriate handles
 
-### Denial of Service (DoS) via Gossip
+### Known Security Issues
+
+#### Denial of Service (DoS) via Gossip
 
 **The Issue:** GossipManager accepts messages from any active peer.
 
@@ -849,7 +876,7 @@ The Root Store acts as the **Identity Provider** (Kernel), providing "User Space
 
 **Remediation:** Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 
-### Token Consumption Race Condition
+#### Token Consumption Race Condition
 
 **The Issue:** `Mesh::consume_invite_secret()` has a check-then-delete race condition.
 
@@ -859,7 +886,7 @@ The Root Store acts as the **Identity Provider** (Kernel), providing "User Space
 
 **Future Remediation:** Wrap the critical section in a `tokio::sync::Mutex` on the `Mesh` struct, or implement atomic delete-and-return if the store supports it.
 
-### Peer Authorization During Replay
+#### Peer Authorization During Replay
 
 *Key distinction:*
 - Signature verification: Is Ed25519 signature valid? (always verifiable)
@@ -914,3 +941,29 @@ To ensure the `StateMachine` is truly independent of the replication log (enabli
     - **Isolation**: Does not import `lattice-kernel` or `Entry` protobufs. Purely materializes state from payload bytes.
 
 This strict layering prevents "leakage" of log-specific concerns (like seq numbers or signatures) into the business logic.
+
+## Service Architecture
+
+Lattice adopts a **Daemon/Client** architecture (see Roadmap M7) to ensure stability, security, and multi-client support.
+
+### The Daemon Pattern
+
+The **`latticed` daemon** is the single long-running process that manages state, P2P networking, and replication.
+
+1. **`latticed` (Daemon)**: Hosts Node, P2P Networking, Storage. Exposes gRPC API over UDS.
+2. **`lat` (CLI)**: Thin gRPC client for user interaction.
+3. **GUI/Web Clients**: Connect to same daemon via RPC.
+
+### Why This Split?
+- **Stability**: Multiple clients can connect/disconnect without affecting the daemon.
+- **Security**: Daemon runs with minimal privileges; clients authenticate via socket.
+- **Concurrency**: CLI, GUI, and background jobs can operate simultaneously.
+
+### Future: Plugin Services
+
+For application-specific logic (e.g., IRC gateway, file sync daemon), services could connect as external processes:
+
+- **Consent Firewall**: Services only run if explicitly enabled in local config.
+- **Cluster Config**: Defines "Intent" (e.g., "Run IRC Gateway on all nodes").
+- **Local Config**: Defines "Consent" (e.g., "This node approves IRC Gateway").
+- **Runtime**: Service only spawns if Intent + Consent both agree.
