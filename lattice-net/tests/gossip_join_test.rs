@@ -85,7 +85,7 @@ async fn test_production_flow_gossip() {
     // === Session 1: Node A runs `lattice init` ===
     let mesh_id;
     {
-        let node_a = Arc::new(NodeBuilder::new().data_dir(data_a.clone()).build().expect("node a"));
+        let node_a = Arc::new(NodeBuilder::new(data_a.clone()).build().expect("node a"));
         mesh_id = node_a.create_mesh().await.expect("init a");
         // Node A exits after init - explicit shutdown required for clean DB release
         node_a.shutdown().await;
@@ -93,7 +93,7 @@ async fn test_production_flow_gossip() {
     
     // === Session 2: Both nodes run `lattice daemon` ===
     // Node A: already initialized, will call start()
-    let node_a = Arc::new(NodeBuilder::new().data_dir(data_a.clone()).build().expect("node a session 2"));
+    let node_a = Arc::new(NodeBuilder::new(data_a.clone()).build().expect("node a session 2"));
     
     let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
     node_a.start().await.expect("start a");  // Emits NetworkStore → gossip setup
@@ -103,7 +103,7 @@ async fn test_production_flow_gossip() {
     let store_a = mesh_a.root_store().clone();
     
     // Node B: not yet initialized
-    let node_b = Arc::new(NodeBuilder::new().data_dir(data_b.clone()).build().expect("node b"));
+    let node_b = Arc::new(NodeBuilder::new(data_b.clone()).build().expect("node b"));
     let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
     
     // Add A's address to B's discovery for reliable connection

@@ -21,31 +21,43 @@
 - `lattice-cli` (Binary): The control interface. Connects to Daemon via RPC.
 
 ### 7A: Library Extraction
-- [ ] Ensure `lattice-node` is a pure library (no CLI/binary code)
-- [ ] Move `main.rs` orchestration logic out of library
+- [x] Ensure `lattice-node` is a pure library (no CLI/binary code)
+- [x] Move `main.rs` orchestration logic out of library
 
 ### 7B: Daemon (`latticed`)
-- [ ] New `lattice-daemon` crate with `latticed` binary
-- [ ] Hosts `Node`, P2P Networking, Storage
-- [ ] Exposes gRPC API over UDS (platform-appropriate location):
-  - macOS: `~/Library/Application Support/Lattice/control.sock`
-  - macOS (sandboxed): `~/Library/Group Containers/<team-id>.lattice/control.sock`
-  - Linux: `$XDG_RUNTIME_DIR/lattice/control.sock` or `~/.local/share/lattice/control.sock`
-  - Windows: Named pipe `\\.\pipe\lattice`
-- [ ] File permissions (`0600`) for security
-- [ ] Logging/tracing setup (`tracing-subscriber`, log rotation)
-- [ ] Graceful shutdown with `CancellationToken` for spawned tasks
+- [x] New `lattice-daemon` crate with `latticed` binary
+- [x] Hosts `Node`, P2P Networking, Storage
+- [x] Exposes gRPC API over UDS (`latticed.sock` in data dir)
+- [x] File permissions (protected by parent directory)
+- [x] Logging/tracing setup with verbosity flag
+- [x] Graceful shutdown with signal handling
 
 ### 7C: RPC Protocol (`lattice-rpc`)
-- [ ] Define `LatticeController` and `LatticeStore` gRPC services
-- [ ] Implement `lattice-rpc` crate (generic over transport)
-- [ ] Refactor `handle_peer_request` dispatch loop to use `irpc` for proper RPC semantics
+- [x] Define `NodeService`, `MeshService`, `StoreService`, `DynamicStoreService` in daemon.proto
+- [x] Implement `lattice-rpc` crate with tonic UDS server
+- [x] Implement MeshService RPCs (Create, List, GetStatus, Join, Peers, Invite, Revoke)
+- [x] Implement StoreService RPCs (Create, List, GetStatus, Delete, Sync, Debug, History, AuthorState, OrphanCleanup)
+- [x] Implement DynamicStoreService (Exec, ListMethods)
 
 ### 7D: CLI Client
-- [ ] Refactor `lattice-cli` with swappable backend (`LatticeClient` trait)
-- [ ] **Daemon mode** (default): Connects to `latticed` via RPC socket
-- [ ] **Embedded mode** (`--embedded`): Runs `Node` in-process (current behavior, for dev/testing)
-- [ ] Supports concurrent clients (CLI + GUI + Web)
+- [x] `LatticeBackend` trait abstraction (backend.rs)
+- [x] `InProcessBackend` - wraps Node/MeshService (embedded mode)
+- [x] `RpcBackend` - wraps RpcClient (daemon mode)
+- [x] --daemon/-d flag selects RPC mode
+- [x] All command handlers use &dyn LatticeBackend
+- [x] Dynamic command RPC encoding (store_exec via RPC)
+
+### 7E: RPC Event Streaming
+- [x] gRPC streaming endpoint for `NodeEvent` subscription (new stores, meshes, join results)
+- [x] `store sync` RPC returns actual sync results (MeshService passed to RPC server)
+
+### 7F: Post-Unification Cleanup & Optimization
+- [x] **Refactor `RpcBackend`**: Remove `Mutex<RpcClient>` bottleneck (use cheap `Clone`)
+- [x] **Secure Socket**: Set `0600` permissions on UDS (currently world-readable based on umask)
+- [x] **Fix Connection Leaks**: `subscribe()` clones existing client (cheap) instead of opening new connection
+- [x] **Optimize Dynamic Exec**: Cache `FileDescriptorSet` in `RpcBackend` to avoid fetching on every command
+- [x] **Reduce Boilerplate**: Unify DTOs via `TryFrom` traits in `conversions.rs`
+- [x] **Error Handling**: Replace string errors with proper `ErrorCode` enum in Protobuf
 
 ---
 

@@ -118,7 +118,8 @@ impl StoreManager {
     
     /// Register an opened store with its peer_manager. Emits NetEvent::StoreReady.
     pub fn register(
-        &self, 
+        &self,
+        mesh_id: Uuid,
         store_id: Uuid,
         opened: OpenedStore,
         store_type: StoreType,
@@ -143,7 +144,7 @@ impl StoreManager {
         }
         
         // Emit events (outside lock)
-        let _ = self.event_tx.send(NodeEvent::StoreReady { store_id });
+        let _ = self.event_tx.send(NodeEvent::StoreReady { mesh_id, store_id });
         let _ = self.net_tx.send(NetEvent::StoreReady { store_id });
         
         Ok(())

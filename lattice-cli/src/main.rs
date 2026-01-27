@@ -8,44 +8,70 @@ mod display_helpers;
 mod graph_renderer;
 mod tracing_writer;
 
-use lattice_net::MeshService;
-use commands::{CommandResult, StoreHandle};
-use lattice_node::NodeBuilder;
-use lattice_node::mesh::Mesh;
+use lattice_runtime::{RpcBackend, LatticeBackend};
+use commands::{CommandResult, CommandContext};
 use rustyline_async::{Readline, ReadlineEvent};
 use std::io::Write;
 use std::sync::{Arc, RwLock};
 use tracing_subscriber::EnvFilter;
+use lattice_runtime::Uuid;
 
-fn make_prompt(mesh: Option<&Mesh>, store: Option<&Arc<dyn StoreHandle>>) -> String {
+fn make_prompt(mesh_id: Option<Uuid>, store_id: Option<Uuid>) -> String {
     use owo_colors::OwoColorize;
     
-    match (mesh, store) {
+    match (mesh_id, store_id) {
         (Some(m), Some(s)) => {
-            let mesh_str = m.id().to_string();
-            let store_str = s.id().to_string();
-            let mesh_id = &mesh_str[..8];
-            let store_id = &store_str[..8];
-            if mesh_id == store_id {
-                // Mesh root store - just show mesh ID
-                format!("{}:{}> ", "lattice".cyan(), mesh_id.to_string().green())
+            let mesh_str = m.to_string()[..8].to_string();
+            let store_str = s.to_string()[..8].to_string();
+            if mesh_str == store_str {
+                format!("{}:{}> ", "lattice".cyan(), mesh_str.green())
             } else {
-                // Subordinate store within mesh
-                format!("{}:{}/{}> ", "lattice".cyan(), mesh_id.to_string().green(), store_id.to_string().yellow())
+                format!("{}:{}/{}> ", "lattice".cyan(), mesh_str.green(), store_str.yellow())
             }
         }
-        (Some(m), None) => format!("{}:{}> ", "lattice".cyan(), m.id().to_string()[..8].to_string().green()),
-        (None, Some(s)) => format!("{}:{}> ", "lattice".cyan(), s.id().to_string()[..8].to_string().yellow()),
+        (Some(m), None) => format!("{}:{}> ", "lattice".cyan(), m.to_string()[..8].to_string().green()),
+        (None, Some(s)) => format!("{}:{}> ", "lattice".cyan(), s.to_string()[..8].to_string().yellow()),
         (None, None) => format!("{}:{}> ", "lattice".cyan(), "no-mesh".yellow()),
     }
 }
 
+/// Macro for writing output consistently
+macro_rules! wout {
+    ($writer:expr, $($arg:tt)*) => {{
+        let mut w = $writer.clone();
+        let _ = writeln!(w, $($arg)*);
+    }};
+}
+
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(name = "lattice", about = "Lattice Interactive CLI", version)]
+struct CliArgs {
+    /// Run Node in-process (standalone mode)
+    #[arg(short, long)]
+    embedded: bool,
+}
+
 #[tokio::main]
 async fn main() {
-    // Create readline first so we can use the async writer for all output
-    let initial_prompt = make_prompt(None, None);
+    // Parse CLI args
+    let args = CliArgs::parse();
     
-    let (mut rl, mut writer) = match Readline::new(initial_prompt) {
+    if args.embedded {
+        run_embedded_mode().await;
+    } else {
+        run_daemon_mode().await;
+    }
+}
+
+/// Daemon mode: connect to latticed via RPC
+async fn run_daemon_mode() {
+    use owo_colors::OwoColorize;
+    
+    let initial_prompt = format!("{}:{}> ", "lattice".cyan(), "connecting".yellow());
+    
+    let (rl, writer) = match Readline::new(initial_prompt) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to create readline: {}", e);
@@ -53,9 +79,50 @@ async fn main() {
         }
     };
     
-    // Initialize tracing with SharedWriter (as early as possible)
-    // Uses RUST_LOG env var, defaults to info for lattice crates
-    // Suppresses noisy iroh warnings (mDNS, magicsock unreachable hosts)
+    // Initialize tracing
+    let make_writer = tracing_writer::SharedWriterMakeWriter::new(writer.clone());
+    let filter = EnvFilter::from_default_env()
+        .add_directive("warn".parse().unwrap())
+        .add_directive("lattice_cli=info".parse().unwrap());
+    tracing_subscriber::fmt()
+        .with_writer(make_writer)
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
+        .with_ansi(true)
+        .init();
+    
+    let _ = writeln!(&mut writer.clone(), "Lattice CLI v{} (daemon mode)", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(&mut writer.clone(), "Connecting to daemon...");
+    
+    // Connect to daemon via RPC
+    let backend: Arc<dyn LatticeBackend> = match RpcBackend::connect().await {
+        Ok(b) => Arc::new(b),
+        Err(e) => {
+            let _ = writeln!(&mut writer.clone(), "Failed to connect to daemon: {}", e);
+            let _ = writeln!(&mut writer.clone(), "Is latticed running? Start with: cargo run -p lattice-daemon");
+            return;
+        }
+    };
+    
+    let _ = writeln!(&mut writer.clone(), "Connected. Type 'help' for commands, 'quit' to exit.\n");
+    
+    run_cli(backend, rl, writer).await;
+}
+
+/// Embedded mode: run Node in-process
+async fn run_embedded_mode() {
+    let initial_prompt = make_prompt(None, None);
+    
+    let (rl, writer) = match Readline::new(initial_prompt) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to create readline: {}", e);
+            return;
+        }
+    };
+    
+    // Initialize tracing
     let make_writer = tracing_writer::SharedWriterMakeWriter::new(writer.clone());
     
     const DIRECTIVES: &[&str] = &[
@@ -80,116 +147,93 @@ async fn main() {
         .with_ansi(true)
         .init();
     
-    let _ = writeln!(writer, "Lattice CLI v{}", env!("CARGO_PKG_VERSION"));
-    let _ = writeln!(writer, "Type 'help' for commands, 'quit' to exit.\n");
+    let _ = writeln!(&mut writer.clone(), "Lattice CLI v{}", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(&mut writer.clone(), "Type 'help' for commands, 'quit' to exit.\n");
     
-    // Create net channel first - network layer owns it
-    let (net_tx, net_rx) = MeshService::create_net_channel();
-    
-    // Build node with net_tx so it can emit events to network layer
-    let node = match NodeBuilder::new().with_net_tx(net_tx).build() {
-        Ok(n) => Arc::new(n),
+    // Start runtime (Node + MeshService + backend)
+    let runtime = match lattice_runtime::Runtime::builder().build().await {
+        Ok(r) => r,
         Err(e) => {
-            let _ = writeln!(writer, "Failed to initialize: {}", e);
+            let _ = writeln!(&mut writer.clone(), "Failed to start: {}", e);
+            let _ = writeln!(&mut writer.clone(), "Hint: If latticed is already running, use --daemon flag to connect via RPC.");
             return;
         }
     };
+    
+    let backend = runtime.backend().clone();
+    
+    run_cli(backend, rl, writer).await;
+}
 
-    let current_store: Arc<RwLock<Option<Arc<dyn StoreHandle>>>> = Arc::new(RwLock::new(None));
-    let current_mesh: Arc<RwLock<Option<Mesh>>> = Arc::new(RwLock::new(None));
+/// Unified CLI loop - works for both embedded and daemon modes
+async fn run_cli(
+    backend: Arc<dyn LatticeBackend>,
+    mut rl: Readline,
+    writer: commands::Writer,
+) {
+    // Context tracking - use Uuid for async-safe updates
+    let current_store: Arc<RwLock<Option<Uuid>>> = Arc::new(RwLock::new(None));
+    let current_mesh: Arc<RwLock<Option<Uuid>>> = Arc::new(RwLock::new(None));
     
-    // Create MeshService with the receiver
-    let mesh_network: Option<Arc<MeshService>> = {
-        // Create endpoint from node's signing key
-        let endpoint = match lattice_net::LatticeEndpoint::new(node.signing_key().clone()).await {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::error!("Iroh endpoint failed to start: {}", e);
-                // Skip creating MeshService if endpoint fails
-                return;
+    // Show node status
+    let _ = node_commands::cmd_status(&*backend, writer.clone()).await;
+    
+    // Set initial mesh context from first mesh, default to root store
+    if let Ok(meshes) = backend.mesh_list().await {
+        if let Some(mesh) = meshes.first() {
+            if let Ok(mut guard) = current_mesh.write() {
+                *guard = Some(mesh.id);
             }
-        };
-        
-        match MeshService::new_with_provider(node.clone(), endpoint, net_rx).await {
-            Ok(s) => {
-                tracing::info!("Iroh: {} (listening)", s.endpoint().public_key().fmt_short());
-                Some(s)
-            }
-            Err(e) => {
-                tracing::error!("Iroh failed to start: {}", e);
-                None
-            }
-        }
-    };
-    
-    if let Err(e) = node.start().await {
-        tracing::warn!("Node start: {}", e);
-    }
-    
-    // Show node status (after server so gossip is set up)
-    let _ = node_commands::cmd_status(&node, mesh_network.as_deref(), writer.clone()).await;
-    
-    // Update current store/mesh based on oldest mesh (deterministic)
-    if let Ok(meshes) = node.meta().list_meshes() {
-        // Pick oldest mesh by joined_at timestamp
-        if let Some((mesh_id, _)) = meshes.into_iter().min_by_key(|(_, info)| info.joined_at) {
-            if let Some(mesh) = node.mesh_by_id(mesh_id) {
-                if let Ok(mut guard) = current_store.write() {
-                    let root_id = mesh.root_store().id();
-                    let store_handle = mesh.store_manager()
-                        .get_handle(&root_id)
-                        .expect("Root store should be registered");
-                    *guard = Some(store_handle);
-                }
-                if let Ok(mut guard) = current_mesh.write() {
-                    *guard = Some(mesh);
-                }
+            // Default to root store (mesh.id = root_store_id)
+            if let Ok(mut guard) = current_store.write() {
+                *guard = Some(mesh.id);
             }
         }
     }
 
-    // Start event listener for async feedback (Join success/failure)
-    {
-        let mut rx = node.subscribe();
+    // Start event listener for async feedback (works for both in-process and RPC)
+    if let Ok(mut rx) = backend.subscribe() {
         let writer = writer.clone();
         let current_store = current_store.clone();
         let current_mesh = current_mesh.clone();
-        let node_clone = node.clone();
         tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
+            while let Some(event) = rx.recv().await {
                 match event {
-                    lattice_node::NodeEvent::MeshReady { mesh_id } => {
-                        if let Some(mesh) = node_clone.mesh_by_id(mesh_id) {
-                            wout!(writer, "\nInfo: Join complete! Switched context to mesh {}.", mesh.id());
-                            if let Ok(mut guard) = current_store.write() {
-                                let root_id = mesh.root_store().id();
-                                let store_handle = mesh.store_manager()
-                                    .get_handle(&root_id)
-                                    .expect("Root store should be registered");
-                                *guard = Some(store_handle);
-                            }
-                            if let Ok(mut guard) = current_mesh.write() {
-                                *guard = Some(mesh);
-                            }
+                    lattice_runtime::BackendEvent::MeshReady { mesh_id } => {
+                        wout!(writer, "\nInfo: Join complete! Mesh {} ready.", mesh_id);
+                        // Update context to new mesh with root store
+                        if let Ok(mut guard) = current_mesh.write() {
+                            *guard = Some(mesh_id);
+                        }
+                        if let Ok(mut guard) = current_store.write() {
+                            *guard = Some(mesh_id); // root store = mesh_id
                         }
                     }
-                    lattice_node::NodeEvent::StoreReady { .. } => {}
-                    lattice_node::NodeEvent::JoinFailed { mesh_id, reason } => {
+                    lattice_runtime::BackendEvent::StoreReady { .. } => {}
+                    lattice_runtime::BackendEvent::JoinFailed { mesh_id, reason } => {
                         wout!(writer, "\nError: Join failed for mesh {}: {}", mesh_id, reason);
+                    }
+                    lattice_runtime::BackendEvent::SyncResult { store_id, peers_synced, entries_sent, entries_received } => {
+                        if peers_synced > 0 {
+                            wout!(writer, "[Sync] {} entries from {} peer(s)", entries_received, peers_synced);
+                        } else {
+                            wout!(writer, "[Sync] No peers to sync with");
+                        }
+                        let _ = (store_id, entries_sent); // silence unused
                     }
                 }
             }
         });
     }
 
+    // REPL loop
     loop {
         let prompt = {
             let mesh_guard = current_mesh.read().ok();
             let store_guard = current_store.read().ok();
-            make_prompt(
-                mesh_guard.as_ref().and_then(|g| g.as_ref()),
-                store_guard.as_ref().and_then(|g| g.as_ref())
-            )
+            let mesh_id = mesh_guard.as_ref().and_then(|g| **g);
+            let store_id = store_guard.as_ref().and_then(|g| **g);
+            make_prompt(mesh_id, store_id)
         };
         let _ = rl.update_prompt(&prompt);
         
@@ -212,7 +256,6 @@ async fn main() {
 
                 match LatticeCli::try_parse_from(args) {
                     Ok(cli) => {
-                        // Check if this command changes state (needs blocking)
                         let needs_blocking = matches!(
                             &cli.command,
                             LatticeCommand::Mesh { subcommand: MeshSubcommand::Create | MeshSubcommand::Use { .. } }
@@ -220,54 +263,38 @@ async fn main() {
                             | LatticeCommand::Quit
                         );
                         
+                        // Build context
+                        let ctx = {
+                            let mesh_guard = current_mesh.read().ok();
+                            let store_guard = current_store.read().ok();
+                            CommandContext {
+                                mesh_id: mesh_guard.as_ref().and_then(|g| **g),
+                                store_id: store_guard.as_ref().and_then(|g| **g),
+                            }
+                        };
+                        
                         if needs_blocking {
-                            // State-changing commands: await result inline
-                            let Ok(store_guard) = current_store.read() else { continue };
-                            let Ok(mesh_guard) = current_mesh.read() else { continue };
-                            let result = handle_command(
-                                &node, 
-                                store_guard.clone(), 
-                                mesh_network.clone(),
-                                mesh_guard.as_ref(), // mesh
-                                cli,
-                                writer.clone(),
-                            ).await;
+                            let result = handle_command(&*backend, &ctx, cli, writer.clone()).await;
                             
                             match result {
                                 CommandResult::Ok => {}
-                                CommandResult::SwitchTo(h) => {
-                                    drop(store_guard);
-                                    drop(mesh_guard);
-                                    // Update current store
-                                    if let Ok(mut guard) = current_store.write() {
-                                        *guard = Some(h.clone());
+                                CommandResult::SwitchContext { mesh_id, store_id } => {
+                                    if let Ok(mut guard) = current_mesh.write() {
+                                        *guard = Some(mesh_id);
                                     }
-                                    // Update current mesh to match the store's mesh
-                                    if let Some(mesh) = node.mesh_by_id(h.id()) {
-                                        if let Ok(mut guard) = current_mesh.write() {
-                                            *guard = Some(mesh);
-                                        }
+                                    if let Ok(mut guard) = current_store.write() {
+                                        *guard = Some(store_id);
                                     }
                                 }
                                 CommandResult::Quit => break,
                             }
                         } else {
-                            // Non-state-changing commands: spawn in background
-                            let node = node.clone();
-                            let store = current_store.read().ok().and_then(|g| g.clone());
-                            let mesh = current_mesh.read().ok().and_then(|g| g.clone());
-                            let server = mesh_network.clone();
+                            // Non-blocking: spawn in background
+                            let backend = backend.clone();
                             let writer = writer.clone();
                             
                             tokio::spawn(async move {
-                                let _ = handle_command(
-                                    &node, 
-                                    store, 
-                                    server, 
-                                    mesh.as_ref(),
-                                    cli,
-                                    writer,
-                                ).await;
+                                let _ = handle_command(&*backend, &ctx, cli, writer).await;
                             });
                         }
                     }
@@ -291,6 +318,5 @@ async fn main() {
         }
     }
     
-    // Flush any remaining output
     let _ = rl.flush();
 }

@@ -6,9 +6,12 @@ members = [
     "lattice-net",
     "lattice-net-types",
     "lattice-cli",
+    "lattice-daemon",
+    "lattice-rpc",
     "lattice-model",
     "lattice-kvstore",
     "lattice-logstore",
+    "lattice-runtime",
 ]
 
 [workspace.package]
@@ -27,6 +30,8 @@ lattice-kvstore = { path = "lattice-kvstore" }
 lattice-logstore = { path = "lattice-logstore" }
 lattice-net-types = { path = "lattice-net-types" }
 lattice-proto = { path = "lattice-proto" }
+lattice-rpc = { path = "lattice-rpc" }
+lattice-runtime = { path = "lattice-runtime" }
 
 # CLI
 rustyline = "17"

@@ -1,88 +1,73 @@
-//! Mesh commands - mesh membership operations (init, join, invite, peers)
-//!
-//! Properly separates Policy (PeerManager) from State (SessionTracker):
-//! - Policy (persistent): Who is authorized? Stored in CRDT/DB
-//! - State (ephemeral): Who is online? Stored in network layer RAM
+//! Mesh commands - mesh membership operations (create, join, invite, peers)
 
+use lattice_runtime::LatticeBackend;
 use crate::commands::{CommandResult, Writer, MeshSubcommand};
 use crate::display_helpers::format_elapsed;
-use lattice_node::{Node, PeerStatus, Mesh, token::Invite};
-use lattice_model::types::PubKey;
-use lattice_net::MeshService;
-use chrono::DateTime;
 use owo_colors::OwoColorize;
-use std::time::Instant;
 use std::io::Write;
+use lattice_runtime::Uuid;
+
+/// Context for mesh commands
+pub struct MeshContext {
+    pub mesh_id: Option<Uuid>,
+}
 
 pub async fn handle_command(
-    node: &Node,
-    mesh: Option<&Mesh>,
-    network: Option<&MeshService>,
+    backend: &dyn LatticeBackend,
+    ctx: &MeshContext,
     cmd: MeshSubcommand,
     writer: Writer,
 ) -> CommandResult {
     match cmd {
-        MeshSubcommand::Create => {
-            // Need node for create - this command might need special handling
-            // For now, let's error if we try to create from here as it requires node access
-             let mut w = writer;
-             let _ = writeln!(w, "Error: 'mesh create' must be handled by node, not mesh handler.");
-             CommandResult::Ok
-        }
-        MeshSubcommand::List => cmd_list(node, writer).await,
-        MeshSubcommand::Use { mesh_id } => cmd_use(node, &mesh_id, writer).await,
-        MeshSubcommand::Status => cmd_status(mesh, writer).await,
-        MeshSubcommand::Join { token } => cmd_join(node, &token, writer).await,
-        MeshSubcommand::Peers => cmd_peers(node, mesh, network, writer).await,
-        MeshSubcommand::Invite => cmd_invite(node, mesh, writer).await,
-        MeshSubcommand::Revoke { pubkey } => cmd_revoke(mesh, pubkey.as_str(), writer).await,
+        MeshSubcommand::Create => cmd_create(backend, writer).await,
+        MeshSubcommand::List => cmd_list(backend, writer).await,
+        MeshSubcommand::Use { mesh_id } => cmd_use(backend, &mesh_id, writer).await,
+        MeshSubcommand::Status => cmd_status(backend, ctx.mesh_id, writer).await,
+        MeshSubcommand::Join { token } => cmd_join(backend, &token, writer).await,
+        MeshSubcommand::Peers => cmd_peers(backend, ctx.mesh_id, writer).await,
+        MeshSubcommand::Invite => cmd_invite(backend, ctx.mesh_id, writer).await,
+        MeshSubcommand::Revoke { pubkey } => cmd_revoke(backend, ctx.mesh_id, &pubkey, writer).await,
     }
 }
 
-// ==================== Mesh Commands ====================
-
 /// Create a new mesh
-pub async fn cmd_create(node: &Node, _mesh: Option<&MeshService>, writer: Writer) -> CommandResult {
-    match node.create_mesh().await {
-        Ok(store_id) => {
-            let mut w = writer.clone();
+pub async fn cmd_create(backend: &dyn LatticeBackend, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    match backend.mesh_create().await {
+        Ok(info) => {
             let _ = writeln!(w, "Mesh created.");
-            let _ = writeln!(w, "Mesh ID: {}", store_id);
-            drop(w);
-            // Use the created mesh
-            match node.mesh_by_id(store_id) {
-                Some(mesh) => {
-                    // Get StoreHandle from store manager (root store is always registered)
-                    let root_id = mesh.root_store().id();
-                    let store_handle = mesh.store_manager()
-                        .get_handle(&root_id)
-                        .expect("Root store should be registered");
-                    CommandResult::SwitchTo(store_handle)
+            let _ = writeln!(w, "Mesh ID: {}", info.id);
+            
+            // Switch to the new mesh's root store
+            if let Ok(stores) = backend.store_list(info.id).await {
+                if let Some(store) = stores.first() {
+                    return CommandResult::SwitchContext { mesh_id: info.id, store_id: store.id };
                 }
-                None => CommandResult::Ok,
             }
         }
         Err(e) => {
-            let mut w = writer.clone();
             let _ = writeln!(w, "Error: {}", e);
-            CommandResult::Ok
         }
     }
+    
+    CommandResult::Ok
 }
 
-/// List all meshes this node is part of
-pub async fn cmd_list(node: &Node, writer: Writer) -> CommandResult {
+/// List all meshes
+pub async fn cmd_list(backend: &dyn LatticeBackend, writer: Writer) -> CommandResult {
     let mut w = writer.clone();
     
-    match node.meta().list_meshes() {
+    match backend.mesh_list().await {
         Ok(meshes) => {
             if meshes.is_empty() {
                 let _ = writeln!(w, "No meshes. Use 'mesh create' or 'mesh join <token>' to get started.");
             } else {
                 let _ = writeln!(w, "Meshes ({}):", meshes.len());
-                for (mesh_id, info) in meshes {
-                    let role = if info.is_creator { "creator" } else { "member" };
-                    let _ = writeln!(w, "  {} ({})", mesh_id, role);
+                for mesh in meshes {
+                    let role = if mesh.is_creator { "creator" } else { "member" };
+                    let _ = writeln!(w, "  {} ({}, {} peers, {} stores)", 
+                        mesh.id, role, mesh.peer_count, mesh.store_count);
                 }
             }
         }
@@ -95,11 +80,10 @@ pub async fn cmd_list(node: &Node, writer: Writer) -> CommandResult {
 }
 
 /// Switch to a different mesh by ID (supports partial UUID match)
-pub async fn cmd_use(node: &Node, mesh_id_prefix: &str, writer: Writer) -> CommandResult {
+pub async fn cmd_use(backend: &dyn LatticeBackend, mesh_id_prefix: &str, writer: Writer) -> CommandResult {
     let mut w = writer.clone();
     
-    // Find matching mesh
-    let meshes = match node.meta().list_meshes() {
+    let meshes = match backend.mesh_list().await {
         Ok(m) => m,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
@@ -109,198 +93,151 @@ pub async fn cmd_use(node: &Node, mesh_id_prefix: &str, writer: Writer) -> Comma
     
     // Find meshes that start with the given prefix
     let matches: Vec<_> = meshes.iter()
-        .filter(|(id, _)| id.to_string().starts_with(mesh_id_prefix))
+        .filter(|m| m.id.to_string().starts_with(mesh_id_prefix))
         .collect();
     
     match matches.len() {
         0 => {
             let _ = writeln!(w, "No mesh found matching '{}'", mesh_id_prefix);
             let _ = writeln!(w, "Use 'mesh list' to see available meshes.");
-            CommandResult::Ok
         }
         1 => {
-            let (mesh_id, _) = matches[0];
-            // Get store handle for this mesh
-            match node.mesh_by_id(*mesh_id) {
-                Some(mesh) => {
-                    let _ = writeln!(w, "Switched to mesh {}", mesh_id);
-                    let root_id = mesh.root_store().id();
-                    let store_handle = mesh.store_manager()
-                        .get_handle(&root_id)
-                        .expect("Root store should be registered");
-                    CommandResult::SwitchTo(store_handle)
-                }
-                None => {
-                    let _ = writeln!(w, "Mesh {} not loaded. Run 'node start' first.", mesh_id);
-                    CommandResult::Ok
-                }
-            }
+            let mesh = matches[0];
+            
+            // Switch to the mesh's root store (root store id = mesh id)
+            let _ = writeln!(w, "Switched to mesh {}", mesh.id);
+            return CommandResult::SwitchContext { mesh_id: mesh.id, store_id: mesh.id };
         }
         _ => {
             let _ = writeln!(w, "Ambiguous mesh ID '{}'. Matches:", mesh_id_prefix);
-            for (id, _) in matches {
-                let _ = writeln!(w, "  {}", id);
+            for mesh in matches {
+                let _ = writeln!(w, "  {}", mesh.id);
             }
-            CommandResult::Ok
         }
     }
+    
+    CommandResult::Ok
 }
 
-/// Show mesh status (ID, peer counts)
-pub async fn cmd_status(mesh: Option<&Mesh>, writer: Writer) -> CommandResult {
+/// Show mesh status
+pub async fn cmd_status(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, writer: Writer) -> CommandResult {
     let mut w = writer.clone();
     
-    let mesh = match mesh {
-        Some(m) => m,
+    let mesh_id = match mesh_id {
+        Some(id) => id,
         None => {
-            let _ = writeln!(w, "Mesh:     (not initialized)");
+            let _ = writeln!(w, "Mesh:     (not selected)");
             return CommandResult::Ok;
         }
     };
     
-    let _ = writeln!(w, "Mesh ID:  {}", mesh.id());
-    
-    // Peer counts
-    if let Ok(peers) = mesh.list_peers().await {
-        let active = peers.iter().filter(|p| p.status == PeerStatus::Active).count();
-        let invited = peers.iter().filter(|p| p.status == PeerStatus::Invited).count();
-        let _ = writeln!(w, "Peers:    {} active, {} invited", active, invited);
+    match backend.mesh_status(mesh_id).await {
+        Ok(info) => {
+            let _ = writeln!(w, "Mesh ID:  {}", info.id);
+            let _ = writeln!(w, "Peers:    {}", info.peer_count);
+            let _ = writeln!(w, "Stores:   {}", info.store_count);
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+        }
     }
     
     CommandResult::Ok
 }
 
 /// Join an existing mesh using an invite token
-pub async fn cmd_join(node: &Node, token: &str, writer: Writer) -> CommandResult {
-    // Multi-mesh: allow joining additional meshes
-    // (Previously blocked if already in a mesh)
-
-    // Parse token using core library
-    let invite = match Invite::parse(token) {
-        Ok(i) => i,
-        Err(e) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Invalid token: {}", e);
-            let _ = writeln!(w, "\nUsage: mesh join <token>");
-            return CommandResult::Ok;
-        }
-    };
-    
-    {
-        let mut w = writer.clone();
-        let _ = writeln!(w, "Joining mesh {} via token...", invite.mesh_id);
-    }
-    
-    // Request join - emits JoinRequested event
-    if let Err(e) = node.join(invite.inviter, invite.mesh_id, invite.secret) {
-        let mut w = writer.clone();
-        let _ = writeln!(w, "Join failed: {}", e);
-        return CommandResult::Ok;
-    }
-    
+pub async fn cmd_join(backend: &dyn LatticeBackend, token: &str, writer: Writer) -> CommandResult {
     let mut w = writer.clone();
-    let _ = writeln!(w, "Join request sent. You will be notified when connection is established.");
+    
+    match backend.mesh_join(token).await {
+        Ok(mesh_id) => {
+            let _ = writeln!(w, "Joining mesh {}...", mesh_id);
+            let _ = writeln!(w, "Join request sent. You will be notified when connection is established.");
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Join failed: {}", e);
+        }
+    }
+    
     CommandResult::Ok
 }
 
 /// List all peers with authorization status + online state
-pub async fn cmd_peers(node: &Node, mesh: Option<&Mesh>, network: Option<&MeshService>, writer: Writer) -> CommandResult {
-    // 1. Get POLICY from PeerManager (Who is authorized?)
-    let mesh = match mesh {
-        Some(m) => m,
+pub async fn cmd_peers(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let mesh_id = match mesh_id {
+        Some(id) => id,
         None => {
-            let mut w = writer.clone();
             let _ = writeln!(w, "Error: No active mesh.");
             return CommandResult::Ok;
         }
     };
-
-    let mut peers = match mesh.list_peers().await {
+    
+    let mut peers = match backend.mesh_peers(mesh_id).await {
         Ok(p) => p,
         Err(e) => {
-            let mut w = writer.clone();
             let _ = writeln!(w, "Error: {}", e);
             return CommandResult::Ok;
         }
     };
     
-    // Sort logic moved to CLI for presentation control
-    peers.sort_by(|a, b| a.status.cmp(&b.status).then(a.name.cmp(&b.name)));
-
-    let mut w = writer.clone();
     if peers.is_empty() {
         let _ = writeln!(w, "No peers found.");
         return CommandResult::Ok;
     }
     
-    // 2. Get STATE from SessionTracker (Who is online?)
-    let online_peers: std::collections::HashMap<PubKey, Instant> = network
-        .map(|m| m.connected_peers().unwrap_or_default())
-        .unwrap_or_default();
+    // Sort by status then name
+    peers.sort_by(|a, b| a.status.cmp(&b.status).then(a.name.cmp(&b.name)));
     
-    // 3. Print peers (already sorted by Status then Name from PeerManager)
-    let mut current_status = None;
+    let my_pubkey = backend.node_id();
+    let mut current_status: Option<&str> = None;
     
     for peer in &peers {
         // Print status header if changed
-        if Some(peer.status) != current_status {
-            current_status = Some(peer.status);
-            // Count peers with this status for the header
+        if current_status != Some(&peer.status) {
+            current_status = Some(&peer.status);
             let count = peers.iter().filter(|p| p.status == peer.status).count();
-            let _ = writeln!(w, "\n[{}] ({}):", peer.status.as_str(), count);
+            let _ = writeln!(w, "\n[{}] ({}):", peer.status, count);
         }
-
+        
         // Blue ● for self, green ● for online, grey ○ for offline
-        let my_pubkey = node.node_id();
-        let (bullet, last_seen) = if peer.pubkey == my_pubkey {
-            (format!("{}", "●".blue()), String::new())  // Blue (self)
-        } else if let Some(seen_at) = online_peers.get(&peer.pubkey) { 
-            let elapsed = seen_at.elapsed();
-            let ago = format_elapsed(elapsed);
-            (format!("{}", "●".green()), format!(" ({})", ago))  // Green (online)
-        } else { 
-            (format!("{}", "○".bright_black()), String::new())  // Grey (offline)
+        let is_self = peer.public_key == my_pubkey;
+        let bullet = if is_self {
+            format!("{}", "●".blue())
+        } else if peer.online {
+            format!("{}", "●".green())
+        } else {
+            format!("{}", "○".bright_black())
         };
         
-        // Format info string
-        let added_str = peer.added_at
-            .and_then(|ts| DateTime::from_timestamp(ts as i64, 0))
-            .map(|dt| dt.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-            
-        let info_str = match (peer.name.as_ref(), added_str.is_empty()) {
-            (Some(name), false) => format!(" {} ({})", name, added_str),
-            (Some(name), true) => format!(" {}", name),
-            (None, false) => format!(" ({})", added_str),
-            (None, true) => String::new(),
-        };
-        
-        let _ = writeln!(w, "  {} {}{}{}", bullet, hex::encode(peer.pubkey), info_str, last_seen);
+        let name_str = peer.name.as_ref().map(|n| format!(" {}", n)).unwrap_or_default();
+        let last_seen_str = peer.last_seen.map(|d| format!(" ({})", format_elapsed(d))).unwrap_or_default();
+        let _ = writeln!(w, "  {} {}{}{}", bullet, hex::encode(&peer.public_key), name_str, last_seen_str);
     }
+    
     CommandResult::Ok
 }
 
 /// Generate an invite token
-pub async fn cmd_invite(node: &Node, mesh: Option<&Mesh>, writer: Writer) -> CommandResult {
-    let mesh = match mesh {
-        Some(m) => m,
+pub async fn cmd_invite(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let mesh_id = match mesh_id {
+        Some(id) => id,
         None => {
-            let mut w = writer.clone();
             let _ = writeln!(w, "Error: No active mesh.");
             return CommandResult::Ok;
         }
     };
-
-    // Generate token
-    match mesh.create_invite(node.node_id()).await {
+    
+    match backend.mesh_invite(mesh_id).await {
         Ok(token) => {
-            let mut w = writer.clone();
             let _ = writeln!(w, "Generated one-time join token:");
             let _ = writeln!(w, "{}", token.green().bold());
             let _ = writeln!(w, "Share this token securely. It can be used once to join this mesh.");
         }
         Err(e) => {
-            let mut w = writer.clone();
             let _ = writeln!(w, "Error creating token: {}", e);
         }
     }
@@ -309,34 +246,33 @@ pub async fn cmd_invite(node: &Node, mesh: Option<&Mesh>, writer: Writer) -> Com
 }
 
 /// Revoke a peer from the mesh
-pub async fn cmd_revoke(mesh: Option<&Mesh>, pubkey: &str, writer: Writer) -> CommandResult {
-    let mesh = match mesh {
-        Some(m) => m,
+pub async fn cmd_revoke(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, pubkey: &str, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let mesh_id = match mesh_id {
+        Some(id) => id,
         None => {
-            let mut w = writer.clone();
             let _ = writeln!(w, "Error: No active mesh.");
             return CommandResult::Ok;
         }
     };
-
-    let pk = match PubKey::from_hex(pubkey) {
-        Ok(pk) => pk,
+    
+    let pk = match hex::decode(pubkey) {
+        Ok(k) => k,
         Err(e) => {
-            let mut w = writer.clone();
             let _ = writeln!(w, "Invalid pubkey: {}", e);
             return CommandResult::Ok;
         }
     };
     
-    match mesh.revoke_peer(pk).await {
+    match backend.mesh_revoke(mesh_id, &pk).await {
         Ok(()) => {
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Revoked peer: {}", pk);
+            let _ = writeln!(w, "Revoked peer: {}", pubkey);
         }
         Err(e) => {
-            let mut w = writer.clone();
             let _ = writeln!(w, "Error: {}", e);
         }
     }
+    
     CommandResult::Ok
 }

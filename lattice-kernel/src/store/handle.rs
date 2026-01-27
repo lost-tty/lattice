@@ -466,7 +466,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
 
 // ==================== StoreInspector implementation ====================
 
-use crate::store_inspector::{StoreInspector, LogStats, LogPathInfo};
+use crate::store_inspector::{StoreInspector, LogStats, LogPathInfo, HistoryEntry};
 
 impl<S: StateMachine + 'static> StoreInspector for Store<S> {
     fn id(&self) -> Uuid {
@@ -510,6 +510,58 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
     ) -> Pin<Box<dyn Future<Output = Result<mpsc::Receiver<SignedEntry>, StoreError>> + Send + '_>> {
         Box::pin(async move {
             Store::stream_entries_in_range(self, &author, from_seq, to_seq).await
+        })
+    }
+
+    fn history(
+        &self,
+        filter_author: Option<PubKey>,
+        limit: Option<u32>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<HistoryEntry>, StoreError>> + Send + '_>> {
+        Box::pin(async move {
+            let sync_state = Store::sync_state(self).await?;
+            let mut entries = Vec::new();
+            
+            // Determine which authors to query
+            let authors: Vec<PubKey> = if let Some(author) = filter_author {
+                vec![author]
+            } else {
+                sync_state.authors().iter().map(|(a, _)| *a).collect()
+            };
+            
+            // Stream entries from each author
+            for author in authors {
+                let mut rx = Store::stream_entries_in_range(self, &author, 1, 0).await?;
+                while let Some(signed) = rx.recv().await {
+                    let entry = &signed.entry;
+                    let hash = Hash::from(signed.hash());
+                    let prev_hash = Hash::try_from(entry.prev_hash.as_slice()).unwrap_or(Hash::ZERO);
+                    let causal_deps: Vec<Hash> = entry.causal_deps.iter()
+                        .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok().map(Hash::from))
+                        .collect();
+                    let timestamp = (entry.timestamp.wall_time << 16) | entry.timestamp.counter as u64;
+                    
+                    entries.push(HistoryEntry {
+                        seq: entry.seq,
+                        author,
+                        payload: entry.payload.clone(),
+                        timestamp,
+                        hash,
+                        prev_hash,
+                        causal_deps,
+                    });
+                }
+            }
+            
+            // Sort by timestamp descending (most recent first)
+            entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            
+            // Apply limit if specified
+            if let Some(n) = limit {
+                entries.truncate(n as usize);
+            }
+            
+            Ok(entries)
         })
     }
 }

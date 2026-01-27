@@ -57,8 +57,8 @@ async fn test_targeted_author_sync() {
     let data_a = temp_data_dir("author_sync_a2");
     let data_b = temp_data_dir("author_sync_b2");
     
-    let node_a = Arc::new(NodeBuilder::new().data_dir(data_a.clone()).build().expect("node a"));
-    let node_b = Arc::new(NodeBuilder::new().data_dir(data_b.clone()).build().expect("node b"));
+    let node_a = Arc::new(NodeBuilder::new(data_a.clone()).build().expect("node a"));
+    let node_b = Arc::new(NodeBuilder::new(data_b.clone()).build().expect("node b"));
     
     let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
     let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
@@ -105,8 +105,8 @@ async fn test_sync_multiple_entries() {
     let data_a = temp_data_dir("multi_sync_a");
     let data_b = temp_data_dir("multi_sync_b");
     
-    let node_a = Arc::new(NodeBuilder::new().data_dir(data_a.clone()).build().expect("node a"));
-    let node_b = Arc::new(NodeBuilder::new().data_dir(data_b.clone()).build().expect("node b"));
+    let node_a = Arc::new(NodeBuilder::new(data_a.clone()).build().expect("node a"));
+    let node_b = Arc::new(NodeBuilder::new(data_b.clone()).build().expect("node b"));
     
     let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
     let server_b = new_from_node_test(node_b.clone()).await.expect("server b");

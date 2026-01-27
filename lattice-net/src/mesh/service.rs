@@ -82,7 +82,7 @@ impl MeshService {
     /// The recommended pattern is:
     /// ```ignore
     /// let (net_tx, net_rx) = MeshService::create_net_channel();
-    /// let node = NodeBuilder::new().with_net_tx(net_tx).build()?;
+    /// let node = NodeBuilder::new(data_dir).with_net_tx(net_tx).build()?;
     /// let endpoint = LatticeEndpoint::new(node.signing_key().clone()).await?;
     /// let service = MeshService::new_with_provider(Arc::new(node), endpoint, net_rx).await?;
     /// ```
@@ -557,19 +557,22 @@ impl MeshService {
                 }
                 NetEvent::SyncStore { store_id } => {
                     tokio::spawn(async move {
-                        tracing::info!(store_id = %store_id, "NetEvent::SyncStore → syncing with all peers");
+                        tracing::debug!(store_id = %store_id, "NetEvent::SyncStore → syncing with all peers");
                         if service.get_store(store_id).is_some() {
                             match service.sync_all_by_id(store_id).await {
-                                Ok(results) if !results.is_empty() => {
-                                    let total: u64 = results.iter().map(|r| r.entries_received).sum();
-                                    tracing::info!(
-                                        store_id = %store_id,
-                                        entries = total, 
-                                        peers = results.len(), 
-                                        "NetEvent::SyncStore → complete"
-                                    );
+                                Ok(results) => {
+                                    let entries_received: u64 = results.iter().map(|r| r.entries_received).sum();
+                                    let entries_sent: u64 = results.iter().map(|r| r.entries_sent).sum();
+                                    let peers_synced = results.len() as u32;
+                                    
+                                    // Emit SyncResult event
+                                    service.provider.emit_user_event(UserEvent::SyncResult {
+                                        store_id,
+                                        peers_synced,
+                                        entries_sent,
+                                        entries_received,
+                                    });
                                 }
-                                Ok(_) => tracing::debug!(store_id = %store_id, "NetEvent::SyncStore → no peers to sync"),
                                 Err(e) => tracing::warn!(store_id = %store_id, error = %e, "NetEvent::SyncStore → failed"),
                             }
                         } else {

@@ -28,6 +28,8 @@ pub enum NodeProviderError {
 pub enum UserEvent {
     /// Join attempt failed
     JoinFailed { mesh_id: Uuid, reason: String },
+    /// Sync completed for a store
+    SyncResult { store_id: Uuid, peers_synced: u32, entries_sent: u64, entries_received: u64 },
 }
 
 /// Result of accepting a peer's join request

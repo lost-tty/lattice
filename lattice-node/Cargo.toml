@@ -16,7 +16,6 @@ prost = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
 hex = { workspace = true }
-dirs = { workspace = true }
 redb = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }

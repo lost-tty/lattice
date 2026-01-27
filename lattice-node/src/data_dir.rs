@@ -9,19 +9,6 @@
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const APP_NAME: &str = "lattice";
-
-/// Data directory configuration.
-///
-/// Multi-store layout:
-/// ```text
-/// base/
-///   identity.key
-///   meta.db
-///   stores/{uuid}/
-///     logs/{author}.log
-///     state.db
-/// ```
 #[derive(Debug, Clone)]
 pub struct DataDir {
     base: PathBuf,
@@ -31,11 +18,6 @@ impl DataDir {
     /// Create a DataDir with a custom base path.
     pub fn new(base: impl Into<PathBuf>) -> Self {
         Self { base: base.into() }
-    }
-
-    /// Create a DataDir using the platform-specific data directory.
-    pub fn default_location() -> Option<Self> {
-        dirs::data_dir().map(|d| Self::new(d.join(APP_NAME)))
     }
 
     /// Get the base directory path.
@@ -103,12 +85,6 @@ impl DataDir {
     }
 }
 
-impl Default for DataDir {
-    fn default() -> Self {
-        Self::default_location().unwrap_or_else(|| Self::new("./data"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,18 +108,5 @@ mod tests {
         assert_eq!(dd.store_sigchain_log(store_id, "abc123"), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/sigchain/abc123.log"));
         assert_eq!(dd.store_state_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/state"));
         assert_eq!(dd.store_sync_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/sync"));
-    }
-
-    #[test]
-    fn test_default_location_exists() {
-        // On most systems, default_location should return Some
-        let location = DataDir::default_location();
-        assert!(location.is_some() || true);
-    }
-
-    #[test]
-    fn test_default_impl() {
-        let dd = DataDir::default();
-        assert!(dd.base().to_str().is_some());
     }
 }

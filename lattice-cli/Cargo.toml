@@ -10,10 +10,7 @@ name = "lattice"
 path = "src/main.rs"
 
 [dependencies]
-lattice-node = { workspace = true }
-lattice-kernel = { workspace = true }
-lattice-net = { workspace = true }
-lattice-model = { workspace = true }
+lattice-runtime = { workspace = true }
 rustyline-async = { git = "https://github.com/lost-tty/rustyline-async" }
 hex = { workspace = true }
 thiserror = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "lattice-daemon"
+description = "Headless daemon running Lattice node and network services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "latticed"
+path = "src/main.rs"
+
+[dependencies]
+lattice-runtime = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = { workspace = true }
+clap = { workspace = true }
+anyhow = "1"

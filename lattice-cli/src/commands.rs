@@ -1,12 +1,11 @@
-//! CLI command handlers
+//! CLI command handlers and dispatch
 
+use lattice_runtime::LatticeBackend;
 use crate::{mesh_commands, node_commands, store_commands};
-use lattice_node::{Node, Mesh};
-use lattice_net::MeshService;
 use clap::{Parser, Subcommand, CommandFactory};
 use rustyline_async::SharedWriter;
-use std::sync::Arc;
 use std::io::Write;
+use lattice_runtime::Uuid;
 
 /// Macro for writing to SharedWriter with less boilerplate
 #[macro_export]
@@ -18,20 +17,23 @@ macro_rules! wout {
     }}
 }
 
-/// Shared writer type for async output - SharedWriter is already Clone and internally synchronized
+/// Shared writer type for async output
 pub type Writer = SharedWriter;
-
-// Re-export StoreHandle for CLI use - provides id(), store_type(), as_dispatcher(), as_sync_provider()
-pub use lattice_node::StoreHandle;
 
 /// Result of a command that may switch stores or exit
 pub enum CommandResult {
-    /// No store change
+    /// No change
     Ok,
-    /// Switch to this store
-    SwitchTo(Arc<dyn StoreHandle>),
+    /// Switch context to mesh/store IDs
+    SwitchContext { mesh_id: Uuid, store_id: Uuid },
     /// Exit the CLI
     Quit,
+}
+
+/// Context for command dispatch
+pub struct CommandContext {
+    pub mesh_id: Option<Uuid>,
+    pub store_id: Option<Uuid>,
 }
 
 #[derive(Parser)]
@@ -64,7 +66,7 @@ pub enum LatticeCommand {
     /// Exit the CLI
     #[command(next_help_heading = "General")]
     Quit,
-    /// Dynamic commands (Put, Get, Delete, List, etc.) - caught externally
+    /// Dynamic commands (Put, Get, Delete, List, etc.)
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -79,8 +81,6 @@ fn format_recursive_help(cmd: &clap::Command, prefix: &str, output: &mut String)
         if name == "help" { continue; }
         
         let heading = sub.get_next_help_heading().map(|h| h.to_string());
-        
-        // If it's a top-level group (has subcommands) and no heading, use about as heading
         let has_subcommands = sub.has_subcommands();
         let final_heading = if prefix.is_empty() && has_subcommands && heading.is_none() {
              sub.get_about().map(|a| a.to_string())
@@ -98,63 +98,51 @@ fn format_recursive_help(cmd: &clap::Command, prefix: &str, output: &mut String)
     }
 
     let mut first_group = true;
-    for (heading, subs) in groups {
-        if !first_group {
-            let _ = writeln!(output);
-        }
-        if let Some(h) = heading {
-            let _ = writeln!(output, "{}:", h);
-        }
+    for (heading, cmds) in groups {
+        if !first_group { output.push('\n'); }
         first_group = false;
 
-        for (sub, full_name) in subs {
-            let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
-            let _ = writeln!(output, "  {:24} {}", full_name, about);
-            format_recursive_help(sub, &full_name, output);
+        if let Some(h) = heading { let _ = writeln!(output, "{}:", h); }
+        for (cmd, full) in cmds {
+            let about = cmd.get_about().map(|a| a.to_string()).unwrap_or_default();
+            if cmd.has_subcommands() {
+                format_recursive_help(cmd, &full, output);
+            } else {
+                let _ = writeln!(output, "  {:24} {}", full, about);
+            }
         }
     }
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum NodeSubcommand {
-    /// Show node info (local identity)
     /// Show node info (local identity)
     Status,
     /// Set display name for this node
-    SetName {
-        name: String,
-    },
+    SetName { name: String },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum MeshSubcommand {
-    /// Create a new mesh (can create multiple)
+    /// Create a new mesh
     Create,
-    /// List all meshes this node is part of
+    /// List all meshes
     List,
-    /// Switch to a different mesh
-    Use {
-        /// Mesh ID (UUID, can be partial)
-        mesh_id: String,
-    },
-    /// Show mesh status (ID, peer counts)
+    /// Switch to a mesh
+    Use { mesh_id: String },
+    /// Show mesh status
     Status,
-    /// Join an existing mesh using an invite token
-    Join {
-        /// Invite token
-        token: String,
-    },
-    /// List all peers (authorization + online status)
+    /// Join a mesh using an invite token
+    Join { token: String },
+    /// List all peers
     Peers,
     /// Generate a one-time invite token
     Invite,
     /// Revoke a peer from the mesh
-    Revoke {
-        pubkey: String,
-    },
+    Revoke { pubkey: String },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum StoreSubcommand {
     /// Create a new store
     Create {
@@ -164,33 +152,23 @@ pub enum StoreSubcommand {
         #[arg(short = 't', long)]
         r#type: String,
     },
-    /// List all stores in the mesh
+    /// List stores
     List,
-    /// Switch context to a specific store
-    Use {
-        /// Store UUID (or first few chars)
-        uuid: String,
-    },
+    /// Switch to a store
+    Use { uuid: String },
     /// Delete (archive) a store
-    Delete {
-        /// Store UUID
-        uuid: String,
-    },
-    /// Show current store info
+    Delete { uuid: String },
+    /// Show store status
     Status {
-        /// Show detailed file info
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Debug: list all log entries per author
+    /// Debug graph output
     Debug,
-    /// Cleanup stale orphans
+    /// Clean up stale orphaned entries
     OrphanCleanup,
-    /// Show history/DAG for a key (or complete history if no key provided)
-    History {
-        /// Key to show history for (omit for complete history)
-        key: Option<String>,
-    },
+    /// Show history for a key
+    History { key: Option<String> },
     /// Show author sync state
     AuthorState {
         /// Optional pubkey (defaults to self)
@@ -204,10 +182,8 @@ pub enum StoreSubcommand {
 }
 
 pub async fn handle_command(
-    node: &Node,
-    store: Option<Arc<dyn StoreHandle>>,
-    mesh_network: Option<Arc<MeshService>>,
-    mesh: Option<&Mesh>,
+    backend: &dyn LatticeBackend,
+    ctx: &CommandContext,
     cli: LatticeCli,
     writer: Writer,
 ) -> CommandResult {
@@ -217,18 +193,18 @@ pub async fn handle_command(
             let cmd = LatticeCli::command();
             format_recursive_help(&cmd, "", &mut output);
             
-            // Add dynamic commands from store introspection (works for any store type)
-            if let Some(ctx) = store.as_ref() {
-                use std::fmt::Write;
-                let _ = writeln!(output, "\nStore Operations ({}):", ctx.store_type());
-                let dispatcher = ctx.as_dispatcher();
-                let service = dispatcher.service_descriptor();
-                let docs = dispatcher.command_docs();
-                for method in service.methods() {
-                    let name = method.name();
-                    let name_lower = name.to_lowercase();
-                    let desc = docs.get(name).map(|s| s.as_str()).unwrap_or("(dynamic)");
-                    let _ = writeln!(output, "  {:24} {}", name_lower, desc);
+            // Add dynamic commands from store introspection
+            if let Some(store_id) = ctx.store_id {
+                match backend.store_list_methods(store_id).await {
+                    Ok(methods) => {
+                        use std::fmt::Write;
+                        let _ = writeln!(output, "\nStore Operations:");
+                        for (name, desc) in methods {
+                            let name_lower = name.to_lowercase();
+                            let _ = writeln!(output, "  {:24} {}", name_lower, desc);
+                        }
+                    }
+                    Err(_) => {}
                 }
             }
             
@@ -237,49 +213,59 @@ pub async fn handle_command(
             let _ = write!(w, "{}", output);
             CommandResult::Ok
         }
+        
         LatticeCommand::Node { subcommand } => match subcommand {
-            NodeSubcommand::Status => node_commands::cmd_status(node, mesh_network.as_deref(), writer).await,
-            NodeSubcommand::SetName { name } => node_commands::cmd_set_name(node, mesh_network.as_deref(), &name, writer).await,
+            NodeSubcommand::Status => node_commands::cmd_status(backend, writer).await,
+            NodeSubcommand::SetName { name } => node_commands::cmd_set_name(backend, &name, writer).await,
         },
-        LatticeCommand::Mesh { subcommand } => match subcommand {
-            MeshSubcommand::Create => mesh_commands::cmd_create(node, mesh_network.as_deref(), writer).await,
-            MeshSubcommand::Join { token } => mesh_commands::cmd_join(node, &token, writer).await,
-            other => {
-                // Use passed Mesh (context-aware)
-                mesh_commands::handle_command(node, mesh, mesh_network.as_deref(), other, writer).await
-            }
-        },
+        
+        LatticeCommand::Mesh { subcommand } => {
+            let mesh_ctx = mesh_commands::MeshContext { mesh_id: ctx.mesh_id };
+            mesh_commands::handle_command(backend, &mesh_ctx, subcommand, writer).await
+        }
+        
         LatticeCommand::Store { subcommand } => match subcommand {
             StoreSubcommand::Create { name, r#type } => {
-                store_commands::cmd_store_create(node, mesh, &name, &r#type, writer).await
-            },
-            StoreSubcommand::List => store_commands::cmd_store_list(node, mesh, writer).await,
-            StoreSubcommand::Use { uuid } => store_commands::cmd_store_use(node, mesh, &uuid, writer).await,
-            StoreSubcommand::Delete { uuid } => store_commands::cmd_store_delete(node, mesh, &uuid, writer).await,
-            StoreSubcommand::Status { verbose } => {
-                let args: Vec<String> = if verbose { vec!["-v".to_string()] } else { vec![] };
-                store_commands::cmd_store_status(node, store, mesh_network.as_deref(), &args, writer).await
-            },
-            StoreSubcommand::Debug => store_commands::cmd_store_debug(node, store, mesh_network.as_deref(), &[], writer).await,
-            StoreSubcommand::OrphanCleanup => store_commands::cmd_orphan_cleanup(node, store, mesh_network.as_deref(), &[], writer).await,
+                store_commands::cmd_store_create(backend, ctx.mesh_id, name, &r#type, writer).await
+            }
+            StoreSubcommand::List => {
+                store_commands::cmd_store_list(backend, ctx.mesh_id, writer).await
+            }
+            StoreSubcommand::Use { uuid } => {
+                store_commands::cmd_store_use(backend, ctx.mesh_id, &uuid, writer).await
+            }
+            StoreSubcommand::Delete { uuid } => {
+                let id = Uuid::parse_str(&uuid).ok();
+                store_commands::cmd_store_delete(backend, id, writer).await
+            }
+            StoreSubcommand::Status { verbose: _ } => {
+                store_commands::cmd_store_status(backend, ctx.store_id, writer).await
+            }
+            StoreSubcommand::Debug => {
+                store_commands::cmd_store_debug(backend, ctx.store_id, writer).await
+            }
+            StoreSubcommand::OrphanCleanup => {
+                store_commands::cmd_orphan_cleanup(backend, ctx.store_id, writer).await
+            }
             StoreSubcommand::History { key } => {
-                let args: Vec<String> = key.into_iter().collect();
-                store_commands::cmd_history(node, store, mesh_network.as_deref(), &args, writer).await
-            },
+                store_commands::cmd_history(backend, ctx.store_id, key.as_deref(), writer).await
+            }
             StoreSubcommand::AuthorState { pubkey, all } => {
-                let mut args = pubkey.map(|p| vec![p]).unwrap_or_default();
-                if all { args.push("-a".to_string()); }
-                store_commands::cmd_author_state(node, store, mesh_network.as_deref(), &args, writer).await
-            },
-            StoreSubcommand::Sync => store_commands::cmd_store_sync(node, store, mesh_network.clone(), &[], writer).await,
+                store_commands::cmd_author_state(backend, ctx.store_id, pubkey.as_deref(), all, writer).await
+            }
+            StoreSubcommand::Sync => {
+                store_commands::cmd_store_sync(backend, ctx.store_id, writer).await
+            }
         },
+        
         LatticeCommand::Quit => {
             let mut w = writer.clone();
             let _ = writeln!(w, "Goodbye!");
             CommandResult::Quit
-        },
+        }
+        
         LatticeCommand::External(args) => {
-            store_commands::cmd_dynamic_exec(node, store, mesh_network.as_deref(), &args, writer).await
+            store_commands::cmd_dynamic_exec(backend, ctx.store_id, &args, writer).await
         }
     }
 }

@@ -1,0 +1,22 @@
+[package]
+name = "lattice-runtime"
+description = "Lattice SDK and runtime - unified backend abstraction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-node = { workspace = true }
+lattice-kernel = { workspace = true }
+lattice-net = { workspace = true }
+lattice-model = { workspace = true }
+lattice-rpc = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+prost = { workspace = true }
+prost-reflect = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }

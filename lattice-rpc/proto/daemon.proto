@@ -1,0 +1,283 @@
+syntax = "proto3";
+
+package lattice.daemon.v1;
+
+// Empty message for RPC calls with no parameters
+message Empty {}
+
+// ============================================================================
+// NodeService - Local node identity and status
+// ============================================================================
+
+service NodeService {
+  // Get node identity and status
+  rpc GetStatus(Empty) returns (NodeStatus);
+  // Set display name
+  rpc SetName(SetNameRequest) returns (Empty);
+  // Subscribe to node events (mesh ready, join failed, etc.)
+  rpc Subscribe(Empty) returns (stream NodeEvent);
+}
+
+message NodeStatus {
+  bytes public_key = 1;
+  string display_name = 2;
+  string iroh_node_id = 3;
+  uint32 mesh_count = 4;
+  uint32 peer_count = 5;
+}
+
+message SetNameRequest {
+  string name = 1;
+}
+
+// Events streamed from Subscribe RPC
+message NodeEvent {
+  oneof event {
+    MeshReadyEvent mesh_ready = 1;
+    StoreReadyEvent store_ready = 2;
+    JoinFailedEvent join_failed = 3;
+    SyncResultEvent sync_result = 4;
+  }
+}
+
+message MeshReadyEvent {
+  bytes mesh_id = 1;
+}
+
+message StoreReadyEvent {
+  bytes mesh_id = 1;
+  bytes store_id = 2;
+}
+
+message JoinFailedEvent {
+  bytes mesh_id = 1;
+  string reason = 2;
+}
+
+message SyncResultEvent {
+  bytes store_id = 1;
+  uint32 peers_synced = 2;
+  uint64 entries_sent = 3;
+  uint64 entries_received = 4;
+}
+
+// ============================================================================
+// MeshService - Mesh management
+// ============================================================================
+
+service MeshService {
+  // Create a new mesh
+  rpc Create(Empty) returns (MeshInfo);
+  // List all meshes
+  rpc List(Empty) returns (MeshList);
+  // Get mesh status
+  rpc GetStatus(MeshId) returns (MeshInfo);
+  // Join mesh with invite token
+  rpc Join(JoinRequest) returns (JoinResponse);
+  // Generate invite token
+  rpc Invite(MeshId) returns (InviteToken);
+  // List peers in mesh
+  rpc ListPeers(MeshId) returns (PeerList);
+  // Revoke a peer
+  rpc Revoke(RevokeRequest) returns (Empty);
+}
+
+message MeshId {
+  bytes id = 1;
+}
+
+message MeshInfo {
+  bytes id = 1;
+  string alias = 2;
+  uint32 peer_count = 3;
+  uint32 store_count = 4;
+}
+
+message MeshList {
+  repeated MeshInfo meshes = 1;
+}
+
+message JoinRequest {
+  string token = 1;
+}
+
+message JoinResponse {
+  bytes mesh_id = 1;
+  string status = 2;
+}
+
+message InviteToken {
+  string token = 1;
+}
+
+message PeerInfo {
+  bytes public_key = 1;
+  string status = 2;
+  bool online = 3;
+  string name = 4;
+  uint64 last_seen_ms = 5;
+}
+
+message PeerList {
+  repeated PeerInfo peers = 1;
+}
+
+message RevokeRequest {
+  bytes mesh_id = 1;
+  bytes peer_key = 2;
+}
+
+// ============================================================================
+// StoreService - Store management
+// ============================================================================
+
+service StoreService {
+  // Create a store in a mesh
+  rpc Create(CreateStoreRequest) returns (StoreInfo);
+  // List stores in a mesh
+  rpc List(MeshId) returns (StoreList);
+  // Get store info
+  rpc GetStatus(StoreId) returns (StoreInfo);
+  // Delete (archive) a store
+  rpc Delete(StoreId) returns (Empty);
+  // Trigger sync with all peers
+  rpc Sync(StoreId) returns (SyncResult);
+  // Debug: list all log entries per author
+  rpc Debug(StoreId) returns (DebugInfo);
+  // Show history/DAG for a key
+  rpc History(HistoryRequest) returns (HistoryResponse);
+  // Show author sync state
+  rpc AuthorState(AuthorStateRequest) returns (AuthorStateResponse);
+  // Cleanup stale orphans
+  rpc OrphanCleanup(StoreId) returns (CleanupResult);
+}
+
+message StoreId {
+  bytes id = 1;
+}
+
+message CreateStoreRequest {
+  bytes mesh_id = 1;
+  string name = 2;
+  string store_type = 3;
+}
+
+message StoreInfo {
+  bytes id = 1;
+  string name = 2;
+  string store_type = 3;
+  uint64 entry_count = 4;
+  bool archived = 5;
+}
+
+message StoreList {
+  repeated StoreInfo stores = 1;
+}
+
+message SyncResult {
+  uint32 peers_synced = 1;
+  uint64 entries_sent = 2;
+  uint64 entries_received = 3;
+}
+
+message DebugInfo {
+  repeated AuthorEntryCount authors = 1;
+}
+
+message AuthorEntryCount {
+  bytes author_key = 1;
+  uint64 entry_count = 2;
+}
+
+message HistoryRequest {
+  bytes store_id = 1;
+  bytes author = 2;   // Optional: filter by author (empty = all authors)
+  uint32 limit = 3;   // Optional: max entries to return (0 = unlimited)
+}
+
+message HistoryEntry {
+  uint64 seq = 1;
+  bytes author = 2;
+  bytes payload = 3;            // Raw payload bytes
+  uint64 timestamp = 4;
+  bytes hash = 5;               // Entry hash
+  bytes prev_hash = 6;          // Previous entry hash in author's chain
+  repeated bytes causal_deps = 7;  // Cross-author causal dependencies
+  string summary = 8;           // Server-decoded payload summary for display
+}
+
+message HistoryResponse {
+  repeated HistoryEntry entries = 1;
+}
+
+message AuthorStateRequest {
+  bytes store_id = 1;
+  bytes author_key = 2;  // Empty = all authors
+}
+
+message AuthorSyncState {
+  bytes author_key = 1;
+  uint64 local_seq = 2;
+  uint64 remote_seq = 3;
+  bool synced = 4;
+}
+
+message AuthorStateResponse {
+  repeated AuthorSyncState authors = 1;
+}
+
+message CleanupResult {
+  uint32 orphans_removed = 1;
+  uint64 bytes_freed = 2;
+}
+
+// ============================================================================
+// Dynamic Store Operations
+// ============================================================================
+//
+// Store-specific operations (Get, Put, Delete, etc.) use the generic Exec RPC
+// which forwards to the store's existing protobuf dispatcher. The CLI can
+// introspect available methods per store type via service_descriptor().
+
+service DynamicStoreService {
+  // Execute a store-specific method using protobuf reflection
+  rpc Exec(ExecRequest) returns (ExecResponse);
+  // Get store's protobuf descriptors for client-side reflection
+  rpc GetDescriptor(StoreId) returns (DescriptorResponse);
+  // List available methods for a store type
+  rpc ListMethods(StoreId) returns (MethodList);
+}
+
+message ExecRequest {
+  bytes store_id = 1;
+  string method = 2;
+  bytes payload = 3;  // Serialized protobuf request message
+}
+
+enum ErrorCode {
+  UNKNOWN = 0;
+  STORE_NOT_FOUND = 1;
+  METHOD_NOT_FOUND = 2;
+  INVALID_ARGUMENT = 3;
+  EXECUTION_FAILED = 4;
+}
+
+message ExecResponse {
+  bytes result = 1;   // Serialized protobuf response message
+  string error = 2;   // Error message if any
+  ErrorCode error_code = 3;
+}
+
+message DescriptorResponse {
+  bytes file_descriptor_set = 1;  // Serialized FileDescriptorSet for client-side DescriptorPool
+  string service_name = 2;        // Fully qualified service name (e.g. "lattice.kv.KvStore")
+}
+
+message MethodInfo {
+  string name = 1;
+  string description = 2;
+}
+
+message MethodList {
+  repeated MethodInfo methods = 1;
+}

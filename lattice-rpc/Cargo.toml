@@ -1,0 +1,25 @@
+[package]
+name = "lattice-rpc"
+description = "gRPC server for Lattice daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-node = { workspace = true }
+lattice-net = { workspace = true }
+lattice-model = { workspace = true }
+tonic = "0.12"
+prost = { workspace = true }
+prost-reflect = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+tracing = { workspace = true }
+uuid = { workspace = true }
+tower = "0.4"
+hyper-util = "0.1"
+hex.workspace = true
+dirs.workspace = true
+
+[build-dependencies]
+tonic-build = "0.12"

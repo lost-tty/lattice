@@ -59,4 +59,33 @@ pub trait StoreInspector: Send + Sync {
         from_seq: u64,
         to_seq: u64,
     ) -> Pin<Box<dyn Future<Output = Result<mpsc::Receiver<SignedEntry>, StoreError>> + Send + '_>>;
+
+    /// Get history entries from the sigchain
+    ///
+    /// Returns all entries, optionally filtered by author. If limit is Some(n),
+    /// returns at most n entries (most recent first).
+    fn history(
+        &self,
+        author: Option<PubKey>,
+        limit: Option<u32>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<HistoryEntry>, StoreError>> + Send + '_>>;
+}
+
+/// A sigchain entry for history display
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    /// Sequence number within author's chain
+    pub seq: u64,
+    /// Author's public key
+    pub author: PubKey,
+    /// Raw payload bytes
+    pub payload: Vec<u8>,
+    /// HLC timestamp (wall_time << 16 | counter)
+    pub timestamp: u64,
+    /// Entry hash
+    pub hash: lattice_model::types::Hash,
+    /// Previous entry hash in author's chain
+    pub prev_hash: lattice_model::types::Hash,
+    /// Cross-author causal dependencies
+    pub causal_deps: Vec<lattice_model::types::Hash>,
 }

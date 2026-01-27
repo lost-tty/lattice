@@ -11,6 +11,7 @@
 //! - Store watcher: automatically opens/closes stores declared in root
 //! - Single point for mesh-wide policies
 
+use std::sync::RwLock;
 use crate::{
     peer_manager::{PeerManager, PeerManagerError},
     store_manager::StoreManager,
@@ -60,6 +61,8 @@ pub struct Mesh {
     store_manager: Arc<StoreManager>,
     /// Shutdown signal for watcher
     shutdown_tx: broadcast::Sender<()>,
+    /// Stores opened by this mesh (for reconciliation - only close what we opened)
+    opened_stores: Arc<RwLock<std::collections::HashSet<Uuid>>>,
 }
 
 impl Clone for Mesh {
@@ -69,14 +72,14 @@ impl Clone for Mesh {
             peer_manager: self.peer_manager.clone(),
             store_manager: self.store_manager.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
+            opened_stores: self.opened_stores.clone(),
         }
     }
 }
 
 impl Mesh {
     /// Create a new Mesh with a fresh root store.
-    /// Note: Does NOT register the root store. Call `register_root_store()` after
-    /// storing the mesh in Node.meshes.
+    /// Root store is registered immediately - no separate registration step needed.
     pub async fn create_new(
         node: &Arc<NodeIdentity>, 
         store_manager: Arc<StoreManager>
@@ -88,6 +91,16 @@ impl Mesh {
         
         let peer_manager = PeerManager::new(root_store, node).await?;
         
+        // Register root store immediately
+        let opened_for_reg = store_manager.open(root_store_id, StoreType::KvStore)?;
+        store_manager.register(
+            root_store_id, // mesh_id = root_store_id
+            root_store_id,
+            opened_for_reg,
+            StoreType::KvStore,
+            peer_manager.clone(),
+        )?;
+        
         let (shutdown_tx, _) = broadcast::channel(1);
         
         let mesh = Self {
@@ -95,11 +108,17 @@ impl Mesh {
             peer_manager,
             store_manager,
             shutdown_tx,
+            opened_stores: Arc::new(RwLock::new(std::collections::HashSet::new())),
         };
+        
+        // Start watcher
+        mesh.start_watcher();
             
         Ok(mesh)
     }
     
+    /// Open an existing Mesh by root store ID.
+    /// Root store is registered immediately - no separate registration step needed.
     pub async fn open(
         store_id: Uuid,
         node: &Arc<NodeIdentity>, 
@@ -112,6 +131,16 @@ impl Mesh {
         
         let peer_manager = PeerManager::new(root_store, node).await?;
         
+        // Register root store immediately
+        let opened_for_reg = store_manager.open(store_id, StoreType::KvStore)?;
+        store_manager.register(
+            store_id, // mesh_id = root_store_id
+            store_id,
+            opened_for_reg,
+            StoreType::KvStore,
+            peer_manager.clone(),
+        )?;
+        
         let (shutdown_tx, _) = broadcast::channel(1);
         
         let mesh = Self {
@@ -119,28 +148,13 @@ impl Mesh {
             peer_manager,
             store_manager,
             shutdown_tx,
+            opened_stores: Arc::new(RwLock::new(std::collections::HashSet::new())),
         };
+        
+        // Start watcher
+        mesh.start_watcher();
             
         Ok(mesh)
-    }
-    
-    /// Register the root store in StoreManager.
-    /// Call this after the mesh is stored in Node.meshes.
-    /// This emits NetEvent::StoreReady.
-    pub fn register_root_store(&self) -> Result<(), MeshError> {
-        // Open store via store_manager and register
-        let opened = self.store_manager.open(self.root_store_id, StoreType::KvStore)?;
-        self.store_manager.register(
-            self.root_store_id,
-            opened,
-            StoreType::KvStore,
-            self.peer_manager.clone(),
-        )?;
-        
-        // Start watcher to automatically open/close stores declared in root store
-        self.start_watcher();
-        
-        Ok(())
     }
     
     /// Get the mesh ID (root store UUID).
@@ -148,10 +162,11 @@ impl Mesh {
         self.root_store_id
     }
     
-    /// Get a handle to the root store.
+    /// Get the root store handle.
+    /// Panics if root store is not registered (should never happen - registered during Mesh construction).
     pub fn root_store(&self) -> KvStore {
         self.store_manager.get::<KvStore>(&self.root_store_id)
-            .expect("root store should exist in store_manager")
+            .expect("Root store not registered - this is a bug, registration should happen during Mesh::open/create_new")
     }
     
     /// Get peer manager for network layer integration.
@@ -200,6 +215,7 @@ impl Mesh {
         let store_manager = self.store_manager.clone();
         let root_store_id = self.root_store_id;
         let peer_manager = self.peer_manager.clone();
+        let opened_stores = self.opened_stores.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         
         let Some(root_store) = self.store_manager.get::<KvStore>(&self.root_store_id) else {
@@ -221,7 +237,7 @@ impl Mesh {
             debug!("Store watcher started for mesh {}", root_store_id);
             
             // Initial reconciliation to open existing stores
-            if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager) {
+            if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores) {
                 warn!(error = %e, "Initial reconcile failed");
             }
             
@@ -235,7 +251,7 @@ impl Mesh {
                         match event {
                             Ok(_evt) => {
                                 // Reconcile on any change
-                                if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager) {
+                                if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores) {
                                     warn!(error = %e, "Reconcile failed");
                                 }
                             }
@@ -249,26 +265,41 @@ impl Mesh {
     }
     
     /// Reconcile stores with declarations in root store.
+    /// Tracks which stores this mesh opened, and only closes those when undeclared.
     fn reconcile_stores(
         store_manager: &Arc<StoreManager>, 
         root: &KvStore, 
         root_store_id: Uuid,
-        peer_manager: &Arc<PeerManager>
+        peer_manager: &Arc<PeerManager>,
+        opened_stores: &Arc<RwLock<std::collections::HashSet<Uuid>>>,
     ) -> Result<(), MeshError> {
         let declarations = Self::list_declarations(root)?;
         
-        // Get current store IDs (excluding root)
-        let current_ids: Vec<Uuid> = store_manager.store_ids()
+        // Get IDs of stores we have opened (from our tracking set)
+        let our_stores: std::collections::HashSet<Uuid> = opened_stores.read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        
+        // Get current store IDs in StoreManager (excluding root)
+        let current_ids: std::collections::HashSet<Uuid> = store_manager.store_ids()
             .into_iter()
             .filter(|id| *id != root_store_id)
+            .collect();
+        
+        let declared_ids: std::collections::HashSet<Uuid> = declarations.iter()
+            .filter(|d| !d.archived)
+            .map(|d| d.id)
             .collect();
         
         // Open stores that should be open but aren't
         for decl in &declarations {
             if decl.archived {
-                // Should be closed - close if open
-                if current_ids.contains(&decl.id) {
+                // Should be closed - close if open AND we opened it
+                if our_stores.contains(&decl.id) && current_ids.contains(&decl.id) {
                     let _ = store_manager.close(&decl.id);
+                    if let Ok(mut guard) = opened_stores.write() {
+                        guard.remove(&decl.id);
+                    }
                     info!(store_id = %decl.id, "Closed archived store");
                 }
             } else {
@@ -277,9 +308,13 @@ impl Mesh {
                     match store_manager.open(decl.id, decl.store_type) {
                         Ok(opened) => {
                             // Register with same peer_manager as root store
-                            if let Err(e) = store_manager.register(decl.id, opened, decl.store_type, peer_manager.clone()) {
+                            if let Err(e) = store_manager.register(root_store_id, decl.id, opened, decl.store_type, peer_manager.clone()) {
                                 warn!(store_id = %decl.id, error = ?e, "Failed to register store");
                             } else {
+                                // Track that we opened this store
+                                if let Ok(mut guard) = opened_stores.write() {
+                                    guard.insert(decl.id);
+                                }
                                 info!(store_id = %decl.id, store_type = %decl.store_type, "Opened store");
                             }
                         }
@@ -291,12 +326,14 @@ impl Mesh {
             }
         }
         
-        // Close stores that are open but no longer declared
-        let declared_ids: Vec<Uuid> = declarations.iter().map(|d| d.id).collect();
-        for id in &current_ids {
-            if !declared_ids.contains(id) {
-                let _ = store_manager.close(id);
-                info!(store_id = %id, "Closed undeclared store");
+        // Close stores that WE opened but are no longer declared
+        for store_id in &our_stores {
+            if !declared_ids.contains(store_id) && current_ids.contains(store_id) {
+                let _ = store_manager.close(store_id);
+                if let Ok(mut guard) = opened_stores.write() {
+                    guard.remove(store_id);
+                }
+                info!(store_id = %store_id, "Closed undeclared store");
             }
         }
         
@@ -342,7 +379,8 @@ impl Mesh {
     /// List all store declarations in this mesh.
     /// Returns all stores declared in /stores/* (excludes root store).
     pub fn list_stores(&self) -> Result<Vec<StoreDeclaration>, MeshError> {
-        Self::list_declarations(&self.root_store())
+        let root = self.root_store();
+        Self::list_declarations(&root)
     }
     
     /// Create a new store declaration in root store.
@@ -412,7 +450,8 @@ impl Mesh {
         
         let hash = blake3::hash(&secret);
         let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
-        self.root_store().put(key.as_bytes(), b"valid").await?;
+        let root = self.root_store();
+        root.put(key.as_bytes(), b"valid").await?;
         
         let invite = Invite::new(inviter, self.id(), secret.to_vec());
         Ok(invite.to_string())
@@ -423,8 +462,10 @@ impl Mesh {
         let hash = blake3::hash(secret);
         let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
         
-        if let Ok(Some(_)) = self.root_store().get(key.as_bytes()).map(|h| h.lww()) {
-            self.root_store().delete(key.as_bytes()).await?;
+        let root = self.root_store();
+        
+        if let Ok(Some(_)) = root.get(key.as_bytes()).map(|h| h.lww()) {
+            root.delete(key.as_bytes()).await?;
             Ok(true)
         } else {
             Ok(false)

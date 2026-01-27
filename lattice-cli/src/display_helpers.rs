@@ -2,7 +2,7 @@
 //!
 //! Provides formatting functions for CLI output.
 
-use lattice_model::types::PubKey;
+use lattice_runtime::PubKey;
 use owo_colors::AnsiColors;
 use std::time::Duration;
 

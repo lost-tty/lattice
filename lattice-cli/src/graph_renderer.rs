@@ -4,7 +4,7 @@
 //! Design inspired by git-graph: https://github.com/mlange-42/git-graph (MIT)
 
 use std::fmt::Write;
-use lattice_model::types::{PubKey, Hash};
+use lattice_runtime::{PubKey, Hash};
 use crate::display_helpers::{author_color, ansi_code};
 
 // Character codes for grid cells
