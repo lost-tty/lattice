@@ -254,7 +254,9 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 ## Technical Debt
 
+- [ ] **REGRESSION**: history command list filtering (backend side) capability
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
+- [ ] **Data Directory Lock File**: Investigate lock file mechanism to prevent multiple processes from using the same data directory simultaneously (daemon + embedded app conflict). Options: flock, PID file, or socket-based detection.
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 - [ ] **Payload Validation Strategy**: Decide where semantic validation occurs and what happens on failure. Options: build-time only, versioned rules, entry replacement, or separate chain/payload advancement. See `test_rejected_entry_breaks_chain` in `lattice-kvstore/src/kv.rs`.
 

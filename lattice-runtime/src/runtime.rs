@@ -49,6 +49,7 @@ impl Runtime {
 pub struct RuntimeBuilder {
     data_dir: Option<PathBuf>,
     with_rpc: bool,
+    name: Option<String>,
 }
 
 impl RuntimeBuilder {
@@ -56,6 +57,7 @@ impl RuntimeBuilder {
         Self { 
             data_dir: None,
             with_rpc: false,
+            name: None,
         }
     }
     
@@ -67,6 +69,12 @@ impl RuntimeBuilder {
     /// Enable RPC server (for daemon mode).
     pub fn with_rpc(mut self) -> Self {
         self.with_rpc = true;
+        self
+    }
+
+    /// Set explicit node name.
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = Some(name);
         self
     }
     
@@ -88,7 +96,10 @@ impl RuntimeBuilder {
         let data_dir = lattice_node::data_dir::DataDir::new(data_path);
 
         // Build node
-        let builder = NodeBuilder::new(data_dir).with_net_tx(net_tx);
+        let mut builder = NodeBuilder::new(data_dir).with_net_tx(net_tx);
+        if let Some(name) = self.name {
+            builder = builder.with_name(name);
+        }
         
         let node = Arc::new(builder.build().map_err(|e| RuntimeError::Node(e.to_string()))?);
         

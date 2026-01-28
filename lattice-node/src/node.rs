@@ -125,11 +125,12 @@ pub struct NodeBuilder {
     /// For production use, the network layer (MeshService) should create this
     /// and pass it to ensure proper ownership.
     net_tx: Option<broadcast::Sender<NetEvent>>,
+    name: Option<String>,
 }
 
 impl NodeBuilder {
     pub fn new(data_dir: DataDir) -> Self {
-        Self { data_dir, net_tx: None }
+        Self { data_dir, net_tx: None, name: None }
     }
     
     /// Set data directory
@@ -142,6 +143,12 @@ impl NodeBuilder {
     /// This inverts the dependency so the network layer owns the channel.
     pub fn with_net_tx(mut self, net_tx: broadcast::Sender<NetEvent>) -> Self {
         self.net_tx = Some(net_tx);
+        self
+    }
+    
+    /// Set explicit node name (overrides system hostname)
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 
@@ -159,12 +166,16 @@ impl NodeBuilder {
         };
 
         let meta = MetaStore::open(self.data_dir.meta_db())?;
-        // Set hostname on first creation
+        
+        // Set name on first creation
         if is_new {
-            let hostname = hostname::get()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "unknown".to_string());
-            let _ = meta.set_name(&hostname);
+            let name = self.name.or_else(|| {
+                hostname::get()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .ok()
+            }).unwrap_or_else(|| "unknown".to_string());
+            
+            let _ = meta.set_name(&name);
         }
         
         let (event_tx, _) = broadcast::channel(16);
@@ -238,6 +249,8 @@ impl Node {
     pub fn node_id(&self) -> PubKey {
         self.node.public_key()
     }
+    
+
     
     /// Subscribe to node events (e.g., root store activation)
     pub fn subscribe_events(&self) -> broadcast::Receiver<NodeEvent> {

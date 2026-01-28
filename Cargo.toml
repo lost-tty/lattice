@@ -12,6 +12,7 @@ members = [
     "lattice-kvstore",
     "lattice-logstore",
     "lattice-runtime",
+    "lattice-bindings",
 ]
 
 [workspace.package]
@@ -24,7 +25,6 @@ license = "MIT"
 lattice-kernel = { path = "lattice-kernel" }
 lattice-node = { path = "lattice-node" }
 lattice-net = { path = "lattice-net" }
-lattice-cli = { path = "lattice-cli" }
 lattice-model = { path = "lattice-model" }
 lattice-kvstore = { path = "lattice-kvstore" }
 lattice-logstore = { path = "lattice-logstore" }
@@ -32,9 +32,6 @@ lattice-net-types = { path = "lattice-net-types" }
 lattice-proto = { path = "lattice-proto" }
 lattice-rpc = { path = "lattice-rpc" }
 lattice-runtime = { path = "lattice-runtime" }
-
-# CLI
-rustyline = "17"
 clap = { version = "4", features = ["derive"] }
 
 # Networking (Iroh)

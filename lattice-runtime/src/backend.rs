@@ -6,7 +6,6 @@
 use std::future::Future;
 use std::pin::Pin;
 use uuid::Uuid;
-
 // ==================== Return Types ====================
 
 /// Node status information
