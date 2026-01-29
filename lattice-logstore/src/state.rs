@@ -110,8 +110,13 @@ impl LogState {
         })
     }
 
-    /// Get all entries in causal order
-    pub fn cat(&self) -> Vec<LogEntry> {
+    /// Helper to decode a DB result into a LogEntry
+    fn decode_db_result(result: Result<(redb::AccessGuard<'_, &[u8]>, redb::AccessGuard<'_, &[u8]>), redb::StorageError>) -> Option<LogEntry> {
+        result.ok().and_then(|(k, v)| Self::decode_entry(k.value(), v.value()).ok())
+    }
+
+    /// Read entries (all or last N, always chronological)
+    pub fn read(&self, tail: Option<usize>) -> Vec<LogEntry> {
         let txn = match self.db.begin_read() {
             Ok(t) => t,
             Err(_) => return Vec::new(),
@@ -121,27 +126,23 @@ impl LogState {
             Err(_) => return Vec::new(),
         };
         
-        let mut entries = Vec::new();
-        if let Ok(iter) = table.iter() {
-            for result in iter {
-                if let Ok((k, v)) = result {
-                    if let Ok(entry) = Self::decode_entry(k.value(), v.value()) {
-                        entries.push(entry);
-                    }
+        match table.iter() {
+            Ok(iter) => {
+                if let Some(n) = tail {
+                    // Optimized tail: read newest first, take N
+                    let mut entries: Vec<_> = iter.rev()
+                        .filter_map(Self::decode_db_result)
+                        .take(n)
+                        .collect();
+                    // Restore chronological order (Oldest -> Newest)
+                    entries.reverse();
+                    entries
+                } else {
+                    // Read all (chronological) 
+                    iter.filter_map(Self::decode_db_result).collect()
                 }
             }
-        }
-        entries
-    }
-
-    /// Get last N entries (oldest to newest)
-    pub fn tail(&self, n: usize) -> Vec<LogEntry> {
-        let all = self.cat();
-        let len = all.len();
-        if n >= len {
-            all
-        } else {
-            all[len - n..].to_vec()
+            Err(_) => Vec::new()
         }
     }
 
@@ -352,7 +353,7 @@ mod tests {
         state.apply(&op).unwrap();
         assert_eq!(state.len(), 1);
         
-        let entries = state.cat();
+        let entries = state.read(None);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, b"hello world");
         assert_eq!(entries[0].author, author);
@@ -361,7 +362,7 @@ mod tests {
         drop(state);
         let state2 = LogState::open(dir.path()).unwrap();
         assert_eq!(state2.len(), 1);
-        let entries2 = state2.cat();
+        let entries2 = state2.read(None);
         assert_eq!(entries2[0].content, b"hello world");
     }
     
@@ -405,11 +406,18 @@ mod tests {
         };
         state.apply(&op2).unwrap();
         
-        // cat() should return in HLC order
-        let entries = state.cat();
+        // read(None) should return in HLC order
+        let entries = state.read(None);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].content, b"first");
         assert_eq!(entries[1].content, b"second");
         assert_eq!(entries[2].content, b"third");
+        
+        // Test tail reading (read last 2)
+        let tail = state.read(Some(2));
+        assert_eq!(tail.len(), 2);
+        // Should be strictly chronological (second, third)
+        assert_eq!(tail[0].content, b"second");
+        assert_eq!(tail[1].content, b"third");
     }
 }

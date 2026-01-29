@@ -32,14 +32,9 @@ impl<W: StateWriter + AsRef<LogState>> LogHandle<W> {
         self.writer.submit(content.to_vec(), vec![]).await
     }
 
-    /// Get all log entries
-    pub fn cat(&self) -> Vec<LogEntry> {
-        self.state().cat()
-    }
-
-    /// Get the last N entries
-    pub fn tail(&self, n: usize) -> Vec<LogEntry> {
-        self.state().tail(n)
+    /// Read entries (all or last N)
+    pub fn read(&self, tail: Option<usize>) -> Vec<LogEntry> {
+        self.state().read(tail)
     }
 
     /// Get entry count
@@ -88,32 +83,24 @@ impl<W: StateWriter + AsRef<LogState> + Send + Sync> CommandDispatcher for LogHa
                     resp.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.0.to_vec().into()));
                     Ok(resp)
                 }
-                "Cat" => {
-                    let entries = self.cat();
+                "Read" => {
+                    let tail = if request.has_field_by_name("tail") {
+                        request.get_field_by_name("tail")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize)
+                    } else {
+                        None
+                    };
+                        
+                    let entries = self.read(tail);
+                    
                     let output_desc = crate::LOG_SERVICE_DESCRIPTOR
                         .methods()
-                        .find(|m| m.name() == "Cat")
+                        .find(|m| m.name() == "Read")
                         .ok_or("Method not found")?
                         .output();
                     let mut resp = prost_reflect::DynamicMessage::new(output_desc);
                     // Build repeated entries
-                    let entry_values: Vec<prost_reflect::Value> = entries.iter().map(|e| {
-                        prost_reflect::Value::String(String::from_utf8_lossy(&e.content).to_string())
-                    }).collect();
-                    resp.set_field_by_name("entries", prost_reflect::Value::List(entry_values));
-                    Ok(resp)
-                }
-                "Tail" => {
-                    let n = request.get_field_by_name("n")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(10) as usize;
-                    let entries = self.tail(n);
-                    let output_desc = crate::LOG_SERVICE_DESCRIPTOR
-                        .methods()
-                        .find(|m| m.name() == "Tail")
-                        .ok_or("Method not found")?
-                        .output();
-                    let mut resp = prost_reflect::DynamicMessage::new(output_desc);
                     let entry_values: Vec<prost_reflect::Value> = entries.iter().map(|e| {
                         prost_reflect::Value::String(String::from_utf8_lossy(&e.content).to_string())
                     }).collect();
@@ -148,8 +135,7 @@ impl<W: StateWriter + AsRef<LogState> + Send + Sync> lattice_model::Introspectab
     fn command_docs(&self) -> std::collections::HashMap<String, String> {
         let mut docs = std::collections::HashMap::new();
         docs.insert("Append".to_string(), "Append a message to the log".to_string());
-        docs.insert("Cat".to_string(), "Get all log entries".to_string());
-        docs.insert("Tail".to_string(), "Get the last N entries".to_string());
+        docs.insert("Read".to_string(), "Read log entries (tail option for last N)".to_string());
         docs
     }
 

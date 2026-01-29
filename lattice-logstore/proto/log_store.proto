@@ -4,8 +4,7 @@ package lattice.log;
 // The Log Store Service - append-only log
 service LogStore {
     rpc Append (AppendRequest) returns (AppendResponse);
-    rpc Cat (CatRequest) returns (CatResponse);
-    rpc Tail (TailRequest) returns (TailResponse);
+    rpc Read (ReadRequest) returns (ReadResponse);
 }
 
 // --- Service Request/Response ---
@@ -18,19 +17,11 @@ message AppendResponse {
     bytes hash = 1;
 }
 
-message CatRequest {
-    // Empty - returns all entries
+message ReadRequest {
+    optional uint64 tail = 1;   // If set, return only the last N entries. If unset, return all.
 }
 
-message CatResponse {
-    repeated string entries = 1;
-}
-
-message TailRequest {
-    uint64 n = 1;  // Number of entries to return
-}
-
-message TailResponse {
+message ReadResponse {
     repeated string entries = 1;
 }
 
