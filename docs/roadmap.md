@@ -61,7 +61,39 @@
 
 ---
 
-## Milestone 8: Abstract Storage Backend
+## Milestone 8: Reflection & Introspection
+
+**Goal:** Enable powerful, generic UIs (like the iOS App and CLI) to introspect any Lattice Store and dynamically build rich interfaces without hardcoded logic. Address the "Shallow Introspection" gap by providing deep type schemas and semantic hints.
+
+**Patterns:**
+1.  **Deep Type Exposure:** `store_get_type_schema(name)` returns full struct/enum definition.
+2.  **Semantic UI Hints:** `.proto` options (`ui.widget="slider"`) drive UI rendering.
+3.  **Command vs Query:** Explicitly distinguish Read/Write methods for Dashboard vs Action UI.
+
+### 8A: Unified API Generation (`lattice-api`)
+- [ ] **Centralized DTOs**: Move `NodeStatus`, `MeshInfo`, etc., to `daemon.proto` as single source of truth.
+- [ ] **Create `lattice-api` crate**:
+  - [ ] Configure `prost-build` to derive `uniffi::Record` on generated structs.
+  - [ ] Zero-copy reuse in `lattice-node` and `lattice-bindings` (skip duplicate generation).
+- [ ] **Unified Streaming**: define `StoreEvent` (KV change, Log append) in `lattice-api`.
+- [ ] **Architecture Refactor**:
+  - [ ] Move `LatticeBackend` trait to `lattice-model` (break circular dep).
+  - [ ] Refactor `lattice-rpc` services to wrapper `Arc<dyn LatticeBackend>` (instead of raw Node).
+  - [ ] `lattice-daemon` injects `InProcessBackend` into RPC server.
+
+### 8B: Enhanced Reflection (Bindings)
+- [ ] **Update `FieldType`**: specific variants `Message(String)` and `Enum(String)` carrying type names.
+- [ ] **Implement `store_inspect_type(name)`**: Returns recursive schema info.
+- [ ] **Unified Watch API**: `watch(store_id)` returns generic `StoreEvent` stream.
+
+### 8C: Generic UI Support
+- [ ] **Structured Results**: `store_exec_dynamic` returns recursive `ReflectValue` (instead of raw `Vec<u8>`).
+- [ ] **Recursive View**: SwiftUI `RecursiveInputView` capable of building nested forms from schema.
+- [ ] **Data Explorer**: Generic view for `ReflectValue` results.
+
+---
+
+## Milestone 9: Abstract Storage Backend
 
 **Goal:** Abstract the underlying key-value database so both `LogStore` and `KvStore` use a generic interface instead of `redb` directly. Enables swappable backends (redb, SQLite, in-memory, flash storage for embedded).
 
@@ -102,40 +134,58 @@
   - Replace direct `redb` calls with `StorageBackend` trait
   - State machines write to `Collection::Data` only
 
-## Milestone 9: Concrete RootStore Implementation
+## Milestone 10: The Weaver Protocol (Data Model Refactor)
+
+**Goal:** Implement the "Ly" data model by splitting the monolithic `Entry` into `Intention` (Transport-Agnostic Signal) and `Witness` (Chain-Specific Ordering). This decoupling enables "Ghost Parent" resolution and selective data sharing.
+
+> **See:** [Ly Architecture](ly_architecture.md) for full protocol details.
+
+### 10A: The Intention
+- [ ] Define `Intention` struct: `{ payload: Vec<u8>, author: PubKey, seq: u64, prev_hash: Hash, sig: Signature }`
+- [ ] Implement `Intention` validation (author signature check + seq/hash continuity)
+- [ ] Ensure `Intention` is valid independent of any chain (floating message)
+
+### 10B: The Witness
+- [ ] Define `Witness` event in `Entry`: `Entry { parent: Hash, event: Witness(Intention), sig: MySig }`
+- [ ] Update `SigChain` to append `Witness` events
+- [ ] Implement "Ingest/Digest" envelope pattern for Gossip
+
+---
+
+## Milestone 11: Concrete RootStore Implementation
 
 **Goal:** Move root store functionality from Node into a specialized store implementation with proper business logic.
 
 > Currently, peer/store management logic is scattered in `Node` and `Mesh`. This milestone consolidates it into a proper state machine with typed operations.
 
-### 9A: RootStore State Machine
+### 11A: RootStore State Machine
 - [ ] Define `RootOp` enum: `AddPeer`, `RevokePeer`, `DeclareStore`, `RemoveStore`
 - [ ] Create `RootState` implementing `StateMachine` trait
 - [ ] `apply(op, store: &mut dyn StateStorage)` enforces invariants (e.g., "only admins can add peers")
 
-### 9B: Refactor Node/Mesh
+### 11B: Refactor Node/Mesh
 - [ ] `PeerManager` submits `RootOp::AddPeer` instead of writing raw keys
 - [ ] `StoreManager` submits `RootOp::DeclareStore` instead of direct writes
 - [ ] Remove ad-hoc `/nodes/*` and `/stores/*` key manipulation
 - [ ] Unified Store Registry: `Node` becomes single source of truth (eliminate race conditions with `MeshNetwork`)
 
-### 9C: Access Control
+### 11C: Access Control
 - [ ] Define admin role in root store (`/acl/admins/{pubkey}`)
 - [ ] Policy enforcement in `RootState::apply()`
 
 ---
 
-## Milestone 10: Negentropy Sync Protocol
+## Milestone 12: Negentropy Sync Protocol
 
 **Goal:** Replace O(n) vector clock sync with sub-linear bandwidth using range-based set reconciliation.
 
 Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
-### 9A: Infrastructure
+### 12A: Infrastructure
 - [ ] Add hash→entry index (for efficient fetch-by-hash)
 - [ ] Implement negentropy fingerprint generation per store
 
-### 9B: Protocol Migration
+### 12B: Protocol Migration
 - [ ] Replace `SyncState` protocol with negentropy exchange
 - [ ] Decouple `seq` from network sync protocol (keep internal only)
 - [ ] Update `FetchRequest` to use hashes instead of seq ranges
@@ -156,52 +206,52 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 ---
 
-## Milestone 11: Wasm Runtime
+## Milestone 13: Wasm Runtime
 
 **Goal:** Replace hardcoded state machine logic with dynamic Wasm modules.
 
-### 11A: Wasm Integration
+### 13A: Wasm Integration
 - [ ] Integrate `wasmtime` into the Kernel
 - [ ] Define minimal Host ABI: `kv_get`, `kv_set`, `log_append`, `get_head`
 - [ ] Replace hardcoded `KvStore::apply()` with `WasmRuntime::call_apply()`
 - [ ] Map Host Functions to `StorageBackend` calls (M8 prerequisite)
 
-### 11B: Data Structures & Verification
+### 13B: Data Structures & Verification
 - [ ] Finalize `Entry`, `SignedEntry`, `Hash`, `PubKey` structs for Wasm boundary
 - [ ] Wasm-side SigChain verification (optional, for paranoid clients)
 - **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
 
 ---
 
-## Milestone 12: Content-Addressable Store (CAS)
+## Milestone 14: Content-Addressable Store (CAS)
 
-**Goal:** Blob storage for large files (prerequisite for Lattice Drive).
+**Goal:** Blob storage for large files (prerequisite for Lattice Drive). We use **CIDs (Content Identifiers)** for self-describing formats and IPFS/IPLD compatibility.
 
-### 12A: CAS Integration
+### 14A: CAS Integration
 - [ ] `lattice-cas` crate with pluggable backend (local FS, Garage S3)
-- [ ] `put_blob(data) -> hash`, `get_blob(hash) -> data`
+- [ ] `put_blob(data) -> CID`, `get_blob(CID) -> data`
 
-### 12B: Metadata & Pinning
+### 14B: Metadata & Pinning
 - [ ] `/cas/pins/{node_id}/{hash}` in root store
 - [ ] Pin reconciler: watch pins, trigger fetch
 
-### 12C: CLI
+### 14C: CLI
 - [ ] `cas put`, `cas get`, `cas pin`, `cas ls`
 
 ---
 
-## Milestone 13: Lattice Drive MVP
+## Milestone 15: Lattice Drive MVP
 
 **Goal:** A functioning file sync tool that proves the architecture.
 
-> **Depends on:** M11 (Wasm) + M12 (CAS)
+> **Depends on:** M13 (Wasm) + M14 (CAS)
 
-### 13A: Filesystem Logic
+### 15A: Filesystem Logic
 - [ ] Write `filesystem.wasm` (in Rust, compiled to wasm32-wasi)
 - [ ] Map file operations (`write`, `mkdir`, `rename`) to Log Ops
 - [ ] Store file content in CAS, reference hashes in sigchain
 
-### 13B: FUSE Interface
+### 15B: FUSE Interface
 - [ ] Write `lattice-fs` using the `fuser` crate
 - [ ] FUSE talks to Daemon via same gRPC interface as CLI
 - [ ] Mount the Store as a folder on Linux/macOS
@@ -209,44 +259,46 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 ---
 
-## Milestone 14: Embedded Proof ("Lattice Nano")
+## Milestone 16: Embedded Proof ("Lattice Nano")
 
 **Goal:** Running the Kernel on the RP2350.
 
 > Because CLI is already separated from Daemon (M7) and storage is abstracted (M8), only the Daemon needs porting.
 
-### 14A: `no_std` Refactoring
+### 16A: `no_std` Refactoring
 - [ ] Split `lattice-kernel` into `core` (logic) and `std` (IO)
 - [ ] Replace `wasmtime` (JIT) with `wasmi` (Interpreter) for embedded target
 - [ ] Port storage layer to `sequential-storage` (Flash) via `StorageBackend`
 
-### 14B: The "Continuity" Demo
+### 16B: The "Continuity" Demo
 - [ ] Build physical USB stick prototype
 - [ ] Implement BLE/Serial transport
 - **The Reveal:** Sync a file from Laptop → Stick → Phone without Internet
 
 ---
 
-## Milestone 15: Log Lifecycle & Pruning
+## Milestone 17: Log Lifecycle & Pruning
 
 **Goal:** Enable long-running nodes to manage log growth through snapshots, pruning, and finality checkpoints.
 
-### 15A: Snapshotting
+> **See:** [DAG-Based Pruning Architecture](pruning.md) for details on Ancestry-based metrics and Log Rewriting.
+
+### 17A: Snapshotting
 - [ ] `state.snapshot()` when log grows large
 - [ ] Store snapshots in `snapshot.db`
 - [ ] Bootstrap new peers from snapshot instead of full log replay
 
-### 15B: Waterlevel Pruning
+### 17B: Waterlevel Pruning
 - [ ] Calculate stability frontier (min seq acknowledged by all peers)
 - [ ] `truncate_prefix(seq)` for old log entries
 - [ ] Preserve entries newer than frontier
 
-### 15C: Checkpointing / Finality
+### 17C: Checkpointing / Finality
 - [ ] Periodically finalize state hash (protect against "Deep History Attacks")
 - [ ] Signed checkpoint entries in sigchain
 - [ ] Nodes reject entries that contradict finalized checkpoints
 
-### 15D: Hash Index Optimization
+### 17D: Hash Index Optimization
 - [ ] Replace in-memory `HashSet<Hash>` with on-disk index (redb) or Bloom Filter
 - [ ] Support 100M+ entries without excessive RAM
 
