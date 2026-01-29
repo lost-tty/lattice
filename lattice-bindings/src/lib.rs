@@ -250,7 +250,6 @@ impl Lattice {
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&mesh_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
         self.rt.block_on(r.backend().store_create(id, name, &store_type))
-            .map(Into::into)
             .map_err(|e| LatticeError::from_backend(e))
     }
 
@@ -259,7 +258,6 @@ impl Lattice {
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&mesh_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
         self.rt.block_on(r.backend().store_list(id))
-            .map(|list| list.into_iter().map(Into::into).collect())
             .map_err(|e| LatticeError::from_backend(e))
     }
 
@@ -268,7 +266,6 @@ impl Lattice {
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
         self.rt.block_on(r.backend().store_status(id))
-            .map(Into::into)
             .map_err(|e| LatticeError::from_backend(e))
     }
 

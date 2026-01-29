@@ -18,3 +18,11 @@ Thumbs.db
 
 # Generated Bindings
 /generated-bindings/
+
+# Build artifacts
+/LatticeBindings.xcframework/
+/target/merged/
+
+# Xcode user-specific files
+*.xcuserstate
+xcuserdata/
