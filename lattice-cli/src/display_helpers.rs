@@ -5,6 +5,21 @@
 use lattice_runtime::PubKey;
 use owo_colors::AnsiColors;
 use std::time::Duration;
+use uuid::Uuid;
+
+/// Parse bytes to Uuid
+pub fn parse_uuid(bytes: &[u8]) -> Option<Uuid> {
+    Uuid::from_slice(bytes).ok()
+}
+
+/// Format bytes as UUID string (or hex fallback)
+pub fn format_id(bytes: &[u8]) -> String {
+    if let Ok(uuid) = Uuid::from_slice(bytes) {
+        uuid.to_string()
+    } else {
+        hex::encode(bytes)
+    }
+}
 
 /// Format elapsed time as human-readable "X ago" string
 pub fn format_elapsed(elapsed: Duration) -> String {

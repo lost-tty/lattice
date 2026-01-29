@@ -14,7 +14,8 @@ use rustyline_async::{Readline, ReadlineEvent};
 use std::io::Write;
 use std::sync::{Arc, RwLock};
 use tracing_subscriber::EnvFilter;
-use lattice_runtime::Uuid;
+use uuid::Uuid;
+use display_helpers::parse_uuid;
 
 fn make_prompt(mesh_id: Option<Uuid>, store_id: Option<Uuid>) -> String {
     use owo_colors::OwoColorize;
@@ -181,12 +182,14 @@ async fn run_cli(
     // Set initial mesh context from first mesh, default to root store
     if let Ok(meshes) = backend.mesh_list().await {
         if let Some(mesh) = meshes.first() {
-            if let Ok(mut guard) = current_mesh.write() {
-                *guard = Some(mesh.id);
-            }
-            // Default to root store (mesh.id = root_store_id)
-            if let Ok(mut guard) = current_store.write() {
-                *guard = Some(mesh.id);
+            if let Some(mesh_id) = parse_uuid(&mesh.id) {
+                if let Ok(mut guard) = current_mesh.write() {
+                    *guard = Some(mesh_id);
+                }
+                // Default to root store (mesh.id = root_store_id)
+                if let Ok(mut guard) = current_store.write() {
+                    *guard = Some(mesh_id);
+                }
             }
         }
     }

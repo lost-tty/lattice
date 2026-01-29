@@ -18,8 +18,6 @@ pub struct RpcBackend {
 impl RpcBackend {
     pub async fn connect() -> BackendResult<Self> {
         let mut client = RpcClient::connect_default().await?;
-        
-        // Get node ID immediately
         let status = client.node.get_status(Empty {}).await?;
         let node_id = status.into_inner().public_key;
         
@@ -36,8 +34,7 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.node.get_status(Empty {}).await?;
-            
-            Ok(resp.into_inner().try_into()?)
+            Ok(resp.into_inner())
         })
     }
     
@@ -57,7 +54,6 @@ impl LatticeBackend for RpcBackend {
     fn subscribe(&self) -> BackendResult<EventReceiver> {
         use lattice_rpc::proto::node_event::Event;
         
-        // Clone the client for the background task (cheap clone)
         let client = self.client.clone();
         let (tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         
@@ -112,9 +108,7 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.mesh.create(Empty {}).await?;
-
-            
-            Ok(resp.into_inner().try_into()?)
+            Ok(resp.into_inner())
         })
     }
     
@@ -122,10 +116,7 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.mesh.list(Empty {}).await?;
-            
-            resp.into_inner().meshes.into_iter().map(|m| {
-                Ok(m.try_into()?)
-            }).collect()
+            Ok(resp.into_inner().meshes)
         })
     }
     
@@ -133,9 +124,7 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.mesh.get_status(MeshId { id: mesh_id.as_bytes().to_vec() }).await?;
-
-            
-            Ok(resp.into_inner().try_into()?)
+            Ok(resp.into_inner())
         })
     }
     
@@ -144,8 +133,7 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.mesh.join(JoinRequest { token }).await?;
-            let mesh_id = resp.into_inner().mesh_id;
-            Ok(Uuid::from_slice(&mesh_id)?)
+            Ok(Uuid::from_slice(&resp.into_inner().mesh_id)?)
         })
     }
     
@@ -161,10 +149,7 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.mesh.list_peers(MeshId { id: mesh_id.as_bytes().to_vec() }).await?;
-            
-            Ok(resp.into_inner().peers.into_iter().map(|p| {
-                Ok(p.try_into()?)
-            }).collect::<BackendResult<Vec<_>>>()?)
+            Ok(resp.into_inner().peers)
         })
     }
     
@@ -172,10 +157,7 @@ impl LatticeBackend for RpcBackend {
         let peer_key = peer_key.to_vec();
         Box::pin(async move {
             let mut client = self.client.clone();
-            client.mesh.revoke(RevokeRequest {
-                mesh_id: mesh_id.as_bytes().to_vec(),
-                peer_key,
-            }).await?;
+            client.mesh.revoke(RevokeRequest { mesh_id: mesh_id.as_bytes().to_vec(), peer_key }).await?;
             Ok(())
         })
     }
@@ -186,12 +168,10 @@ impl LatticeBackend for RpcBackend {
             let mut client = self.client.clone();
             let resp = client.store.create(CreateStoreRequest {
                 mesh_id: mesh_id.as_bytes().to_vec(),
-                name: name.clone().unwrap_or_default(),
-                store_type: store_type.clone(),
+                name: name.unwrap_or_default(),
+                store_type,
             }).await?;
-
-            
-            Ok(resp.into_inner().try_into()?)
+            Ok(resp.into_inner())
         })
     }
     
@@ -199,20 +179,15 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.store.list(MeshId { id: mesh_id.as_bytes().to_vec() }).await?;
-            
-            resp.into_inner().stores.into_iter().map(|s| {
-                Ok(s.try_into()?)
-            }).collect()
+            Ok(resp.into_inner().stores)
         })
     }
     
-    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreStatus> {
+    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreInfo> {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.store.get_status(StoreId { id: store_id.as_bytes().to_vec() }).await?;
-
-            
-            Ok(resp.into_inner().try_into()?)
+            Ok(resp.into_inner())
         })
     }
     
@@ -224,13 +199,11 @@ impl LatticeBackend for RpcBackend {
         })
     }
     
-    fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, SyncResult> {
+    fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
             let mut client = self.client.clone();
-            let resp = client.store.sync(StoreId { id: store_id.as_bytes().to_vec() }).await?;
-
-            
-            Ok(resp.into_inner().into())
+            client.store.sync(StoreId { id: store_id.as_bytes().to_vec() }).await?;
+            Ok(())
         })
     }
     
@@ -238,22 +211,20 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.store.debug(StoreId { id: store_id.as_bytes().to_vec() }).await?;
-            
-            Ok(resp.into_inner().authors.into_iter().map(|a| a.into()).collect())
+            Ok(resp.into_inner().authors)
         })
     }
     
-    fn store_history(&self, store_id: Uuid, _key: Option<&str>) -> AsyncResult<'_, Vec<HistoryEntry>> {
+    fn store_history(&self, store_id: Uuid) -> AsyncResult<'_, Vec<HistoryEntry>> {
         Box::pin(async move {
             use lattice_rpc::proto::HistoryRequest;
             let mut client = self.client.clone();
             let resp = client.store.history(HistoryRequest {
                 store_id: store_id.as_bytes().to_vec(),
-                author: Vec::new(),  // All authors
-                limit: 0,            // No limit
+                author: Vec::new(),
+                limit: 0,
             }).await?;
-            
-            Ok(resp.into_inner().entries.into_iter().map(|e| e.into()).collect())
+            Ok(resp.into_inner().entries)
         })
     }
     
@@ -261,10 +232,11 @@ impl LatticeBackend for RpcBackend {
         self.store_debug(store_id)
     }
     
-    fn store_orphan_cleanup(&self, _store_id: Uuid) -> AsyncResult<'_, (u32, u64)> {
+    fn store_orphan_cleanup(&self, store_id: Uuid) -> AsyncResult<'_, u32> {
         Box::pin(async move {
-            // Not yet implemented in RPC
-            Ok((0, 0))
+            let mut client = self.client.clone();
+            let resp = client.store.orphan_cleanup(StoreId { id: store_id.as_bytes().to_vec() }).await?;
+            Ok(resp.into_inner().orphans_removed)
         })
     }
     
@@ -274,10 +246,10 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             use lattice_rpc::proto::ExecRequest;
             let mut client = self.client.clone();
-            let resp = client.dynamic.exec(ExecRequest {
-                store_id: store_id.as_bytes().to_vec(),
-                method,
-                payload,
+            let resp = client.dynamic.exec(ExecRequest { 
+                store_id: store_id.as_bytes().to_vec(), 
+                method, 
+                payload 
             }).await?;
             let result = resp.into_inner();
             
@@ -317,7 +289,6 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.dynamic.list_methods(StoreId { id: store_id.as_bytes().to_vec() }).await?;
-            
             Ok(resp.into_inner().methods.into_iter().map(|m| (m.name, m.description)).collect())
         })
     }

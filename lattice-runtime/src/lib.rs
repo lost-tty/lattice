@@ -11,7 +11,6 @@
 mod backend;
 mod backend_inprocess;
 mod backend_rpc;
-mod conversions;
 mod runtime;
 
 // Re-export backend abstraction
@@ -22,7 +21,6 @@ pub use runtime::{Runtime, RuntimeBuilder, RuntimeError};
 
 // Re-export types consumers need
 pub use lattice_model::{FieldFormat, types::{PubKey, Hash}};
-pub use uuid::Uuid;
 
 // Internal re-exports (not public API)
 pub(crate) use lattice_net::MeshService;

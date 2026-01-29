@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package lattice.daemon.v1;
+
+import "types.proto";
+
+// ============================================================================
+// NodeService - Local node identity and status
+// ============================================================================
+
+service NodeService {
+  rpc GetStatus(Empty) returns (NodeStatus);
+  rpc SetName(SetNameRequest) returns (Empty);
+  rpc Subscribe(Empty) returns (stream NodeEvent);
+}
+
+// ============================================================================
+// MeshService - Mesh management
+// ============================================================================
+
+service MeshService {
+  rpc Create(Empty) returns (MeshInfo);
+  rpc List(Empty) returns (MeshList);
+  rpc GetStatus(MeshId) returns (MeshInfo);
+  rpc Join(JoinRequest) returns (JoinResponse);
+  rpc Invite(MeshId) returns (InviteToken);
+  rpc ListPeers(MeshId) returns (PeerList);
+  rpc Revoke(RevokeRequest) returns (Empty);
+}
+
+// ============================================================================
+// StoreService - Store management
+// ============================================================================
+
+service StoreService {
+  rpc Create(CreateStoreRequest) returns (StoreInfo);
+  rpc List(MeshId) returns (StoreList);
+  rpc GetStatus(StoreId) returns (StoreInfo);
+  rpc Delete(StoreId) returns (Empty);
+  rpc Sync(StoreId) returns (Empty);
+  rpc Debug(StoreId) returns (DebugInfo);
+  rpc History(HistoryRequest) returns (HistoryResponse);
+  rpc AuthorState(AuthorStateRequest) returns (AuthorStateResponse);
+  rpc OrphanCleanup(StoreId) returns (CleanupResult);
+}
+
+// ============================================================================
+// DynamicStoreService - Store-specific operations via reflection
+// ============================================================================
+
+service DynamicStoreService {
+  rpc Exec(ExecRequest) returns (ExecResponse);
+  rpc GetDescriptor(StoreId) returns (DescriptorResponse);
+  rpc ListMethods(StoreId) returns (MethodList);
+}

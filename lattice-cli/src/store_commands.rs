@@ -3,10 +3,11 @@
 use lattice_runtime::LatticeBackend;
 use crate::commands::{CommandResult, Writer};
 use crate::graph_renderer;
+use crate::display_helpers::{format_id, parse_uuid};
 use lattice_runtime::{Hash, PubKey};
 use std::io::Write;
 use std::collections::HashMap;
-use lattice_runtime::Uuid;
+use uuid::Uuid;
 use prost_reflect::{DescriptorPool, DynamicMessage, Value, ReflectMessage};
 use prost_reflect::prost::Message as ProstMessage;
 use std::fmt::Write as FmtWrite;
@@ -34,11 +35,13 @@ pub async fn cmd_store_create(
     match backend.store_create(mesh_id, name.clone(), store_type).await {
         Ok(info) => {
             let display_name = name.map(|n| format!(" ({})", n)).unwrap_or_default();
-            let _ = writeln!(w, "Created store: {}{}", info.id, display_name);
+            let _ = writeln!(w, "Created store: {}{}", format_id(&info.id), display_name);
             let _ = writeln!(w, "Type: {}", info.store_type);
             
             // Switch to the new store
-            return CommandResult::SwitchContext { mesh_id, store_id: info.id };
+            if let Some(store_id) = parse_uuid(&info.id) {
+                return CommandResult::SwitchContext { mesh_id, store_id };
+            }
         }
         Err(e) => {
             let _ = writeln!(w, "Error creating store: {}", e);
@@ -69,8 +72,8 @@ pub async fn cmd_store_list(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>,
             
             for store in stores {
                 let archived_str = if store.archived { " [archived]" } else { "" };
-                let name_str = store.name.map(|n| format!(" ({})", n)).unwrap_or_default();
-                let _ = writeln!(w, "  {} [{}]{}{}", store.id, store.store_type, name_str, archived_str);
+                let name_str = if store.name.is_empty() { String::new() } else { format!(" ({})", store.name) };
+                let _ = writeln!(w, "  {} [{}]{}{}", format_id(&store.id), store.store_type, name_str, archived_str);
             }
         }
         Err(e) => {
@@ -114,7 +117,7 @@ pub async fn cmd_store_use(
     
     // Find matching store from declarations
     let matches: Vec<_> = stores.iter()
-        .filter(|s| s.id.to_string().starts_with(uuid_prefix))
+        .filter(|s| format_id(&s.id).starts_with(uuid_prefix))
         .collect();
     
     match matches.len() {
@@ -123,13 +126,15 @@ pub async fn cmd_store_use(
         }
         1 => {
             let store = matches[0];
-            let _ = writeln!(w, "Switching to store {}", store.id);
-            return CommandResult::SwitchContext { mesh_id, store_id: store.id };
+            let _ = writeln!(w, "Switching to store {}", format_id(&store.id));
+            if let Some(store_id) = parse_uuid(&store.id) {
+                return CommandResult::SwitchContext { mesh_id, store_id };
+            }
         }
         _ => {
             let _ = writeln!(w, "Ambiguous store ID '{}'. Matches:", uuid_prefix);
             for store in matches {
-                let _ = writeln!(w, "  {}", store.id);
+                let _ = writeln!(w, "  {}", format_id(&store.id));
             }
         }
     }
@@ -176,16 +181,22 @@ pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uui
     
     match backend.store_status(store_id).await {
         Ok(status) => {
-            let _ = writeln!(w, "Store ID: {}", status.id);
+            let _ = writeln!(w, "Store ID: {}", format_id(&status.id));
+            if !status.name.is_empty() {
+                let _ = writeln!(w, "Name:     {}", status.name);
+            }
             let _ = writeln!(w, "Type:     {}", status.store_type);
-            if status.author_count > 0 {
-                let _ = writeln!(w, "Authors:  {}", status.author_count);
-            }
-            if status.log_file_count > 0 {
-                let _ = writeln!(w, "Logs:     {} files, {} bytes", status.log_file_count, status.log_bytes);
-            }
-            if status.orphan_count > 0 {
-                let _ = writeln!(w, "Orphans:  {} (pending parent entries)", status.orphan_count);
+            
+            if let Some(details) = &status.details {
+                if details.author_count > 0 {
+                    let _ = writeln!(w, "Authors:  {}", details.author_count);
+                }
+                if details.log_file_count > 0 {
+                    let _ = writeln!(w, "Logs:     {} files, {} bytes", details.log_file_count, details.log_bytes);
+                }
+                if details.orphan_count > 0 {
+                    let _ = writeln!(w, "Orphans:  {} (pending parent entries)", details.orphan_count);
+                }
             }
         }
         Err(e) => {
@@ -243,7 +254,7 @@ pub async fn cmd_store_debug(backend: &dyn LatticeBackend, store_id: Option<Uuid
     let _ = writeln!(w, "Store {} - {} authors\n", store_id, authors.len());
     
     // Get all history entries
-    let entries = match backend.store_history(store_id, None).await {
+    let entries = match backend.store_history(store_id).await {
         Ok(e) => e,
         Err(e) => {
             let _ = writeln!(w, "Error getting entries: {}", e);
@@ -375,7 +386,7 @@ pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, k
     };
     
     // Unified path - works for both RPC and in-process via backend abstraction
-    let entries = match backend.store_history(store_id, key).await {
+    let entries = match backend.store_history(store_id).await {
         Ok(e) => e,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
@@ -446,7 +457,7 @@ pub async fn cmd_orphan_cleanup(backend: &dyn LatticeBackend, store_id: Option<U
     };
     
     match backend.store_orphan_cleanup(store_id).await {
-        Ok((removed, _bytes)) => {
+        Ok(removed) => {
             if removed > 0 {
                 let _ = writeln!(w, "Cleaned up {} stale orphan(s)", removed);
             } else {

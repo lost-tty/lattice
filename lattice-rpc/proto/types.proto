@@ -1,0 +1,228 @@
+syntax = "proto3";
+
+package lattice.daemon.v1;
+
+// ============================================================================
+// Core DTO Types - Single source of truth for all Lattice types
+// ============================================================================
+
+message Empty {}
+
+// ============================================================================
+// Node Types
+// ============================================================================
+
+message NodeStatus {
+  bytes public_key = 1;
+  string display_name = 2;
+  string data_path = 3;
+  uint32 mesh_count = 4;
+  uint32 peer_count = 5;
+}
+
+message SetNameRequest {
+  string name = 1;
+}
+
+// ============================================================================
+// Event Types
+// ============================================================================
+
+message NodeEvent {
+  oneof event {
+    MeshReadyEvent mesh_ready = 1;
+    StoreReadyEvent store_ready = 2;
+    JoinFailedEvent join_failed = 3;
+    SyncResultEvent sync_result = 4;
+  }
+}
+
+message MeshReadyEvent {
+  bytes mesh_id = 1;
+}
+
+message StoreReadyEvent {
+  bytes mesh_id = 1;
+  bytes store_id = 2;
+}
+
+message JoinFailedEvent {
+  bytes mesh_id = 1;
+  string reason = 2;
+}
+
+message SyncResultEvent {
+  bytes store_id = 1;
+  uint32 peers_synced = 2;
+  uint64 entries_sent = 3;
+  uint64 entries_received = 4;
+}
+
+// ============================================================================
+// Mesh Types
+// ============================================================================
+
+message MeshId {
+  bytes id = 1;
+}
+
+message MeshInfo {
+  bytes id = 1;
+  uint32 peer_count = 2;
+  uint32 store_count = 3;
+}
+
+message MeshList {
+  repeated MeshInfo meshes = 1;
+}
+
+message JoinRequest {
+  string token = 1;
+}
+
+message JoinResponse {
+  bytes mesh_id = 1;
+}
+
+message InviteToken {
+  string token = 1;
+}
+
+message PeerInfo {
+  bytes public_key = 1;
+  string status = 2;
+  bool online = 3;
+  string name = 4;
+  uint64 last_seen_ms = 5;
+  uint64 added_at = 6;
+}
+
+message PeerList {
+  repeated PeerInfo peers = 1;
+}
+
+message RevokeRequest {
+  bytes mesh_id = 1;
+  bytes peer_key = 2;
+}
+
+// ============================================================================
+// Store Types
+// ============================================================================
+
+message StoreId {
+  bytes id = 1;
+}
+
+message CreateStoreRequest {
+  bytes mesh_id = 1;
+  string name = 2;
+  string store_type = 3;
+}
+
+message StoreInfo {
+  bytes id = 1;
+  string name = 2;
+  string store_type = 3;
+  bool archived = 4;
+  StoreDetails details = 5;  // Populated by GetStatus, null in List
+}
+
+message StoreList {
+  repeated StoreInfo stores = 1;
+}
+
+message StoreDetails {
+  uint32 author_count = 1;
+  uint32 log_file_count = 2;
+  uint64 log_bytes = 3;
+  uint32 orphan_count = 4;
+}
+
+message SyncResult {
+  uint32 peers_synced = 1;
+  uint64 entries_sent = 2;
+  uint64 entries_received = 3;
+}
+
+message DebugInfo {
+  repeated AuthorState authors = 1;
+}
+
+message HistoryRequest {
+  bytes store_id = 1;
+  bytes author = 2;
+  uint32 limit = 3;
+}
+
+message HistoryEntry {
+  uint64 seq = 1;
+  bytes author = 2;
+  bytes payload = 3;
+  uint64 timestamp = 4;
+  bytes hash = 5;
+  bytes prev_hash = 6;
+  repeated bytes causal_deps = 7;
+  string summary = 8;
+}
+
+message HistoryResponse {
+  repeated HistoryEntry entries = 1;
+}
+
+message AuthorStateRequest {
+  bytes store_id = 1;
+  bytes author_key = 2;
+}
+
+message AuthorState {
+  bytes public_key = 1;
+  uint64 seq = 2;
+  bytes hash = 3;
+}
+
+message AuthorStateResponse {
+  repeated AuthorState authors = 1;
+}
+
+message CleanupResult {
+  uint32 orphans_removed = 1;
+}
+
+// ============================================================================
+// Dynamic Store Types
+// ============================================================================
+
+message ExecRequest {
+  bytes store_id = 1;
+  string method = 2;
+  bytes payload = 3;
+}
+
+enum ErrorCode {
+  UNKNOWN = 0;
+  STORE_NOT_FOUND = 1;
+  METHOD_NOT_FOUND = 2;
+  INVALID_ARGUMENT = 3;
+  EXECUTION_FAILED = 4;
+}
+
+message ExecResponse {
+  bytes result = 1;
+  string error = 2;
+  ErrorCode error_code = 3;
+}
+
+message DescriptorResponse {
+  bytes file_descriptor_set = 1;
+  string service_name = 2;
+}
+
+message MethodInfo {
+  string name = 1;
+  string description = 2;
+}
+
+message MethodList {
+  repeated MethodInfo methods = 1;
+}

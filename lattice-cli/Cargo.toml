@@ -15,6 +15,7 @@ rustyline-async = { git = "https://github.com/lost-tty/rustyline-async" }
 hex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+uuid = { workspace = true }
 shlex = "1"
 clap = { workspace = true }
 serde_json = "1"

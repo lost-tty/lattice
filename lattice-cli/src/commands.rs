@@ -5,7 +5,7 @@ use crate::{mesh_commands, node_commands, store_commands};
 use clap::{Parser, Subcommand, CommandFactory};
 use rustyline_async::SharedWriter;
 use std::io::Write;
-use lattice_runtime::Uuid;
+use uuid::Uuid;
 
 /// Macro for writing to SharedWriter with less boilerplate
 #[macro_export]

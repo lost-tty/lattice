@@ -1,5 +1,6 @@
 //! RPC Server with UDS listener
 
+use crate::backend::Backend;
 use crate::dynamic_store_service::DynamicStoreServiceImpl;
 use crate::mesh_service::MeshServiceImpl;
 use crate::node_service::NodeServiceImpl;
@@ -9,30 +10,20 @@ use crate::proto::{
     store_service_server::StoreServiceServer,
 };
 use crate::store_service::StoreServiceImpl;
-use lattice_net::MeshService as NetMeshService;
-use lattice_node::Node;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
 /// RPC Server for latticed daemon
 pub struct RpcServer {
-    node: Arc<Node>,
-    mesh_network: Option<Arc<NetMeshService>>,
+    backend: Backend,
     socket_path: PathBuf,
 }
 
 impl RpcServer {
-    pub fn new(node: Arc<Node>, socket_path: PathBuf) -> Self {
-        Self { node, mesh_network: None, socket_path }
-    }
-    
-    /// Set the network MeshService for peer info
-    pub fn with_mesh_service(mut self, mesh_network: Arc<NetMeshService>) -> Self {
-        self.mesh_network = Some(mesh_network);
-        self
+    pub fn new(backend: Backend, socket_path: PathBuf) -> Self {
+        Self { backend, socket_path }
     }
 
     /// Default socket path using platform-specific data directory
@@ -72,11 +63,11 @@ impl RpcServer {
 
         tracing::info!("RPC server listening on {:?}", self.socket_path);
 
-        // Create all service implementations
-        let node_service = NodeServiceImpl::new(self.node.clone());
-        let mesh_service = MeshServiceImpl::new(self.node.clone(), self.mesh_network.clone());
-        let store_service = StoreServiceImpl::new(self.node.clone());
-        let dynamic_store_service = DynamicStoreServiceImpl::new(self.node.clone());
+        // Create all service implementations - all wrap the same backend
+        let node_service = NodeServiceImpl::new(self.backend.clone());
+        let mesh_service = MeshServiceImpl::new(self.backend.clone());
+        let store_service = StoreServiceImpl::new(self.backend.clone());
+        let dynamic_store_service = DynamicStoreServiceImpl::new(self.backend.clone());
 
         Server::builder()
             .add_service(NodeServiceServer::new(node_service))
@@ -96,4 +87,3 @@ impl Drop for RpcServer {
         let _ = std::fs::remove_file(&self.socket_path);
     }
 }
-

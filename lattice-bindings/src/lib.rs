@@ -2,9 +2,21 @@ uniffi::setup_scaffolding!();
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use lattice_runtime::Uuid;
+use uuid::Uuid;
 use prost_reflect::{DescriptorPool, DynamicMessage, Value, Kind};
 use prost_reflect::prost::Message;
+
+/// Format Vec<u8> as UUID string (for IDs)
+fn format_uuid(bytes: &[u8]) -> String {
+    Uuid::from_slice(bytes)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| hex::encode(bytes))
+}
+
+/// Convert String to Option<String> (empty = None)
+fn opt_string(s: String) -> Option<String> {
+    if s.is_empty() { None } else { Some(s) }
+}
 
 #[derive(thiserror::Error, Debug, uniffi::Error)]
 pub enum LatticeError {
@@ -30,6 +42,7 @@ pub struct StoreInfo {
     pub name: Option<String>,
     pub store_type: String,
     pub archived: bool,
+    pub details: Option<StoreDetails>,  // Populated by store_status, None for store_list
 }
 
 #[derive(uniffi::Record)]
@@ -42,9 +55,7 @@ pub struct NodeStatus {
 }
 
 #[derive(uniffi::Record)]
-pub struct StoreStatus {
-    pub id: String,
-    pub store_type: String,
+pub struct StoreDetails {
     pub author_count: u32,
     pub log_file_count: u32,
     pub log_bytes: u64,
@@ -54,7 +65,6 @@ pub struct StoreStatus {
 #[derive(uniffi::Record)]
 pub struct JoinResponse {
     pub mesh_id: String,
-    pub status: String,
 }
 
 #[derive(uniffi::Record)]
@@ -88,7 +98,6 @@ pub struct AuthorState {
 #[derive(uniffi::Record)]
 pub struct CleanupResult {
     pub orphans_removed: u32,
-    pub bytes_freed: u64,
 }
 
 // Reflection Types
@@ -244,7 +253,7 @@ impl Lattice {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         self.rt.block_on(r.backend().mesh_join(&token))
-            .map(|id| JoinResponse { mesh_id: id.to_string(), status: "joined".to_string() })
+            .map(|id| JoinResponse { mesh_id: id.to_string() })
             .map_err(|e| LatticeError::Runtime(e.to_string()))
     }
     
@@ -292,7 +301,7 @@ impl Lattice {
             .map_err(|e| LatticeError::Runtime(e.to_string()))
     }
 
-    pub fn store_status(&self, store_id: String) -> Result<StoreStatus, LatticeError> {
+    pub fn store_status(&self, store_id: String) -> Result<StoreInfo, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::Runtime(e.to_string()))?;
@@ -318,11 +327,11 @@ impl Lattice {
             .map_err(|e| LatticeError::Runtime(e.to_string()))
     }
 
-    pub fn store_history(&self, store_id: String, key: Option<String>) -> Result<Vec<HistoryEntry>, LatticeError> {
+    pub fn store_history(&self, store_id: String) -> Result<Vec<HistoryEntry>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::Runtime(e.to_string()))?;
-        self.rt.block_on(r.backend().store_history(id, key.as_deref()))
+        self.rt.block_on(r.backend().store_history(id))
             .map(|list| list.into_iter().map(Into::into).collect())
             .map_err(|e| LatticeError::Runtime(e.to_string()))
     }
@@ -341,7 +350,7 @@ impl Lattice {
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::Runtime(e.to_string()))?;
         self.rt.block_on(r.backend().store_orphan_cleanup(id))
-            .map(|(removed, bytes)| CleanupResult { orphans_removed: removed, bytes_freed: bytes })
+            .map(|orphans_removed| CleanupResult { orphans_removed })
             .map_err(|e| LatticeError::Runtime(e.to_string()))
     }
 
@@ -519,7 +528,7 @@ impl From<lattice_runtime::NodeStatus> for NodeStatus {
     fn from(s: lattice_runtime::NodeStatus) -> Self {
         Self {
             public_key: s.public_key,
-            display_name: s.display_name,
+            display_name: opt_string(s.display_name),
             data_path: s.data_path,
             mesh_count: s.mesh_count,
             peer_count: s.peer_count,
@@ -529,9 +538,11 @@ impl From<lattice_runtime::NodeStatus> for NodeStatus {
 
 impl From<lattice_runtime::MeshInfo> for MeshInfo {
     fn from(m: lattice_runtime::MeshInfo) -> Self {
+        let id_str = format_uuid(&m.id);
+        let alias = id_str.get(..8).unwrap_or(&id_str).to_string();
         Self {
-            id: m.id.to_string(),
-            alias: m.id.to_string()[..8].to_string(),
+            id: id_str,
+            alias,
             peer_count: m.peer_count,
             store_count: m.store_count,
         }
@@ -541,23 +552,22 @@ impl From<lattice_runtime::MeshInfo> for MeshInfo {
 impl From<lattice_runtime::StoreInfo> for StoreInfo {
     fn from(s: lattice_runtime::StoreInfo) -> Self {
         Self {
-            id: s.id.to_string(),
-            name: s.name,
+            id: format_uuid(&s.id),
+            name: opt_string(s.name),
             store_type: s.store_type,
             archived: s.archived,
+            details: s.details.map(Into::into),
         }
     }
 }
 
-impl From<lattice_runtime::StoreStatus> for StoreStatus {
-    fn from(s: lattice_runtime::StoreStatus) -> Self {
+impl From<lattice_runtime::StoreDetails> for StoreDetails {
+    fn from(d: lattice_runtime::StoreDetails) -> Self {
         Self {
-            id: s.id.to_string(),
-            store_type: s.store_type,
-            author_count: s.author_count,
-            log_file_count: s.log_file_count,
-            log_bytes: s.log_bytes,
-            orphan_count: s.orphan_count,
+            author_count: d.author_count,
+            log_file_count: d.log_file_count,
+            log_bytes: d.log_bytes,
+            orphan_count: d.orphan_count,
         }
     }
 }
@@ -568,8 +578,8 @@ impl From<lattice_runtime::PeerInfo> for PeerInfo {
             public_key: p.public_key,
             status: p.status,
             online: p.online,
-            name: p.name,
-            last_seen_ms: p.last_seen.map(|d| d.as_millis() as u64),
+            name: opt_string(p.name),
+            last_seen_ms: if p.last_seen_ms > 0 { Some(p.last_seen_ms) } else { None },
         }
     }
 }

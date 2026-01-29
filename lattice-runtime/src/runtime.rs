@@ -123,8 +123,7 @@ impl RuntimeBuilder {
         
         // Start RPC server if requested
         let rpc_handle = if self.with_rpc {
-            let rpc_server = RpcServer::new(node.clone(), RpcServer::default_socket_path())
-                .with_mesh_service(mesh_service.clone());
+            let rpc_server = RpcServer::new(backend.clone(), RpcServer::default_socket_path());
             Some(tokio::spawn(async move {
                 if let Err(e) = rpc_server.run().await {
                     tracing::error!("RPC server error: {}", e);

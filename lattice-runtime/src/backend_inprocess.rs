@@ -26,17 +26,23 @@ impl InProcessBackend {
     }
     
     fn get_store(&self, store_id: Uuid) -> BackendResult<Arc<dyn StoreHandle>> {
-        // Search all meshes for this store
+        self.node.store_manager().get_handle(&store_id)
+            .ok_or_else(|| "Store not found".into())
+    }
+    
+    fn find_store_name(&self, store_id: Uuid) -> Option<String> {
         if let Ok(meshes) = self.node.meta().list_meshes() {
             for (mesh_id, _) in meshes {
                 if let Some(mesh) = self.node.mesh_by_id(mesh_id) {
-                    if let Some(handle) = mesh.store_manager().get_handle(&store_id) {
-                        return Ok(handle);
+                    if let Ok(stores) = mesh.list_stores() {
+                        if let Some(s) = stores.into_iter().find(|s| s.id == store_id) {
+                            return s.name;
+                        }
                     }
                 }
             }
         }
-        Err("Store not found".into())
+        None
     }
 }
 
@@ -56,7 +62,7 @@ impl LatticeBackend for InProcessBackend {
             
             Ok(NodeStatus {
                 public_key: self.node.node_id().to_vec(),
-                display_name: self.node.name(),
+                display_name: self.node.name().unwrap_or_default(),
                 data_path: self.node.data_path().display().to_string(),
                 mesh_count: self.node.list_mesh_ids().len() as u32,
                 peer_count,
@@ -96,7 +102,7 @@ impl LatticeBackend for InProcessBackend {
                     }
                 };
                 if tx.send(backend_event).is_err() {
-                    break; // Receiver dropped
+                    break;
                 }
             }
         });
@@ -112,10 +118,9 @@ impl LatticeBackend for InProcessBackend {
             let store_count = mesh.list_stores().map(|s| s.len() as u32).unwrap_or(0);
             
             Ok(MeshInfo {
-                id: mesh_id,
+                id: mesh_id.as_bytes().to_vec(),
                 peer_count,
                 store_count,
-                is_creator: true,
             })
         })
     }
@@ -125,7 +130,7 @@ impl LatticeBackend for InProcessBackend {
             let meshes = self.node.meta().list_meshes()?;
             let mut result = Vec::new();
             
-            for (id, info) in meshes {
+            for (id, _info) in meshes {
                 let (peer_count, store_count) = if let Some(mesh) = self.node.mesh_by_id(id) {
                     let peers = mesh.list_peers().await.map(|p| p.len() as u32).unwrap_or(0);
                     let stores = mesh.list_stores().map(|s| s.len() as u32).unwrap_or(0);
@@ -135,10 +140,9 @@ impl LatticeBackend for InProcessBackend {
                 };
                 
                 result.push(MeshInfo {
-                    id,
+                    id: id.as_bytes().to_vec(),
                     peer_count,
                     store_count,
-                    is_creator: info.is_creator,
                 });
             }
             
@@ -149,17 +153,13 @@ impl LatticeBackend for InProcessBackend {
     fn mesh_status(&self, mesh_id: Uuid) -> AsyncResult<'_, MeshInfo> {
         Box::pin(async move {
             let mesh = self.get_mesh(mesh_id)?;
-            let info = self.node.meta().list_meshes()?.into_iter()
-                .find(|(id, _)| *id == mesh_id)
-                .map(|(_, i)| i);
             let peer_count = mesh.list_peers().await.map(|p| p.len() as u32).unwrap_or(0);
             let store_count = mesh.list_stores().map(|s| s.len() as u32).unwrap_or(0);
             
             Ok(MeshInfo {
-                id: mesh_id,
+                id: mesh_id.as_bytes().to_vec(),
                 peer_count,
                 store_count,
-                is_creator: info.map(|i| i.is_creator).unwrap_or(false),
             })
         })
     }
@@ -186,7 +186,7 @@ impl LatticeBackend for InProcessBackend {
             let mesh = self.get_mesh(mesh_id)?;
             let peers = mesh.list_peers().await?;
             
-            // Get online status and last_seen from network layer
+            // Get online status from network layer
             let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = self.mesh_network
                 .as_ref()
                 .and_then(|m| m.connected_peers().ok())
@@ -195,14 +195,16 @@ impl LatticeBackend for InProcessBackend {
             Ok(peers.into_iter().map(|p| {
                 let is_self = p.pubkey == self.node.node_id();
                 let online = is_self || online_peers.contains_key(&p.pubkey);
-                let last_seen = online_peers.get(&p.pubkey).map(|i| i.elapsed());
+                let last_seen_ms = online_peers.get(&p.pubkey)
+                    .map(|i| i.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
                 PeerInfo {
                     public_key: p.pubkey.to_vec(),
-                    name: p.name,
+                    name: p.name.unwrap_or_default(),
                     status: p.status.as_str().to_string(),
                     online,
-                    added_at: p.added_at,
-                    last_seen,
+                    added_at: p.added_at.unwrap_or(0),
+                    last_seen_ms,
                 }
             }).collect())
         })
@@ -227,10 +229,11 @@ impl LatticeBackend for InProcessBackend {
             let store_id = mesh.create_store(name.clone(), stype).await?;
             
             Ok(StoreInfo {
-                id: store_id,
-                name,
+                id: store_id.as_bytes().to_vec(),
+                name: name.unwrap_or_default(),
                 store_type: stype.to_string(),
                 archived: false,
+                details: None,
             })
         })
     }
@@ -241,36 +244,41 @@ impl LatticeBackend for InProcessBackend {
             let stores = mesh.list_stores()?;
             
             Ok(stores.into_iter().map(|s| StoreInfo {
-                id: s.id,
-                name: s.name,
+                id: s.id.as_bytes().to_vec(),
+                name: s.name.unwrap_or_default(),
                 store_type: s.store_type.to_string(),
                 archived: s.archived,
+                details: None,
             }).collect())
         })
     }
     
-    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreStatus> {
+    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreInfo> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
             
             let sync_state = inspector.sync_state().await?;
             let log_stats = inspector.log_stats().await;
+            let name = self.find_store_name(store_id);
             
-            Ok(StoreStatus {
-                id: store_id,
+            Ok(StoreInfo {
+                id: store_id.as_bytes().to_vec(),
+                name: name.unwrap_or_default(),
                 store_type: store.store_type().to_string(),
-                author_count: sync_state.authors().len() as u32,
-                log_file_count: log_stats.file_count as u32,
-                log_bytes: log_stats.total_bytes,
-                orphan_count: log_stats.orphan_count as u32,
+                archived: false,
+                details: Some(StoreDetails {
+                    author_count: sync_state.authors().len() as u32,
+                    log_file_count: log_stats.file_count as u32,
+                    log_bytes: log_stats.total_bytes,
+                    orphan_count: log_stats.orphan_count as u32,
+                }),
             })
         })
     }
     
     fn store_delete(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
-            // Find mesh containing this store
             if let Ok(meshes) = self.node.meta().list_meshes() {
                 for (mesh_id, _) in meshes {
                     if let Some(mesh) = self.node.mesh_by_id(mesh_id) {
@@ -284,18 +292,13 @@ impl LatticeBackend for InProcessBackend {
         })
     }
     
-    fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, SyncResult> {
+    fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let sync_provider = store.as_sync_provider();
-            let _ = sync_provider.sync_state().await;
-            
-            // Sync is handled by network layer - just return placeholder
-            Ok(SyncResult {
-                peers_synced: 0,
-                entries_sent: 0,
-                entries_received: 0,
-            })
+            // Trigger sync - actual result comes via SyncResult event from subscribe()
+            sync_provider.sync_state().await?;
+            Ok(())
         })
     }
     
@@ -313,7 +316,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
     
-    fn store_history(&self, store_id: Uuid, _key: Option<&str>) -> AsyncResult<'_, Vec<HistoryEntry>> {
+    fn store_history(&self, store_id: Uuid) -> AsyncResult<'_, Vec<HistoryEntry>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
@@ -321,30 +324,28 @@ impl LatticeBackend for InProcessBackend {
             
             let entries = inspector.history(None, None).await?;
             
-            Ok(entries.into_iter().map(|e| {
-                // Generate summary using dispatcher
-                let summary = dispatcher.decode_payload(&e.payload)
-                    .map(|msg| {
-                        let summaries = dispatcher.summarize_payload(&msg);
-                        if summaries.is_empty() {
-                            hex::encode(&e.hash[..4])
-                        } else {
-                            summaries.join(", ")
-                        }
-                    })
-                    .unwrap_or_else(|_| hex::encode(&e.hash[..4]));
-                
-                HistoryEntry {
-                    seq: e.seq,
-                    author: e.author.to_vec(),
-                    payload: e.payload,
-                    timestamp: e.timestamp,
-                    hash: e.hash.to_vec(),
-                    prev_hash: e.prev_hash.to_vec(),
-                    causal_deps: e.causal_deps.into_iter().map(|h| h.to_vec()).collect(),
-                    summary,
-                }
-            }).collect())
+            Ok(entries.into_iter()
+                .map(|e| {
+                    let summary = dispatcher.decode_payload(&e.payload)
+                        .map(|msg| {
+                            let summaries = dispatcher.summarize_payload(&msg);
+                            if summaries.is_empty() { hex::encode(&e.hash[..4]) }
+                            else { summaries.join(", ") }
+                        })
+                        .unwrap_or_else(|_| hex::encode(&e.hash[..4]));
+                    
+                    HistoryEntry {
+                        seq: e.seq,
+                        author: e.author.to_vec(),
+                        payload: e.payload,
+                        timestamp: e.timestamp,
+                        hash: e.hash.to_vec(),
+                        prev_hash: e.prev_hash.to_vec(),
+                        causal_deps: e.causal_deps.into_iter().map(|h| h.to_vec()).collect(),
+                        summary,
+                    }
+                })
+                .collect())
         })
     }
     
@@ -352,11 +353,11 @@ impl LatticeBackend for InProcessBackend {
         self.store_debug(store_id)
     }
     
-    fn store_orphan_cleanup(&self, store_id: Uuid) -> AsyncResult<'_, (u32, u64)> {
+    fn store_orphan_cleanup(&self, store_id: Uuid) -> AsyncResult<'_, u32> {
         Box::pin(async move {
-            let _ = store_id;
-            // Not yet exposed via StoreInspector
-            Ok((0, 0))
+            let store = self.get_store(store_id)?;
+            let inspector = store.as_inspector();
+            Ok(inspector.orphan_cleanup().await as u32)
         })
     }
     
@@ -367,7 +368,6 @@ impl LatticeBackend for InProcessBackend {
             let store = self.get_store(store_id)?;
             let dispatcher = store.as_dispatcher();
             
-            // Decode payload into DynamicMessage
             let service = dispatcher.service_descriptor();
             let method_desc = service.methods()
                 .find(|m| m.name().eq_ignore_ascii_case(&method))

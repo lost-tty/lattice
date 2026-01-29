@@ -2,10 +2,11 @@
 
 use lattice_runtime::LatticeBackend;
 use crate::commands::{CommandResult, Writer, MeshSubcommand};
-use crate::display_helpers::format_elapsed;
+use crate::display_helpers::{format_elapsed, format_id, parse_uuid};
 use owo_colors::OwoColorize;
 use std::io::Write;
-use lattice_runtime::Uuid;
+use std::time::Duration;
+use uuid::Uuid;
 
 /// Context for mesh commands
 pub struct MeshContext {
@@ -36,13 +37,18 @@ pub async fn cmd_create(backend: &dyn LatticeBackend, writer: Writer) -> Command
     
     match backend.mesh_create().await {
         Ok(info) => {
+            let mesh_uuid = parse_uuid(&info.id);
             let _ = writeln!(w, "Mesh created.");
-            let _ = writeln!(w, "Mesh ID: {}", info.id);
+            let _ = writeln!(w, "Mesh ID: {}", format_id(&info.id));
             
             // Switch to the new mesh's root store
-            if let Ok(stores) = backend.store_list(info.id).await {
-                if let Some(store) = stores.first() {
-                    return CommandResult::SwitchContext { mesh_id: info.id, store_id: store.id };
+            if let Some(mesh_id) = mesh_uuid {
+                if let Ok(stores) = backend.store_list(mesh_id).await {
+                    if let Some(store) = stores.first() {
+                        if let Some(store_id) = parse_uuid(&store.id) {
+                            return CommandResult::SwitchContext { mesh_id, store_id };
+                        }
+                    }
                 }
             }
         }
@@ -65,9 +71,8 @@ pub async fn cmd_list(backend: &dyn LatticeBackend, writer: Writer) -> CommandRe
             } else {
                 let _ = writeln!(w, "Meshes ({}):", meshes.len());
                 for mesh in meshes {
-                    let role = if mesh.is_creator { "creator" } else { "member" };
-                    let _ = writeln!(w, "  {} ({}, {} peers, {} stores)", 
-                        mesh.id, role, mesh.peer_count, mesh.store_count);
+                    let _ = writeln!(w, "  {} ({} peers, {} stores)", 
+                        format_id(&mesh.id), mesh.peer_count, mesh.store_count);
                 }
             }
         }
@@ -93,7 +98,7 @@ pub async fn cmd_use(backend: &dyn LatticeBackend, mesh_id_prefix: &str, writer:
     
     // Find meshes that start with the given prefix
     let matches: Vec<_> = meshes.iter()
-        .filter(|m| m.id.to_string().starts_with(mesh_id_prefix))
+        .filter(|m| format_id(&m.id).starts_with(mesh_id_prefix))
         .collect();
     
     match matches.len() {
@@ -103,15 +108,16 @@ pub async fn cmd_use(backend: &dyn LatticeBackend, mesh_id_prefix: &str, writer:
         }
         1 => {
             let mesh = matches[0];
-            
-            // Switch to the mesh's root store (root store id = mesh id)
-            let _ = writeln!(w, "Switched to mesh {}", mesh.id);
-            return CommandResult::SwitchContext { mesh_id: mesh.id, store_id: mesh.id };
+            if let Some(mesh_id) = parse_uuid(&mesh.id) {
+                // Switch to the mesh's root store (root store id = mesh id)
+                let _ = writeln!(w, "Switched to mesh {}", format_id(&mesh.id));
+                return CommandResult::SwitchContext { mesh_id, store_id: mesh_id };
+            }
         }
         _ => {
             let _ = writeln!(w, "Ambiguous mesh ID '{}'. Matches:", mesh_id_prefix);
             for mesh in matches {
-                let _ = writeln!(w, "  {}", mesh.id);
+                let _ = writeln!(w, "  {}", format_id(&mesh.id));
             }
         }
     }
@@ -133,7 +139,7 @@ pub async fn cmd_status(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, wri
     
     match backend.mesh_status(mesh_id).await {
         Ok(info) => {
-            let _ = writeln!(w, "Mesh ID:  {}", info.id);
+            let _ = writeln!(w, "Mesh ID:  {}", format_id(&info.id));
             let _ = writeln!(w, "Peers:    {}", info.peer_count);
             let _ = writeln!(w, "Stores:   {}", info.store_count);
         }
@@ -211,8 +217,12 @@ pub async fn cmd_peers(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, writ
             format!("{}", "○".bright_black())
         };
         
-        let name_str = peer.name.as_ref().map(|n| format!(" {}", n)).unwrap_or_default();
-        let last_seen_str = peer.last_seen.map(|d| format!(" ({})", format_elapsed(d))).unwrap_or_default();
+        let name_str = if peer.name.is_empty() { String::new() } else { format!(" {}", peer.name) };
+        let last_seen_str = if peer.last_seen_ms > 0 { 
+            format!(" ({})", format_elapsed(Duration::from_millis(peer.last_seen_ms)))
+        } else { 
+            String::new() 
+        };
         let _ = writeln!(w, "  {} {}{}{}", bullet, hex::encode(&peer.public_key), name_str, last_seen_str);
     }
     

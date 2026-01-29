@@ -11,8 +11,8 @@ pub async fn cmd_status(backend: &dyn LatticeBackend, writer: Writer) -> Command
     match backend.node_status().await {
         Ok(status) => {
             let _ = writeln!(w, "Node ID:  {}", hex::encode(&status.public_key));
-            if let Some(name) = status.display_name {
-                let _ = writeln!(w, "Name:     {}", name);
+            if !status.display_name.is_empty() {
+                let _ = writeln!(w, "Name:     {}", status.display_name);
             }
             if !status.data_path.is_empty() {
                 let _ = writeln!(w, "Data:     {}", status.data_path);
