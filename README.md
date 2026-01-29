@@ -43,21 +43,55 @@ We believe software should be as resilient as the hardware it runs on. Most mode
 - **Reconciliation**: Bidirectional protocol ensures eventual consistency.
 - **Gossip**: Efficient message propagation for real-time updates.
 
+## Building
+
+**Prerequisites**: Rust 1.75+, Protobuf compiler (`protoc`)
+
+```bash
+# Build release binaries
+cargo build --release
+
+# Binaries are in target/release/
+ls target/release/lattice target/release/latticed
+```
+
+Or install directly:
+```bash
+cargo install --path lattice-cli
+cargo install --path lattice-daemon
+```
+
 ## Quick Start
 
-1. **Create a mesh on the first node**:
+### Option 1: Daemon Mode (recommended)
+
+1. **Start the daemon**:
    ```bash
-   cargo run --package lattice-cli
+   latticed
+   ```
+
+2. **In another terminal, use the CLI**:
+   ```bash
+   lattice
    lattice:no-mesh> mesh create
    ```
 
-2. **Generate an invite token**:
+### Option 2: Embedded Mode (standalone)
+
+```bash
+lattice --embedded
+lattice:no-mesh> mesh create
+```
+
+### Connecting Nodes
+
+1. **Generate an invite token**:
    ```bash
    lattice:060e0f0d> mesh invite
    # Outputs: 2aWDipfQ...
    ```
 
-3. **Join the mesh** (on second node):
+2. **Join the mesh** (on second node):
    ```bash
    lattice:no-mesh> mesh join <token>
    ```
@@ -102,15 +136,18 @@ We believe software should be as resilient as the hardware it runs on. Most mode
 
 | Crate | Purpose |
 |-------|---------|
-| `lattice-model` | **Shared types**. Core types, traits, and protocol definitions used across crates. |
-| `lattice-kernel` | **The replication engine**. Implements Store, SigChain, HLC, and entry validation. |
-| `lattice-kvstore` | **KV state machine**. LWW-based key-value state with atomic batch operations. |
-| `lattice-logstore` | **Log state machine**. Append-only log with HLC-ordered persistence. |
-| `lattice-node` | **Application layer**. Node, Mesh, PeerManager orchestration and store lifecycle. |
-| `lattice-net` | **Networking layer**. Iroh endpoints, Gossip, and Sync protocols. |
-| `lattice-net-types` | **Network abstractions**. Shared traits for decoupling net from node. |
-| `lattice-cli` | **Interactive shell** for managing nodes and debugging state. |
-| `lattice-proto` | **Protocol Buffers** definitions for wire format and disk storage. |
+| `lattice-model` | **Shared types**. Core types, traits, and protocol definitions. |
+| `lattice-kernel` | **Replication engine**. SigChain, HLC, DAG, and entry validation. |
+| `lattice-kvstore` | **KV state machine**. LWW key-value with atomic batches. |
+| `lattice-logstore` | **Log state machine**. Append-only log with HLC ordering. |
+| `lattice-node` | **Application layer**. Node, Mesh, PeerManager orchestration. |
+| `lattice-net` | **Networking**. Iroh endpoints, Gossip, and Sync protocols. |
+| `lattice-net-types` | **Network abstractions**. Shared traits decoupling net from node. |
+| `lattice-api` | **API layer**. Protobuf definitions, gRPC services, backend trait. |
+| `lattice-runtime` | **Runtime**. Backend implementations (InProcess, RPC). |
+| `lattice-daemon` | **Daemon binary** (`latticed`). Headless service with UDS socket. |
+| `lattice-cli` | **CLI binary** (`lattice`). Interactive shell for node management. |
+| `lattice-bindings` | **FFI bindings**. UniFFI exports for Swift/Kotlin. |
 
 ## Data Directory
 
@@ -118,6 +155,7 @@ We believe software should be as resilient as the hardware it runs on. Most mode
 ~/.local/share/lattice/
 ├── identity.key        # Ed25519 private key
 ├── meta.db             # Global metadata
+├── latticed.sock       # Daemon UDS socket (when running)
 └── stores/{uuid}/      # Per-store data
     ├── logs/           # Append-only entry logs
     └── state.db        # KV state snapshot

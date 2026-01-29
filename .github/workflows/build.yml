@@ -56,12 +56,13 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/lattice dist/lattice-${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/latticed dist/latticed-${{ matrix.name }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lattice-${{ matrix.name }}
-          path: dist/lattice-*
+          name: binaries-${{ matrix.name }}
+          path: dist/*
           retention-days: 14
 
   # Update the "dev" pre-release with latest binaries (main branch only)
@@ -81,7 +82,7 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          find artifacts -type f -name 'lattice-*' -exec cp {} release/ \;
+          find artifacts -type f \( -name 'lattice-*' -o -name 'latticed-*' \) -exec cp {} release/ \;
           ls -la release/
 
       - name: Update dev release
@@ -90,7 +91,9 @@ jobs:
           tag_name: dev
           name: Development Build
           prerelease: true
-          files: release/lattice-*
+          files: |
+            release/lattice-*
+            release/latticed-*
           body: |
             **Latest development build from `main` branch.**
             
