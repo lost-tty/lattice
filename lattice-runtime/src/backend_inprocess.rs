@@ -10,6 +10,28 @@ use lattice_node::{mesh::Mesh, Node};
 use std::sync::Arc;
 use uuid::Uuid;
 
+// Convert from internal node events (Uuid) to transport-layer NodeEvent (Vec<u8>)
+fn to_node_event(event: lattice_node::NodeEvent) -> NodeEvent {
+    match event {
+        lattice_node::NodeEvent::MeshReady { mesh_id } => 
+            NodeEvent::MeshReady(MeshReadyEvent { mesh_id: mesh_id.as_bytes().to_vec() }),
+        lattice_node::NodeEvent::StoreReady { mesh_id, store_id } => 
+            NodeEvent::StoreReady(StoreReadyEvent { 
+                mesh_id: mesh_id.as_bytes().to_vec(), 
+                store_id: store_id.as_bytes().to_vec() 
+            }),
+        lattice_node::NodeEvent::JoinFailed { mesh_id, reason } => 
+            NodeEvent::JoinFailed(JoinFailedEvent { mesh_id: mesh_id.as_bytes().to_vec(), reason }),
+        lattice_node::NodeEvent::SyncResult { store_id, peers_synced, entries_sent, entries_received } => 
+            NodeEvent::SyncResult(SyncResultEvent { 
+                store_id: store_id.as_bytes().to_vec(), 
+                peers_synced, 
+                entries_sent, 
+                entries_received 
+            }),
+    }
+}
+
 pub struct InProcessBackend {
     node: Arc<Node>,
     mesh_network: Option<Arc<MeshService>>,
@@ -87,21 +109,7 @@ impl LatticeBackend for InProcessBackend {
         
         tokio::spawn(async move {
             while let Ok(event) = rx.recv().await {
-                let backend_event = match event {
-                    lattice_node::NodeEvent::MeshReady { mesh_id } => {
-                        BackendEvent::MeshReady { mesh_id }
-                    }
-                    lattice_node::NodeEvent::StoreReady { mesh_id, store_id } => {
-                        BackendEvent::StoreReady { mesh_id, store_id }
-                    }
-                    lattice_node::NodeEvent::JoinFailed { mesh_id, reason } => {
-                        BackendEvent::JoinFailed { mesh_id, reason }
-                    }
-                    lattice_node::NodeEvent::SyncResult { store_id, peers_synced, entries_sent, entries_received } => {
-                        BackendEvent::SyncResult { store_id, peers_synced, entries_sent, entries_received }
-                    }
-                };
-                if tx.send(backend_event).is_err() {
+                if tx.send(to_node_event(event)).is_err() {
                     break;
                 }
             }

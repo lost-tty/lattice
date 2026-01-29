@@ -12,6 +12,9 @@ use uuid::Uuid;
 pub use crate::proto::{
     NodeStatus, MeshInfo, PeerInfo, StoreInfo, StoreDetails,
     AuthorState, HistoryEntry, SyncResult,
+    // Event types - inner enum for consumer matching
+    MeshReadyEvent, StoreReadyEvent, JoinFailedEvent, SyncResultEvent,
+    node_event::NodeEvent,  // Consumers use NodeEvent::MeshReady(...), etc.
 };
 
 // ==================== Error Types ====================
@@ -23,19 +26,10 @@ pub type BackendResult<T> = Result<T, BackendError>;
 /// Async return type for trait methods
 pub type AsyncResult<'a, T> = Pin<Box<dyn Future<Output = BackendResult<T>> + Send + 'a>>;
 
-// ==================== Events ====================
-
-/// Events from the backend (unified across in-process and RPC)
-#[derive(Debug, Clone)]
-pub enum BackendEvent {
-    MeshReady { mesh_id: Uuid },
-    StoreReady { mesh_id: Uuid, store_id: Uuid },
-    JoinFailed { mesh_id: Uuid, reason: String },
-    SyncResult { store_id: Uuid, peers_synced: u32, entries_sent: u64, entries_received: u64 },
-}
+// ==================== Event Conversion ====================
 
 /// Event receiver type for subscribe()
-pub type EventReceiver = tokio::sync::mpsc::UnboundedReceiver<BackendEvent>;
+pub type EventReceiver = tokio::sync::mpsc::UnboundedReceiver<NodeEvent>;
 
 // ==================== Backend Trait ====================
 

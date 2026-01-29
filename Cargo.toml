@@ -7,7 +7,7 @@ members = [
     "lattice-net-types",
     "lattice-cli",
     "lattice-daemon",
-    "lattice-rpc",
+    "lattice-api",
     "lattice-model",
     "lattice-kvstore",
     "lattice-logstore",
@@ -30,7 +30,7 @@ lattice-kvstore = { path = "lattice-kvstore" }
 lattice-logstore = { path = "lattice-logstore" }
 lattice-net-types = { path = "lattice-net-types" }
 lattice-proto = { path = "lattice-proto" }
-lattice-rpc = { path = "lattice-rpc" }
+lattice-api = { path = "lattice-api" }
 lattice-runtime = { path = "lattice-runtime" }
 clap = { version = "4", features = ["derive"] }
 

@@ -25,4 +25,4 @@ pub use lattice_model::{FieldFormat, types::{PubKey, Hash}};
 // Internal re-exports (not public API)
 pub(crate) use lattice_net::MeshService;
 pub(crate) use lattice_node::{Node, NodeBuilder, StoreHandle};
-pub(crate) use lattice_rpc::RpcServer;
+pub(crate) use lattice_api::RpcServer;

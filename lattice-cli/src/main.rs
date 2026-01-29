@@ -8,7 +8,7 @@ mod display_helpers;
 mod graph_renderer;
 mod tracing_writer;
 
-use lattice_runtime::{RpcBackend, LatticeBackend};
+use lattice_runtime::{RpcBackend, LatticeBackend, NodeEvent};
 use commands::{CommandResult, CommandContext};
 use rustyline_async::{Readline, ReadlineEvent};
 use std::io::Write;
@@ -42,6 +42,103 @@ macro_rules! wout {
         let mut w = $writer.clone();
         let _ = writeln!(w, $($arg)*);
     }};
+}
+
+/// Handle incoming node events - extracted for testability
+fn handle_node_event(
+    event: NodeEvent,
+    writer: &rustyline_async::SharedWriter,
+    current_mesh: &Arc<RwLock<Option<Uuid>>>,
+    current_store: &Arc<RwLock<Option<Uuid>>>,
+) {
+    match event {
+        NodeEvent::MeshReady(e) => {
+            if let Ok(uuid) = Uuid::from_slice(&e.mesh_id) {
+                wout!(writer, "\nInfo: Join complete! Mesh {} ready.", &uuid.to_string()[..8]);
+                if let Ok(mut guard) = current_mesh.write() {
+                    *guard = Some(uuid);
+                }
+                if let Ok(mut guard) = current_store.write() {
+                    *guard = Some(uuid); // root store = mesh_id
+                }
+            }
+        }
+        NodeEvent::StoreReady(_) => {}
+        NodeEvent::JoinFailed(e) => {
+            let short = Uuid::from_slice(&e.mesh_id)
+                .map(|u| u.to_string()[..8].to_string())
+                .unwrap_or_else(|_| hex::encode(&e.mesh_id[..4.min(e.mesh_id.len())]));
+            wout!(writer, "\nError: Join failed for mesh {}: {}", short, e.reason);
+        }
+        NodeEvent::SyncResult(e) => {
+            if e.peers_synced > 0 {
+                wout!(writer, "[Sync] {} entries from {} peer(s)", e.entries_received, e.peers_synced);
+            } else {
+                wout!(writer, "[Sync] No peers to sync with");
+            }
+        }
+    }
+}
+
+/// Result of command dispatch - controls REPL flow
+enum DispatchResult {
+    Continue,
+    Quit,
+}
+
+/// Dispatch a parsed command, handling blocking vs non-blocking execution
+async fn dispatch_command(
+    cli: commands::LatticeCli,
+    backend: &Arc<dyn LatticeBackend>,
+    current_mesh: &Arc<RwLock<Option<Uuid>>>,
+    current_store: &Arc<RwLock<Option<Uuid>>>,
+    writer: &rustyline_async::SharedWriter,
+) -> DispatchResult {
+    use commands::{LatticeCommand, MeshSubcommand, handle_command};
+    
+    let needs_blocking = matches!(
+        &cli.command,
+        LatticeCommand::Mesh { subcommand: MeshSubcommand::Create | MeshSubcommand::Use { .. } }
+        | LatticeCommand::Store { subcommand: commands::StoreSubcommand::Use { .. } }
+        | LatticeCommand::Quit
+    );
+    
+    // Build context
+    let ctx = {
+        let mesh_guard = current_mesh.read().ok();
+        let store_guard = current_store.read().ok();
+        CommandContext {
+            mesh_id: mesh_guard.as_ref().and_then(|g| **g),
+            store_id: store_guard.as_ref().and_then(|g| **g),
+        }
+    };
+    
+    if needs_blocking {
+        let result = handle_command(&**backend, &ctx, cli, writer.clone()).await;
+        
+        match result {
+            CommandResult::Ok => {}
+            CommandResult::SwitchContext { mesh_id, store_id } => {
+                if let Ok(mut guard) = current_mesh.write() {
+                    *guard = Some(mesh_id);
+                }
+                if let Ok(mut guard) = current_store.write() {
+                    *guard = Some(store_id);
+                }
+            }
+            CommandResult::Quit => return DispatchResult::Quit,
+        }
+    } else {
+        // Non-blocking: spawn in background
+        let backend = backend.clone();
+        let writer = writer.clone();
+        
+        tokio::spawn(async move {
+            let _ = handle_command(&*backend, &ctx, cli, writer).await;
+        });
+    }
+    
+    DispatchResult::Continue
 }
 
 use clap::Parser;
@@ -201,30 +298,7 @@ async fn run_cli(
         let current_mesh = current_mesh.clone();
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                match event {
-                    lattice_runtime::BackendEvent::MeshReady { mesh_id } => {
-                        wout!(writer, "\nInfo: Join complete! Mesh {} ready.", mesh_id);
-                        // Update context to new mesh with root store
-                        if let Ok(mut guard) = current_mesh.write() {
-                            *guard = Some(mesh_id);
-                        }
-                        if let Ok(mut guard) = current_store.write() {
-                            *guard = Some(mesh_id); // root store = mesh_id
-                        }
-                    }
-                    lattice_runtime::BackendEvent::StoreReady { .. } => {}
-                    lattice_runtime::BackendEvent::JoinFailed { mesh_id, reason } => {
-                        wout!(writer, "\nError: Join failed for mesh {}: {}", mesh_id, reason);
-                    }
-                    lattice_runtime::BackendEvent::SyncResult { store_id, peers_synced, entries_sent, entries_received } => {
-                        if peers_synced > 0 {
-                            wout!(writer, "[Sync] {} entries from {} peer(s)", entries_received, peers_synced);
-                        } else {
-                            wout!(writer, "[Sync] No peers to sync with");
-                        }
-                        let _ = (store_id, entries_sent); // silence unused
-                    }
-                }
+                handle_node_event(event, &writer, &current_mesh, &current_store);
             }
         });
     }
@@ -255,50 +329,18 @@ async fn run_cli(
                 };
 
                 use clap::Parser;
-                use commands::{LatticeCli, LatticeCommand, MeshSubcommand, handle_command};
+                use commands::LatticeCli;
 
                 match LatticeCli::try_parse_from(args) {
                     Ok(cli) => {
-                        let needs_blocking = matches!(
-                            &cli.command,
-                            LatticeCommand::Mesh { subcommand: MeshSubcommand::Create | MeshSubcommand::Use { .. } }
-                            | LatticeCommand::Store { subcommand: crate::commands::StoreSubcommand::Use { .. } }
-                            | LatticeCommand::Quit
-                        );
-                        
-                        // Build context
-                        let ctx = {
-                            let mesh_guard = current_mesh.read().ok();
-                            let store_guard = current_store.read().ok();
-                            CommandContext {
-                                mesh_id: mesh_guard.as_ref().and_then(|g| **g),
-                                store_id: store_guard.as_ref().and_then(|g| **g),
-                            }
-                        };
-                        
-                        if needs_blocking {
-                            let result = handle_command(&*backend, &ctx, cli, writer.clone()).await;
-                            
-                            match result {
-                                CommandResult::Ok => {}
-                                CommandResult::SwitchContext { mesh_id, store_id } => {
-                                    if let Ok(mut guard) = current_mesh.write() {
-                                        *guard = Some(mesh_id);
-                                    }
-                                    if let Ok(mut guard) = current_store.write() {
-                                        *guard = Some(store_id);
-                                    }
-                                }
-                                CommandResult::Quit => break,
-                            }
-                        } else {
-                            // Non-blocking: spawn in background
-                            let backend = backend.clone();
-                            let writer = writer.clone();
-                            
-                            tokio::spawn(async move {
-                                let _ = handle_command(&*backend, &ctx, cli, writer).await;
-                            });
+                        if let DispatchResult::Quit = dispatch_command(
+                            cli,
+                            &backend,
+                            &current_mesh,
+                            &current_store,
+                            &writer,
+                        ).await {
+                            break;
                         }
                     }
                     Err(e) => {

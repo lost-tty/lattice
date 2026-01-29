@@ -29,7 +29,7 @@ message SetNameRequest {
 // ============================================================================
 
 message NodeEvent {
-  oneof event {
+  oneof node_event {
     MeshReadyEvent mesh_ready = 1;
     StoreReadyEvent store_ready = 2;
     JoinFailedEvent join_failed = 3;

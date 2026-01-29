@@ -71,25 +71,43 @@
 3.  **Command vs Query:** Explicitly distinguish Read/Write methods for Dashboard vs Action UI.
 
 ### 8A: Unified API Generation (`lattice-api`)
-- [ ] **Centralized DTOs**: Move `NodeStatus`, `MeshInfo`, etc., to `daemon.proto` as single source of truth.
-- [ ] **Create `lattice-api` crate**:
-  - [ ] Configure `prost-build` to derive `uniffi::Record` on generated structs.
-  - [ ] Zero-copy reuse in `lattice-node` and `lattice-bindings` (skip duplicate generation).
-- [ ] **Unified Streaming**: define `StoreEvent` (KV change, Log append) in `lattice-api`.
-- [ ] **Architecture Refactor**:
-  - [ ] Move `LatticeBackend` trait to `lattice-model` (break circular dep).
-  - [ ] Refactor `lattice-rpc` services to wrapper `Arc<dyn LatticeBackend>` (instead of raw Node).
-  - [ ] `lattice-daemon` injects `InProcessBackend` into RPC server.
+- [x] **Centralized DTOs**: Move `NodeStatus`, `MeshInfo`, etc., to `daemon.proto` as single source of truth.
+- [x] **Create `lattice-api` crate**:
+  - [x] Configure `prost-build` to derive `uniffi::Record` on generated structs.
+  - [x] Zero-copy reuse in `lattice-node` and `lattice-bindings` (skip duplicate generation).
+- [x] **Architecture Refactor**:
+  - [x] `LatticeBackend` trait in `lattice-api` (services use `Arc<dyn LatticeBackend>`).
+  - [x] RPC services (`NodeServiceImpl`) accept `Backend` trait object.
+  - [x] `lattice-runtime` provides `InProcessBackend` and `RpcBackend` implementations.
 
 ### 8B: Enhanced Reflection (Bindings)
 - [ ] **Update `FieldType`**: specific variants `Message(String)` and `Enum(String)` carrying type names.
 - [ ] **Implement `store_inspect_type(name)`**: Returns recursive schema info.
-- [ ] **Unified Watch API**: `watch(store_id)` returns generic `StoreEvent` stream.
 
 ### 8C: Generic UI Support
 - [ ] **Structured Results**: `store_exec_dynamic` returns recursive `ReflectValue` (instead of raw `Vec<u8>`).
 - [ ] **Recursive View**: SwiftUI `RecursiveInputView` capable of building nested forms from schema.
 - [ ] **Data Explorer**: Generic view for `ReflectValue` results.
+
+### 8D: Store Watchers & Event Streaming
+> **Note:** `KvHandle::watch(pattern)` already exists internally. This milestone exposes it via RPC/FFI with a **reflectable** design so any state machine can define streams.
+
+**Design**: Extend introspection pattern to streams (like `ListMethods()` for commands):
+- `ListStreams(store_id)` → returns available subscriptions with schemas
+- `Subscribe(store_id, stream_name, params)` → generic streaming endpoint
+
+**Examples of RSM-defined streams:**
+- **KvStore**: `watch(pattern)`, `scan_changes(prefix)`
+- **LogStore**: `tail(from_seq)`, `follow()`
+- **Custom RSMs**: Define arbitrary event sources
+
+**Tasks:**
+- [ ] **Define `StoreStream` introspection**: name, param schema, event schema
+- [ ] **Define `StoreEvent` proto**: Generic wrapper or per-stream typed events
+- [ ] **Expose `store_subscribe(store_id, stream, params)` RPC**: Streaming endpoint
+- [ ] **Trait extension**: `StateMachine::streams()` returns available stream descriptors
+- [ ] **LatticeBackend**: Add `subscribe(store_id, stream, params) -> Stream<StoreEvent>`
+- [ ] **FFI bindings**: Type-safe stream subscriptions
 
 ---
 

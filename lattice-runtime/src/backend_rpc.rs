@@ -3,10 +3,14 @@
 //! Wraps RpcClient for daemon mode (connecting to latticed via RPC).
 
 use crate::backend::*;
-use lattice_rpc::proto::{Empty, MeshId, StoreId, JoinRequest, CreateStoreRequest, RevokeRequest, SetNameRequest};
-use lattice_rpc::RpcClient;
+use lattice_api::proto::{
+    Empty, MeshId, StoreId, JoinRequest, CreateStoreRequest, RevokeRequest, SetNameRequest,
+    HistoryRequest, ExecRequest,
+};
+use lattice_api::RpcClient;
 use uuid::Uuid;
 use tokio::sync::Mutex;
+use tokio_stream::StreamExt;
 use std::collections::HashMap;
 
 pub struct RpcBackend {
@@ -52,8 +56,6 @@ impl LatticeBackend for RpcBackend {
     }
     
     fn subscribe(&self) -> BackendResult<EventReceiver> {
-        use lattice_rpc::proto::node_event::Event;
-        
         let client = self.client.clone();
         let (tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         
@@ -66,36 +68,12 @@ impl LatticeBackend for RpcBackend {
                 Err(_) => return,
             };
             
-            use tokio_stream::StreamExt;
             while let Some(result) = stream.next().await {
                 if let Ok(proto_event) = result {
-                    let backend_event = match proto_event.event {
-                        Some(Event::MeshReady(e)) => {
-                            let mesh_id = Uuid::from_slice(&e.mesh_id).unwrap_or_default();
-                            BackendEvent::MeshReady { mesh_id }
+                    if let Some(event) = proto_event.node_event {
+                        if tx.send(event).is_err() {
+                            break;
                         }
-                        Some(Event::StoreReady(e)) => {
-                            let mesh_id = Uuid::from_slice(&e.mesh_id).unwrap_or_default();
-                            let store_id = Uuid::from_slice(&e.store_id).unwrap_or_default();
-                            BackendEvent::StoreReady { mesh_id, store_id }
-                        }
-                        Some(Event::JoinFailed(e)) => {
-                            let mesh_id = Uuid::from_slice(&e.mesh_id).unwrap_or_default();
-                            BackendEvent::JoinFailed { mesh_id, reason: e.reason }
-                        }
-                        Some(Event::SyncResult(e)) => {
-                            let store_id = Uuid::from_slice(&e.store_id).unwrap_or_default();
-                            BackendEvent::SyncResult { 
-                                store_id, 
-                                peers_synced: e.peers_synced, 
-                                entries_sent: e.entries_sent, 
-                                entries_received: e.entries_received 
-                            }
-                        }
-                        None => continue,
-                    };
-                    if tx.send(backend_event).is_err() {
-                        break;
                     }
                 }
             }
@@ -217,7 +195,6 @@ impl LatticeBackend for RpcBackend {
     
     fn store_history(&self, store_id: Uuid) -> AsyncResult<'_, Vec<HistoryEntry>> {
         Box::pin(async move {
-            use lattice_rpc::proto::HistoryRequest;
             let mut client = self.client.clone();
             let resp = client.store.history(HistoryRequest {
                 store_id: store_id.as_bytes().to_vec(),
@@ -244,7 +221,6 @@ impl LatticeBackend for RpcBackend {
         let method = method.to_string();
         let payload = payload.to_vec();
         Box::pin(async move {
-            use lattice_rpc::proto::ExecRequest;
             let mut client = self.client.clone();
             let resp = client.dynamic.exec(ExecRequest { 
                 store_id: store_id.as_bytes().to_vec(), 
