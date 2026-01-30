@@ -8,6 +8,7 @@ use rustyline_async::SharedWriter;
 use std::io::Write;
 use std::sync::Arc;
 use uuid::Uuid;
+use CommandOutput::*;
 
 /// Macro for writing to SharedWriter with less boilerplate
 #[macro_export]
@@ -22,15 +23,19 @@ macro_rules! wout {
 /// Shared writer type for async output
 pub type Writer = SharedWriter;
 
-/// Result of a command that may switch stores or exit
-pub enum CommandResult {
-    /// No change
-    Ok,
-    /// Switch context to mesh/store IDs
-    SwitchContext { mesh_id: Uuid, store_id: Uuid },
-    /// Exit the CLI
+/// Output from a command
+#[derive(Debug, Clone)]
+pub enum CommandOutput {
+    /// Command completed, continue REPL
+    Continue,
+    /// Switch to a different context
+    Switch { mesh_id: Uuid, store_id: Uuid },
+    /// Exit the REPL
     Quit,
 }
+
+/// Result type for commands
+pub type CmdResult = Result<CommandOutput, anyhow::Error>;
 
 /// Context for command dispatch
 pub struct CommandContext {
@@ -49,8 +54,11 @@ pub struct LatticeCli {
 #[derive(Subcommand)]
 #[command(allow_external_subcommands = true)]
 pub enum LatticeCommand {
-    /// Show all commands in a flat list
-    Help,
+    /// Show all commands, or detailed help for a specific command/stream
+    Help {
+        /// Command or stream name to get help for
+        topic: Option<String>,
+    },
     /// Node operations
     Node {
         #[command(subcommand)]
@@ -196,50 +204,43 @@ pub enum StoreSubcommand {
     },
 }
 
+async fn format_help(backend: &dyn LatticeBackend, ctx: &CommandContext, topic: Option<&str>) -> String {
+    let mut output = String::from("Available commands:\n");
+    let cmd = LatticeCli::command();
+    format_recursive_help(&cmd, "", &mut output);
+    
+    let Some(store_id) = ctx.store_id else {
+        output.push('\n');
+        return output;
+    };
+    
+    // If topic specified, delegate to store_commands for detailed help
+    if let Some(name) = topic {
+        if let Some(help) = store_commands::format_topic_help(backend, store_id, name).await {
+            return help;
+        }
+        return format!("Unknown command or stream: {}\n", name);
+    }
+    
+    // Delegate dynamic help (operations + streams) to store_commands
+    output.push_str(&store_commands::format_dynamic_help(backend, store_id).await);
+    output.push('\n');
+    output
+}
+
+
 pub async fn handle_command(
     backend: &dyn LatticeBackend,
     ctx: &CommandContext,
     cli: LatticeCli,
     writer: Writer,
-) -> CommandResult {
+) -> CmdResult {
     match cli.command {
-        LatticeCommand::Help => {
-            let mut output = String::from("Available commands:\n");
-            let cmd = LatticeCli::command();
-            format_recursive_help(&cmd, "", &mut output);
-            
-            // Add dynamic commands from store introspection with type signatures
-            if let Some(store_id) = ctx.store_id {
-                if let Ok((descriptor_bytes, service_name)) = backend.store_get_descriptor(store_id).await {
-                    if let Ok(pool) = prost_reflect::DescriptorPool::decode(descriptor_bytes.as_slice()) {
-                        if let Some(service) = pool.get_service_by_name(&service_name) {
-                            use std::fmt::Write;
-                            let _ = writeln!(output, "\nStore Operations:");
-                            
-                            // Get descriptions from list_methods if available
-                            let descriptions: std::collections::HashMap<String, String> = 
-                                backend.store_list_methods(store_id).await
-                                    .map(|m| m.into_iter().collect())
-                                    .unwrap_or_default();
-                            
-                            for method in service.methods() {
-                                let name = method.name().to_lowercase();
-                                let args: Vec<String> = method.input().fields()
-                                    .map(|f| format!("<{}>", f.name()))
-                                    .collect();
-                                let args_str = if args.is_empty() { String::new() } else { format!(" {}", args.join(" ")) };
-                                let desc = descriptions.get(method.name()).map(|s| s.as_str()).unwrap_or("");
-                                let _ = writeln!(output, "  {:25}{}", format!("{}{}", name, args_str), desc);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            output.push('\n');
+        LatticeCommand::Help { topic } => {
+            let output = format_help(backend, ctx, topic.as_deref()).await;
             let mut w = writer.clone();
             let _ = write!(w, "{}", output);
-            CommandResult::Ok
+            Ok(Continue)
         }
         
         LatticeCommand::Node { subcommand } => match subcommand {
@@ -300,7 +301,7 @@ pub async fn handle_command(
             ctx.registry.stop_all().await;
             let mut w = writer.clone();
             let _ = writeln!(w, "Goodbye!");
-            CommandResult::Quit
+            Ok(Quit)
         }
         
         LatticeCommand::External(args) => {

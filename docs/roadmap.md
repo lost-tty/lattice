@@ -10,109 +10,8 @@
 | **M6**           | Multi-store: root store as control plane, StoreManager with live reconciliation, per-store gossip                                             |
 | **Decoupling**   | Node/Net separation via `NodeProvider` traits, `NetEvent` channel owned by net layer, unified StoreManager                                    |
 | **Kernel Audit** | Orphan resolution refactor, `MAX_CAUSAL_DEPS` limit, zero `.unwrap()` policy, clean module hierarchy                                          |
-
-## Milestone 7: Client/Daemon Split & Service Architecture
-
-**Goal**: Refactor the codebase into a clean Library/Daemon/Client split, enabling both headless operation and embedded usage (iOS), then build the Service Architecture on top.
-
-**Architecture Split**:
-- `lattice-node` (Library): The core logic. Embeddable in iOS/GUI apps.
-- `lattice-daemon` (Binary): The headless Unix daemon. Runs the Library + RPC Server.
-- `lattice-cli` (Binary): The control interface. Connects to Daemon via RPC.
-
-### 7A: Library Extraction
-- [x] Ensure `lattice-node` is a pure library (no CLI/binary code)
-- [x] Move `main.rs` orchestration logic out of library
-
-### 7B: Daemon (`latticed`)
-- [x] New `lattice-daemon` crate with `latticed` binary
-- [x] Hosts `Node`, P2P Networking, Storage
-- [x] Exposes gRPC API over UDS (`latticed.sock` in data dir)
-- [x] File permissions (protected by parent directory)
-- [x] Logging/tracing setup with verbosity flag
-- [x] Graceful shutdown with signal handling
-
-### 7C: RPC Protocol (`lattice-rpc`)
-- [x] Define `NodeService`, `MeshService`, `StoreService`, `DynamicStoreService` in daemon.proto
-- [x] Implement `lattice-rpc` crate with tonic UDS server
-- [x] Implement MeshService RPCs (Create, List, GetStatus, Join, Peers, Invite, Revoke)
-- [x] Implement StoreService RPCs (Create, List, GetStatus, Delete, Sync, Debug, History, AuthorState, OrphanCleanup)
-- [x] Implement DynamicStoreService (Exec, ListMethods)
-
-### 7D: CLI Client
-- [x] `LatticeBackend` trait abstraction (backend.rs)
-- [x] `InProcessBackend` - wraps Node/MeshService (embedded mode)
-- [x] `RpcBackend` - wraps RpcClient (daemon mode)
-- [x] --daemon/-d flag selects RPC mode
-- [x] All command handlers use &dyn LatticeBackend
-- [x] Dynamic command RPC encoding (store_exec via RPC)
-
-### 7E: RPC Event Streaming
-- [x] gRPC streaming endpoint for `NodeEvent` subscription (new stores, meshes, join results)
-- [x] `store sync` RPC returns actual sync results (MeshService passed to RPC server)
-
-### 7F: Post-Unification Cleanup & Optimization
-- [x] **Refactor `RpcBackend`**: Remove `Mutex<RpcClient>` bottleneck (use cheap `Clone`)
-- [x] **Secure Socket**: Set `0600` permissions on UDS (currently world-readable based on umask)
-- [x] **Fix Connection Leaks**: `subscribe()` clones existing client (cheap) instead of opening new connection
-- [x] **Optimize Dynamic Exec**: Cache `FileDescriptorSet` in `RpcBackend` to avoid fetching on every command
-- [x] **Reduce Boilerplate**: Unify DTOs via `TryFrom` traits in `conversions.rs`
-- [x] **Error Handling**: Replace string errors with proper `ErrorCode` enum in Protobuf
-
----
-
-## Milestone 8: Reflection & Introspection
-
-**Goal:** Enable powerful, generic UIs (like the iOS App and CLI) to introspect any Lattice Store and dynamically build rich interfaces without hardcoded logic. Address the "Shallow Introspection" gap by providing deep type schemas and semantic hints.
-
-**Patterns:**
-1.  **Deep Type Exposure:** `store_get_type_schema(name)` returns full struct/enum definition.
-2.  **Semantic UI Hints:** `.proto` options (`ui.widget="slider"`) drive UI rendering.
-3.  **Command vs Query:** Explicitly distinguish Read/Write methods for Dashboard vs Action UI.
-
-### 8A: Unified API Generation (`lattice-api`)
-- [x] **Centralized DTOs**: Move `NodeStatus`, `MeshInfo`, etc., to `daemon.proto` as single source of truth.
-- [x] **Create `lattice-api` crate**:
-  - [x] Configure `prost-build` to derive `uniffi::Record` on generated structs.
-  - [x] Zero-copy reuse in `lattice-node` and `lattice-bindings` (skip duplicate generation).
-- [x] **Architecture Refactor**:
-  - [x] `LatticeBackend` trait in `lattice-api` (services use `Arc<dyn LatticeBackend>`).
-  - [x] RPC services (`NodeServiceImpl`) accept `Backend` trait object.
-  - [x] `lattice-runtime` provides `InProcessBackend` and `RpcBackend` implementations.
-
-### 8B: Enhanced Reflection (Bindings)
-- [x] **Update `FieldType`**: specific variants `Message(String)` and `Enum(String)` carrying type names.
-- [x] **Implement `store_inspect_type(name)`**: Returns recursive schema info.
-- [x] **TypeNotFound Error**: Specific error variant for type lookup failures.
-- [x] **Recursion Depth Limit**: Max 16 levels to prevent stack overflow.
-- [x] **Enum Name Resolution**: Resolves enum values to names via FieldDescriptor.
-
-### 8C: Generic UI Support
-- [x] **Structured Results**: `store_exec_dynamic` returns recursive `ReflectValue` (instead of raw `Vec<u8>`).
-- [x] **Unicode Width**: CLI tables use `unicode-width` for proper alignment.
-
-### 8D: Store Watchers & Event Streaming
-> **Note:** `KvHandle::watch(pattern)` already exists internally. This milestone exposes it via RPC/FFI with a **reflectable** design so any state machine can define streams.
-
-**Design**: Extend introspection pattern to streams (like `ListMethods()` for commands):
-- `ListStreams(store_id)` → returns available subscriptions with schemas
-- `Subscribe(store_id, stream_name, params)` → generic streaming endpoint
-
-**Examples of RSM-defined streams:**
-- **KvStore**: `watch(pattern)`, `scan_changes(prefix)`
-- **LogStore**: `tail(from_seq)`, `follow()`
-- **Custom RSMs**: Define arbitrary event sources
-
-**Tasks:**
-- [x] **Define `StoreStream` introspection**: `StreamDescriptor` with name, param_schema, event_schema
-- [x] **Define `StoreEvent` proto**: Per-stream typed events (WatchEventProto, LogEvent)
-- [x] **Expose `store_subscribe(store_id, stream, params)` RPC**: Streaming endpoint in DynamicStoreService
-- [x] **Trait extension**: `StreamReflectable` trait with `stream_descriptors()` and `subscribe()`
-- [x] **LatticeBackend**: `store_list_streams()` and `store_subscribe()` implemented
-- [x] **CLI integration**: Introspection-based stream dispatch, subscription registry
-- [x] **FFI bindings**: Type-safe stream subscriptions for iOS/Swift
-
----
+| **M7**           | Client/Daemon split: library extraction, `latticed` daemon with UDS gRPC, `LatticeBackend` trait, RPC event streaming, socket security        |
+| **M8**           | Reflection & introspection: `lattice-api` crate, deep type schemas, `ReflectValue` structured results, store watchers & FFI stream bindings   |
 
 ## Milestone 9: Abstract Storage Backend
 
@@ -155,58 +54,78 @@
   - Replace direct `redb` calls with `StorageBackend` trait
   - State machines write to `Collection::Data` only
 
-## Milestone 10: The Weaver Protocol (Data Model Refactor)
+---
+
+## Milestone 10: Concrete RootStore Implementation
+
+**Goal:** Move root store functionality from Node into a specialized store implementation with proper business logic.
+
+> Currently, peer/store management logic is scattered in `Node` and `Mesh`. This milestone consolidates it into a proper state machine with typed operations.
+
+### 10A: RootStore State Machine
+- [ ] Define `RootOp` enum: `AddPeer`, `RevokePeer`, `DeclareStore`, `RemoveStore`
+- [ ] Create `RootState` implementing `StateMachine` trait
+- [ ] `apply(op, store: &mut dyn StateStorage)` enforces invariants (e.g., "only admins can add peers")
+
+### 10B: Refactor Node/Mesh
+- [ ] `PeerManager` submits `RootOp::AddPeer` instead of writing raw keys
+- [ ] `StoreManager` submits `RootOp::DeclareStore` instead of direct writes
+- [ ] Remove ad-hoc `/nodes/*` and `/stores/*` key manipulation
+- [ ] Unified Store Registry: `Node` becomes single source of truth (eliminate race conditions with `MeshNetwork`)
+
+### 10C: Access Control
+- [ ] Define admin role in root store (`/acl/admins/{pubkey}`)
+- [ ] Policy enforcement in `RootState::apply()`
+
+---
+
+## Milestone 11: Embedded Proof ("Lattice Nano")
+
+**Goal:** Running the Kernel on the RP2350.
+
+> Because CLI is already separated from Daemon (M7) and storage is abstracted (M9), only the Daemon needs porting.
+
+### 11A: `no_std` Refactoring
+- [ ] Split `lattice-kernel` into `core` (logic) and `std` (IO)
+- [ ] Replace `wasmtime` (JIT) with `wasmi` (Interpreter) for embedded target
+- [ ] Port storage layer to `sequential-storage` (Flash) via `StorageBackend`
+
+### 11B: The "Continuity" Demo
+- [ ] Build physical USB stick prototype
+- [ ] Implement BLE/Serial transport
+- **The Reveal:** Sync a file from Laptop → Stick → Phone without Internet
+
+---
+
+## Milestone 12: The Weaver Protocol (Data Model Refactor)
 
 **Goal:** Implement the "Ly" data model by splitting the monolithic `Entry` into `Intention` (Transport-Agnostic Signal) and `Witness` (Chain-Specific Ordering). This decoupling enables "Ghost Parent" resolution and selective data sharing.
 
 > **See:** [Ly Architecture](ly_architecture.md) for full protocol details.
 
-### 10A: The Intention
+### 12A: The Intention
 - [ ] Define `Intention` struct: `{ payload: Vec<u8>, author: PubKey, seq: u64, prev_hash: Hash, sig: Signature }`
 - [ ] Implement `Intention` validation (author signature check + seq/hash continuity)
 - [ ] Ensure `Intention` is valid independent of any chain (floating message)
 
-### 10B: The Witness
+### 12B: The Witness
 - [ ] Define `Witness` event in `Entry`: `Entry { parent: Hash, event: Witness(Intention), sig: MySig }`
 - [ ] Update `SigChain` to append `Witness` events
 - [ ] Implement "Ingest/Digest" envelope pattern for Gossip
 
 ---
 
-## Milestone 11: Concrete RootStore Implementation
-
-**Goal:** Move root store functionality from Node into a specialized store implementation with proper business logic.
-
-> Currently, peer/store management logic is scattered in `Node` and `Mesh`. This milestone consolidates it into a proper state machine with typed operations.
-
-### 11A: RootStore State Machine
-- [ ] Define `RootOp` enum: `AddPeer`, `RevokePeer`, `DeclareStore`, `RemoveStore`
-- [ ] Create `RootState` implementing `StateMachine` trait
-- [ ] `apply(op, store: &mut dyn StateStorage)` enforces invariants (e.g., "only admins can add peers")
-
-### 11B: Refactor Node/Mesh
-- [ ] `PeerManager` submits `RootOp::AddPeer` instead of writing raw keys
-- [ ] `StoreManager` submits `RootOp::DeclareStore` instead of direct writes
-- [ ] Remove ad-hoc `/nodes/*` and `/stores/*` key manipulation
-- [ ] Unified Store Registry: `Node` becomes single source of truth (eliminate race conditions with `MeshNetwork`)
-
-### 11C: Access Control
-- [ ] Define admin role in root store (`/acl/admins/{pubkey}`)
-- [ ] Policy enforcement in `RootState::apply()`
-
----
-
-## Milestone 12: Negentropy Sync Protocol
+## Milestone 13: Negentropy Sync Protocol
 
 **Goal:** Replace O(n) vector clock sync with sub-linear bandwidth using range-based set reconciliation.
 
 Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
-### 12A: Infrastructure
+### 13A: Infrastructure
 - [ ] Add hash→entry index (for efficient fetch-by-hash)
 - [ ] Implement negentropy fingerprint generation per store
 
-### 12B: Protocol Migration
+### 13B: Protocol Migration
 - [ ] Replace `SyncState` protocol with negentropy exchange
 - [ ] Decouple `seq` from network sync protocol (keep internal only)
 - [ ] Update `FetchRequest` to use hashes instead of seq ranges
@@ -227,74 +146,56 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 ---
 
-## Milestone 13: Wasm Runtime
+## Milestone 14: Wasm Runtime
 
 **Goal:** Replace hardcoded state machine logic with dynamic Wasm modules.
 
-### 13A: Wasm Integration
+### 14A: Wasm Integration
 - [ ] Integrate `wasmtime` into the Kernel
 - [ ] Define minimal Host ABI: `kv_get`, `kv_set`, `log_append`, `get_head`
 - [ ] Replace hardcoded `KvStore::apply()` with `WasmRuntime::call_apply()`
-- [ ] Map Host Functions to `StorageBackend` calls (M8 prerequisite)
+- [ ] Map Host Functions to `StorageBackend` calls (M9 prerequisite)
 
-### 13B: Data Structures & Verification
+### 14B: Data Structures & Verification
 - [ ] Finalize `Entry`, `SignedEntry`, `Hash`, `PubKey` structs for Wasm boundary
 - [ ] Wasm-side SigChain verification (optional, for paranoid clients)
 - **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
 
 ---
 
-## Milestone 14: Content-Addressable Store (CAS)
+## Milestone 15: Content-Addressable Store (CAS)
 
 **Goal:** Blob storage for large files (prerequisite for Lattice Drive). We use **CIDs (Content Identifiers)** for self-describing formats and IPFS/IPLD compatibility.
 
-### 14A: CAS Integration
+### 15A: CAS Integration
 - [ ] `lattice-cas` crate with pluggable backend (local FS, Garage S3)
 - [ ] `put_blob(data) -> CID`, `get_blob(CID) -> data`
 
-### 14B: Metadata & Pinning
+### 15B: Metadata & Pinning
 - [ ] `/cas/pins/{node_id}/{hash}` in root store
 - [ ] Pin reconciler: watch pins, trigger fetch
 
-### 14C: CLI
+### 15C: CLI
 - [ ] `cas put`, `cas get`, `cas pin`, `cas ls`
 
 ---
 
-## Milestone 15: Lattice Drive MVP
+## Milestone 16: Lattice Drive MVP
 
 **Goal:** A functioning file sync tool that proves the architecture.
 
-> **Depends on:** M13 (Wasm) + M14 (CAS)
+> **Depends on:** M14 (Wasm) + M15 (CAS)
 
-### 15A: Filesystem Logic
+### 16A: Filesystem Logic
 - [ ] Write `filesystem.wasm` (in Rust, compiled to wasm32-wasi)
 - [ ] Map file operations (`write`, `mkdir`, `rename`) to Log Ops
 - [ ] Store file content in CAS, reference hashes in sigchain
 
-### 15B: FUSE Interface
+### 16B: FUSE Interface
 - [ ] Write `lattice-fs` using the `fuser` crate
 - [ ] FUSE talks to Daemon via same gRPC interface as CLI
 - [ ] Mount the Store as a folder on Linux/macOS
 - **Demo:** `cp photo.jpg ~/lattice/` → Syncs to second node
-
----
-
-## Milestone 16: Embedded Proof ("Lattice Nano")
-
-**Goal:** Running the Kernel on the RP2350.
-
-> Because CLI is already separated from Daemon (M7) and storage is abstracted (M8), only the Daemon needs porting.
-
-### 16A: `no_std` Refactoring
-- [ ] Split `lattice-kernel` into `core` (logic) and `std` (IO)
-- [ ] Replace `wasmtime` (JIT) with `wasmi` (Interpreter) for embedded target
-- [ ] Port storage layer to `sequential-storage` (Flash) via `StorageBackend`
-
-### 16B: The "Continuity" Demo
-- [ ] Build physical USB stick prototype
-- [ ] Implement BLE/Serial transport
-- **The Reveal:** Sync a file from Laptop → Stick → Phone without Internet
 
 ---
 
@@ -329,7 +230,6 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 - [ ] **REGRESSION**: history command list filtering (backend side) capability
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
-- [ ] **CLI Architecture**: Command handlers (`store_commands.rs`, `mesh_commands.rs`, etc.) return `CommandResult` (REPL-level concept). Commands should not deal with REPL concerns. Refactor to return Result<Output, Error> and let caller handle REPL translation.
 - [ ] **Store Name Lookup Optimization**: `find_store_name()` in `store_service.rs` and `backend_inprocess.rs` does O(meshes × stores) linear search. Store names live in mesh root KV stores (StoreDeclaration). Consider caching in StoreManager or adding index.
 - [ ] **Data Directory Lock File**: Investigate lock file mechanism to prevent multiple processes from using the same data directory simultaneously (daemon + embedded app conflict). Options: flock, PID file, or socket-based detection.
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.

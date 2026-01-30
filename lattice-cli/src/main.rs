@@ -10,7 +10,7 @@ mod tracing_writer;
 mod subscriptions;
 
 use lattice_runtime::{RpcBackend, LatticeBackend, NodeEvent};
-use commands::{CommandResult, CommandContext};
+use commands::{CommandOutput, CommandContext};
 use rustyline_async::{Readline, ReadlineEvent};
 use std::io::Write;
 use std::sync::{Arc, RwLock};
@@ -120,8 +120,8 @@ async fn dispatch_command(
         let result = handle_command(&**backend, &ctx, cli, writer.clone()).await;
         
         match result {
-            CommandResult::Ok => {}
-            CommandResult::SwitchContext { mesh_id, store_id } => {
+            Ok(CommandOutput::Continue) => {}
+            Ok(CommandOutput::Switch { mesh_id, store_id }) => {
                 if let Ok(mut guard) = current_mesh.write() {
                     *guard = Some(mesh_id);
                 }
@@ -129,7 +129,10 @@ async fn dispatch_command(
                     *guard = Some(store_id);
                 }
             }
-            CommandResult::Quit => return DispatchResult::Quit,
+            Ok(CommandOutput::Quit) => return DispatchResult::Quit,
+            Err(e) => {
+                wout!(writer, "Error: {}", e);
+            }
         }
     } else {
         // Non-blocking: spawn in background
@@ -137,7 +140,9 @@ async fn dispatch_command(
         let writer = writer.clone();
         
         tokio::spawn(async move {
-            let _ = handle_command(&*backend, &ctx, cli, writer).await;
+            if let Err(e) = handle_command(&*backend, &ctx, cli, writer.clone()).await {
+                wout!(writer, "Error: {}", e);
+            }
         });
     }
     

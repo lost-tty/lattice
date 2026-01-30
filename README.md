@@ -99,37 +99,46 @@ lattice:no-mesh> mesh create
 ## CLI Commands
 
 ```
-[node]
-  node status            Show local identity info
+General:
+  quit                     Exit the CLI
 
-[mesh]
-  mesh create            Create a new mesh (can create multiple)
-  mesh list              List all meshes
-  mesh use <id>          Switch to a mesh (partial ID supported)
-  mesh status            Show current mesh info
-  mesh invite            Generate a one-time invite token
-  mesh join <token>      Join a mesh using invite token
-  mesh peers             List peers
-  mesh revoke <pubkey>   Revoke a peer
+Mesh operations (init, join, invite, peers):
+  mesh create              Create a new mesh
+  mesh list                List all meshes
+  mesh use                 Switch to a mesh
+  mesh status              Show mesh status
+  mesh join                Join a mesh using an invite token
+  mesh peers               List all peers
+  mesh invite              Generate a one-time invite token
+  mesh revoke              Revoke a peer from the mesh
 
-[store]
-  store create           Create a new store (subordinate)
-  store use <uuid>       Switch to a store
-  store list             List all stores
-  store status           Show store info
-  store sync             Sync with peers
-  store author-state     Show author sync state (use -a for all)
+Node operations:
+  node status              Show node info (local identity)
+  node set-name            Set display name for this node
 
-[kv]
-  put <key> <value>      Store a value
-  get <key>              Retrieve a value  
-  delete <key>           Delete a key
-  list [prefix]          List keys
-  history [key]          Show key history
+Store management:
+  store create             Create a new store
+  store list               List stores
+  store use                Switch to a store
+  store delete             Delete (archive) a store
+  store status             Show store status
+  store debug              Debug graph output
+  store orphan-cleanup     Clean up stale orphaned entries
+  store history            Show history for a key
+  store author-state       Show author sync state
+  store sync               Sync with all peers
+  store inspect-type       Explore a message type's schema
+  store subs               List active stream subscriptions
+  store unsub              Stop a subscription by ID (or "all")
 
-[general]
-  help                   Show all commands
-  quit                   Exit
+Store Operations:
+  put <key> <value>        Store a key-value pair
+  get <key> <verbose>      Get value for key
+  delete <key>             Delete a key
+  list <prefix> <verbose>  List keys by prefix
+
+Store Streams:
+  watch [pattern]          Subscribe to key changes matching a regex pattern
 ```
 
 ## Project Layout

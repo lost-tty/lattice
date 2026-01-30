@@ -32,3 +32,4 @@ owo-colors = "4.2"
 bs58 = { version = "0.5", features = ["check"] }
 blake3.workspace = true
 unicode-width = "0.1"
+anyhow = "1.0.100"

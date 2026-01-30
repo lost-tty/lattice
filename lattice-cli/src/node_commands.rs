@@ -1,11 +1,11 @@
 //! Node commands - local identity operations
 
 use lattice_runtime::LatticeBackend;
-use crate::commands::{CommandResult, Writer};
+use crate::commands::{CmdResult, CommandOutput::*, Writer};
 use std::io::Write;
 
 /// Show node status
-pub async fn cmd_status(backend: &dyn LatticeBackend, writer: Writer) -> CommandResult {
+pub async fn cmd_status(backend: &dyn LatticeBackend, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     match backend.node_status().await {
@@ -27,11 +27,11 @@ pub async fn cmd_status(backend: &dyn LatticeBackend, writer: Writer) -> Command
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 /// Set display name for this node
-pub async fn cmd_set_name(backend: &dyn LatticeBackend, name: &str, writer: Writer) -> CommandResult {
+pub async fn cmd_set_name(backend: &dyn LatticeBackend, name: &str, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     match backend.node_set_name(name).await {
@@ -43,5 +43,5 @@ pub async fn cmd_set_name(backend: &dyn LatticeBackend, name: &str, writer: Writ
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }

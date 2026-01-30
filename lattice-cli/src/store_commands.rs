@@ -1,7 +1,7 @@
 //! Store commands - CRUD operations and introspection
 
 use lattice_runtime::LatticeBackend;
-use crate::commands::{CommandResult, Writer};
+use crate::commands::{CmdResult, CommandOutput::*, Writer};
 use crate::graph_renderer;
 use crate::display_helpers::{format_id, parse_uuid};
 use crate::subscriptions::SubscriptionRegistry;
@@ -26,14 +26,14 @@ pub async fn cmd_store_create(
     name: Option<String>,
     store_type: &str,
     writer: Writer
-) -> CommandResult {
+) -> CmdResult {
     let mut w = writer.clone();
     
     let mesh_id = match mesh_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "Error: No active mesh. Use 'mesh create' first.");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -45,7 +45,7 @@ pub async fn cmd_store_create(
             
             // Switch to the new store
             if let Some(store_id) = parse_uuid(&info.id) {
-                return CommandResult::SwitchContext { mesh_id, store_id };
+                return Ok(Switch { mesh_id, store_id });
             }
         }
         Err(e) => {
@@ -53,18 +53,18 @@ pub async fn cmd_store_create(
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 /// List all stores in the mesh
-pub async fn cmd_store_list(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, writer: Writer) -> CommandResult {
+pub async fn cmd_store_list(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let mesh_id = match mesh_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "Error: No active mesh.");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -86,7 +86,7 @@ pub async fn cmd_store_list(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>,
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 /// Switch to a specific store
@@ -95,14 +95,14 @@ pub async fn cmd_store_use(
     mesh_id: Option<Uuid>,
     uuid_prefix: &str,
     writer: Writer
-) -> CommandResult {
+) -> CmdResult {
     let mut w = writer.clone();
     
     let mesh_id = match mesh_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "Error: No active mesh.");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -110,14 +110,14 @@ pub async fn cmd_store_use(
         Ok(s) => s,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
     // Check if matching root store (mesh_id = root_store_id, not in store list)
     if mesh_id.to_string().starts_with(uuid_prefix) {
         let _ = writeln!(w, "Switching to root store {}", mesh_id);
-        return CommandResult::SwitchContext { mesh_id, store_id: mesh_id };
+        return Ok(Switch { mesh_id, store_id: mesh_id });
     }
     
     // Find matching store from declarations
@@ -133,7 +133,7 @@ pub async fn cmd_store_use(
             let store = matches[0];
             let _ = writeln!(w, "Switching to store {}", format_id(&store.id));
             if let Some(store_id) = parse_uuid(&store.id) {
-                return CommandResult::SwitchContext { mesh_id, store_id };
+                return Ok(Switch { mesh_id, store_id });
             }
         }
         _ => {
@@ -144,18 +144,18 @@ pub async fn cmd_store_use(
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 /// Delete (archive) a store
-pub async fn cmd_store_delete(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CommandResult {
+pub async fn cmd_store_delete(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let store_id = match store_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "Error: No store selected.");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -168,19 +168,19 @@ pub async fn cmd_store_delete(backend: &dyn LatticeBackend, store_id: Option<Uui
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 // ==================== Store Status/Debug Commands ====================
 
-pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CommandResult {
+pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let store_id = match store_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "No store selected. Use 'store use <uuid>'");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -209,17 +209,17 @@ pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uui
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
-pub async fn cmd_store_sync(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CommandResult {
+pub async fn cmd_store_sync(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let store_id = match store_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "No store selected.");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -233,17 +233,17 @@ pub async fn cmd_store_sync(backend: &dyn LatticeBackend, store_id: Option<Uuid>
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
-pub async fn cmd_store_debug(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CommandResult {
+pub async fn cmd_store_debug(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let store_id = match store_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "No store selected.");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -252,7 +252,7 @@ pub async fn cmd_store_debug(backend: &dyn LatticeBackend, store_id: Option<Uuid
         Ok(a) => a,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -263,7 +263,7 @@ pub async fn cmd_store_debug(backend: &dyn LatticeBackend, store_id: Option<Uuid
         Ok(e) => e,
         Err(e) => {
             let _ = writeln!(w, "Error getting entries: {}", e);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -311,18 +311,18 @@ pub async fn cmd_store_debug(backend: &dyn LatticeBackend, store_id: Option<Uuid
         let _ = writeln!(w);
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 
-pub async fn cmd_author_state(backend: &dyn LatticeBackend, store_id: Option<Uuid>, pubkey: Option<&str>, show_all: bool, writer: Writer) -> CommandResult {
+pub async fn cmd_author_state(backend: &dyn LatticeBackend, store_id: Option<Uuid>, pubkey: Option<&str>, show_all: bool, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let store_id = match store_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "Error: no store selected");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -334,7 +334,7 @@ pub async fn cmd_author_state(backend: &dyn LatticeBackend, store_id: Option<Uui
                 Ok(pk) => Some(pk),
                 Err(e) => {
                     let _ = writeln!(w, "Error: {}", e);
-                    return CommandResult::Ok;
+                    return Ok(Continue);
                 }
             }
         } else {
@@ -352,7 +352,7 @@ pub async fn cmd_author_state(backend: &dyn LatticeBackend, store_id: Option<Uui
                 } else {
                     let _ = writeln!(w, "No state for author");
                 }
-                return CommandResult::Ok;
+                return Ok(Continue);
             }
             
             if show_all {
@@ -376,17 +376,17 @@ pub async fn cmd_author_state(backend: &dyn LatticeBackend, store_id: Option<Uui
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
-pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, key: Option<&str>, writer: Writer) -> CommandResult {
+pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, key: Option<&str>, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let store_id = match store_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "No store selected.");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -395,13 +395,13 @@ pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, k
         Ok(e) => e,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
     if entries.is_empty() {
         let _ = writeln!(w, "(no matching history found)");
-        return CommandResult::Ok;
+        return Ok(Continue);
     }
     
     let mut graph_entries: HashMap<Hash, graph_renderer::RenderEntry> = HashMap::new();
@@ -439,7 +439,7 @@ pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, k
     
     if graph_entries.is_empty() {
         let _ = writeln!(w, "(no matching history found)");
-        return CommandResult::Ok;
+        return Ok(Continue);
     }
     
     let target = filter_val.unwrap_or_else(|| "*".to_string());
@@ -447,17 +447,17 @@ pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, k
     let output = graph_renderer::render_dag(&graph_entries, target.as_bytes());
     let _ = write!(w, "{}", output);
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
-pub async fn cmd_orphan_cleanup(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CommandResult {
+pub async fn cmd_orphan_cleanup(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let store_id = match store_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "No store selected.");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -474,7 +474,7 @@ pub async fn cmd_orphan_cleanup(backend: &dyn LatticeBackend, store_id: Option<U
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 // ==================== Dynamic Command Execution ====================
@@ -506,19 +506,19 @@ async fn lookup_operation_type(backend: &dyn LatticeBackend, store_id: Uuid, nam
 }
 
 /// Single entry point for dynamic store operations
-pub async fn cmd_dynamic_exec(backend: &dyn LatticeBackend, ctx: &crate::commands::CommandContext, args: &[String], writer: Writer) -> CommandResult {
+pub async fn cmd_dynamic_exec(backend: &dyn LatticeBackend, ctx: &crate::commands::CommandContext, args: &[String], writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     if args.is_empty() {
         let _ = writeln!(w, "Usage: <operation> [args...]");
-        return CommandResult::Ok;
+        return Ok(Continue);
     }
     
     let store_id = match ctx.store_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "No store selected. Use 'store use <uuid>'");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -530,20 +530,20 @@ pub async fn cmd_dynamic_exec(backend: &dyn LatticeBackend, ctx: &crate::command
         Some(OperationType::Command) => cmd_dynamic_command(backend, store_id, operation, op_args, writer).await,
         None => {
             let _ = writeln!(w, "Unknown operation: {}", operation);
-            CommandResult::Ok
+            Ok(Continue)
         }
     }
 }
 
 /// Public entry point for `store inspect-type [name]`
-pub async fn cmd_store_inspect_type(backend: &dyn LatticeBackend, store_id: Option<Uuid>, type_name: Option<&str>, writer: Writer) -> CommandResult {
+pub async fn cmd_store_inspect_type(backend: &dyn LatticeBackend, store_id: Option<Uuid>, type_name: Option<&str>, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let store_id = match store_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "No store selected. Use 'store use <uuid>'");
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -554,14 +554,14 @@ pub async fn cmd_store_inspect_type(backend: &dyn LatticeBackend, store_id: Opti
 }
 
 /// Inspect a type's schema
-async fn cmd_inspect_type(backend: &dyn LatticeBackend, store_id: Uuid, type_name: &str, writer: Writer) -> CommandResult {
+async fn cmd_inspect_type(backend: &dyn LatticeBackend, store_id: Uuid, type_name: &str, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let (descriptor_bytes, _) = match backend.store_get_descriptor(store_id).await {
         Ok(d) => d,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -569,7 +569,7 @@ async fn cmd_inspect_type(backend: &dyn LatticeBackend, store_id: Uuid, type_nam
         Ok(p) => p,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -587,7 +587,7 @@ async fn cmd_inspect_type(backend: &dyn LatticeBackend, store_id: Uuid, type_nam
                 let _ = writeln!(w, "  {} : {}{}", field.name(), format_kind_full(field.kind()), repeated);
             }
         }
-        return CommandResult::Ok;
+        return Ok(Continue);
     }
     
     // Try as enum
@@ -598,7 +598,7 @@ async fn cmd_inspect_type(backend: &dyn LatticeBackend, store_id: Uuid, type_nam
         for value in enum_desc.values() {
             let _ = writeln!(w, "  {} = {}", value.name(), value.number());
         }
-        return CommandResult::Ok;
+        return Ok(Continue);
     }
     
     // Not found - list available types
@@ -614,18 +614,18 @@ async fn cmd_inspect_type(backend: &dyn LatticeBackend, store_id: Uuid, type_nam
         let _ = writeln!(w, "  {}", e.full_name());
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 /// List all types in the store's schema
-async fn cmd_list_types(backend: &dyn LatticeBackend, store_id: Uuid, writer: Writer) -> CommandResult {
+async fn cmd_list_types(backend: &dyn LatticeBackend, store_id: Uuid, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let (descriptor_bytes, _) = match backend.store_get_descriptor(store_id).await {
         Ok(d) => d,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -633,7 +633,7 @@ async fn cmd_list_types(backend: &dyn LatticeBackend, store_id: Uuid, writer: Wr
         Ok(p) => p,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -648,7 +648,7 @@ async fn cmd_list_types(backend: &dyn LatticeBackend, store_id: Uuid, writer: Wr
         let _ = writeln!(w, "  {}", e.full_name());
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 /// Format a Kind as a full type string
@@ -675,8 +675,123 @@ fn format_kind_full(kind: prost_reflect::Kind) -> String {
     }
 }
 
+/// A help item - unified representation for both methods and streams
+struct HelpItem {
+    name: String,
+    description: String,
+    section: &'static str,
+    fields: Vec<(String, String)>, // (wrapped_name, type)
+}
+
+impl HelpItem {
+    fn format_detailed(&self) -> String {
+        use std::fmt::Write;
+        let mut output = String::new();
+        let _ = writeln!(output, "{}\n", self.name);
+        if !self.description.is_empty() {
+            let _ = writeln!(output, "  {}\n", self.description);
+        }
+        let _ = writeln!(output, "{}:", self.section);
+        if self.fields.is_empty() {
+            let _ = writeln!(output, "  (none)");
+        } else {
+            for (name, typ) in &self.fields {
+                let _ = writeln!(output, "  {:20} {}", name, typ);
+            }
+        }
+        output
+    }
+    
+    fn format_summary(&self) -> String {
+        let args: Vec<&str> = self.fields.iter().map(|(n, _)| n.as_str()).collect();
+        let args_str = if args.is_empty() { String::new() } else { format!(" {}", args.join(" ")) };
+        format!("  {:25}{}\n", format!("{}{}", self.name.to_lowercase(), args_str), self.description)
+    }
+}
+
+/// Shared context for help generation
+struct HelpContext {
+    operations: Vec<HelpItem>,
+    streams: Vec<HelpItem>,
+}
+
+impl HelpContext {
+    async fn load(backend: &dyn LatticeBackend, store_id: Uuid) -> Option<Self> {
+        let (descriptor_bytes, service_name) = backend.store_get_descriptor(store_id).await.ok()?;
+        let pool = DescriptorPool::decode(descriptor_bytes.as_slice()).ok()?;
+        let service = pool.get_service_by_name(&service_name)?;
+        
+        let descriptions: HashMap<String, String> = backend.store_list_methods(store_id).await
+            .map(|m| m.into_iter().collect())
+            .unwrap_or_default();
+        
+        let operations = service.methods().map(|m| {
+            let fields = m.input().fields()
+                .map(|f| (format!("<{}>", f.name()), format_kind_full(f.kind())))
+                .collect();
+            HelpItem {
+                name: m.name().to_string(),
+                description: descriptions.get(m.name()).cloned().unwrap_or_default(),
+                section: "Arguments",
+                fields,
+            }
+        }).collect();
+        
+        let stream_descs = backend.store_list_streams(store_id).await.unwrap_or_default();
+        let streams = stream_descs.into_iter().map(|s| {
+            let fields = s.param_schema.as_ref()
+                .and_then(|schema| pool.get_message_by_name(schema))
+                .map(|msg| msg.fields().map(|f| (format!("[{}]", f.name()), format_kind_full(f.kind()))).collect())
+                .unwrap_or_default();
+            HelpItem {
+                name: s.name,
+                description: s.description,
+                section: "Parameters",
+                fields,
+            }
+        }).collect();
+        
+        Some(Self { operations, streams })
+    }
+    
+    fn find(&self, name: &str) -> Option<&HelpItem> {
+        let name_lower = name.to_lowercase();
+        self.operations.iter().chain(self.streams.iter())
+            .find(|item| item.name.to_lowercase() == name_lower)
+    }
+}
+
+/// Generate detailed help for a specific command or stream
+pub async fn format_topic_help(backend: &dyn LatticeBackend, store_id: Uuid, topic: &str) -> Option<String> {
+    let ctx = HelpContext::load(backend, store_id).await?;
+    ctx.find(topic).map(|item| item.format_detailed())
+}
+
+/// Format dynamic store operations and streams for help output
+pub async fn format_dynamic_help(backend: &dyn LatticeBackend, store_id: Uuid) -> String {
+    
+    let Some(ctx) = HelpContext::load(backend, store_id).await else {
+        return String::new();
+    };
+    
+    fn format_section(output: &mut String, header: &str, items: &[HelpItem]) {
+        use std::fmt::Write;
+        if !items.is_empty() {
+            let _ = writeln!(output, "\n{}:", header);
+            for item in items {
+                output.push_str(&item.format_summary());
+            }
+        }
+    }
+    
+    let mut output = String::new();
+    format_section(&mut output, "Store Operations", &ctx.operations);
+    format_section(&mut output, "Store Streams", &ctx.streams);
+    output
+}
+
 // Dynamic command execution
-async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, operation: &str, args: &[String], writer: Writer) -> CommandResult {
+async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, operation: &str, args: &[String], writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     let method_name = operation;
     let method_args = args;
@@ -686,7 +801,7 @@ async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, opera
         Ok(d) => d,
         Err(e) => {
             let _ = writeln!(w, "Error fetching descriptors: {}", e);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -695,7 +810,7 @@ async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, opera
         Ok(p) => p,
         Err(e) => {
             let _ = writeln!(w, "Error decoding descriptors: {}", e);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -703,7 +818,7 @@ async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, opera
         Some(s) => s,
         None => {
             let _ = writeln!(w, "Error: Service '{}' not found in descriptors", service_name);
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -712,7 +827,7 @@ async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, opera
         None => {
             let _ = writeln!(w, "Unknown command: {}", method_name);
             let _ = writeln!(w, "Available: {}", service.methods().map(|m| m.name().to_string()).collect::<Vec<_>>().join(", "));
-            return CommandResult::Ok;
+            return Ok(Continue);
         }
     };
     
@@ -742,7 +857,7 @@ async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, opera
     let mut payload = Vec::new();
     if let Err(e) = dynamic_msg.encode(&mut payload) {
         let _ = writeln!(w, "Error encoding request: {}", e);
-        return CommandResult::Ok;
+        return Ok(Continue);
     }
     
     // Call backend with canonical method name from descriptor
@@ -765,7 +880,7 @@ async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, opera
         }
     }
     
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 fn parse_value_for_field(field: &prost_reflect::FieldDescriptor, s: &str) -> prost_reflect::Value {
@@ -956,14 +1071,14 @@ pub async fn cmd_stream_subscribe(
     args: &[String],
     registry: &Arc<SubscriptionRegistry>,
     writer: Writer,
-) -> CommandResult {
+) -> CmdResult {
     let mut w = writer.clone();
     
     let streams = backend.store_list_streams(store_id).await.unwrap_or_default();
     let Some(stream_desc) = streams.iter().find(|s| s.name.eq_ignore_ascii_case(stream_name)).cloned() else {
         let available: Vec<_> = streams.iter().map(|s| s.name.as_str()).collect();
         let _ = writeln!(w, "Unknown stream '{}'. Available: {:?}", stream_name, available);
-        return CommandResult::Ok;
+        return Ok(Continue);
     };
     
     let pool = backend.store_get_descriptor(store_id).await.ok()
@@ -973,7 +1088,7 @@ pub async fn cmd_stream_subscribe(
     
     let Ok(stream) = backend.store_subscribe(store_id, &stream_desc.name, &params) else {
         let _ = writeln!(w, "Error subscribing to {}", stream_name);
-        return CommandResult::Ok;
+        return Ok(Continue);
     };
     
     let (cancel_tx, mut cancel_rx) = mpsc::channel::<()>(1);
@@ -998,7 +1113,7 @@ pub async fn cmd_stream_subscribe(
     
     let sub_id = registry.register(display_name.clone(), store_id, stream_desc.name.clone(), cancel_tx, handle);
     let _ = writeln!(w, "Started subscription #{} - {}", sub_id, display_name);
-    CommandResult::Ok
+    Ok(Continue)
 }
 
 fn build_stream_params(desc: &lattice_runtime::StreamDescriptor, args: &[String], pool: Option<&DescriptorPool>) -> Vec<u8> {
@@ -1042,7 +1157,7 @@ fn display_stream_event(payload: &[u8], schema: &Option<String>, pool: Option<&D
     }
 }
 
-pub fn cmd_subs(registry: &Arc<SubscriptionRegistry>, writer: Writer) -> CommandResult {
+pub fn cmd_subs(registry: &Arc<SubscriptionRegistry>, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     let subs = registry.list();
     if subs.is_empty() {
@@ -1053,10 +1168,10 @@ pub fn cmd_subs(registry: &Arc<SubscriptionRegistry>, writer: Writer) -> Command
             let _ = writeln!(w, "  #{} {} ({})", id, name, stream);
         }
     }
-    CommandResult::Ok
+    Ok(Continue)
 }
 
-pub async fn cmd_unsub(registry: &Arc<SubscriptionRegistry>, target: &str, writer: Writer) -> CommandResult {
+pub async fn cmd_unsub(registry: &Arc<SubscriptionRegistry>, target: &str, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     if target == "all" {
         registry.stop_all().await;
@@ -1069,5 +1184,5 @@ pub async fn cmd_unsub(registry: &Arc<SubscriptionRegistry>, target: &str, write
     } else {
         let _ = writeln!(w, "Usage: unsub <id> or unsub all");
     }
-    CommandResult::Ok
+    Ok(Continue)
 }
