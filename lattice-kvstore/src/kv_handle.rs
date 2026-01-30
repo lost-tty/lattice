@@ -225,11 +225,7 @@ impl<W: StateWriter + AsRef<KvState> + Send + Sync> lattice_model::StreamReflect
                     
                     let kind = match event.kind {
                         crate::WatchEventKind::Update { heads } => {
-                            let lww_value = heads.into_iter()
-                                .filter(|h| !h.tombstone)
-                                .max_by_key(|h| h.hlc)
-                                .map(|h| h.value)
-                                .unwrap_or_default();
+                            let lww_value = heads.lww().unwrap_or_default();
                             Some(crate::kv_types::watch_event_proto::Kind::Value(lww_value))
                         }
                         crate::WatchEventKind::Delete => {
@@ -1177,5 +1173,105 @@ mod tests {
         // rx2 should receive config event
         let event2 = expect_event(&mut rx2, b"/config/test").await;
         assert!(event2.key.starts_with(b"/config/"));
+    }
+
+    /// Regression test for tombstone resurrection bug in subscribe().
+    /// 
+    /// Bug: subscribe() stream was filtering tombstones BEFORE finding winner.
+    /// This caused deleted keys to "resurrect" in watch events during concurrent conflicts.
+    /// 
+    /// Scenario (Concurrent Conflict):
+    /// - Node A: Put "value" (HLC 10), referencing base
+    /// - Node B: Delete (HLC 20, tombstone), referencing same base
+    /// - Result: Both heads coexist (conflict), tombstone has higher HLC
+    /// - Bug: filter(tombstone) first → A's value "resurrects" as winner in stream
+    /// - Fix: find winner first (tombstone wins), then return empty/deleted  
+    #[tokio::test]
+    async fn test_subscribe_stream_tombstone_should_not_resurrect() {
+        use prost::Message;
+        use crate::kv_types::WatchEventProto;
+        use lattice_model::StreamReflectable;
+        
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(writer.clone());
+        
+        let key = b"conflict_key";
+        
+        // 1. Base: Initial write that both nodes see
+        let hash_base = handle.put(key, b"base").await.unwrap();
+        
+        // 2. Subscribe to stream BEFORE the conflicting writes
+        let params = crate::proto::WatchParams { pattern: ".*".to_string() };
+        let mut param_bytes = Vec::new();
+        params.encode(&mut param_bytes).unwrap();
+        let stream = handle.subscribe("Watch", &param_bytes).unwrap();
+        tokio::pin!(stream);
+        
+        // 3. Simulate CONCURRENT conflict:
+        //    - Node A: Deletes (referencing base) - will have higher HLC due to later call
+        //    - Node B: Updates to "alive" (referencing base) - lower HLC
+        // We need to inject ops that reference the SAME parent (hash_base) to create conflict.
+        
+        // Node B's put (goes first, gets lower HLC)
+        let op_put = Operation::put(key.to_vec(), b"alive".to_vec());
+        let payload_put = KvPayload { ops: vec![op_put] }.encode_to_vec();
+        let _hash_put = writer.submit(payload_put, vec![hash_base]).await.unwrap();
+        
+        // Node A's delete (goes second, gets HIGHER HLC)
+        let op_del = Operation::delete(key.to_vec());
+        let payload_del = KvPayload { ops: vec![op_del] }.encode_to_vec();
+        let _hash_del = writer.submit(payload_del, vec![hash_base]).await.unwrap();
+        
+        // Small delay to ensure events propagate  
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        
+        // 4. Verify the state: should have 2 heads (conflict)
+        let heads = handle.get(key).unwrap();
+        assert_eq!(heads.len(), 2, "Expected concurrent conflict with 2 heads");
+        assert!(heads.iter().any(|h| h.tombstone), "One head should be tombstone");
+        assert!(heads.iter().any(|h| !h.tombstone), "One head should be live value");
+        
+        // 5. Get the LAST event from stream (the delete event has higher HLC)
+        use futures_util::StreamExt as _;
+        
+        // Skip events until we get the one for the delete (has tombstone)
+        // We need to find the event that contains the conflict
+        let mut last_event = None;
+        loop {
+            match timeout(Duration::from_millis(200), stream.next()).await {
+                Ok(Some(bytes)) => {
+                    let event = WatchEventProto::decode(bytes.as_slice()).unwrap();
+                    if event.key == key.to_vec() {
+                        last_event = Some(event);
+                    }
+                }
+                _ => break,
+            }
+        }
+        
+        let event = last_event.expect("Should have received events for key");
+        
+        // 6. CRITICAL ASSERTION: The tombstone has higher HLC, so should win LWW
+        // Bug symptom: Kind::Value(b"alive") because tombstone was filtered first
+        // Correct: Kind::Value(empty) or Kind::Deleted, indicating tombstone won
+        match event.kind {
+            Some(crate::kv_types::watch_event_proto::Kind::Deleted(_)) => {
+                // Correct: explicitly marked as deleted
+            }
+            Some(crate::kv_types::watch_event_proto::Kind::Value(v)) if v.is_empty() => {
+                // Also acceptable: empty value indicates tombstone won
+            }
+            Some(crate::kv_types::watch_event_proto::Kind::Value(v)) => {
+                // BUG! The old value "resurrected" due to filtering tombstones before finding winner
+                panic!(
+                    "TOMBSTONE RESURRECTION BUG: Expected deletion/empty, got Value({:?}). \
+                     The tombstone has higher HLC but filtering it first let 'alive' win.",
+                    String::from_utf8_lossy(&v)
+                );
+            }
+            None => panic!("Event kind is None"),
+        }
     }
 }
