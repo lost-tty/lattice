@@ -10,7 +10,7 @@ use crate::StoreRegistry;
 use crate::{KvStore, LogStore};
 use crate::StoreHandle;
 use lattice_kernel::{Store, SyncProvider};
-use lattice_model::{Uuid, CommandDispatcher, StoreType};
+use lattice_model::{Uuid, CommandDispatcher, StoreType, StreamReflectable};
 use lattice_kvstore::{KvState, KvHandle};
 use lattice_logstore::{LogState, LogHandle};
 use lattice_kernel::StoreInspector;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 /// Trait for bridging handle types to StoreHandle
 /// Implemented by KvHandle and LogHandle to enable generic wrapper
-trait HandleBridge: CommandDispatcher + Clone + Send + Sync + 'static {
+trait HandleBridge: CommandDispatcher + StreamReflectable + Clone + Send + Sync + 'static {
     type Writer: SyncProvider + StoreInspector + Clone + Send + Sync + 'static;
     
     fn id(&self) -> Uuid;
@@ -71,6 +71,10 @@ impl<H: HandleBridge> StoreHandle for StoreWrapper<H> {
     
     fn as_inspector(&self) -> Arc<dyn StoreInspector> {
         Arc::new(self.handle.writer().clone())
+    }
+    
+    fn as_stream_reflectable(&self) -> Arc<dyn StreamReflectable> {
+        Arc::new(self.handle.clone())
     }
 }
 

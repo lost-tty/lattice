@@ -785,6 +785,20 @@ mod payload_summary {
     }
 }
 
+// Implement StreamReflectable for KvState
+impl lattice_model::StreamReflectable for KvState {
+    fn stream_descriptors(&self) -> Vec<lattice_model::StreamDescriptor> {
+        vec![
+            lattice_model::StreamDescriptor {
+                name: "Watch".to_string(),
+                description: "Subscribe to key changes matching a regex pattern".to_string(),
+                param_schema: Some("lattice.kv.WatchParams".to_string()),
+                event_schema: Some("lattice.kv.WatchEventProto".to_string()),
+            }
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

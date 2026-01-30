@@ -24,7 +24,7 @@ pub use hlc::HLC;
 pub use clock::{Clock, SystemClock, MockClock};
 pub use state_machine::{StateMachine, StateWriter, StateWriterError, Op};
 pub use log_traits::{LogEntry, LogManager, ChainTipInfo, LogValidation, Identity};
-pub use introspection::{Introspectable, CommandDispatcher, FieldFormat};
+pub use introspection::{Introspectable, CommandDispatcher, FieldFormat, StreamDescriptor, StreamReflectable, StreamError, BoxByteStream};
 pub use replication::{
     // Traits
     SyncProvider,

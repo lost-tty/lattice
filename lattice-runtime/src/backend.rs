@@ -6,7 +6,7 @@
 // Re-export everything from lattice-api's backend module
 pub use lattice_api::backend::{
     LatticeBackend, Backend, NodeEvent, BackendError, BackendResult,
-    AsyncResult, EventReceiver,
+    AsyncResult, EventReceiver, StreamDescriptor, BoxByteStream,
     // Event wrapper types
     MeshReadyEvent, StoreReadyEvent, JoinFailedEvent, SyncResultEvent,
 };

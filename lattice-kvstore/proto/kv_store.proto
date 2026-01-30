@@ -88,3 +88,19 @@ message HeadInfo {
 message HeadList {
     repeated HeadInfo heads = 1;
 }
+
+// --- Stream Types (watch subscription) ---
+
+// Parameters for the Watch stream
+message WatchParams {
+    string pattern = 1;  // Regex pattern to filter keys
+}
+
+// Wire format for watch events
+message WatchEventProto {
+    bytes key = 1;
+    oneof kind {
+        bytes value = 2;  // Update: the new LWW value
+        bool deleted = 3; // Delete: key was removed (value ignored)
+    }
+}

@@ -226,3 +226,31 @@ message MethodInfo {
 message MethodList {
   repeated MethodInfo methods = 1;
 }
+
+// ============================================================================
+// Stream Subscription Types
+// ============================================================================
+
+// Descriptor for a subscribable event stream
+message StreamDescriptor {
+  string name = 1;
+  string description = 2;
+  string param_schema = 3;   // Proto message name for params (if any)
+  string event_schema = 4;   // Proto message name for events
+}
+
+message StreamList {
+  repeated StreamDescriptor streams = 1;
+}
+
+// Subscribe to a store stream
+message SubscribeRequest {
+  bytes store_id = 1;
+  string stream_name = 2;
+  bytes params = 3;  // Encoded stream-specific params
+}
+
+// Event from a store stream
+message StoreEvent {
+  bytes payload = 1;  // Encoded stream event
+}

@@ -20,3 +20,4 @@ prost-reflect = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
+futures.workspace = true

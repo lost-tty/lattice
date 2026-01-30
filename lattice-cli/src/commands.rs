@@ -2,9 +2,11 @@
 
 use lattice_runtime::LatticeBackend;
 use crate::{mesh_commands, node_commands, store_commands};
+use crate::subscriptions::SubscriptionRegistry;
 use clap::{Parser, Subcommand, CommandFactory};
 use rustyline_async::SharedWriter;
 use std::io::Write;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Macro for writing to SharedWriter with less boilerplate
@@ -34,6 +36,7 @@ pub enum CommandResult {
 pub struct CommandContext {
     pub mesh_id: Option<Uuid>,
     pub store_id: Option<Uuid>,
+    pub registry: Arc<SubscriptionRegistry>,
 }
 
 #[derive(Parser)]
@@ -66,7 +69,7 @@ pub enum LatticeCommand {
     /// Exit the CLI
     #[command(next_help_heading = "General")]
     Quit,
-    /// Dynamic commands (Put, Get, Delete, List, etc.)
+    /// Dynamic commands (Put, Get, Delete, List, Watch, Follow, etc.)
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -184,6 +187,13 @@ pub enum StoreSubcommand {
         /// Full type name (e.g., lattice.kv.Entry), or omit to list all types
         type_name: Option<String>,
     },
+    /// List active stream subscriptions
+    Subs,
+    /// Stop a subscription by ID (or "all")
+    Unsub {
+        /// Subscription ID or "all"
+        target: String,
+    },
 }
 
 pub async fn handle_command(
@@ -277,16 +287,24 @@ pub async fn handle_command(
             StoreSubcommand::InspectType { type_name } => {
                 store_commands::cmd_store_inspect_type(backend, ctx.store_id, type_name.as_deref(), writer).await
             }
+            StoreSubcommand::Subs => {
+                store_commands::cmd_subs(&ctx.registry, writer)
+            }
+            StoreSubcommand::Unsub { target } => {
+                store_commands::cmd_unsub(&ctx.registry, &target, writer).await
+            }
         },
         
         LatticeCommand::Quit => {
+            // Stop all subscriptions before quitting
+            ctx.registry.stop_all().await;
             let mut w = writer.clone();
             let _ = writeln!(w, "Goodbye!");
             CommandResult::Quit
         }
         
         LatticeCommand::External(args) => {
-            store_commands::cmd_dynamic_exec(backend, ctx.store_id, &args, writer).await
+            store_commands::cmd_dynamic_exec(backend, ctx, &args, writer).await
         }
     }
 }

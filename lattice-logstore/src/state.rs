@@ -8,6 +8,13 @@ use std::io::{Read, Cursor, BufReader};
 use std::path::Path;
 use redb::{Database, TableDefinition, ReadableTable, ReadableTableMetadata};
 use thiserror::Error;
+use tokio::sync::broadcast;
+
+/// Event emitted when a new log entry is appended
+#[derive(Debug, Clone)]
+pub struct LogEvent {
+    pub content: Vec<u8>,
+}
 
 /// A single log entry
 #[derive(Debug, Clone)]
@@ -57,6 +64,8 @@ const SNAPSHOT_RECORD_META: u8 = 2;
 /// LogState - append-only log with redb persistence
 pub struct LogState {
     db: Database,
+    /// Broadcast channel for log entry events
+    event_tx: broadcast::Sender<LogEvent>,
 }
 
 impl std::fmt::Debug for LogState {
@@ -72,7 +81,13 @@ impl LogState {
         let db_path = path.join("log.db");
         let db = Database::create(db_path)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        Ok(Self { db })
+        let (event_tx, _) = broadcast::channel(256);
+        Ok(Self { db, event_tx })
+    }
+    
+    /// Subscribe to log entry events
+    pub fn subscribe(&self) -> broadcast::Receiver<LogEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Build compound key: HLC (8 bytes, big-endian for sort) + Author (32 bytes)
@@ -179,28 +194,41 @@ impl StateMachine for LogState {
         let value = Self::encode_entry(&entry);
         
         let write_txn = self.db.begin_write()?;
+        let is_new;
         {
             let mut table = write_txn.open_table(TABLE_LOG)?;
             // Idempotency: check if already exists
             if table.get(key.as_slice())?.is_some() {
-                return Ok(());
+                is_new = false;
+            } else {
+                table.insert(key.as_slice(), value.as_slice())?;
+                is_new = true;
             }
-            table.insert(key.as_slice(), value.as_slice())?;
             
-            // Update state hash
-            let mut meta = write_txn.open_table(TABLE_META)?;
-            let current = meta.get(KEY_STATE_HASH)?
-                .map(|v| v.value().to_vec())
-                .unwrap_or(vec![0u8; 32]);
-            let current_hash: [u8; 32] = current.try_into().unwrap_or([0u8; 32]);
-            
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&current_hash);
-            hasher.update(op.id.as_ref());
-            let new_hash = hasher.finalize();
-            meta.insert(KEY_STATE_HASH, new_hash.as_bytes().as_slice())?;
+            if is_new {
+                // Update state hash
+                let mut meta = write_txn.open_table(TABLE_META)?;
+                let current = meta.get(KEY_STATE_HASH)?
+                    .map(|v| v.value().to_vec())
+                    .unwrap_or(vec![0u8; 32]);
+                let current_hash: [u8; 32] = current.try_into().unwrap_or([0u8; 32]);
+                
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&current_hash);
+                hasher.update(op.id.as_ref());
+                let new_hash = hasher.finalize();
+                meta.insert(KEY_STATE_HASH, new_hash.as_bytes().as_slice())?;
+            }
         }
         write_txn.commit()?;
+        
+        // Emit event for new entries (ignore send errors - no receivers is OK)
+        if is_new {
+            let _ = self.event_tx.send(LogEvent {
+                content: op.payload.to_vec(),
+            });
+        }
+        
         Ok(())
     }
 

@@ -416,4 +416,17 @@ impl LatticeBackend for InProcessBackend {
             }).collect())
         })
     }
+    
+    fn store_list_streams(&self, store_id: Uuid) -> AsyncResult<'_, Vec<StreamDescriptor>> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            Ok(store.as_stream_reflectable().stream_descriptors())
+        })
+    }
+    
+    fn store_subscribe(&self, store_id: Uuid, stream_name: &str, params: &[u8]) -> BackendResult<BoxByteStream> {
+        let store = self.get_store(store_id)?;
+        let stream = store.as_stream_reflectable().subscribe(stream_name, params)?;
+        Ok(stream)
+    }
 }

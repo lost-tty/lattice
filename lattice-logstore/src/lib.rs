@@ -6,7 +6,7 @@
 mod state;
 mod handle;
 
-pub use state::LogState;
+pub use state::{LogState, LogEvent};
 pub use handle::LogHandle;
 
 // Include the generated FileDescriptorSet
@@ -24,3 +24,8 @@ static DESCRIPTOR_POOL: Lazy<DescriptorPool> = Lazy::new(|| {
 pub static LOG_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
     DESCRIPTOR_POOL.get_service_by_name("lattice.log.LogStore").expect("Service definition missing")
 });
+
+// Generated proto types
+pub mod proto {
+    include!(concat!(env!("OUT_DIR"), "/lattice.log.rs"));
+}

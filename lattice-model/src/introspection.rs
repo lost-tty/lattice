@@ -72,3 +72,65 @@ pub trait CommandDispatcher: Introspectable {
         request: DynamicMessage,
     ) -> Pin<Box<dyn Future<Output = Result<DynamicMessage, Box<dyn Error + Send + Sync>>> + Send + 'a>>;
 }
+
+// ============================================================================
+// Stream Introspection (Roadmap 8D)
+// ============================================================================
+
+/// Descriptor for a subscribable event stream.
+///
+/// Used by `StreamReflectable` to describe available streams for introspection.
+#[derive(Debug, Clone)]
+pub struct StreamDescriptor {
+    /// Name of the stream (e.g., "watch", "follow")
+    pub name: String,
+    /// Human-readable description
+    pub description: String,
+    /// Proto message name for subscription parameters (if any)
+    pub param_schema: Option<String>,
+    /// Proto message name for events emitted by this stream
+    pub event_schema: Option<String>,
+}
+
+/// Error type for stream subscription operations.
+#[derive(Debug)]
+pub enum StreamError {
+    /// Stream name not found
+    NotFound(String),
+    /// Invalid subscription parameters
+    InvalidParams(String),
+    /// Other stream error
+    Other(String),
+}
+
+impl std::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StreamError::NotFound(s) => write!(f, "Stream not found: {}", s),
+            StreamError::InvalidParams(s) => write!(f, "Invalid params: {}", s),
+            StreamError::Other(s) => write!(f, "Stream error: {}", s),
+        }
+    }
+}
+
+impl std::error::Error for StreamError {}
+
+/// Type alias for a boxed byte stream (serialized proto events).
+pub type BoxByteStream = Pin<Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + 'static>>;
+
+/// A state machine that can expose event streams.
+///
+/// Implemented by handles (e.g., `KvHandle`, `LogHandle`) to describe
+/// available streams and provide subscription capabilities.
+pub trait StreamReflectable: Send + Sync {
+    /// Returns descriptors for all available streams.
+    fn stream_descriptors(&self) -> Vec<StreamDescriptor>;
+    
+    /// Subscribe to a named stream with the given parameters.
+    ///
+    /// Returns a stream of serialized proto events.
+    /// Default implementation returns NotFound for all streams.
+    fn subscribe(&self, stream_name: &str, _params: &[u8]) -> Result<BoxByteStream, StreamError> {
+        Err(StreamError::NotFound(stream_name.to_string()))
+    }
+}

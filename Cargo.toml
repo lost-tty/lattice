@@ -51,6 +51,8 @@ prost-reflect = "0.16"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
+tokio-stream = "0.1"
+futures = "0.3"
 futures-util = "0.3"
 
 # Utilities
@@ -60,6 +62,7 @@ bytes = "1"
 dirs = "5"
 blake3 = "1"
 hex = "0.4"
+uniffi = "0.31.0"
 redb = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"

@@ -12,6 +12,8 @@ blake3 = { workspace = true }
 once_cell = { workspace = true }
 redb = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+async-stream = "0.3"
 
 [build-dependencies]
 prost-build = { workspace = true }

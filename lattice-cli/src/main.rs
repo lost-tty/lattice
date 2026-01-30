@@ -7,6 +7,7 @@ mod store_commands;
 mod display_helpers;
 mod graph_renderer;
 mod tracing_writer;
+mod subscriptions;
 
 use lattice_runtime::{RpcBackend, LatticeBackend, NodeEvent};
 use commands::{CommandResult, CommandContext};
@@ -92,6 +93,7 @@ async fn dispatch_command(
     backend: &Arc<dyn LatticeBackend>,
     current_mesh: &Arc<RwLock<Option<Uuid>>>,
     current_store: &Arc<RwLock<Option<Uuid>>>,
+    registry: &Arc<subscriptions::SubscriptionRegistry>,
     writer: &rustyline_async::SharedWriter,
 ) -> DispatchResult {
     use commands::{LatticeCommand, MeshSubcommand, handle_command};
@@ -99,7 +101,7 @@ async fn dispatch_command(
     let needs_blocking = matches!(
         &cli.command,
         LatticeCommand::Mesh { subcommand: MeshSubcommand::Create | MeshSubcommand::Use { .. } }
-        | LatticeCommand::Store { subcommand: commands::StoreSubcommand::Use { .. } }
+        | LatticeCommand::Store { subcommand: commands::StoreSubcommand::Use { .. } | commands::StoreSubcommand::Subs | commands::StoreSubcommand::Unsub { .. } }
         | LatticeCommand::Quit
     );
     
@@ -110,6 +112,7 @@ async fn dispatch_command(
         CommandContext {
             mesh_id: mesh_guard.as_ref().and_then(|g| **g),
             store_id: store_guard.as_ref().and_then(|g| **g),
+            registry: registry.clone(),
         }
     };
     
@@ -273,6 +276,9 @@ async fn run_cli(
     let current_store: Arc<RwLock<Option<Uuid>>> = Arc::new(RwLock::new(None));
     let current_mesh: Arc<RwLock<Option<Uuid>>> = Arc::new(RwLock::new(None));
     
+    // Stream subscription registry
+    let registry = Arc::new(subscriptions::SubscriptionRegistry::new());
+    
     // Show node status
     let _ = node_commands::cmd_status(&*backend, writer.clone()).await;
     
@@ -338,6 +344,7 @@ async fn run_cli(
                             &backend,
                             &current_mesh,
                             &current_store,
+                            &registry,
                             &writer,
                         ).await {
                             break;

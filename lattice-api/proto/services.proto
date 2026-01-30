@@ -49,7 +49,12 @@ service StoreService {
 // ============================================================================
 
 service DynamicStoreService {
+  // Command execution
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc GetDescriptor(StoreId) returns (DescriptorResponse);
   rpc ListMethods(StoreId) returns (MethodList);
+  
+  // Stream subscription
+  rpc ListStreams(StoreId) returns (StreamList);
+  rpc Subscribe(SubscribeRequest) returns (stream StoreEvent);
 }

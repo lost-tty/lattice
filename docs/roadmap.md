@@ -104,12 +104,13 @@
 - **Custom RSMs**: Define arbitrary event sources
 
 **Tasks:**
-- [ ] **Define `StoreStream` introspection**: name, param schema, event schema
-- [ ] **Define `StoreEvent` proto**: Generic wrapper or per-stream typed events
-- [ ] **Expose `store_subscribe(store_id, stream, params)` RPC**: Streaming endpoint
-- [ ] **Trait extension**: `StateMachine::streams()` returns available stream descriptors
-- [ ] **LatticeBackend**: Add `subscribe(store_id, stream, params) -> Stream<StoreEvent>`
-- [ ] **FFI bindings**: Type-safe stream subscriptions
+- [x] **Define `StoreStream` introspection**: `StreamDescriptor` with name, param_schema, event_schema
+- [x] **Define `StoreEvent` proto**: Per-stream typed events (WatchEventProto, LogEvent)
+- [x] **Expose `store_subscribe(store_id, stream, params)` RPC**: Streaming endpoint in DynamicStoreService
+- [x] **Trait extension**: `StreamReflectable` trait with `stream_descriptors()` and `subscribe()`
+- [x] **LatticeBackend**: `store_list_streams()` and `store_subscribe()` implemented
+- [x] **CLI integration**: Introspection-based stream dispatch, subscription registry
+- [x] **FFI bindings**: Type-safe stream subscriptions for iOS/Swift
 
 ---
 
@@ -328,6 +329,7 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 - [ ] **REGRESSION**: history command list filtering (backend side) capability
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
+- [ ] **CLI Architecture**: Command handlers (`store_commands.rs`, `mesh_commands.rs`, etc.) return `CommandResult` (REPL-level concept). Commands should not deal with REPL concerns. Refactor to return Result<Output, Error> and let caller handle REPL translation.
 - [ ] **Store Name Lookup Optimization**: `find_store_name()` in `store_service.rs` and `backend_inprocess.rs` does O(meshes × stores) linear search. Store names live in mesh root KV stores (StoreDeclaration). Consider caching in StoreManager or adding index.
 - [ ] **Data Directory Lock File**: Investigate lock file mechanism to prevent multiple processes from using the same data directory simultaneously (daemon + embedded app conflict). Options: flock, PID file, or socket-based detection.
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
@@ -344,3 +346,9 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 - **Salted Gossip ALPN**: Use `/config/salt` from root store to salt the gossip ALPN per mesh (improves privacy by isolating mesh traffic).
 - **HTTP API**: External access to stores via REST/gRPC-Web (design TBD based on store types)
 - **Hierarchical Store Model**: Tree of stores where any store can spawn child stores with scoped permissions
+- **Audit Trail Enhancements** (HLC `wall_time` already in Entry):
+  - Human-readable timestamps in CLI (`store history` shows ISO 8601)
+  - Time-based query filters (`store history --from 2026-01-01 --to 2026-01-31`)
+  - Identity mapping layer (PublicKey → User name/email)
+  - Tamper-evident audit export (signed Merkle bundles for external auditors)
+  - Optional: External audit sink (stream to S3/SIEM)

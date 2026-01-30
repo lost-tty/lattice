@@ -164,3 +164,55 @@ impl<W: StateWriter + AsRef<LogState> + Send + Sync> lattice_model::Introspectab
         Vec::new()
     }
 }
+
+// Implement StreamReflectable for LogHandle
+impl<W: StateWriter + AsRef<LogState> + Send + Sync> lattice_model::StreamReflectable for LogHandle<W> {
+    fn stream_descriptors(&self) -> Vec<lattice_model::StreamDescriptor> {
+        vec![
+            lattice_model::StreamDescriptor {
+                name: "Follow".to_string(),
+                description: "Subscribe to new log entries as they are appended".to_string(),
+                param_schema: Some("lattice.log.FollowParams".to_string()),
+                event_schema: Some("lattice.log.LogEvent".to_string()),
+            }
+        ]
+    }
+    
+    fn subscribe(&self, stream_name: &str, _params: &[u8]) -> Result<lattice_model::BoxByteStream, lattice_model::StreamError> {
+        use lattice_model::StreamError;
+        use prost::Message;
+        use tokio::sync::broadcast;
+        
+        if stream_name != "Follow" {
+            return Err(StreamError::NotFound(stream_name.to_string()));
+        }
+        
+        // No params needed for Follow - FollowParams is empty
+        
+        // Subscribe to state's broadcast channel
+        let mut state_rx = self.state().subscribe();
+        
+        // Create stream that converts events to proto and serializes
+        let stream = async_stream::stream! {
+            loop {
+                match state_rx.recv().await {
+                    Ok(event) => {
+                        // Convert to proto LogEvent
+                        let proto_event = crate::proto::LogEvent {
+                            content: event.content,
+                        };
+                        
+                        // Serialize to bytes
+                        let mut buf = Vec::new();
+                        proto_event.encode(&mut buf).ok();
+                        yield buf;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        };
+        
+        Ok(Box::pin(stream))
+    }
+}

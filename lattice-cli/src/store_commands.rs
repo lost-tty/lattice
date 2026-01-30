@@ -4,14 +4,18 @@ use lattice_runtime::LatticeBackend;
 use crate::commands::{CommandResult, Writer};
 use crate::graph_renderer;
 use crate::display_helpers::{format_id, parse_uuid};
+use crate::subscriptions::SubscriptionRegistry;
 use lattice_runtime::{Hash, PubKey};
 use std::io::Write;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 use prost_reflect::{DescriptorPool, DynamicMessage, Value, ReflectMessage};
 use prost_reflect::prost::Message as ProstMessage;
 use std::fmt::Write as FmtWrite;
 use unicode_width::UnicodeWidthStr;
+use futures_util::StreamExt;
+use tokio::sync::mpsc;
 
 // ==================== Multi-Store Commands ====================
 
@@ -475,10 +479,42 @@ pub async fn cmd_orphan_cleanup(backend: &dyn LatticeBackend, store_id: Option<U
 
 // ==================== Dynamic Command Execution ====================
 
-pub async fn cmd_dynamic_exec(backend: &dyn LatticeBackend, store_id: Option<Uuid>, args: &[String], writer: Writer) -> CommandResult {
+/// Operation type for unified dispatch
+enum OperationType {
+    Stream,
+    Command,
+}
+
+/// Lookup operation type using introspection
+async fn lookup_operation_type(backend: &dyn LatticeBackend, store_id: Uuid, name: &str) -> Option<OperationType> {
+    // Check streams
+    let streams = backend.store_list_streams(store_id).await.unwrap_or_default();
+    if streams.iter().any(|s| s.name.eq_ignore_ascii_case(name)) {
+        return Some(OperationType::Stream);
+    }
+    
+    // Check commands
+    let (descriptor_bytes, service_name) = backend.store_get_descriptor(store_id).await.ok()?;
+    let pool = DescriptorPool::decode(descriptor_bytes.as_slice()).ok()?;
+    let service = pool.get_service_by_name(&service_name)?;
+    
+    if service.methods().any(|m| m.name().eq_ignore_ascii_case(name)) {
+        Some(OperationType::Command)
+    } else {
+        None
+    }
+}
+
+/// Single entry point for dynamic store operations
+pub async fn cmd_dynamic_exec(backend: &dyn LatticeBackend, ctx: &crate::commands::CommandContext, args: &[String], writer: Writer) -> CommandResult {
     let mut w = writer.clone();
     
-    let store_id = match store_id {
+    if args.is_empty() {
+        let _ = writeln!(w, "Usage: <operation> [args...]");
+        return CommandResult::Ok;
+    }
+    
+    let store_id = match ctx.store_id {
         Some(id) => id,
         None => {
             let _ = writeln!(w, "No store selected. Use 'store use <uuid>'");
@@ -486,8 +522,17 @@ pub async fn cmd_dynamic_exec(backend: &dyn LatticeBackend, store_id: Option<Uui
         }
     };
     
-    // Execute via backend abstraction (works for both in-process and RPC modes)
-    return cmd_dynamic_exec_rpc(backend, store_id, args, writer).await;
+    let operation = &args[0];
+    let op_args = &args[1..];
+    
+    match lookup_operation_type(backend, store_id, operation).await {
+        Some(OperationType::Stream) => cmd_stream_subscribe(backend, store_id, operation, op_args, &ctx.registry, writer).await,
+        Some(OperationType::Command) => cmd_dynamic_command(backend, store_id, operation, op_args, writer).await,
+        None => {
+            let _ = writeln!(w, "Unknown operation: {}", operation);
+            CommandResult::Ok
+        }
+    }
 }
 
 /// Public entry point for `store inspect-type [name]`
@@ -630,13 +675,11 @@ fn format_kind_full(kind: prost_reflect::Kind) -> String {
     }
 }
 
-// RPC mode dynamic execution - fetches descriptors from daemon
-async fn cmd_dynamic_exec_rpc(backend: &dyn LatticeBackend, store_id: Uuid, args: &[String], writer: Writer) -> CommandResult {
-
-    
+// Dynamic command execution
+async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, operation: &str, args: &[String], writer: Writer) -> CommandResult {
     let mut w = writer.clone();
-    let method_name = &args[0];
-    let method_args = &args[1..];
+    let method_name = operation;
+    let method_args = args;
     
     // Fetch descriptor from daemon via RPC
     let (descriptor_bytes, service_name) = match backend.store_get_descriptor(store_id).await {
@@ -903,6 +946,128 @@ fn escape_control_chars(s: &str) -> String {
         c => c.to_string(),
     }).collect()
 }
+// ==================== Stream Commands ====================
 
-// ==================== Helper Functions ====================
+/// Subscribe to a store stream - runs in background with introspection-based decoding
+pub async fn cmd_stream_subscribe(
+    backend: &dyn LatticeBackend,
+    store_id: Uuid,
+    stream_name: &str,
+    args: &[String],
+    registry: &Arc<SubscriptionRegistry>,
+    writer: Writer,
+) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let streams = backend.store_list_streams(store_id).await.unwrap_or_default();
+    let Some(stream_desc) = streams.iter().find(|s| s.name.eq_ignore_ascii_case(stream_name)).cloned() else {
+        let available: Vec<_> = streams.iter().map(|s| s.name.as_str()).collect();
+        let _ = writeln!(w, "Unknown stream '{}'. Available: {:?}", stream_name, available);
+        return CommandResult::Ok;
+    };
+    
+    let pool = backend.store_get_descriptor(store_id).await.ok()
+        .and_then(|(bytes, _)| DescriptorPool::decode(bytes.as_slice()).ok());
+    
+    let params = build_stream_params(&stream_desc, args, pool.as_ref());
+    
+    let Ok(stream) = backend.store_subscribe(store_id, &stream_desc.name, &params) else {
+        let _ = writeln!(w, "Error subscribing to {}", stream_name);
+        return CommandResult::Ok;
+    };
+    
+    let (cancel_tx, mut cancel_rx) = mpsc::channel::<()>(1);
+    let display_name = args.first()
+        .map(|a| format!("{}:{}", stream_desc.name.to_lowercase(), a))
+        .unwrap_or_else(|| stream_desc.name.to_lowercase());
+    
+    let writer_clone = writer.clone();
+    let event_schema = stream_desc.event_schema.clone();
+    let handle = tokio::spawn(async move {
+        tokio::pin!(stream);
+        loop {
+            tokio::select! {
+                _ = cancel_rx.recv() => break,
+                Some(payload) = stream.next() => {
+                    display_stream_event(&payload, &event_schema, pool.as_ref(), &writer_clone);
+                }
+                else => break,
+            }
+        }
+    });
+    
+    let sub_id = registry.register(display_name.clone(), store_id, stream_desc.name.clone(), cancel_tx, handle);
+    let _ = writeln!(w, "Started subscription #{} - {}", sub_id, display_name);
+    CommandResult::Ok
+}
 
+fn build_stream_params(desc: &lattice_runtime::StreamDescriptor, args: &[String], pool: Option<&DescriptorPool>) -> Vec<u8> {
+    let Some(schema) = desc.param_schema.as_ref().filter(|s| !s.is_empty()) else { return vec![] };
+    let Some(msg_desc) = pool.and_then(|p| p.get_message_by_name(schema)) else { return vec![] };
+    
+    let mut msg = DynamicMessage::new(msg_desc.clone());
+    for (field, arg) in msg_desc.fields().zip(args.iter()) {
+        if let Some(val) = parse_arg_as_value(&field, arg) {
+            msg.set_field(&field, val);
+        }
+    }
+    msg.encode_to_vec()
+}
+
+fn parse_arg_as_value(field: &prost_reflect::FieldDescriptor, arg: &str) -> Option<Value> {
+    use prost_reflect::Kind::*;
+    Some(match field.kind() {
+        String => Value::String(arg.to_string()),
+        Bytes => Value::Bytes(arg.as_bytes().to_vec().into()),
+        Int32 | Sint32 | Sfixed32 => Value::I32(arg.parse().ok()?),
+        Int64 | Sint64 | Sfixed64 => Value::I64(arg.parse().ok()?),
+        Uint32 | Fixed32 => Value::U32(arg.parse().ok()?),
+        Uint64 | Fixed64 => Value::U64(arg.parse().ok()?),
+        Bool => Value::Bool(arg.eq_ignore_ascii_case("true") || arg == "1"),
+        Float => Value::F32(arg.parse().ok()?),
+        Double => Value::F64(arg.parse().ok()?),
+        _ => return None,
+    })
+}
+
+fn display_stream_event(payload: &[u8], schema: &Option<String>, pool: Option<&DescriptorPool>, writer: &Writer) {
+    let mut w = writer.clone();
+    if let Some(msg) = schema.as_ref()
+        .and_then(|s| pool?.get_message_by_name(s))
+        .and_then(|desc| DynamicMessage::decode(desc, payload).ok())
+    {
+        let _ = writeln!(w, "[Stream] {}", format_dynamic_message(&msg));
+    } else {
+        let _ = writeln!(w, "[Stream] {} bytes", payload.len());
+    }
+}
+
+pub fn cmd_subs(registry: &Arc<SubscriptionRegistry>, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    let subs = registry.list();
+    if subs.is_empty() {
+        let _ = writeln!(w, "No active subscriptions.");
+    } else {
+        let _ = writeln!(w, "Active subscriptions:");
+        for (id, name, stream) in subs {
+            let _ = writeln!(w, "  #{} {} ({})", id, name, stream);
+        }
+    }
+    CommandResult::Ok
+}
+
+pub async fn cmd_unsub(registry: &Arc<SubscriptionRegistry>, target: &str, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    if target == "all" {
+        registry.stop_all().await;
+        let _ = writeln!(w, "Stopped all subscriptions.");
+    } else if let Ok(id) = target.parse::<u64>() {
+        match registry.stop(id).await {
+            Ok(()) => { let _ = writeln!(w, "Stopped subscription #{}.", id); }
+            Err(e) => { let _ = writeln!(w, "Error: {}", e); }
+        }
+    } else {
+        let _ = writeln!(w, "Usage: unsub <id> or unsub all");
+    }
+    CommandResult::Ok
+}

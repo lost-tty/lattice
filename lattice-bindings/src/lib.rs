@@ -82,12 +82,44 @@ impl LatticeError {
 /// Input values for dynamic method execution
 #[derive(uniffi::Enum, Clone, Debug)]
 pub enum ArgValue {
+    Null,
     String(String),
     Int(i64),
     Float(f64),
     Bool(bool),
     Bytes(Vec<u8>),
     List(Vec<ArgValue>),
+}
+
+// ... (ReflectValue etc unchanged)
+
+// Update map_arg_to_value to return Option<Value>
+fn map_arg_to_value(arg: &ArgValue, kind: Kind) -> Result<Option<Value>, LatticeError> {
+    match (arg, kind.clone()) {
+        (ArgValue::Null, _) => Ok(None),
+        (ArgValue::String(s), Kind::String) => Ok(Some(Value::String(s.clone()))),
+        (ArgValue::Int(i), Kind::Int32 | Kind::Sint32 | Kind::Sfixed32) => Ok(Some(Value::I32(*i as i32))),
+        (ArgValue::Int(i), Kind::Int64 | Kind::Sint64 | Kind::Sfixed64) => Ok(Some(Value::I64(*i))),
+        (ArgValue::Int(i), Kind::Uint32 | Kind::Fixed32) => Ok(Some(Value::U32(*i as u32))),
+        (ArgValue::Int(i), Kind::Uint64 | Kind::Fixed64) => Ok(Some(Value::U64(*i as u64))),
+        (ArgValue::Float(f), Kind::Float) => Ok(Some(Value::F32(*f as f32))),
+        (ArgValue::Float(f), Kind::Double) => Ok(Some(Value::F64(*f))),
+        (ArgValue::Bool(b), Kind::Bool) => Ok(Some(Value::Bool(*b))),
+        (ArgValue::Bytes(b), Kind::Bytes) => Ok(Some(Value::Bytes(bytes::Bytes::copy_from_slice(b)))),
+        // Coercions
+        (ArgValue::String(s), Kind::Int32) => {
+            if s.is_empty() { return Ok(None); }
+            s.parse::<i32>().map(Value::I32).map(Some).map_err(|e| LatticeError::Internal { message: e.to_string() })
+        },
+        (ArgValue::String(s), Kind::Int64) => {
+            if s.is_empty() { return Ok(None); }
+            s.parse::<i64>().map(Value::I64).map(Some).map_err(|e| LatticeError::Internal { message: e.to_string() })
+        },
+        // Fallback for empty strings on other numeric types to be safe
+        (ArgValue::String(s), _) if s.is_empty() => Ok(None),
+        
+        _ => Err(LatticeError::Internal { message: format!("Type mismatch for arg {:?} vs kind {:?}", arg, kind) }),
+    }
 }
 
 /// Structured result values from dynamic method execution
@@ -406,8 +438,9 @@ impl Lattice {
         
         for (i, arg) in args.iter().enumerate() {
             let field = &fields[i];
-            let value = map_arg_to_value(arg, field.kind())?;
-            dynamic_msg.set_field(field, value);
+            if let Some(value) = map_arg_to_value(arg, field.kind())? {
+                dynamic_msg.set_field(field, value);
+            }
         }
         
         let mut payload = Vec::new();
@@ -463,23 +496,96 @@ impl Lattice {
         Ok(DescriptorInfo { descriptor_bytes: bytes, service_name: name })
     }
 
-    // Events are special - they should return a blocking stream iterator?
-    // UniFFI iterators?
-    // Or we keep EventStream but it has blocking `next`?
-    pub fn subscribe(&self) -> Result<Arc<LatticeEventStream>, LatticeError> {
+    // ---- Stream operations ----
+    
+    /// List available streams for a store
+    pub fn store_list_streams(&self, store_id: String) -> Result<Vec<StreamInfo>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
         
-        // This must be async to get receiver
-        // But backend().subscribe() returns sync? No, async.
-        let rx = self.rt.block_on(async {
-            r.backend().subscribe().map_err(|e| LatticeError::from_backend(e))
-        })?;
+        self.rt.block_on(r.backend().store_list_streams(id))
+            .map(|streams| streams.into_iter().map(Into::into).collect())
+            .map_err(|e| LatticeError::from_backend(e))
+    }
+    
+    /// Subscribe to a store stream (e.g., "Watch" with pattern param)
+    pub fn store_subscribe(&self, store_id: String, stream_name: String, args: Vec<ArgValue>) -> Result<Arc<StoreStream>, LatticeError> {
+        let r_guard = self.rt.block_on(self.runtime.read());
+        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
+        
+        // Get descriptor pool for decoding
+        let (descriptor_bytes, _) = self.rt.block_on(r.backend().store_get_descriptor(id))
+            .map_err(|e| LatticeError::from_backend(e))?;
+        let pool = DescriptorPool::decode(descriptor_bytes.as_slice()).ok();
+        
+        // Get stream info for schema and param building
+        let streams = self.rt.block_on(r.backend().store_list_streams(id))
+            .map_err(|e| LatticeError::from_backend(e))?;
+        let stream_desc = streams.iter()
+            .find(|s| s.name.eq_ignore_ascii_case(&stream_name))
+            .ok_or_else(|| LatticeError::Store { message: format!("Stream '{}' not found", stream_name) })?;
+        
+        // Build params
+        let params = self.build_stream_params(stream_desc, &args, pool.as_ref())?;
+        
+        // Subscribe
+        let stream = r.backend().store_subscribe(id, &stream_desc.name, &params)
+            .map_err(|e| LatticeError::from_backend(e))?;
+        
+        // Bridge stream to channel for blocking iteration
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let rt_handle = self.rt.handle().clone();
+        rt_handle.spawn(async move {
+            use tokio_stream::StreamExt;
+            tokio::pin!(stream);
+            while let Some(payload) = stream.next().await {
+                if tx.send(payload).await.is_err() { break; }
+            }
+        });
+        
+        Ok(Arc::new(StoreStream {
+            rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            pool,
+            event_schema: stream_desc.event_schema.clone(),
+        }))
+    }
+
+    // Events 
+    pub async fn subscribe(&self) -> Result<Arc<LatticeEventStream>, LatticeError> {
+        let r_guard = self.runtime.read().await;
+        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+        
+        let rx = r.backend().subscribe().map_err(|e| LatticeError::from_backend(e))?;
         
         Ok(Arc::new(LatticeEventStream {
             rx: Arc::new(tokio::sync::Mutex::new(rx)),
-            rt: self.rt.handle().clone(),
         }))
+    }
+}
+
+impl Lattice {
+    fn build_stream_params(&self, desc: &lattice_model::StreamDescriptor, args: &[ArgValue], pool: Option<&DescriptorPool>) -> Result<Vec<u8>, LatticeError> {
+        let Some(schema) = desc.param_schema.as_ref().filter(|s| !s.is_empty()) else { return Ok(vec![]) };
+        let Some(pool) = pool else { return Ok(vec![]) };
+        let msg_desc = pool.get_message_by_name(schema)
+            .ok_or_else(|| LatticeError::TypeNotFound { name: schema.clone() })?;
+        
+        let mut msg = DynamicMessage::new(msg_desc.clone());
+        let fields: Vec<_> = msg_desc.fields().collect();
+        
+        for (i, arg) in args.iter().enumerate() {
+            if i >= fields.len() { break; }
+            let field = &fields[i];
+            if let Some(value) = map_arg_to_value(arg, field.kind())? {
+                msg.set_field(field, value);
+            }
+        }
+        
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).map_err(|e| LatticeError::Internal { message: e.to_string() })?;
+        Ok(buf)
     }
 }
 
@@ -489,20 +595,71 @@ pub struct DescriptorInfo {
     pub service_name: String,
 }
 
+/// Stream metadata for FFI
+#[derive(uniffi::Record)]
+pub struct StreamInfo {
+    pub name: String,
+    pub param_schema: Option<String>,
+    pub event_schema: Option<String>,
+}
+
+impl From<lattice_model::StreamDescriptor> for StreamInfo {
+    fn from(s: lattice_model::StreamDescriptor) -> Self {
+        Self { name: s.name, param_schema: s.param_schema, event_schema: s.event_schema }
+    }
+}
+
+/// Store stream subscription for FFI - provides blocking iteration
+#[derive(uniffi::Object)]
+pub struct StoreStream {
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
+    pool: Option<DescriptorPool>,
+    event_schema: Option<String>,
+}
+
+#[uniffi::export]
+impl StoreStream {
+    /// Async next() - returns None when stream ends, Error on decode failure
+    pub async fn next(&self) -> Result<Option<ReflectValue>, LatticeError> {
+        let mut rx = self.rx.lock().await;
+        match rx.recv().await {
+            Some(payload) => self.decode_event(&payload).map(Some),
+            None => Ok(None),
+        }
+    }
+    
+    /// Get raw bytes (for advanced use cases)
+    pub async fn next_bytes(&self) -> Option<Vec<u8>> {
+        let mut rx = self.rx.lock().await;
+        rx.recv().await
+    }
+}
+
+impl StoreStream {
+    fn decode_event(&self, payload: &[u8]) -> Result<ReflectValue, LatticeError> {
+        let schema = self.event_schema.as_ref()
+            .ok_or_else(|| LatticeError::Internal { message: "No event schema defined".into() })?;
+        let pool = self.pool.as_ref()
+            .ok_or_else(|| LatticeError::Internal { message: "No descriptor pool".into() })?;
+        let msg_desc = pool.get_message_by_name(schema)
+            .ok_or_else(|| LatticeError::TypeNotFound { name: schema.clone() })?;
+        let msg = DynamicMessage::decode(msg_desc, payload)
+            .map_err(|e| LatticeError::Internal { message: format!("Decode error: {}", e) })?;
+        Ok(dynamic_message_to_reflect_value(&msg))
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct LatticeEventStream {
     rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<lattice_runtime::NodeEvent>>>,
-    rt: tokio::runtime::Handle,
 }
 
 #[uniffi::export]
 impl LatticeEventStream {
-    // Blocking next()
-    pub fn next(&self) -> Option<BackendEvent> {
-        self.rt.block_on(async {
-            let mut rx = self.rx.lock().await;
-            rx.recv().await.map(Into::into)
-        })
+    // Async next()
+    pub async fn next(&self) -> Option<BackendEvent> {
+        let mut rx = self.rx.lock().await;
+        rx.recv().await.map(Into::into)
     }
 }
 
@@ -521,23 +678,7 @@ fn map_kind_to_field_type(kind: Kind) -> FieldType {
     }
 }
 
-fn map_arg_to_value(arg: &ArgValue, kind: Kind) -> Result<Value, LatticeError> {
-    match (arg, kind.clone()) {
-        (ArgValue::String(s), Kind::String) => Ok(Value::String(s.clone())),
-        (ArgValue::Int(i), Kind::Int32 | Kind::Sint32 | Kind::Sfixed32) => Ok(Value::I32(*i as i32)),
-        (ArgValue::Int(i), Kind::Int64 | Kind::Sint64 | Kind::Sfixed64) => Ok(Value::I64(*i)),
-        (ArgValue::Int(i), Kind::Uint32 | Kind::Fixed32) => Ok(Value::U32(*i as u32)),
-        (ArgValue::Int(i), Kind::Uint64 | Kind::Fixed64) => Ok(Value::U64(*i as u64)),
-        (ArgValue::Float(f), Kind::Float) => Ok(Value::F32(*f as f32)),
-        (ArgValue::Float(f), Kind::Double) => Ok(Value::F64(*f)),
-        (ArgValue::Bool(b), Kind::Bool) => Ok(Value::Bool(*b)),
-        (ArgValue::Bytes(b), Kind::Bytes) => Ok(Value::Bytes(bytes::Bytes::copy_from_slice(b))),
-        // Basic coercions using CLI-like logic if mismatched
-        (ArgValue::String(s), Kind::Int32) => s.parse::<i32>().map(Value::I32).map_err(|e| LatticeError::Internal { message: e.to_string() }),
-        (ArgValue::String(s), Kind::Int64) => s.parse::<i64>().map(Value::I64).map_err(|e| LatticeError::Internal { message: e.to_string() }),
-        _ => Err(LatticeError::Internal { message: format!("Type mismatch for arg {:?} vs kind {:?}", arg, kind) }),
-    }
-}
+
 
 /// Convert a DynamicMessage to a ReflectValue::Message
 fn dynamic_message_to_reflect_value(msg: &DynamicMessage) -> ReflectValue {
@@ -611,3 +752,37 @@ fn map_key_to_reflect_value(key: &prost_reflect::MapKey) -> ReflectValue {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    fn make_test_stream(pool: Option<DescriptorPool>, schema: Option<String>) -> StoreStream {
+        StoreStream {
+            rx: Arc::new(tokio::sync::Mutex::new(tokio::sync::mpsc::channel(1).1)),
+            pool,
+            event_schema: schema,
+        }
+    }
+    
+    #[tokio::test]
+    async fn decode_event_missing_schema_returns_error() {
+        let stream = make_test_stream(None, None);
+        let result = stream.decode_event(&[1, 2, 3]);
+        assert!(matches!(result, Err(LatticeError::Internal { .. })));
+    }
+    
+    #[tokio::test]
+    async fn decode_event_missing_pool_returns_error() {
+        let stream = make_test_stream(None, Some("test.Message".to_string()));
+        let result = stream.decode_event(&[1, 2, 3]);
+        assert!(matches!(result, Err(LatticeError::Internal { .. })));
+    }
+    
+    #[tokio::test]
+    async fn decode_event_type_not_found_returns_error() {
+        let pool = DescriptorPool::new();
+        let stream = make_test_stream(Some(pool), Some("nonexistent.Message".to_string()));
+        let result = stream.decode_event(&[1, 2, 3]);
+        assert!(matches!(result, Err(LatticeError::TypeNotFound { .. })));
+    }
+}

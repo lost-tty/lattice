@@ -17,6 +17,9 @@ pub use crate::proto::{
     node_event::NodeEvent,  // Consumers use NodeEvent::MeshReady(...), etc.
 };
 
+// Re-export model types needed by backends
+pub use lattice_model::{StreamDescriptor, BoxByteStream};
+
 // ==================== Error Types ====================
 
 /// Backend error type
@@ -71,6 +74,12 @@ pub trait LatticeBackend: Send + Sync {
     /// Get store's descriptor bytes and service name for client-side reflection
     fn store_get_descriptor(&self, store_id: Uuid) -> AsyncResult<'_, (Vec<u8>, String)>;
     fn store_list_methods(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, String)>>;
+    
+    // ---- Stream operations ----
+    /// List available streams for a store
+    fn store_list_streams(&self, store_id: Uuid) -> AsyncResult<'_, Vec<StreamDescriptor>>;
+    /// Subscribe to a store stream
+    fn store_subscribe(&self, store_id: Uuid, stream_name: &str, params: &[u8]) -> BackendResult<BoxByteStream>;
 }
 
 /// Type alias for shared backend reference

@@ -30,3 +30,13 @@ message ReadResponse {
 message LogPayload {
     bytes content = 1;
 }
+
+// --- Stream Types (follow subscription) ---
+
+// Parameters for the Follow stream (no params needed)
+message FollowParams {}
+
+// Event emitted for each new log entry
+message LogEvent {
+    bytes content = 1;
+}

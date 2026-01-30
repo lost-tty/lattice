@@ -188,6 +188,66 @@ impl<W: StateWriter + AsRef<KvState> + Send + Sync> lattice_model::Introspectabl
     }
 }
 
+// Implement StreamReflectable for KvHandle (delegates to state, implements subscribe)
+impl<W: StateWriter + AsRef<KvState> + Send + Sync> lattice_model::StreamReflectable for KvHandle<W> {
+    fn stream_descriptors(&self) -> Vec<lattice_model::StreamDescriptor> {
+        self.state().stream_descriptors()
+    }
+    
+    fn subscribe(&self, stream_name: &str, params: &[u8]) -> Result<lattice_model::BoxByteStream, lattice_model::StreamError> {
+        use lattice_model::StreamError;
+        use prost::Message;
+        
+        if stream_name != "Watch" {
+            return Err(StreamError::NotFound(stream_name.to_string()));
+        }
+        
+        // Decode WatchParams to get pattern
+        let watch_params = crate::proto::WatchParams::decode(params)
+            .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
+        let pattern = watch_params.pattern;
+        
+        // Compile regex for filtering
+        let re = Regex::new(&pattern)
+            .map_err(|e| StreamError::InvalidParams(format!("Invalid regex: {}", e)))?;
+        
+        // Subscribe to state's broadcast channel
+        let state_rx = self.state().subscribe();
+        
+        // Use BroadcastStream - handles Lagged internally, cleaner than manual loop
+        use tokio_stream::wrappers::BroadcastStream;
+        let stream = BroadcastStream::new(state_rx)
+            .filter_map(move |result| {
+                let re = re.clone();
+                async move {
+                    let event = result.ok()?;
+                    if !re.is_match(&event.key) { return None; }
+                    
+                    let kind = match event.kind {
+                        crate::WatchEventKind::Update { heads } => {
+                            let lww_value = heads.into_iter()
+                                .filter(|h| !h.tombstone)
+                                .max_by_key(|h| h.hlc)
+                                .map(|h| h.value)
+                                .unwrap_or_default();
+                            Some(crate::kv_types::watch_event_proto::Kind::Value(lww_value))
+                        }
+                        crate::WatchEventKind::Delete => {
+                            Some(crate::kv_types::watch_event_proto::Kind::Deleted(true))
+                        }
+                    };
+                    
+                    let proto_event = crate::kv_types::WatchEventProto { key: event.key, kind };
+                    let mut buf = Vec::new();
+                    proto_event.encode(&mut buf).ok()?;
+                    Some(buf)
+                }
+            });
+        
+        Ok(Box::pin(stream))
+    }
+}
+
 impl<W: StateWriter + AsRef<KvState>> AsRef<KvState> for KvHandle<W> {
     fn as_ref(&self) -> &KvState {
         self.writer.as_ref()

@@ -268,4 +268,48 @@ impl LatticeBackend for RpcBackend {
             Ok(resp.into_inner().methods.into_iter().map(|m| (m.name, m.description)).collect())
         })
     }
+    
+    fn store_list_streams(&self, store_id: Uuid) -> AsyncResult<'_, Vec<StreamDescriptor>> {
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client.dynamic.list_streams(StoreId { id: store_id.as_bytes().to_vec() }).await?;
+            Ok(resp.into_inner().streams.into_iter().map(|s| StreamDescriptor {
+                name: s.name,
+                description: s.description,
+                param_schema: if s.param_schema.is_empty() { None } else { Some(s.param_schema) },
+                event_schema: if s.event_schema.is_empty() { None } else { Some(s.event_schema) },
+            }).collect())
+        })
+    }
+    
+    fn store_subscribe(&self, store_id: Uuid, stream_name: &str, params: &[u8]) -> BackendResult<BoxByteStream> {
+        use lattice_api::proto::SubscribeRequest;
+        
+        let client = self.client.clone();
+        let stream_name = stream_name.to_string();
+        let params = params.to_vec();
+        
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        
+        tokio::spawn(async move {
+            let mut dynamic = client.dynamic;
+            let resp = dynamic.subscribe(SubscribeRequest {
+                store_id: store_id.as_bytes().to_vec(),
+                stream_name,
+                params,
+            }).await;
+            
+            if let Ok(resp) = resp {
+                let mut stream = resp.into_inner();
+                // Use tokio_stream's StreamExt (already imported at top)
+                while let Some(Ok(event)) = StreamExt::next(&mut stream).await {
+                    if tx.send(event.payload).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
 }

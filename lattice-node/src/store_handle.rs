@@ -6,7 +6,7 @@
 
 use crate::SyncProvider;
 use lattice_kernel::StoreInspector;
-use lattice_model::{CommandDispatcher, Uuid, StoreType};
+use lattice_model::{CommandDispatcher, Uuid, StoreType, StreamReflectable};
 use std::sync::Arc;
 
 /// A unified interface for store handles.
@@ -16,6 +16,7 @@ use std::sync::Arc;
 /// - CommandDispatcher for introspection and command execution (extends Introspectable)
 /// - SyncProvider for network sync operations
 /// - StoreInspector for log inspection and diagnostics (CLI)
+/// - StreamReflectable for stream introspection
 pub trait StoreHandle: Send + Sync {
     /// Get the store's unique identifier
     fn id(&self) -> Uuid;
@@ -32,4 +33,7 @@ pub trait StoreHandle: Send + Sync {
     
     /// Get a StoreInspector for log inspection and diagnostics (CLI)
     fn as_inspector(&self) -> Arc<dyn StoreInspector>;
+    
+    /// Get a StreamReflectable for stream introspection
+    fn as_stream_reflectable(&self) -> Arc<dyn StreamReflectable>;
 }

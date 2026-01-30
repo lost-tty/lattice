@@ -9,7 +9,7 @@ crate-type = ["cdylib", "staticlib"]
 name = "lattice_bindings"
 
 [dependencies]
-uniffi = { version = "0.29.0", features = ["tokio", "cli"] }
+uniffi = { workspace = true, features = ["tokio", "cli"] }
 lattice-runtime = { workspace = true }
 lattice-api = { workspace = true, features = ["ffi"] }
 lattice-model = { workspace = true }
@@ -21,6 +21,7 @@ hex = "0.4"
 uuid = { workspace = true }
 prost-reflect.workspace = true
 bytes.workspace = true
+tokio-stream.workspace = true
 
 [lints]
 workspace = true
