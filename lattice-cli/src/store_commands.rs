@@ -11,6 +11,7 @@ use uuid::Uuid;
 use prost_reflect::{DescriptorPool, DynamicMessage, Value, ReflectMessage};
 use prost_reflect::prost::Message as ProstMessage;
 use std::fmt::Write as FmtWrite;
+use unicode_width::UnicodeWidthStr;
 
 // ==================== Multi-Store Commands ====================
 
@@ -485,30 +486,148 @@ pub async fn cmd_dynamic_exec(backend: &dyn LatticeBackend, store_id: Option<Uui
         }
     };
     
-    if args.is_empty() {
-        // Show available methods
-        let _ = writeln!(w, "Usage: <Command> [key=value]...");
-        let _ = writeln!(w, "Available commands:");
+    // Execute via backend abstraction (works for both in-process and RPC modes)
+    return cmd_dynamic_exec_rpc(backend, store_id, args, writer).await;
+}
+
+/// Public entry point for `store inspect-type [name]`
+pub async fn cmd_store_inspect_type(backend: &dyn LatticeBackend, store_id: Option<Uuid>, type_name: Option<&str>, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "No store selected. Use 'store use <uuid>'");
+            return CommandResult::Ok;
+        }
+    };
+    
+    match type_name {
+        Some(name) => cmd_inspect_type(backend, store_id, name, writer).await,
+        None => cmd_list_types(backend, store_id, writer).await,
+    }
+}
+
+/// Inspect a type's schema
+async fn cmd_inspect_type(backend: &dyn LatticeBackend, store_id: Uuid, type_name: &str, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let (descriptor_bytes, _) = match backend.store_get_descriptor(store_id).await {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+            return CommandResult::Ok;
+        }
+    };
+    
+    let pool = match DescriptorPool::decode(descriptor_bytes.as_slice()) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+            return CommandResult::Ok;
+        }
+    };
+    
+    // Try to find as message first
+    if let Some(msg_desc) = pool.get_message_by_name(type_name) {
+        let _ = writeln!(w, "Message: {}", msg_desc.full_name());
+        let _ = writeln!(w);
         
-        match backend.store_list_methods(store_id).await {
-            Ok(methods) => {
-                for (name, desc) in methods {
-                    if desc.is_empty() {
-                        let _ = writeln!(w, "  {}", name);
-                    } else {
-                        let _ = writeln!(w, "  {} - {}", name, desc);
-                    }
-                }
-            }
-            Err(e) => {
-                let _ = writeln!(w, "Error: {}", e);
+        let fields: Vec<_> = msg_desc.fields().collect();
+        if fields.is_empty() {
+            let _ = writeln!(w, "  (no fields)");
+        } else {
+            for field in fields {
+                let repeated = if field.is_list() { " (repeated)" } else { "" };
+                let _ = writeln!(w, "  {} : {}{}", field.name(), format_kind_full(field.kind()), repeated);
             }
         }
         return CommandResult::Ok;
     }
     
-    // Execute via backend abstraction (works for both in-process and RPC modes)
-    return cmd_dynamic_exec_rpc(backend, store_id, args, writer).await;
+    // Try as enum
+    if let Some(enum_desc) = pool.get_enum_by_name(type_name) {
+        let _ = writeln!(w, "Enum: {}", enum_desc.full_name());
+        let _ = writeln!(w);
+        
+        for value in enum_desc.values() {
+            let _ = writeln!(w, "  {} = {}", value.name(), value.number());
+        }
+        return CommandResult::Ok;
+    }
+    
+    // Not found - list available types
+    let _ = writeln!(w, "Type '{}' not found.", type_name);
+    let _ = writeln!(w);
+    let _ = writeln!(w, "Available message types:");
+    for msg in pool.all_messages() {
+        let _ = writeln!(w, "  {}", msg.full_name());
+    }
+    let _ = writeln!(w);
+    let _ = writeln!(w, "Available enum types:");
+    for e in pool.all_enums() {
+        let _ = writeln!(w, "  {}", e.full_name());
+    }
+    
+    CommandResult::Ok
+}
+
+/// List all types in the store's schema
+async fn cmd_list_types(backend: &dyn LatticeBackend, store_id: Uuid, writer: Writer) -> CommandResult {
+    let mut w = writer.clone();
+    
+    let (descriptor_bytes, _) = match backend.store_get_descriptor(store_id).await {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+            return CommandResult::Ok;
+        }
+    };
+    
+    let pool = match DescriptorPool::decode(descriptor_bytes.as_slice()) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+            return CommandResult::Ok;
+        }
+    };
+    
+    let _ = writeln!(w, "Message types:");
+    for msg in pool.all_messages() {
+        let _ = writeln!(w, "  {}", msg.full_name());
+    }
+    
+    let _ = writeln!(w);
+    let _ = writeln!(w, "Enum types:");
+    for e in pool.all_enums() {
+        let _ = writeln!(w, "  {}", e.full_name());
+    }
+    
+    CommandResult::Ok
+}
+
+/// Format a Kind as a full type string
+fn format_kind_full(kind: prost_reflect::Kind) -> String {
+    use prost_reflect::Kind;
+    match kind {
+        Kind::Double => "double".to_string(),
+        Kind::Float => "float".to_string(),
+        Kind::Int32 => "int32".to_string(),
+        Kind::Int64 => "int64".to_string(),
+        Kind::Uint32 => "uint32".to_string(),
+        Kind::Uint64 => "uint64".to_string(),
+        Kind::Sint32 => "sint32".to_string(),
+        Kind::Sint64 => "sint64".to_string(),
+        Kind::Fixed32 => "fixed32".to_string(),
+        Kind::Fixed64 => "fixed64".to_string(),
+        Kind::Sfixed32 => "sfixed32".to_string(),
+        Kind::Sfixed64 => "sfixed64".to_string(),
+        Kind::Bool => "bool".to_string(),
+        Kind::String => "string".to_string(),
+        Kind::Bytes => "bytes".to_string(),
+        Kind::Message(m) => m.full_name().to_string(),
+        Kind::Enum(e) => e.full_name().to_string(),
+    }
 }
 
 // RPC mode dynamic execution - fetches descriptors from daemon
@@ -695,16 +814,10 @@ fn format_value_generic(v: &Value, out: &mut String, indent: usize) {
             if list.is_empty() {
                 let _ = writeln!(out, "(empty)");
             } else {
-                let _ = writeln!(out);
-                for item in list {
-                    let _ = write!(out, "{}- ", "  ".repeat(indent));
-                    format_list_item_generic(item, out, indent + 1);
-                }
-                let _ = writeln!(out, "({} items)", list.len());
+                format_list_as_table(list, out, indent);
             }
         }
         Value::Message(m) => {
-            let _ = writeln!(out);
             for field in m.descriptor().fields() {
                 if let Some(fv) = m.get_field_by_name(field.name()) {
                     let _ = write!(out, "{}  {}: ", "  ".repeat(indent), field.name());
@@ -716,21 +829,79 @@ fn format_value_generic(v: &Value, out: &mut String, indent: usize) {
     }
 }
 
-fn format_list_item_generic(v: &Value, out: &mut String, indent: usize) {
+fn format_list_as_table(list: &[Value], out: &mut String, indent: usize) {
+    // Build columns: (header, values)
+    let rows: Vec<Vec<String>> = list.iter().map(|item| {
+        match item {
+            Value::Message(m) => m.descriptor().fields()
+                .map(|f| m.get_field_by_name(f.name())
+                    .map(|v| format_value_inline(v.as_ref()))
+                    .unwrap_or_default())
+                .collect(),
+            v => vec![format_value_inline(v)],
+        }
+    }).collect();
+    
+    let headers: Vec<String> = match list.first() {
+        Some(Value::Message(m)) => m.descriptor().fields().map(|f| f.name().to_uppercase()).collect(),
+        _ => vec!["VALUE".to_string()],
+    };
+    
+    let col_widths: Vec<usize> = (0..headers.len()).map(|i| {
+        headers.get(i).map(|h| h.width()).unwrap_or(0)
+            .max(rows.iter().filter_map(|r| r.get(i)).map(|s| s.width()).max().unwrap_or(0))
+    }).collect();
+    
+    // Header
+    let _ = write!(out, "{}", "  ".repeat(indent));
+    for (i, h) in headers.iter().enumerate() {
+        let _ = write!(out, "{:width$}  ", h, width = col_widths[i]);
+    }
+    let _ = writeln!(out);
+    
+    // Rows
+    for row in &rows {
+        let _ = write!(out, "{}", "  ".repeat(indent));
+        for (i, val) in row.iter().enumerate() {
+            let _ = write!(out, "{:width$}  ", val, width = col_widths.get(i).copied().unwrap_or(0));
+        }
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(out, "({} items)", list.len());
+}
+
+fn format_value_inline(v: &Value) -> String {
     match v {
-        Value::Message(m) => {
-            let _ = writeln!(out);
-            for field in m.descriptor().fields() {
-                if let Some(fv) = m.get_field_by_name(field.name()) {
-                    let _ = write!(out, "{}  {}: ", "  ".repeat(indent), field.name());
-                    format_value_generic(fv.as_ref(), out, indent + 1);
+        Value::String(s) => escape_control_chars(s),
+        Value::Bytes(b) => {
+            if let Ok(s) = std::str::from_utf8(b) {
+                if s.chars().all(|c| !c.is_control()) {
+                    return s.to_string();
                 }
             }
+            hex::encode(&b[..32.min(b.len())])
         }
-        _ => {
-            format_value_generic(v, out, indent);
-        }
+        Value::Bool(b) => b.to_string(),
+        Value::I32(n) => n.to_string(),
+        Value::I64(n) => n.to_string(),
+        Value::U32(n) => n.to_string(),
+        Value::U64(n) => n.to_string(),
+        Value::F32(n) => n.to_string(),
+        Value::F64(n) => n.to_string(),
+        Value::EnumNumber(n) => format!("enum({})", n),
+        _ => String::new(), // Complex types not supported inline
     }
+}
+
+/// Escape control characters for display
+fn escape_control_chars(s: &str) -> String {
+    s.chars().map(|c| match c {
+        '\n' => "\\n".to_string(),
+        '\r' => "\\r".to_string(),
+        '\t' => "\\t".to_string(),
+        c if c.is_control() => format!("\\x{:02x}", c as u32),
+        c => c.to_string(),
+    }).collect()
 }
 
 // ==================== Helper Functions ====================

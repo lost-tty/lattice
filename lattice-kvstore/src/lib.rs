@@ -19,6 +19,19 @@ pub mod proto {
 }
 pub const KV_DESCRIPTOR_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kv_descriptor.bin"));
 
+// Lazy service descriptor for introspection
+use once_cell::sync::Lazy;
+use prost_reflect::{DescriptorPool, ServiceDescriptor};
+
+static DESCRIPTOR_POOL: Lazy<DescriptorPool> = Lazy::new(|| {
+    DescriptorPool::decode(KV_DESCRIPTOR_BYTES).expect("Invalid embedded descriptors")
+});
+
+/// Get the KvStore service descriptor for CLI introspection
+pub static KV_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
+    DESCRIPTOR_POOL.get_service_by_name("lattice.kv.KvStore").expect("Service definition missing")
+});
+
 pub use head::{Head, HeadError};
 pub use merge::{Merge, MergeList};
 pub use kv_types::{KvPayload, Operation, operation, WatchEvent, WatchEventKind, WatchError};

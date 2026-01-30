@@ -179,6 +179,11 @@ pub enum StoreSubcommand {
     },
     /// Sync with all peers
     Sync,
+    /// Explore a message type's schema
+    InspectType {
+        /// Full type name (e.g., lattice.kv.Entry), or omit to list all types
+        type_name: Option<String>,
+    },
 }
 
 pub async fn handle_command(
@@ -193,18 +198,31 @@ pub async fn handle_command(
             let cmd = LatticeCli::command();
             format_recursive_help(&cmd, "", &mut output);
             
-            // Add dynamic commands from store introspection
+            // Add dynamic commands from store introspection with type signatures
             if let Some(store_id) = ctx.store_id {
-                match backend.store_list_methods(store_id).await {
-                    Ok(methods) => {
-                        use std::fmt::Write;
-                        let _ = writeln!(output, "\nStore Operations:");
-                        for (name, desc) in methods {
-                            let name_lower = name.to_lowercase();
-                            let _ = writeln!(output, "  {:24} {}", name_lower, desc);
+                if let Ok((descriptor_bytes, service_name)) = backend.store_get_descriptor(store_id).await {
+                    if let Ok(pool) = prost_reflect::DescriptorPool::decode(descriptor_bytes.as_slice()) {
+                        if let Some(service) = pool.get_service_by_name(&service_name) {
+                            use std::fmt::Write;
+                            let _ = writeln!(output, "\nStore Operations:");
+                            
+                            // Get descriptions from list_methods if available
+                            let descriptions: std::collections::HashMap<String, String> = 
+                                backend.store_list_methods(store_id).await
+                                    .map(|m| m.into_iter().collect())
+                                    .unwrap_or_default();
+                            
+                            for method in service.methods() {
+                                let name = method.name().to_lowercase();
+                                let args: Vec<String> = method.input().fields()
+                                    .map(|f| format!("<{}>", f.name()))
+                                    .collect();
+                                let args_str = if args.is_empty() { String::new() } else { format!(" {}", args.join(" ")) };
+                                let desc = descriptions.get(method.name()).map(|s| s.as_str()).unwrap_or("");
+                                let _ = writeln!(output, "  {:25}{}", format!("{}{}", name, args_str), desc);
+                            }
                         }
                     }
-                    Err(_) => {}
                 }
             }
             
@@ -255,6 +273,9 @@ pub async fn handle_command(
             }
             StoreSubcommand::Sync => {
                 store_commands::cmd_store_sync(backend, ctx.store_id, writer).await
+            }
+            StoreSubcommand::InspectType { type_name } => {
+                store_commands::cmd_store_inspect_type(backend, ctx.store_id, type_name.as_deref(), writer).await
             }
         },
         

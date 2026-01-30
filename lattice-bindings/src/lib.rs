@@ -3,7 +3,7 @@ uniffi::setup_scaffolding!();
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use prost_reflect::{DescriptorPool, DynamicMessage, Value, Kind};
+use prost_reflect::{DescriptorPool, DynamicMessage, Value, Kind, ReflectMessage};
 use prost_reflect::prost::Message;
 
 // Re-export proto types directly (have UniFFI derives via lattice-api ffi feature)
@@ -48,6 +48,8 @@ pub enum LatticeError {
     NotInitialized,
     #[error("Invalid UUID: {reason}")]
     InvalidUuid { reason: String },
+    #[error("Type not found: {name}")]
+    TypeNotFound { name: String },
     #[error("Network error: {message}")]
     Network { message: String },
     #[error("Store error: {message}")]
@@ -77,6 +79,7 @@ impl LatticeError {
 
 // Reflection Types
 
+/// Input values for dynamic method execution
 #[derive(uniffi::Enum, Clone, Debug)]
 pub enum ArgValue {
     String(String),
@@ -85,27 +88,47 @@ pub enum ArgValue {
     Bool(bool),
     Bytes(Vec<u8>),
     List(Vec<ArgValue>),
-    // Simplified map support? Or omit for now.
-    // Map(Vec<ArgValue>, Vec<ArgValue>) 
 }
 
-#[derive(uniffi::Enum)]
+/// Structured result values from dynamic method execution
+#[derive(uniffi::Enum, Clone, Debug)]
+pub enum ReflectValue {
+    Null,
+    String(String),
+    Int(i64),
+    Uint(u64),
+    Float(f64),
+    Bool(bool),
+    Bytes(Vec<u8>),
+    List(Vec<ReflectValue>),
+    Message(Vec<ReflectField>),
+    Enum { name: String, value: i32 },
+}
+
+/// A single field within a ReflectValue::Message
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct ReflectField {
+    pub name: String,
+    pub value: ReflectValue,
+}
+
+/// Field type descriptor with type name for nested types
+#[derive(uniffi::Enum, Clone, Debug)]
 pub enum FieldType {
     String,
     Int,
+    Uint,
     Float,
     Bool,
     Bytes,
-    List, // logic will need to check element type
-    Message, // Nested message?
-    Enum,
+    Message { type_name: String },
+    Enum { type_name: String },
 }
 
 #[derive(uniffi::Record)]
 pub struct FieldInfo {
     pub name: String,
-    pub type_kind: FieldType,
-    pub type_name: String, // e.g. "int32" or "MyEnum"
+    pub field_type: FieldType,
     pub is_repeated: bool,
 }
 
@@ -113,6 +136,7 @@ pub struct FieldInfo {
 pub struct MethodInfo {
     pub name: String,
     pub input_fields: Vec<FieldInfo>,
+    pub return_type: FieldType,
 }
 
 #[derive(uniffi::Object)]
@@ -335,22 +359,26 @@ impl Lattice {
             for field in input_desc.fields() {
                 fields.push(FieldInfo {
                     name: field.name().to_string(),
-                    type_kind: map_kind_to_field_type(field.kind()),
-                    type_name: format!("{:?}", field.kind()), 
+                    field_type: map_kind_to_field_type(field.kind()),
                     is_repeated: field.is_list(),
                 });
             }
             
+            // Determine return type from output message
+            let output_desc = method.output();
+            let return_type = FieldType::Message { type_name: output_desc.full_name().to_string() };
+            
             methods.push(MethodInfo {
                 name: method.name().to_string(),
                 input_fields: fields,
+                return_type,
             });
         }
         
         Ok(methods)
     }
     
-    pub fn store_exec_dynamic(&self, store_id: String, method_name: String, args: Vec<ArgValue>) -> Result<Vec<u8>, LatticeError> {
+    pub fn store_exec_dynamic(&self, store_id: String, method_name: String, args: Vec<ArgValue>) -> Result<ReflectValue, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
@@ -389,7 +417,39 @@ impl Lattice {
         let result_bytes = self.rt.block_on(r.backend().store_exec(id, method.name(), &payload))
             .map_err(|e| LatticeError::from_backend(e))?;
             
-        Ok(result_bytes)
+        // Decode result into ReflectValue
+        let output_desc = method.output();
+        let result_msg = DynamicMessage::decode(output_desc.clone(), result_bytes.as_slice())
+            .map_err(|e| LatticeError::Internal { message: format!("Failed to decode result: {}", e) })?;
+        
+        Ok(dynamic_message_to_reflect_value(&result_msg))
+    }
+    
+    /// Inspect a specific type definition (message or enum) within a store's schema
+    pub fn store_inspect_type(&self, store_id: String, type_name: String) -> Result<Vec<FieldInfo>, LatticeError> {
+        let r_guard = self.rt.block_on(self.runtime.read());
+        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
+        
+        let (descriptor_bytes, _) = self.rt.block_on(r.backend().store_get_descriptor(id))
+             .map_err(|e| LatticeError::from_backend(e))?;
+
+        let pool = DescriptorPool::decode(descriptor_bytes.as_slice())
+            .map_err(|e| LatticeError::Internal { message: format!("Failed to decode descriptors: {}", e) })?;
+            
+        let message_desc = pool.get_message_by_name(&type_name)
+        .ok_or_else(|| LatticeError::TypeNotFound { name: type_name.clone() })?;
+        
+        let mut fields = Vec::new();
+        for field in message_desc.fields() {
+            fields.push(FieldInfo {
+                name: field.name().to_string(),
+                field_type: map_kind_to_field_type(field.kind()),
+                is_repeated: field.is_list(),
+            });
+        }
+        
+        Ok(fields)
     }
 
     pub fn get_store_descriptor(&self, store_id: String) -> Result<DescriptorInfo, LatticeError> {
@@ -452,12 +512,12 @@ fn map_kind_to_field_type(kind: Kind) -> FieldType {
     match kind {
         Kind::Double | Kind::Float => FieldType::Float,
         Kind::Int32 | Kind::Int64 | Kind::Sint32 | Kind::Sint64 | Kind::Sfixed32 | Kind::Sfixed64 => FieldType::Int,
-        Kind::Uint32 | Kind::Uint64 | Kind::Fixed32 | Kind::Fixed64 => FieldType::Int, // Treat huge uints as Int (Swift handles Int64)
+        Kind::Uint32 | Kind::Uint64 | Kind::Fixed32 | Kind::Fixed64 => FieldType::Uint,
         Kind::Bool => FieldType::Bool,
         Kind::String => FieldType::String,
         Kind::Bytes => FieldType::Bytes,
-        Kind::Message(_) => FieldType::Message,
-        Kind::Enum(_) => FieldType::Enum,
+        Kind::Message(msg_desc) => FieldType::Message { type_name: msg_desc.full_name().to_string() },
+        Kind::Enum(enum_desc) => FieldType::Enum { type_name: enum_desc.full_name().to_string() },
     }
 }
 
@@ -478,3 +538,76 @@ fn map_arg_to_value(arg: &ArgValue, kind: Kind) -> Result<Value, LatticeError> {
         _ => Err(LatticeError::Internal { message: format!("Type mismatch for arg {:?} vs kind {:?}", arg, kind) }),
     }
 }
+
+/// Convert a DynamicMessage to a ReflectValue::Message
+fn dynamic_message_to_reflect_value(msg: &DynamicMessage) -> ReflectValue {
+    dynamic_message_to_reflect_value_depth(msg, 0)
+}
+
+fn dynamic_message_to_reflect_value_depth(msg: &DynamicMessage, depth: usize) -> ReflectValue {
+    if depth > 16 {
+        return ReflectValue::String("<max depth>".to_string());
+    }
+    let mut fields = Vec::new();
+    for field_desc in msg.descriptor().fields() {
+        let value = msg.get_field(&field_desc);
+        fields.push(ReflectField {
+            name: field_desc.name().to_string(),
+            value: value_to_reflect_value_with_field(&value, Some(&field_desc), depth + 1),
+        });
+    }
+    ReflectValue::Message(fields)
+}
+
+fn value_to_reflect_value_with_field(value: &Value, field: Option<&prost_reflect::FieldDescriptor>, depth: usize) -> ReflectValue {
+    if depth > 16 {
+        return ReflectValue::String("<max depth>".to_string());
+    }
+    match value {
+        Value::Bool(b) => ReflectValue::Bool(*b),
+        Value::I32(i) => ReflectValue::Int(*i as i64),
+        Value::I64(i) => ReflectValue::Int(*i),
+        Value::U32(u) => ReflectValue::Uint(*u as u64),
+        Value::U64(u) => ReflectValue::Uint(*u),
+        Value::F32(f) => ReflectValue::Float(*f as f64),
+        Value::F64(f) => ReflectValue::Float(*f),
+        Value::String(s) => ReflectValue::String(s.clone()),
+        Value::Bytes(b) => ReflectValue::Bytes(b.to_vec()),
+        Value::EnumNumber(n) => {
+            let name = field
+                .and_then(|f| match f.kind() {
+                    prost_reflect::Kind::Enum(e) => e.get_value(*n).map(|v| v.name().to_string()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            ReflectValue::Enum { name, value: *n }
+        }
+        Value::Message(msg) => dynamic_message_to_reflect_value_depth(msg, depth + 1),
+        Value::List(list) => {
+            let items: Vec<ReflectValue> = list.iter().map(|v| value_to_reflect_value_with_field(v, field, depth + 1)).collect();
+            ReflectValue::List(items)
+        }
+        Value::Map(map) => {
+            let items: Vec<ReflectValue> = map.iter().map(|(k, v)| {
+                ReflectValue::Message(vec![
+                    ReflectField { name: "key".to_string(), value: map_key_to_reflect_value(k) },
+                    ReflectField { name: "value".to_string(), value: value_to_reflect_value_with_field(v, None, depth + 1) },
+                ])
+            }).collect();
+            ReflectValue::List(items)
+        }
+    }
+}
+
+/// Convert a map key to ReflectValue
+fn map_key_to_reflect_value(key: &prost_reflect::MapKey) -> ReflectValue {
+    match key {
+        prost_reflect::MapKey::Bool(b) => ReflectValue::Bool(*b),
+        prost_reflect::MapKey::I32(i) => ReflectValue::Int(*i as i64),
+        prost_reflect::MapKey::I64(i) => ReflectValue::Int(*i),
+        prost_reflect::MapKey::U32(u) => ReflectValue::Uint(*u as u64),
+        prost_reflect::MapKey::U64(u) => ReflectValue::Uint(*u),
+        prost_reflect::MapKey::String(s) => ReflectValue::String(s.clone()),
+    }
+}
+

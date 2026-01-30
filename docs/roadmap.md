@@ -81,13 +81,15 @@
   - [x] `lattice-runtime` provides `InProcessBackend` and `RpcBackend` implementations.
 
 ### 8B: Enhanced Reflection (Bindings)
-- [ ] **Update `FieldType`**: specific variants `Message(String)` and `Enum(String)` carrying type names.
-- [ ] **Implement `store_inspect_type(name)`**: Returns recursive schema info.
+- [x] **Update `FieldType`**: specific variants `Message(String)` and `Enum(String)` carrying type names.
+- [x] **Implement `store_inspect_type(name)`**: Returns recursive schema info.
+- [x] **TypeNotFound Error**: Specific error variant for type lookup failures.
+- [x] **Recursion Depth Limit**: Max 16 levels to prevent stack overflow.
+- [x] **Enum Name Resolution**: Resolves enum values to names via FieldDescriptor.
 
 ### 8C: Generic UI Support
-- [ ] **Structured Results**: `store_exec_dynamic` returns recursive `ReflectValue` (instead of raw `Vec<u8>`).
-- [ ] **Recursive View**: SwiftUI `RecursiveInputView` capable of building nested forms from schema.
-- [ ] **Data Explorer**: Generic view for `ReflectValue` results.
+- [x] **Structured Results**: `store_exec_dynamic` returns recursive `ReflectValue` (instead of raw `Vec<u8>`).
+- [x] **Unicode Width**: CLI tables use `unicode-width` for proper alignment.
 
 ### 8D: Store Watchers & Event Streaming
 > **Note:** `KvHandle::watch(pattern)` already exists internally. This milestone exposes it via RPC/FFI with a **reflectable** design so any state machine can define streams.
