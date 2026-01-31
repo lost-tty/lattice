@@ -13,58 +13,42 @@
 | **M7**           | Client/Daemon split: library extraction, `latticed` daemon with UDS gRPC, `LatticeBackend` trait, RPC event streaming, socket security        |
 | **M8**           | Reflection & introspection: `lattice-api` crate, deep type schemas, `ReflectValue` structured results, store watchers & FFI stream bindings   |
 
-## Milestone 9: Abstract Storage Backend
+## Milestone 9: Decouple Storage from State Machines ✓
 
-**Goal:** Abstract the underlying key-value database so both `LogStore` and `KvStore` use a generic interface instead of `redb` directly. Enables swappable backends (redb, SQLite, in-memory, flash storage for embedded).
+**Goal:** Decouple state machine logic from concrete storage. `LogStore` and `KvStore` now operate through abstract traits (`StateBackend`, `StateLogic`) rather than direct `redb` calls. This simplifies testing and prepares for future backend options, but **redb remains the sole runtime implementation**.
 
-```
-┌─────────────────────────────────────────┐
-│  State Machines (LogStore, KvStore)     │  → writes Collection::Data
-├─────────────────────────────────────────┤
-│  Kernel (SigChainManager)               │  → writes Collection::Meta
-├─────────────────────────────────────────┤
-│  StorageBackend trait + Collections     │  ← This milestone
-├─────────────────────────────────────────┤
-│  RedbBackend │ MemoryBackend │ Flash    │
-└─────────────────────────────────────────┘
-```
 
-**Column Families (Namespace Isolation):**
-| Collection | Purpose | Who writes |
-|------------|---------|------------|
-| `Data` (0) | User key-value space | State machine |
-| `Meta` (1) | Frontiers, tips, state hash | Kernel |
-| `Index` (2) | Sidecar indexes (Negentropy) | Kernel |
-
-- [ ] **Define Backend Traits** (`lattice-model`):
-  - `Collection` enum: `Data = 0`, `Meta = 1`, `Index = 2`
-  - `StorageBackend` trait: `get(col, key)`, `transaction()`
-  - `StorageTransaction` trait: `get`, `set`, `delete`, `scan`, `commit`
-- [ ] **Implement RedbBackend** (runtime):
-  - Map collections to separate redb tables
-  - Atomic transactions across all collections
-- [ ] **Refactor Consumers** (Partial):
-  - `lattice-kernel` (OrphanStore) uses `StorageBackend`
-  - `lattice-kvstore` / `lattice-logstore` use `StorageBackend`
-- [ ] **Architectural Fix: Decouple StoreOpener** (Critical):
-  - Move `StoreOpener` trait to `lattice-kernel` (resolves dependency cycle)
-  - Change signature: `open(id: Uuid, path: &Path)` (removes `StoreRegistry` dependency)
-  - Implement `StoreOpener` in `lattice-storage-memory`
-  - Implement `StoreOpener` in `lattice-storage-redb`
-- [ ] **Wire Up Runtime & Tests**:
-  - `lattice-node` consumes kernel trait
-  - Testing: `lattice-node` dev-depends on `lattice-storage-memory`
-  - Runtime: Inject `RedbStoreOpener`
-- [ ] **Verification**:
-  - Verify `MemoryBackend` with node tests
-  - Verify `RedbBackend` with integration tests
-
+- [x] **Define Backend Traits** (`lattice-model`):
+  - `StateBackend`: wraps database, provides `verify_and_update_tip`, state hash
+  - `StateLogic` trait: `apply()`, `backend()` for state machine implementations
+  - `PersistentState<T>` wrapper: composes `StateLogic` with persistence
+- [x] **Refactor Consumers**:
+  - `lattice-kvstore` uses `StateLogic` / `PersistentState`
+  - `lattice-logstore` uses `StateLogic` / `PersistentState`
+  
 ### 9B: Batch Operations via Reflection
 > Unify typed and reflection access by exposing BatchBuilder through CommandDispatcher.
 - [ ] Add `Batch` proto message (list of operations)
-- [ ] CommandDispatcher handles `Batch` → delegates to BatchBuilder
+- [ ] `CommandDispatcher` handles `Batch` → delegates to `BatchBuilder`
 - [ ] Eliminate `typed_handle` from `OpenedStore` (node uses reflection like CLI)
-- [ ] Benefit: Single access pattern for all consumers
+
+### 9C: Handle Consolidation
+> Simplify store handle layer by unifying patterns across KvStore and LogStore.
+- [ ] Merge or simplify `handle.rs` across stores
+- [ ] Unify service descriptors in stores
+
+### 9D: State Machine Unification
+> Reduce duplication between `KvState` and `LogState` implementations.
+- [ ] **Standardize Open Boilerplate**: Extract `setup_persistent_state<L>()` helper
+- [ ] **Unified Entry Handling**: `StorageEntry` trait for key derivation and encode/decode
+- [ ] **Shared Apply Template**: Factor verify → mutate → notify into `StateLogic` default impl
+
+### 9E: State Machine Interface Documentation
+> Clearly document the contract for implementing a new store type.
+- [ ] Document `StateLogic` trait requirements and lifecycle
+- [ ] Document `Openable` / `StoreOpener` patterns
+- [ ] Document `ServiceDescriptor` integration for reflection
+- [ ] Provide minimal example skeleton for new store implementations
 
 ---
 
