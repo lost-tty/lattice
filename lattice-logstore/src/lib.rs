@@ -29,3 +29,21 @@ pub static LOG_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/lattice.log.rs"));
 }
+
+// Openable trait implementation
+use lattice_model::Openable;
+
+impl Openable for LogState {
+    fn open(path: &std::path::Path) -> Result<Self, String> {
+        LogState::open(path).map_err(|e| e.to_string())
+    }
+}
+
+// Implement StoreInfo for LogHandle
+use lattice_model::{StoreInfo, StateWriter};
+
+impl<W: StateWriter> StoreInfo for LogHandle<W> {
+    fn store_type(&self) -> lattice_model::StoreType {
+        lattice_model::StoreType::LogStore
+    }
+}

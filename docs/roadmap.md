@@ -40,19 +40,31 @@
   - `Collection` enum: `Data = 0`, `Meta = 1`, `Index = 2`
   - `StorageBackend` trait: `get(col, key)`, `transaction()`
   - `StorageTransaction` trait: `get`, `set`, `delete`, `scan`, `commit`
-- [ ] **Implement RedbBackend** (production):
+- [ ] **Implement RedbBackend** (runtime):
   - Map collections to separate redb tables
   - Atomic transactions across all collections
-- [ ] **Implement MemoryBackend** (tests):
-  - Prefix-encode collection ID: `[col_id][key]`
-  - BTreeMap-based for fast unit tests
-- [ ] **Kernel owns `Collection::Meta`**:
-  - After `apply_op()`, kernel writes chain tips and frontiers
-  - State machine only sees `Collection::Data`
-  - Clean separation: kernel owns chain, state machine owns data
-- [ ] **Refactor LogStore & KvStore**:
-  - Replace direct `redb` calls with `StorageBackend` trait
-  - State machines write to `Collection::Data` only
+- [ ] **Refactor Consumers** (Partial):
+  - `lattice-kernel` (OrphanStore) uses `StorageBackend`
+  - `lattice-kvstore` / `lattice-logstore` use `StorageBackend`
+- [ ] **Architectural Fix: Decouple StoreOpener** (Critical):
+  - Move `StoreOpener` trait to `lattice-kernel` (resolves dependency cycle)
+  - Change signature: `open(id: Uuid, path: &Path)` (removes `StoreRegistry` dependency)
+  - Implement `StoreOpener` in `lattice-storage-memory`
+  - Implement `StoreOpener` in `lattice-storage-redb`
+- [ ] **Wire Up Runtime & Tests**:
+  - `lattice-node` consumes kernel trait
+  - Testing: `lattice-node` dev-depends on `lattice-storage-memory`
+  - Runtime: Inject `RedbStoreOpener`
+- [ ] **Verification**:
+  - Verify `MemoryBackend` with node tests
+  - Verify `RedbBackend` with integration tests
+
+### 9B: Batch Operations via Reflection
+> Unify typed and reflection access by exposing BatchBuilder through CommandDispatcher.
+- [ ] Add `Batch` proto message (list of operations)
+- [ ] CommandDispatcher handles `Batch` → delegates to BatchBuilder
+- [ ] Eliminate `typed_handle` from `OpenedStore` (node uses reflection like CLI)
+- [ ] Benefit: Single access pattern for all consumers
 
 ---
 

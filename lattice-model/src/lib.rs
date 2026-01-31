@@ -15,6 +15,8 @@ pub mod peer_provider;
 pub mod net_event;
 pub mod node_provider;
 pub mod store_type;
+pub mod openable;
+pub mod store_info;
 
 // Re-exports from dependencies
 pub use uuid::Uuid;
@@ -38,3 +40,5 @@ pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream, GossipPeer};
 pub use net_event::NetEvent;
 pub use node_provider::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
 pub use store_type::{StoreType, ParseStoreTypeError};
+pub use openable::{Openable, OpenError};
+pub use store_info::StoreInfo;

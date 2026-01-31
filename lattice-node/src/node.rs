@@ -12,7 +12,8 @@ use lattice_kernel::{
     store::{StateError, LogError, Store},
 };
 use crate::KvStore;
-use lattice_kvstore::{KvHandleError, KvState};
+use lattice_kvstore::{KvHandle, KvHandleError, KvState};
+use lattice_logstore::LogHandle;
 use lattice_model::{types::PubKey, NetEvent};
 use std::collections::HashMap;
 use std::path::Path;
@@ -188,8 +189,8 @@ impl NodeBuilder {
         let store_manager = std::sync::Arc::new(crate::StoreManager::new(registry.clone(), event_tx.clone(), net_tx.clone()));
         
         // Register built-in store openers
-        store_manager.register_opener(crate::StoreType::KvStore, Box::new(crate::KvStoreOpener));
-        store_manager.register_opener(crate::StoreType::LogStore, Box::new(crate::LogStoreOpener));
+        store_manager.register_opener(crate::StoreType::KvStore, crate::opener(registry.clone(), KvHandle::new));
+        store_manager.register_opener(crate::StoreType::LogStore, crate::opener(registry.clone(), LogHandle::new));
 
         Ok(Node {
             data_dir: self.data_dir,

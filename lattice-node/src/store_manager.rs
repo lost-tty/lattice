@@ -39,7 +39,7 @@ pub struct OpenedStore {
 /// Trait for opening stores of a specific type
 pub trait StoreOpener: Send + Sync {
     /// Open or create a store by ID, returning both typed handle and StoreHandle
-    fn open(&self, registry: &Arc<StoreRegistry>, store_id: Uuid) -> Result<OpenedStore, StoreManagerError>;
+    fn open(&self, store_id: Uuid) -> Result<OpenedStore, StoreManagerError>;
 }
 
 /// Metadata about a managed store
@@ -105,7 +105,7 @@ impl StoreManager {
         let opener = openers.get(&store_type)
             .ok_or_else(|| StoreManagerError::NoOpener(store_type))?;
         
-        opener.open(&self.registry, store_id)
+        opener.open(store_id)
     }
     
     /// Create a new store with a fresh UUID.

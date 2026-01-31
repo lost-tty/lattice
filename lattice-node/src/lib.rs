@@ -22,7 +22,7 @@ pub mod store_handle;
 
 pub use token::Invite;
 pub use store_manager::{StoreManager, StoreManagerError, StoreOpener, OpenedStore};
-pub use store_openers::{KvStoreOpener, LogStoreOpener};
+pub use store_openers::opener;
 pub use store_registry::StoreRegistry;
 pub use store_handle::StoreHandle;
 

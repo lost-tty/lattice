@@ -37,3 +37,21 @@ pub use merge::{Merge, MergeList};
 pub use kv_types::{KvPayload, Operation, operation, WatchEvent, WatchEventKind, WatchError};
 pub use kv::{KvState, StateError};
 pub use kv_handle::{KvHandle, KvHandleError};
+
+// Openable trait implementation
+use lattice_model::Openable;
+
+impl Openable for KvState {
+    fn open(path: &std::path::Path) -> Result<Self, String> {
+        KvState::open(path).map_err(|e| e.to_string())
+    }
+}
+
+// Implement StoreInfo for KvHandle
+use lattice_model::{StoreInfo, StateWriter};
+
+impl<W: StateWriter> StoreInfo for KvHandle<W> {
+    fn store_type(&self) -> lattice_model::StoreType {
+        lattice_model::StoreType::KvStore
+    }
+}
