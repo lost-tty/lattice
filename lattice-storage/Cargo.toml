@@ -1,0 +1,15 @@
+[package]
+name = "lattice-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+redb = { workspace = true }
+thiserror = { workspace = true }
+byteorder = "1.4"
+uuid = { workspace = true }
+blake3 = { workspace = true }
+lattice-model = { workspace = true }
+prost-reflect.workspace = true
+[dev-dependencies]
+tempfile = "3.8"

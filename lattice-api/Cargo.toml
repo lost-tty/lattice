@@ -22,7 +22,7 @@ lattice-model = { workspace = true }
 tonic = "0.12"
 prost = { workspace = true }
 prost-reflect = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 tokio-stream = "0.1"
 tracing = { workspace = true }
 uuid = { workspace = true }

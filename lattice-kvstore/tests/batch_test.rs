@@ -1,28 +1,29 @@
 //! Tests for KvHandle batch operations
 
 use lattice_kvstore::{KvState, KvHandle, Merge};
-use lattice_model::{StateWriterError, types::Hash, HLC};
-use std::sync::{Arc, Mutex};
+use lattice_model::{StateWriterError, types::Hash, HLC, Uuid, StateMachine};
+use lattice_storage::PersistentState;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 /// Mock writer that applies directly to state (no replication)
 struct MockWriter {
-    state: Arc<KvState>,
+    state: Arc<PersistentState<KvState>>,
     /// Track chain tip for the mock author
-    chain_tip: Mutex<Hash>,
+    chain_tip: std::sync::Mutex<Hash>,
 }
 
 impl MockWriter {
-    fn new(state: Arc<KvState>) -> Self {
+    fn new(state: Arc<PersistentState<KvState>>) -> Self {
         Self { 
             state,
-            chain_tip: Mutex::new(Hash::ZERO),
+            chain_tip: std::sync::Mutex::new(Hash::ZERO),
         }
     }
 }
 
-impl AsRef<KvState> for MockWriter {
-    fn as_ref(&self) -> &KvState {
+impl AsRef<PersistentState<KvState>> for MockWriter {
+    fn as_ref(&self) -> &PersistentState<KvState> {
         &self.state
     }
 }
@@ -52,7 +53,7 @@ impl lattice_model::StateWriter for MockWriter {
                 timestamp: HLC::now(),
                 causal_deps: &causal_deps,
             };
-            state.apply_op(&op).map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
+            state.apply(&op).map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
             Ok(op_id)
         })
     }
@@ -64,15 +65,15 @@ struct TrackingWriter {
 }
 
 impl TrackingWriter {
-    fn new(state: Arc<KvState>) -> Self {
+    fn new(state: Arc<PersistentState<KvState>>) -> Self {
         Self {
             inner: Arc::new(MockWriter::new(state)),
         }
     }
 }
 
-impl AsRef<KvState> for TrackingWriter {
-    fn as_ref(&self) -> &KvState {
+impl AsRef<PersistentState<KvState>> for TrackingWriter {
+    fn as_ref(&self) -> &PersistentState<KvState> {
         self.inner.state.as_ref()
     }
 }
@@ -100,7 +101,7 @@ impl lattice_model::StateWriter for TrackingWriter {
 
 fn setup() -> (TempDir, KvHandle<TrackingWriter>) {
     let dir = TempDir::new().unwrap();
-    let state = Arc::new(KvState::open(dir.path()).unwrap());
+    let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
     let writer = TrackingWriter::new(state);
     let handle = KvHandle::new(writer);
     (dir, handle)

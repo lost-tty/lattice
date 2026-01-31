@@ -9,9 +9,8 @@
 pub mod head;
 pub mod merge;
 pub mod kv_types;
-
-pub mod kv;
-pub mod kv_handle;
+pub mod state;
+pub mod handle;
 
 // Include generated protos and descriptor
 pub mod proto {
@@ -35,17 +34,8 @@ pub static KV_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
 pub use head::{Head, HeadError};
 pub use merge::{Merge, MergeList};
 pub use kv_types::{KvPayload, Operation, operation, WatchEvent, WatchEventKind, WatchError};
-pub use kv::{KvState, StateError};
-pub use kv_handle::{KvHandle, KvHandleError};
-
-// Openable trait implementation
-use lattice_model::Openable;
-
-impl Openable for KvState {
-    fn open(path: &std::path::Path) -> Result<Self, String> {
-        KvState::open(path).map_err(|e| e.to_string())
-    }
-}
+pub use state::KvState;
+pub use handle::{KvHandle, KvHandleError};
 
 // Implement StoreInfo for KvHandle
 use lattice_model::{StoreInfo, StateWriter};

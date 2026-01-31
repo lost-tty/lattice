@@ -13,6 +13,24 @@ members = [
     "lattice-logstore",
     "lattice-runtime",
     "lattice-bindings",
+    "lattice-storage",
+]
+
+# lattice-bindings is excluded from default members to prevent slow linking (cdylib)
+# during normal development. Build it explicitly with `-p lattice-bindings`.
+default-members = [
+    "lattice-kernel",
+    "lattice-node",
+    "lattice-net",
+    "lattice-net-types",
+    "lattice-cli",
+    "lattice-daemon",
+    "lattice-api",
+    "lattice-model",
+    "lattice-kvstore",
+    "lattice-logstore",
+    "lattice-runtime",
+    "lattice-storage",
 ]
 
 [workspace.package]
@@ -28,6 +46,7 @@ lattice-net = { path = "lattice-net" }
 lattice-model = { path = "lattice-model" }
 lattice-kvstore = { path = "lattice-kvstore" }
 lattice-logstore = { path = "lattice-logstore" }
+lattice-storage = { path = "lattice-storage" }
 lattice-net-types = { path = "lattice-net-types" }
 lattice-proto = { path = "lattice-proto" }
 lattice-api = { path = "lattice-api" }
@@ -49,7 +68,7 @@ prost-build = "0.13"
 prost-reflect = "0.16"
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = [] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tokio-stream = "0.1"
 futures = "0.3"

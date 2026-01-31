@@ -6,13 +6,14 @@ license.workspace = true
 
 [dependencies]
 lattice-model = { workspace = true }
+lattice-storage = { path = "../lattice-storage" }
 prost = { workspace = true }
 prost-reflect = { workspace = true }
 blake3 = { workspace = true }
 once_cell = { workspace = true }
 redb = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 async-stream = "0.3"
 
 [build-dependencies]

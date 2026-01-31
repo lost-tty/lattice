@@ -14,7 +14,7 @@ lattice-runtime = { workspace = true }
 rustyline-async = { git = "https://github.com/lost-tty/rustyline-async" }
 hex = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true }
 shlex = "1"
 clap = { workspace = true }

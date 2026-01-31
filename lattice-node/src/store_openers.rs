@@ -56,7 +56,7 @@ where
 {
     fn open(&self, store_id: Uuid) -> Result<OpenedStore, StoreManagerError> {
         let (store, _) = self.registry.get_or_open(store_id, |path| {
-            S::open(path).map_err(|e| lattice_kernel::store::StateError::Backend(e))
+            S::open(store_id, path).map_err(|e| lattice_kernel::store::StateError::Backend(e))
         }).map_err(|e| StoreManagerError::Registry(e.to_string()))?;
         
         let handle = (self.wrap_fn)(store);

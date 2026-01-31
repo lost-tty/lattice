@@ -59,13 +59,14 @@ pub use meta_store::MetaStore;
 // Re-export from lattice-kvstore
 use lattice_kvstore::KvState;
 pub use lattice_kvstore::{Head, KvHandle};
+use lattice_storage::PersistentState;
 
 /// Type alias for the KvHandle wrapping a Store.
-pub type KvStore = KvHandle<Store<KvState>>;
+pub type KvStore = KvHandle<Store<PersistentState<KvState>>>;
 
 // Re-export from lattice-logstore
 use lattice_logstore::LogState;
 pub use lattice_logstore::LogHandle;
 
 /// Type alias for the LogHandle wrapping a Store.
-pub type LogStore = LogHandle<Store<LogState>>;
+pub type LogStore = LogHandle<Store<PersistentState<LogState>>>;

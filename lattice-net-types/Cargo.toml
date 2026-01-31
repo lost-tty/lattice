@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 uuid = { workspace = true }
 hex = { workspace = true }
 async-trait = "0.1"

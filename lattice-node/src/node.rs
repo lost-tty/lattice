@@ -11,6 +11,7 @@ use lattice_kernel::{
     NodeIdentity, NodeError as IdentityError, PeerStatus,
     store::{StateError, LogError, Store},
 };
+use lattice_storage::PersistentState;
 use crate::KvStore;
 use lattice_kvstore::{KvHandle, KvHandleError, KvState};
 use lattice_logstore::LogHandle;
@@ -472,7 +473,7 @@ impl Node {
     pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<KvStore, NodeError> {
         // Create local store file with that UUID (store_manager.open will use it)
         self.registry.create(store_id, |path| {
-            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
+            KvState::open(store_id, path).map_err(|e| StateError::Backend(e.to_string()))
         })?;
         
         // Record in meta.db (as member)
@@ -539,14 +540,14 @@ impl Node {
     
     fn create_store_internal(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
         self.registry.create(store_id, |path| {
-            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
+            KvState::open(store_id, path).map_err(|e| StateError::Backend(e.to_string()))
         })?;
         Ok(store_id)
     }
 
-    pub fn open_root_store(&self, store_id: Uuid) -> Result<(Store<KvState>, StoreInfo), NodeError> {
+    pub fn open_root_store(&self, store_id: Uuid) -> Result<(Store<PersistentState<KvState>>, StoreInfo), NodeError> {
         self.registry.get_or_open(store_id, |path| {
-            KvState::open(path).map_err(|e| StateError::Backend(e.to_string()))
+            KvState::open(store_id, path).map_err(|e| StateError::Backend(e.to_string()))
         }).map_err(NodeError::from)
     }
     

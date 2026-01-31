@@ -3,11 +3,10 @@
 //! Uses redb for efficient embedded storage.
 //! Key: (HLC, Author) for globally consistent causal ordering.
 
-use lattice_model::{StateMachine, Op, PubKey, Hash};
-use std::io::{Read, Cursor, BufReader};
+use lattice_model::{Op, PubKey, Uuid};
+
 use std::path::Path;
-use redb::{Database, TableDefinition, ReadableTable, ReadableTableMetadata};
-use thiserror::Error;
+use redb::{ReadableTable, ReadableTableMetadata};
 use tokio::sync::broadcast;
 
 /// Event emitted when a new log entry is appended
@@ -27,43 +26,11 @@ pub struct LogEntry {
     pub content: Vec<u8>,
 }
 
-/// Error type for LogState operations
-#[derive(Debug, Error)]
-pub enum LogStateError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("Database error: {0}")]
-    Database(#[from] redb::DatabaseError),
-    #[error("Table error: {0}")]
-    Table(#[from] redb::TableError),
-    #[error("Transaction error: {0}")]
-    Transaction(#[from] redb::TransactionError),
-    #[error("Commit error: {0}")]
-    Commit(#[from] redb::CommitError),
-    #[error("Storage error: {0}")]
-    Storage(#[from] redb::StorageError),
-    #[error("Snapshot error: {0}")]
-    Snapshot(String),
-}
-
-// Table definitions
-// Key: 40 bytes = 8 (HLC) + 32 (Author PubKey)
-// Value: LogEntry encoded as: content_len (u64) + content
-const TABLE_LOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("log");
-const TABLE_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
-
-const KEY_STATE_HASH: &[u8] = b"state_hash";
-
-// Snapshot format
-const SNAPSHOT_MAGIC: [u8; 4] = *b"LLOG";
-const SNAPSHOT_VERSION: u32 = 1;
-const SNAPSHOT_EOF: u8 = 0;
-const SNAPSHOT_RECORD_LOG: u8 = 1;
-const SNAPSHOT_RECORD_META: u8 = 2;
+use lattice_storage::{StateBackend, StateDbError, TABLE_DATA, PersistentState, StateLogic, StateFactory, StateHasher, setup_persistent_state};
 
 /// LogState - append-only log with redb persistence
 pub struct LogState {
-    db: Database,
+    backend: StateBackend,
     /// Broadcast channel for log entry events
     event_tx: broadcast::Sender<LogEvent>,
 }
@@ -74,17 +41,23 @@ impl std::fmt::Debug for LogState {
     }
 }
 
+// ==================== Openable Implementation ====================
+
+
 impl LogState {
     /// Open or create a log state in the given directory.
-    pub fn open(path: &Path) -> Result<Self, std::io::Error> {
-        std::fs::create_dir_all(path)?;
-        let db_path = path.join("log.db");
-        let db = Database::create(db_path)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        let (event_tx, _) = broadcast::channel(256);
-        Ok(Self { db, event_tx })
+    pub fn open(id: Uuid, path: &Path) -> Result<PersistentState<Self>, StateDbError> {
+        setup_persistent_state(id, path, |backend| {
+            let (event_tx, _) = broadcast::channel(256);
+            Self { backend, event_tx }
+        })
     }
-    
+
+    /// Get access to the database
+    pub fn db(&self) -> &redb::Database {
+        self.backend.db()
+    }
+
     /// Subscribe to log entry events
     pub fn subscribe(&self) -> broadcast::Receiver<LogEvent> {
         self.event_tx.subscribe()
@@ -107,16 +80,16 @@ impl LogState {
     }
 
     /// Decode a LogEntry from key + value bytes
-    fn decode_entry(key: &[u8], value: &[u8]) -> Result<LogEntry, LogStateError> {
+    fn decode_entry(key: &[u8], value: &[u8]) -> Result<LogEntry, StateDbError> {
         if key.len() != 40 || value.len() < 8 {
-            return Err(LogStateError::Snapshot("Invalid entry format".into()));
+            return Err(StateDbError::Conversion("Invalid entry format".into()));
         }
         let hlc = u64::from_be_bytes(key[..8].try_into().unwrap());
         let author = PubKey::try_from(&key[8..])
-            .map_err(|_| LogStateError::Snapshot("Invalid author".into()))?;
+            .map_err(|_| StateDbError::Conversion("Invalid author".into()))?;
         let content_len = u64::from_le_bytes(value[..8].try_into().unwrap()) as usize;
         if value.len() < 8 + content_len {
-            return Err(LogStateError::Snapshot("Truncated content".into()));
+            return Err(StateDbError::Conversion("Truncated content".into()));
         }
         Ok(LogEntry {
             timestamp: hlc,
@@ -132,11 +105,11 @@ impl LogState {
 
     /// Read entries (all or last N, always chronological)
     pub fn read(&self, tail: Option<usize>) -> Vec<LogEntry> {
-        let txn = match self.db.begin_read() {
+        let txn = match self.backend.db().begin_read() {
             Ok(t) => t,
             Err(_) => return Vec::new(),
         };
-        let table = match txn.open_table(TABLE_LOG) {
+        let table = match txn.open_table(TABLE_DATA) {
             Ok(t) => t,
             Err(_) => return Vec::new(),
         };
@@ -163,11 +136,11 @@ impl LogState {
 
     /// Get entry count
     pub fn len(&self) -> usize {
-        let txn = match self.db.begin_read() {
+        let txn = match self.backend.db().begin_read() {
             Ok(t) => t,
             Err(_) => return 0,
         };
-        let table = match txn.open_table(TABLE_LOG) {
+        let table = match txn.open_table(TABLE_DATA) {
             Ok(t) => t,
             Err(_) => return 0,
         };
@@ -179,173 +152,70 @@ impl LogState {
     }
 }
 
-impl StateMachine for LogState {
-    type Error = LogStateError;
+impl StateLogic for LogState {
+    fn backend(&self) -> &StateBackend {
+        &self.backend
+    }
 
-    fn apply(&self, op: &Op) -> Result<(), Self::Error> {
-        let hlc = (op.timestamp.wall_time << 16) | (op.timestamp.counter as u64);
-        let key = Self::make_key(hlc, &op.author);
-        
-        let entry = LogEntry {
-            timestamp: hlc,
-            author: op.author,
-            content: op.payload.to_vec(),
-        };
-        let value = Self::encode_entry(&entry);
-        
-        let write_txn = self.db.begin_write()?;
-        let is_new;
+    /// Apply an operation to the log.
+    /// This now enforces Causal Consistency (Chain Rules) using the meta table.
+    fn apply(&self, op: &Op) -> Result<(), StateDbError> {
+        // Validate payload content
+        if op.payload.is_empty() {
+             return Err(StateDbError::Conversion("Empty payload".into()));
+        }
+
+        let write_txn = self.backend.db().begin_write()?;
         {
-            let mut table = write_txn.open_table(TABLE_LOG)?;
-            // Idempotency: check if already exists
-            if table.get(key.as_slice())?.is_some() {
-                is_new = false;
-            } else {
-                table.insert(key.as_slice(), value.as_slice())?;
-                is_new = true;
+            let mut table_log = write_txn.open_table(TABLE_DATA)?;
+            
+            // 1. Chain Validation (using shared backend logic)
+            // Checks Link, Genesis, and Idempotency
+            let should_apply = self.backend.verify_and_update_tip(&write_txn, &op.author, op.id, op.prev_hash)?;
+                 
+            if !should_apply {
+                 // Idempotent duplicate
+                 return Ok(());
             }
             
-            if is_new {
-                // Update state hash
-                let mut meta = write_txn.open_table(TABLE_META)?;
-                let current = meta.get(KEY_STATE_HASH)?
-                    .map(|v| v.value().to_vec())
-                    .unwrap_or(vec![0u8; 32]);
-                let current_hash: [u8; 32] = current.try_into().unwrap_or([0u8; 32]);
-                
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(&current_hash);
-                hasher.update(op.id.as_ref());
-                let new_hash = hasher.finalize();
-                meta.insert(KEY_STATE_HASH, new_hash.as_bytes().as_slice())?;
-            }
-        }
-        write_txn.commit()?;
-        
-        // Emit event for new entries (ignore send errors - no receivers is OK)
-        if is_new {
-            let _ = self.event_tx.send(LogEvent {
+            // 2. Append Log Entry
+            // Key: HLC (8 bytes) + Author (32 bytes) -> ensures chronological sort per author, and global order by HLC
+            let key = Self::make_key(op.timestamp.wall_time, &op.author);
+            let entry = LogEntry {
+                timestamp: op.timestamp.wall_time,
+                author: op.author,
                 content: op.payload.to_vec(),
-            });
-        }
-        
-        Ok(())
-    }
-
-    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
-        // LogState doesn't track chain tips separately
-        Ok(Vec::new())
-    }
-    
-    fn state_identity(&self) -> Hash {
-        let txn = match self.db.begin_read() {
-            Ok(t) => t,
-            Err(_) => return Hash::ZERO,
-        };
-        let table = match txn.open_table(TABLE_META) {
-            Ok(t) => t,
-            Err(_) => return Hash::ZERO,
-        };
-        match table.get(KEY_STATE_HASH) {
-            Ok(Some(v)) => Hash::try_from(v.value()).unwrap_or(Hash::ZERO),
-            _ => Hash::ZERO,
-        }
-    }
-
-    fn snapshot(&self) -> Result<Box<dyn Read + Send>, Self::Error> {
-        let txn = self.db.begin_read()?;
-        let mut buffer = Vec::new();
-        
-        // Header
-        buffer.extend_from_slice(&SNAPSHOT_MAGIC);
-        buffer.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
-        
-        // Log entries
-        if let Ok(table) = txn.open_table(TABLE_LOG) {
-            for entry in table.iter()? {
-                let (k, v) = entry?;
-                buffer.push(SNAPSHOT_RECORD_LOG);
-                buffer.extend_from_slice(&(k.value().len() as u64).to_le_bytes());
-                buffer.extend_from_slice(k.value());
-                buffer.extend_from_slice(&(v.value().len() as u64).to_le_bytes());
-                buffer.extend_from_slice(v.value());
-            }
-        }
-        
-        // Meta entries
-        if let Ok(table) = txn.open_table(TABLE_META) {
-            for entry in table.iter()? {
-                let (k, v) = entry?;
-                buffer.push(SNAPSHOT_RECORD_META);
-                buffer.extend_from_slice(&(k.value().len() as u64).to_le_bytes());
-                buffer.extend_from_slice(k.value());
-                buffer.extend_from_slice(&(v.value().len() as u64).to_le_bytes());
-                buffer.extend_from_slice(v.value());
-            }
-        }
-        
-        buffer.push(SNAPSHOT_EOF);
-        Ok(Box::new(Cursor::new(buffer)))
-    }
-
-    fn restore(&self, snapshot: Box<dyn Read + Send>) -> Result<(), Self::Error> {
-        let mut reader = BufReader::new(snapshot);
-        
-        // Read header
-        let mut header = [0u8; 8];
-        reader.read_exact(&mut header)?;
-        if &header[..4] != &SNAPSHOT_MAGIC {
-            return Err(LogStateError::Snapshot("Invalid snapshot magic".into()));
-        }
-        let version = u32::from_le_bytes(header[4..8].try_into().unwrap());
-        if version != SNAPSHOT_VERSION {
-            return Err(LogStateError::Snapshot("Unsupported version".into()));
-        }
-        
-        let write_txn = self.db.begin_write()?;
-        // Clear existing tables
-        write_txn.delete_table(TABLE_LOG)?;
-        write_txn.delete_table(TABLE_META)?;
-        
-        {
-            let mut log_table = write_txn.open_table(TABLE_LOG)?;
-            let mut meta_table = write_txn.open_table(TABLE_META)?;
+            };
+            let value = Self::encode_entry(&entry);
             
-            loop {
-                let mut type_buf = [0u8; 1];
-                if reader.read_exact(&mut type_buf).is_err() {
-                    break;
-                }
-                if type_buf[0] == SNAPSHOT_EOF {
-                    break;
-                }
-                
-                // Read key
-                let mut len_buf = [0u8; 8];
-                reader.read_exact(&mut len_buf)?;
-                let key_len = u64::from_le_bytes(len_buf) as usize;
-                let mut key = vec![0u8; key_len];
-                reader.read_exact(&mut key)?;
-                
-                // Read value
-                reader.read_exact(&mut len_buf)?;
-                let val_len = u64::from_le_bytes(len_buf) as usize;
-                let mut val = vec![0u8; val_len];
-                reader.read_exact(&mut val)?;
-                
-                match type_buf[0] {
-                    SNAPSHOT_RECORD_LOG => {
-                        log_table.insert(key.as_slice(), val.as_slice())?;
-                    }
-                    SNAPSHOT_RECORD_META => {
-                        meta_table.insert(key.as_slice(), val.as_slice())?;
-                    }
-                    _ => return Err(LogStateError::Snapshot("Unknown record type".into())),
-                }
+            // Check for duplicate key (hash collision or timestamp collision for same author)
+            // Timestamp collision is fatal for ordering.
+            if table_log.get(key.as_slice())?.is_some() {
+                 return Err(StateDbError::InvalidChain("Duplicate timestamp for author".into()));
             }
+            
+            table_log.insert(key.as_slice(), value.as_slice())?;
+            
+            // 3. Update Merkle Root (Rolling Hash)
+            // LogStore logic: StateHash = StateHash ^ OpID
+            let mut hasher = StateHasher::new();
+            hasher.update(op.id);
+            self.backend.update_state_identity(&write_txn, hasher.finish())?;
         }
         write_txn.commit()?;
+        
+        let _ = self.event_tx.send(LogEvent {
+            content: op.payload.to_vec(),
+        });
+        
         Ok(())
+    }
+}
+
+impl StateFactory for LogState {
+    fn create(backend: StateBackend) -> Self {
+        let (event_tx, _) = broadcast::channel(1024);
+        Self { backend, event_tx }
     }
 }
 
@@ -360,44 +230,41 @@ mod tests {
     use super::*;
     use lattice_model::hlc::HLC;
     use tempfile::tempdir;
+    use lattice_model::Uuid;
+    use lattice_model::{Hash, PubKey, Op, StateMachine};
 
     #[test]
     fn test_persistence_roundtrip() {
         let dir = tempdir().unwrap();
-        let state = LogState::open(dir.path()).unwrap();
-        
+        // Create initial state
         let author = PubKey::from([1u8; 32]);
-        let payload = b"hello world";
-        let causal_deps: Vec<Hash> = vec![];
+        let id = Uuid::new_v4();
+        let state = LogState::open(id, dir.path()).unwrap();
+        
         let op = Op {
             id: Hash::from([42u8; 32]),
             prev_hash: Hash::ZERO,
-            causal_deps: &causal_deps,
+            causal_deps: &[],
             author,
             timestamp: HLC { wall_time: 1000, counter: 1 },
-            payload: payload.as_slice(),
+            payload: b"hello world",
         };
         
         state.apply(&op).unwrap();
-        assert_eq!(state.len(), 1);
+        assert_eq!(state.read(None).len(), 1);
         
-        let entries = state.read(None);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].content, b"hello world");
-        assert_eq!(entries[0].author, author);
-        
-        // Verify persistence by reopening
         drop(state);
-        let state2 = LogState::open(dir.path()).unwrap();
-        assert_eq!(state2.len(), 1);
-        let entries2 = state2.read(None);
-        assert_eq!(entries2[0].content, b"hello world");
+        
+        // Re-open with SAME ID
+        let state2 = LogState::open(id, dir.path()).unwrap();
+        assert_eq!(state2.read(None).len(), 1);
+        assert_eq!(state2.read(None)[0].content, b"hello world");
     }
     
     #[test]
     fn test_ordering() {
         let dir = tempdir().unwrap();
-        let state = LogState::open(dir.path()).unwrap();
+        let state = LogState::open(Uuid::new_v4(), dir.path()).unwrap();
         
         let author1 = PubKey::from([1u8; 32]);
         let author2 = PubKey::from([2u8; 32]);
@@ -426,7 +293,7 @@ mod tests {
         
         let op2 = Op {
             id: Hash::from([2u8; 32]),
-            prev_hash: Hash::ZERO,
+            prev_hash: Hash::from([1u8; 32]), // Chain to op1
             causal_deps: &causal_deps,
             author: author1,
             timestamp: HLC { wall_time: 2000, counter: 0 },
@@ -447,5 +314,40 @@ mod tests {
         // Should be strictly chronological (second, third)
         assert_eq!(tail[0].content, b"second");
         assert_eq!(tail[1].content, b"third");
+    }
+
+    #[test]
+    fn test_snapshot_restore() {
+        let store_id = Uuid::new_v4();
+        
+        let dir1 = tempdir().unwrap();
+        let state1 = LogState::open(store_id, dir1.path()).unwrap();
+        
+        let author = PubKey::from([1u8; 32]);
+        let start_hlc = HLC::now();
+        let op = Op {
+            id: Hash::from([1u8; 32]),
+            prev_hash: Hash::ZERO,
+            causal_deps: &[],
+            author,
+            timestamp: start_hlc,
+            payload: b"log_entry_1",
+        };
+        state1.apply(&op).unwrap();
+        
+        // Take snapshot
+        let snapshot = state1.snapshot().unwrap();
+        
+        // Restore to fresh state with SAME store ID (restore validates ID)
+        let dir2 = tempdir().unwrap();
+        let state2 = LogState::open(store_id, dir2.path()).unwrap();
+        state2.restore(snapshot).unwrap();
+        
+        // Verify
+        assert_eq!(state2.len(), 1);
+        let entries = state2.read(None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, b"log_entry_1");
+        assert_eq!(entries[0].timestamp, state1.read(None)[0].timestamp);
     }
 }

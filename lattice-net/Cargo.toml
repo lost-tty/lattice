@@ -12,7 +12,7 @@ lattice-net-types = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
 prost = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }

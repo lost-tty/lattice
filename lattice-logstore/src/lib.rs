@@ -31,13 +31,7 @@ pub mod proto {
 }
 
 // Openable trait implementation
-use lattice_model::Openable;
 
-impl Openable for LogState {
-    fn open(path: &std::path::Path) -> Result<Self, String> {
-        LogState::open(path).map_err(|e| e.to_string())
-    }
-}
 
 // Implement StoreInfo for LogHandle
 use lattice_model::{StoreInfo, StateWriter};

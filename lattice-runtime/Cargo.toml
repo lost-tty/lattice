@@ -13,7 +13,7 @@ lattice-model = { workspace = true }
 lattice-api = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 tokio-stream = "0.1"
 prost = { workspace = true }
 prost-reflect = { workspace = true }

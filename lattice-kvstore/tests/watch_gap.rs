@@ -1,12 +1,12 @@
 use lattice_kvstore::{KvState, KvHandle};
+use lattice_kvstore::handle::MockWriter;
 use lattice_model::Op;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::hlc::HLC;
+use lattice_model::{StateMachine, Uuid};
 use tempfile::tempdir;
 use std::sync::Arc;
 use tokio::time::Duration;
-
-use lattice_kvstore::kv_handle::MockWriter;
 
 // Helper op creator
 fn create_put_op(key: &[u8], val: &[u8], id: Hash, author: PubKey) -> Op<'static> {
@@ -29,7 +29,7 @@ fn create_put_op(key: &[u8], val: &[u8], id: Hash, author: PubKey) -> Op<'static
 #[tokio::test]
 async fn test_watch_gap_race_condition() {
     let dir = tempdir().unwrap();
-    let state = Arc::new(KvState::open(dir.path()).unwrap());
+    let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
     
     // Using KvOps trait to access watch (which has the bug)
     // We can test 'KvHandle' or generic 'T: KvOps'.
@@ -82,7 +82,7 @@ async fn test_watch_gap_race_condition() {
             // We might want to fill DB to make Scan slower?
             
             // Write!
-            state_clone.apply_op(&op_dynamic).unwrap();
+            state_clone.apply(&op_dynamic).unwrap();
         });
         
         // Call Watch

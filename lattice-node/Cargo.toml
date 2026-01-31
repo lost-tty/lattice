@@ -11,6 +11,7 @@ lattice-model = { workspace = true }
 lattice-kvstore = { workspace = true }
 lattice-logstore = { workspace = true }
 lattice-net-types = { workspace = true }
+lattice-storage = { workspace = true }
 ed25519-dalek = { workspace = true }
 prost = { workspace = true }
 thiserror = { workspace = true }
@@ -18,7 +19,7 @@ blake3 = { workspace = true }
 hex = { workspace = true }
 redb = { workspace = true }
 uuid = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 rand = { workspace = true }
 hostname = "0.4"
 serde_json = "1"

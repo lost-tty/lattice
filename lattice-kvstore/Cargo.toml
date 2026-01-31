@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 lattice-model = { workspace = true }
+lattice-storage = { path = "../lattice-storage" }
 lattice-proto = { workspace = true }
 redb = { workspace = true }
 prost = { workspace = true }
@@ -16,7 +17,7 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 async-trait = "0.1"
 futures = "0.3"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 tracing = { workspace = true }
 regex = "1"
 regex-syntax = "0.8"

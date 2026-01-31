@@ -30,7 +30,7 @@ pub enum StoreManagerError {
 
 /// Result of opening a store - contains both typed handle and StoreHandle
 pub struct OpenedStore {
-    /// Typed handle for downcasting (e.g., KvHandle<Store<KvState>>)
+    /// Typed handle for downcasting (e.g., KvHandle<Store<PersistentState<KvState>>>)
     pub typed_handle: Box<dyn Any + Send + Sync>,
     /// Type-erased StoreHandle for generic access
     pub store_handle: Arc<dyn StoreHandle>,

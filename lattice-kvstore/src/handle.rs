@@ -5,7 +5,9 @@
 //! - Writes: Via StateWriter (goes through replication)
 
 use std::sync::Arc;
-use crate::{KvState, Head, StateError, KvPayload, Operation, Merge};
+use crate::{KvState, Head, KvPayload, Operation, Merge};
+use lattice_storage::StateDbError;
+use lattice_storage::PersistentState;
 use lattice_model::{StateWriter, StateWriterError, Introspectable, CommandDispatcher};
 use lattice_model::types::Hash;
 use lattice_model::replication::EntryStreamProvider;
@@ -44,7 +46,7 @@ impl<W: StateWriter + Clone> Clone for KvHandle<W> {
     }
 }
 
-impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
+impl<W: StateWriter + AsRef<PersistentState<KvState>>> KvHandle<W> {
     /// Create a new KvHandle
     pub fn new(writer: W) -> Self {
         Self { writer }
@@ -52,7 +54,7 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
     
     /// Get the underlying state for direct reads
     pub fn state(&self) -> &KvState {
-        self.writer.as_ref()
+        &*self.writer.as_ref()
     }
     
     /// Get the underlying writer (e.g., Replica for replication operations)
@@ -148,7 +150,7 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
 }
 
 // Implement CommandDispatcher trait for KvHandle (only dispatch - introspection via Introspectable)
-impl<W: StateWriter + AsRef<KvState> + Send + Sync> CommandDispatcher for KvHandle<W> {
+impl<W: StateWriter + AsRef<PersistentState<KvState>> + Send + Sync> CommandDispatcher for KvHandle<W> {
     fn dispatch<'a>(
         &'a self,
         method_name: &'a str,
@@ -162,7 +164,7 @@ impl<W: StateWriter + AsRef<KvState> + Send + Sync> CommandDispatcher for KvHand
 }
 
 // Implement Introspectable trait for KvHandle (delegates to state)
-impl<W: StateWriter + AsRef<KvState> + Send + Sync> lattice_model::Introspectable for KvHandle<W> {
+impl<W: StateWriter + AsRef<PersistentState<KvState>> + Send + Sync> lattice_model::Introspectable for KvHandle<W> {
     fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
         self.state().service_descriptor()
     }
@@ -189,7 +191,7 @@ impl<W: StateWriter + AsRef<KvState> + Send + Sync> lattice_model::Introspectabl
 }
 
 // Implement StreamReflectable for KvHandle (delegates to state, implements subscribe)
-impl<W: StateWriter + AsRef<KvState> + Send + Sync> lattice_model::StreamReflectable for KvHandle<W> {
+impl<W: StateWriter + AsRef<PersistentState<KvState>> + Send + Sync> lattice_model::StreamReflectable for KvHandle<W> {
     fn stream_descriptors(&self) -> Vec<lattice_model::StreamDescriptor> {
         self.state().stream_descriptors()
     }
@@ -244,8 +246,8 @@ impl<W: StateWriter + AsRef<KvState> + Send + Sync> lattice_model::StreamReflect
     }
 }
 
-impl<W: StateWriter + AsRef<KvState>> AsRef<KvState> for KvHandle<W> {
-    fn as_ref(&self) -> &KvState {
+impl<W: StateWriter + AsRef<PersistentState<KvState>>> AsRef<PersistentState<KvState>> for KvHandle<W> {
+    fn as_ref(&self) -> &PersistentState<KvState> {
         self.writer.as_ref()
     }
 }
@@ -288,7 +290,7 @@ impl<W: lattice_model::replication::EntryStreamProvider + Send + Sync + StateWri
 /// Error type for KvHandle operations
 #[derive(Debug)]
 pub enum KvHandleError {
-    State(StateError),
+    State(StateDbError),
     Writer(StateWriterError),
 }
 
@@ -303,30 +305,30 @@ impl std::fmt::Display for KvHandleError {
 
 impl std::error::Error for KvHandleError {}
 
-impl From<StateError> for KvHandleError {
-    fn from(e: StateError) -> Self {
+impl From<StateDbError> for KvHandleError {
+    fn from(e: StateDbError) -> Self {
         KvHandleError::State(e)
     }
 }
 
 // ==================== Inherent KvHandle Methods ====================
 
-impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
+impl<W: StateWriter + AsRef<PersistentState<KvState>>> KvHandle<W> {
     /// Get the value for a key.
     /// Returns all heads for the key. Use `Merge` trait to resolve conflicts (e.g. `.lww()`).
-    pub fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateError> {
+    pub fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateDbError> {
         self.state().get(key)
     }
     
     /// Scan keys with optional prefix and regex pattern.
     /// calls visitor(key, heads). Returns Ok(false) to stop.
-    pub fn scan<F>(&self, prefix: &[u8], pattern: Option<&str>, visitor: F) -> Result<(), StateError>
-    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateError> {
+    pub fn scan<F>(&self, prefix: &[u8], pattern: Option<&str>, visitor: F) -> Result<(), StateDbError>
+    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateDbError> {
         let (regex, search_prefix) = match pattern {
             Some(p) => {
-                 let re = Regex::new(p).map_err(|e| StateError::Conversion(e.to_string()))?;
+                 let re = Regex::new(p).map_err(|e| StateDbError::Conversion(e.to_string()))?;
                  let lit_prefix = if prefix.is_empty() {
-                     crate::kv::extract_literal_prefix(p).unwrap_or_default()
+                     crate::state::extract_literal_prefix(p).unwrap_or_default()
                  } else {
                      prefix.to_vec()
                  };
@@ -338,21 +340,21 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
     }
 
     /// List all keys with heads (Collects to Vec)
-    pub fn list(&self) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
+    pub fn list(&self) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateDbError> {
         let mut out = Vec::new();
         self.scan(&[], None, |k, v| { out.push((k, v)); Ok(true) })?;
         Ok(out)
     }
     
     /// List keys by prefix (Collects to Vec)
-    pub fn list_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
+    pub fn list_by_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateDbError> {
         let mut out = Vec::new();
         self.scan(prefix, None, |k, v| { out.push((k, v)); Ok(true) })?;
         Ok(out)
     }
     
     /// List keys by regex pattern (Collects to Vec)
-    pub fn list_by_regex(&self, pattern: &str) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateError> {
+    pub fn list_by_regex(&self, pattern: &str) -> Result<Vec<(Vec<u8>, Vec<Head>)>, StateDbError> {
         let mut out = Vec::new();
         self.scan(&[], Some(pattern), |k, v| { out.push((k, v)); Ok(true) })?;
         Ok(out)
@@ -424,12 +426,12 @@ impl<W: StateWriter + AsRef<KvState>> KvHandle<W> {
 /// 
 /// Collects multiple put/delete operations and commits them as a single sigchain entry.
 /// If the same key appears multiple times, only the last operation for that key is kept.
-pub struct BatchBuilder<'a, W: StateWriter + AsRef<KvState>> {
+pub struct BatchBuilder<'a, W: StateWriter + AsRef<PersistentState<KvState>>> {
     handle: &'a KvHandle<W>,
     ops: Vec<Operation>,
 }
 
-impl<'a, W: StateWriter + AsRef<KvState>> BatchBuilder<'a, W> {
+impl<'a, W: StateWriter + AsRef<PersistentState<KvState>>> BatchBuilder<'a, W> {
     fn new(handle: &'a KvHandle<W>) -> Self {
         Self {
             handle,
@@ -501,7 +503,7 @@ impl<'a, W: StateWriter + AsRef<KvState>> BatchBuilder<'a, W> {
     }
 }
 
-impl<W: StateWriter + EntryStreamProvider + Clone + Send + Sync + AsRef<KvState> + 'static> KvHandle<W> {
+impl<W: StateWriter + EntryStreamProvider + Clone + Send + Sync + AsRef<PersistentState<KvState>> + 'static> KvHandle<W> {
     /// Watch keys matching a regex pattern.
     pub fn watch(&self, pattern: &str) -> Pin<Box<dyn Future<Output = Result<(Vec<(Vec<u8>, Vec<Head>)>, broadcast::Receiver<WatchEvent>), WatchError>> + Send + '_>> {
         let pattern_str = pattern.to_string();
@@ -516,7 +518,7 @@ impl<W: StateWriter + EntryStreamProvider + Clone + Send + Sync + AsRef<KvState>
             let mut state_rx = this.state().subscribe();
 
             // 3. Get initial state
-            let prefix = crate::kv::extract_literal_prefix(&pattern_str).unwrap_or_default();
+            let prefix = crate::state::extract_literal_prefix(&pattern_str).unwrap_or_default();
             let mut initial = Vec::new();
             this.state().scan(&prefix, Some(re.clone()), |k, v| {
                 initial.push((k, v));
@@ -556,13 +558,13 @@ impl<W: StateWriter + EntryStreamProvider + Clone + Send + Sync + AsRef<KvState>
 /// Useful for testing without the full replication stack.
 #[doc(hidden)]
 pub struct MockWriter {
-    state: Arc<KvState>,
+    state: Arc<PersistentState<KvState>>,
     next_hash: Arc<std::sync::atomic::AtomicU64>,
     pub entry_tx: broadcast::Sender<Vec<u8>>,
 }
 
 impl MockWriter {
-    pub fn new(state: Arc<KvState>) -> Self {
+    pub fn new(state: Arc<PersistentState<KvState>>) -> Self {
         let (entry_tx, _) = broadcast::channel(128);
         Self {
             state,
@@ -572,9 +574,9 @@ impl MockWriter {
     }
 }
 
-impl AsRef<KvState> for MockWriter {
-    fn as_ref(&self) -> &KvState {
-        &self.state
+impl AsRef<PersistentState<KvState>> for MockWriter {
+    fn as_ref(&self) -> &PersistentState<KvState> {
+        &*self.state
     }
 }
 
@@ -647,7 +649,7 @@ impl StateWriter for MockWriter {
                 prev_hash,
             };
             
-            state.apply_op(&op)
+            state.apply(&op)
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
             
             // Emit entry if successful
@@ -687,6 +689,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::time::{timeout, Duration};
     use futures_util::StreamExt;
+    use lattice_model::Uuid;
 
     // Helper to reduce boilerplate and enforce timeouts
     async fn expect_event(rx: &mut broadcast::Receiver<WatchEvent>, expected_key: &[u8]) -> WatchEvent {
@@ -707,7 +710,7 @@ mod tests {
     #[tokio::test]
     async fn test_kv_handle_put_get() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer);
         
@@ -724,7 +727,7 @@ mod tests {
     #[tokio::test]
     async fn test_kv_handle_delete() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer);
         
@@ -740,7 +743,7 @@ mod tests {
     #[tokio::test]
     async fn test_kv_handle_list_by_prefix() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer);
         
@@ -757,7 +760,7 @@ mod tests {
     #[tokio::test]
     async fn test_kv_ops_watch_robust() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer);
 
@@ -789,7 +792,7 @@ mod tests {
     #[tokio::test]
     async fn test_kv_handle_strict_updates() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer.clone());
         
@@ -825,7 +828,7 @@ mod tests {
     #[tokio::test]
     async fn test_watch_invalid_regex() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone()); // Assuming MockWriter works similarly
         let handle = KvHandle::new(writer);
 
@@ -837,7 +840,7 @@ mod tests {
     #[tokio::test]
     async fn test_malformed_replication_entry() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone()); 
         let handle = KvHandle::new(writer.clone());
         
@@ -862,7 +865,7 @@ mod tests {
     #[tokio::test]
     async fn test_causal_dependency_chain() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer);
 
@@ -914,7 +917,7 @@ mod tests {
         use prost::Message; // Needed for encode_to_vec
 
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer.clone());
         
@@ -958,7 +961,7 @@ mod tests {
     #[tokio::test]
     async fn test_resurrection_causality() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer);
         let key = b"resurrect_me";
@@ -1002,7 +1005,7 @@ mod tests {
         use prost::Message;
 
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer.clone());
         
@@ -1038,7 +1041,7 @@ mod tests {
     #[tokio::test]
     async fn test_watch_binary_key_safety() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer);
 
@@ -1063,7 +1066,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_key_edge_case() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer);
 
@@ -1079,7 +1082,7 @@ mod tests {
         use prost::Message;
 
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer.clone());
         let key = b"genesis_conflict";
@@ -1131,7 +1134,7 @@ mod tests {
     #[tokio::test]
     async fn test_watch_complex_regex() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer);
         
@@ -1152,7 +1155,7 @@ mod tests {
     #[tokio::test]
     async fn test_watch_multiple_watchers() {
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer);
         
@@ -1193,7 +1196,7 @@ mod tests {
         use lattice_model::StreamReflectable;
         
         let dir = tempdir().unwrap();
-        let state = Arc::new(KvState::open(dir.path()).unwrap());
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
         let writer = MockWriter::new(state.clone());
         let handle = KvHandle::new(writer.clone());
         

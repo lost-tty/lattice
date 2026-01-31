@@ -12,5 +12,5 @@ pub type OpenError = String;
 /// by the generic `TypedOpener<S>` in `lattice-node`.
 pub trait Openable: StateMachine + Sized + Send + Sync + 'static {
     /// Open the state machine from a filesystem path.
-    fn open(path: &Path) -> Result<Self, OpenError>;
+    fn open(id: crate::Uuid, path: &Path) -> Result<Self, OpenError>;
 }

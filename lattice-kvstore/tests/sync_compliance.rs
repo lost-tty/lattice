@@ -2,6 +2,7 @@ use lattice_kvstore::{KvState, KvPayload, Operation, Head};
 use lattice_model::{StateMachine, Op};
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::hlc::HLC;
+use lattice_model::Uuid;
 use tempfile::tempdir;
 use prost::Message;
 
@@ -49,7 +50,7 @@ fn encode_heads(heads: &[Head]) -> Vec<u8> {
 #[test]
 fn test_sync_metadata_tracking() {
     let dir = tempdir().unwrap();
-    let state = KvState::open(dir.path()).unwrap();
+    let state = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
     
     let author1 = PubKey::from([1u8; 32]);
     let hash1 = Hash::from([0xAA; 32]);
@@ -62,7 +63,7 @@ fn test_sync_metadata_tracking() {
     assert!(state.applied_chaintips().unwrap().is_empty());
     
     // 2. Apply Op
-    state.apply_op(&op1).unwrap();
+    state.apply(&op1).unwrap();
     
     // Calculate expected Identity
     // Key "key1" has 1 head.
@@ -81,7 +82,7 @@ fn test_sync_metadata_tracking() {
     // 3. Apply another op from same author on DIFFERENT key
     let hash2 = Hash::from([0xBB; 32]);
     let op2 = create_test_op(b"key2", b"val2", author1, hash2, start_hlc, hash1);
-    state.apply_op(&op2).unwrap();
+    state.apply(&op2).unwrap();
     
     // Calculate expected Identity: hash(key1) ^ hash(key2)
     let heads2 = state.get(b"key2").unwrap();
@@ -100,7 +101,7 @@ fn test_sync_metadata_tracking() {
     // This should REMOVE old key1 hash and ADD new key1 hash.
     let hash3 = Hash::from([0xCC; 32]);
     let op3 = create_test_op(b"key1", b"val1_updated", author1, hash3, start_hlc, hash2);
-    state.apply_op(&op3).unwrap();
+    state.apply(&op3).unwrap();
     
     let heads_updated = state.get(b"key1").unwrap();
     let encoded_updated = encode_heads(&heads_updated);
@@ -117,13 +118,14 @@ fn test_sync_metadata_tracking() {
 #[test]
 fn test_snapshot_restore() {
     let dir1 = tempdir().unwrap();
-    let state1 = KvState::open(dir1.path()).unwrap();
+    let store_id = Uuid::new_v4();
+    let state1 = KvState::open(store_id, dir1.path()).unwrap();
     
     let author = PubKey::from([1u8; 32]);
     let hash = Hash::from([0xCC; 32]);
     let op = create_test_op(b"snap_key", b"snap_val", author, hash, HLC::now(), Hash::ZERO);
     
-    state1.apply_op(&op).unwrap();
+    state1.apply(&op).unwrap();
     let id_before = state1.state_identity();
     
     // Take Snapshot
@@ -131,7 +133,7 @@ fn test_snapshot_restore() {
     
     // Create fresh state
     let dir2 = tempdir().unwrap();
-    let state2 = KvState::open(dir2.path()).unwrap();
+    let state2 = KvState::open(store_id, dir2.path()).unwrap();
     
     // Restore
     state2.restore(snapshot).unwrap();
@@ -153,10 +155,10 @@ fn test_snapshot_restore() {
 #[test]
 fn test_convergence_concurrent_operations() {
     let dir1 = tempdir().unwrap();
-    let state1 = KvState::open(dir1.path()).unwrap();
+    let state1 = KvState::open(Uuid::new_v4(), dir1.path()).unwrap();
     
     let dir2 = tempdir().unwrap();
-    let state2 = KvState::open(dir2.path()).unwrap();
+    let state2 = KvState::open(Uuid::new_v4(), dir2.path()).unwrap();
     
     let start_hlc = HLC::now();
     
@@ -170,12 +172,12 @@ fn test_convergence_concurrent_operations() {
     let op2 = create_test_op(b"key1", b"val2", author2, hash2, start_hlc, Hash::ZERO); 
     
     // Node A: 1 then 2
-    state1.apply_op(&op1).unwrap();
-    state1.apply_op(&op2).unwrap();
+    state1.apply(&op1).unwrap();
+    state1.apply(&op2).unwrap();
     
     // Node B: 2 then 1
-    state2.apply_op(&op2).unwrap();
-    state2.apply_op(&op1).unwrap();
+    state2.apply(&op2).unwrap();
+    state2.apply(&op1).unwrap();
     
     // Convergence Check
     assert_ne!(state1.state_identity(), Hash::ZERO);
@@ -202,7 +204,8 @@ fn test_convergence_concurrent_operations() {
 #[test]
 fn test_restore_overwrites_existing_data() {
     let dir = tempdir().unwrap();
-    let state = KvState::open(dir.path()).unwrap();
+    let store_id = Uuid::new_v4();
+    let state = KvState::open(store_id, dir.path()).unwrap();
     
     let author = PubKey::from([1u8; 32]);
     let start_hlc = HLC::now();
@@ -210,17 +213,18 @@ fn test_restore_overwrites_existing_data() {
     // 1. Create State with "key_old"
     let hash1 = Hash::from([0xAA; 32]);
     let op1 = create_test_op(b"key_old", b"val_old", author, hash1, start_hlc, Hash::ZERO);
-    state.apply_op(&op1).unwrap();
+    state.apply(&op1).unwrap();
     
     assert!(state.get(b"key_old").unwrap().len() > 0);
     
     // 2. Prepare a Snapshot that ONLY has "key_new"
     // We do this by creating a separate state/db, adding key_new, taking snapshot.
     let dir_snap = tempdir().unwrap();
-    let state_snap = KvState::open(dir_snap.path()).unwrap();
+    // MUST use same store_id for restore to work
+    let state_snap = KvState::open(store_id, dir_snap.path()).unwrap();
     let hash2 = Hash::from([0xBB; 32]);
     let op2 = create_test_op(b"key_new", b"val_new", author, hash2, start_hlc, Hash::ZERO);
-    state_snap.apply_op(&op2).unwrap();
+    state_snap.apply(&op2).unwrap();
     
     let snapshot_id = state_snap.state_identity();
     let snapshot_stream = state_snap.snapshot().unwrap();
@@ -261,7 +265,7 @@ fn create_delete_op(key: &[u8], author: PubKey, id: Hash, timestamp: HLC, prev_h
 #[test]
 fn test_delete_correctness() {
     let dir = tempdir().unwrap();
-    let state = KvState::open(dir.path()).unwrap();
+    let state = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
     
     let author = PubKey::from([1u8; 32]);
     let start_hlc = HLC::now();
@@ -269,7 +273,7 @@ fn test_delete_correctness() {
     // 1. Insert
     let hash1 = Hash::from([0xA1; 32]);
     let op1 = create_test_op(b"del_key", b"val", author, hash1, start_hlc, Hash::ZERO);
-    state.apply_op(&op1).unwrap();
+    state.apply(&op1).unwrap();
     
     let heads1 = state.get(b"del_key").unwrap();
     let encoded1 = encode_heads(&heads1);
@@ -280,7 +284,7 @@ fn test_delete_correctness() {
     // 2. Delete (Add Tombstone)
     let hash2 = Hash::from([0xB2; 32]);
     let op2 = create_delete_op(b"del_key", author, hash2, start_hlc, hash1);
-    state.apply_op(&op2).unwrap();
+    state.apply(&op2).unwrap();
     
     let heads2 = state.get(b"del_key").unwrap();
     assert!(heads2.iter().any(|h| h.tombstone));
@@ -299,7 +303,7 @@ fn test_delete_correctness() {
 #[test]
 fn test_chain_rules_compliance() {
     let dir = tempdir().unwrap();
-    let state = KvState::open(dir.path()).unwrap();
+    let state = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
     let author = PubKey::from([0x99; 32]);
     let hlc = HLC::now();
     
@@ -307,24 +311,85 @@ fn test_chain_rules_compliance() {
     
     // 1. Invalid Genesis (Prev != ZERO)
     let bad_genesis = create_test_op(b"k", b"v", author, hash1, hlc, Hash::from([0x01; 32])); 
-    let err = state.apply_op(&bad_genesis).unwrap_err();
+    let err = state.apply(&bad_genesis).unwrap_err();
     assert!(format!("{}", err).contains("Invalid genesis"), "Error: {}", err);
     
     // 2. Valid Genesis
     let valid_genesis = create_test_op(b"k", b"v", author, hash1, hlc, Hash::ZERO);
-    state.apply_op(&valid_genesis).unwrap();
+    state.apply(&valid_genesis).unwrap();
     
     // 3. Idempotency (Apply same op again)
     // Should return Ok
-    state.apply_op(&valid_genesis).unwrap();
+    state.apply(&valid_genesis).unwrap();
     
     // 4. Broken Link (Prev != Current Tip)
     let hash2 = Hash::from([0x22; 32]);
     let bad_link = create_test_op(b"k", b"v2", author, hash2, hlc, Hash::ZERO); // Prev should be hash1
-    let err = state.apply_op(&bad_link).unwrap_err();
+    let err = state.apply(&bad_link).unwrap_err();
     assert!(format!("{}", err).contains("Broken chain"), "Error: {}", err);
     
     // 5. Valid Link
     let valid_link = create_test_op(b"k", b"v2", author, hash2, hlc, hash1);
-    state.apply_op(&valid_link).unwrap();
+    state.apply(&valid_link).unwrap();
 }
+
+#[test]
+fn test_snapshot_checksum_failure() {
+    let dir1 = tempdir().unwrap();
+    let store_id = Uuid::new_v4();
+    let state1 = KvState::open(store_id, dir1.path()).unwrap();
+    
+    // Add some data
+    let author = PubKey::from([1u8; 32]);
+    let hash = Hash::from([0xAA; 32]);
+    let op = create_test_op(b"key", b"val", author, hash, HLC::now(), Hash::ZERO);
+    state1.apply(&op).unwrap();
+
+    let snapshot_bytes = {
+        let mut buf = Vec::new();
+        let mut stream = state1.snapshot().unwrap();
+        stream.read_to_end(&mut buf).unwrap();
+        buf
+    };
+    
+    // Corrupt the LAST byte (part of checksum)
+    let len = snapshot_bytes.len();
+    let mut corrupt_checksum = snapshot_bytes.clone();
+    corrupt_checksum[len - 1] ^= 0xFF; 
+    
+    let dir2 = tempdir().unwrap();
+    let state2 = KvState::open(store_id, dir2.path()).unwrap();
+    
+    let err = state2.restore(Box::new(std::io::Cursor::new(corrupt_checksum))).unwrap_err();
+    assert!(format!("{}", err).contains("Checksum mismatch"));
+    
+    // Corrupt a data byte (somewhere in the middle)
+    // The checksum logic calculates running hash, so modifying data also invalidates checksum
+    let mut corrupt_data = snapshot_bytes.clone();
+    corrupt_data[50] ^= 0xFF; // Arbitrary index, assuming snapshot is large enough
+    
+    let err_data = state2.restore(Box::new(std::io::Cursor::new(corrupt_data))).unwrap_err();
+    // Ideally this also fails checksum, but it might fail decoding first depending on what byte we hit.
+    // If we hit a length prefix, it might fail elsewhere. But if we hit value data, it will be checksum.
+    // Let's just assert it fails.
+    assert!(
+        format!("{}", err_data).contains("Checksum mismatch") || 
+        format!("{}", err_data).contains("IO error") // If we corrupt length to be huge
+    );
+}
+
+#[test]
+fn test_snapshot_uuid_mismatch() {
+    let dir1 = tempdir().unwrap();
+    let state1 = KvState::open(Uuid::new_v4(), dir1.path()).unwrap();
+    
+    let snapshot = state1.snapshot().unwrap();
+    
+    let dir2 = tempdir().unwrap();
+    // Open with DIFFERENT UUID
+    let state2 = KvState::open(Uuid::new_v4(), dir2.path()).unwrap();
+    
+    let err = state2.restore(snapshot).unwrap_err();
+    assert!(format!("{}", err).contains("Store ID mismatch"), "Error was: {}", err);
+}
+

@@ -4,13 +4,14 @@
 
 use crate::state::{LogState, LogEntry};
 use lattice_model::{StateWriter, StateWriterError, Hash};
+use lattice_storage::PersistentState;
 
 /// Handle for log operations
 pub struct LogHandle<W> {
     writer: W,
 }
 
-impl<W: StateWriter + AsRef<LogState>> LogHandle<W> {
+impl<W: StateWriter + AsRef<PersistentState<LogState>>> LogHandle<W> {
     /// Create a new LogHandle wrapping the writer
     pub fn new(writer: W) -> Self {
         Self { writer }
@@ -18,7 +19,7 @@ impl<W: StateWriter + AsRef<LogState>> LogHandle<W> {
 
     /// Get a reference to the underlying state
     pub fn state(&self) -> &LogState {
-        self.writer.as_ref()
+        &*self.writer.as_ref()
     }
 
     /// Get a reference to the writer (for Store access)
@@ -27,9 +28,19 @@ impl<W: StateWriter + AsRef<LogState>> LogHandle<W> {
     }
 
     /// Append a message to the log
+    /// 
+    /// Uses current chain tips as causal dependencies for proper causal ordering.
     pub async fn append(&self, content: &[u8]) -> Result<Hash, StateWriterError> {
-        // Payload is just the raw content
-        self.writer.submit(content.to_vec(), vec![]).await
+        use lattice_storage::StateLogic;
+        
+        // Get current chain tips as causal deps
+        let causal_deps: Vec<Hash> = self.state()
+            .backend()
+            .get_applied_chaintips()
+            .map(|tips| tips.into_iter().map(|(_, hash)| hash).collect())
+            .unwrap_or_default();
+        
+        self.writer.submit(content.to_vec(), causal_deps).await
     }
 
     /// Read entries (all or last N)
@@ -57,7 +68,7 @@ impl<W: Clone> Clone for LogHandle<W> {
 
 // CommandDispatcher implementation for LogStore (only dispatch - introspection via Introspectable)
 use lattice_model::CommandDispatcher;
-impl<W: StateWriter + AsRef<LogState> + Send + Sync> CommandDispatcher for LogHandle<W> {
+impl<W: StateWriter + AsRef<PersistentState<LogState>> + Send + Sync> CommandDispatcher for LogHandle<W> {
     fn dispatch<'a>(
         &'a self,
         method_name: &'a str,
@@ -114,7 +125,7 @@ impl<W: StateWriter + AsRef<LogState> + Send + Sync> CommandDispatcher for LogHa
 }
 
 // Implement Introspectable trait for LogHandle
-impl<W: StateWriter + AsRef<LogState> + Send + Sync> lattice_model::Introspectable for LogHandle<W> {
+impl<W: StateWriter + AsRef<PersistentState<LogState>> + Send + Sync> lattice_model::Introspectable for LogHandle<W> {
     fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
         crate::LOG_SERVICE_DESCRIPTOR.clone()
     }
@@ -166,7 +177,7 @@ impl<W: StateWriter + AsRef<LogState> + Send + Sync> lattice_model::Introspectab
 }
 
 // Implement StreamReflectable for LogHandle
-impl<W: StateWriter + AsRef<LogState> + Send + Sync> lattice_model::StreamReflectable for LogHandle<W> {
+impl<W: StateWriter + AsRef<PersistentState<LogState>> + Send + Sync> lattice_model::StreamReflectable for LogHandle<W> {
     fn stream_descriptors(&self) -> Vec<lattice_model::StreamDescriptor> {
         vec![
             lattice_model::StreamDescriptor {

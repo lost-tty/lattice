@@ -29,8 +29,8 @@ pub enum PeerManagerError {
     StateWriter(#[from] lattice_model::StateWriterError),
     #[error("State error: {0}")]
     State(#[from] lattice_kernel::store::StateError),
-    #[error("KV State error: {0}")]
-    KvState(#[from] lattice_kvstore::StateError),
+    #[error("Storage error: {0}")]
+    Storage(#[from] lattice_storage::StateDbError),
     #[error("Watch error: {0}")]
     Watch(#[from] lattice_kvstore::WatchError),
     #[error("Lock poisoned")]
