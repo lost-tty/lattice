@@ -152,6 +152,9 @@ pub enum OrphanStoreError {
 
     #[error("Decode error: {0}")]
     Decode(#[from] prost::DecodeError),
+
+    #[error("Invalid data: {0}")]
+    InvalidData(String),
 }
 
 /// Information about a gap in the sigchain detected from orphan entries
@@ -262,13 +265,13 @@ impl OrphanStore {
             let (key_bytes, value) = row?;
             let orphaned = OrphanedEntry::decode(value.value())?;
             let proto_signed = orphaned.entry.ok_or_else(|| {
-                OrphanStoreError::Decode(prost::DecodeError::new("Missing entry"))
+                OrphanStoreError::InvalidData("Missing entry".to_string())
             })?;
             let signed = SignedEntry::try_from(proto_signed)
-                .map_err(|e| OrphanStoreError::Decode(prost::DecodeError::new(e.to_string())))?;
+                .map_err(|e| OrphanStoreError::InvalidData(e.to_string()))?;
 
             let key = OrphanKey::from_bytes(key_bytes.value())
-                .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
+                .ok_or_else(|| OrphanStoreError::InvalidData("Invalid key".to_string()))?;
 
             results.push((orphaned.seq, signed, key.entry_hash));
         }
@@ -310,7 +313,7 @@ impl OrphanStore {
         for row in table.iter()? {
             let (key_bytes, value) = row?;
             let key = OrphanKey::from_bytes(key_bytes.value())
-                .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
+                .ok_or_else(|| OrphanStoreError::InvalidData("Invalid key".to_string()))?;
 
             let orphaned = crate::proto::storage::OrphanedEntry::decode(value.value())?;
             orphans.push(OrphanInfo {
@@ -376,14 +379,14 @@ impl OrphanStore {
         for row in table.range(start.to_bytes().as_slice()..=end.to_bytes().as_slice())? {
             let (key_bytes, value) = row?;
             let dag_key = DagOrphanKey::from_bytes(key_bytes.value())
-                .ok_or_else(|| OrphanStoreError::Decode(prost::DecodeError::new("Invalid key")))?;
+                .ok_or_else(|| OrphanStoreError::InvalidData("Invalid key".to_string()))?;
 
             let orphaned = DagOrphanedEntry::decode(value.value())?;
             let proto_signed = orphaned.entry.ok_or_else(|| {
-                OrphanStoreError::Decode(prost::DecodeError::new("Missing entry"))
+                OrphanStoreError::InvalidData("Missing entry".to_string())
             })?;
             let signed = SignedEntry::try_from(proto_signed)
-                .map_err(|e| OrphanStoreError::Decode(prost::DecodeError::new(e.to_string())))?;
+                .map_err(|e| OrphanStoreError::InvalidData(e.to_string()))?;
             results.push((signed, dag_key.entry_hash));
         }
         Ok(results)

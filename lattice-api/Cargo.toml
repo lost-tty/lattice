@@ -20,14 +20,15 @@ lattice-node = { workspace = true }
 lattice-net = { workspace = true }
 lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
-tonic = "0.12"
+tonic = "0.14"
+tonic-prost = "0.14"
 prost = { workspace = true }
 prost-reflect = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = "0.1"
 tracing = { workspace = true }
 uuid = { workspace = true }
-tower = "0.4"
+tower = { version = "0.5", features = ["util"] }
 hyper-util = "0.1"
 hex.workspace = true
 dirs.workspace = true
@@ -39,4 +40,5 @@ uniffi = { workspace = true, optional = true }
 futures.workspace = true
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
