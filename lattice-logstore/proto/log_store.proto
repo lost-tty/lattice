@@ -22,7 +22,7 @@ message ReadRequest {
 }
 
 message ReadResponse {
-    repeated string entries = 1;
+    repeated bytes entries = 1;
 }
 
 // --- Payload Type (log entry format) ---

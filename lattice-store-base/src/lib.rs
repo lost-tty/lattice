@@ -8,6 +8,7 @@
 
 mod introspection;
 mod handle;
+pub mod dispatch;
 
 pub use introspection::{
     BoxByteStream, CommandDispatcher, FieldFormat, Introspectable, StreamDescriptor,

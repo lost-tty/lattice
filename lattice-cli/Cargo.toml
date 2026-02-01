@@ -23,6 +23,7 @@ iroh = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true }
 chrono = { workspace = true }
+lexpr = "0.2.7"
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
 tempfile = "3"

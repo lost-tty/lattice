@@ -37,9 +37,9 @@ Typed wrappers:  put(k,v) → dispatch("Put", PutRequest{k,v})
 ```
 
 **Step 1: Batch via dispatch (prerequisite - Node uses batch heavily)**
-- [ ] Add `Batch` proto message (list of `BatchOp` with put/delete variants)
-- [ ] `CommandDispatcher::dispatch("Batch", msg)` delegates to `BatchBuilder`
-- [ ] Verify CLI and Node can batch through reflection API
+- [x] Add `Batch` proto message (list of `BatchOp` with put/delete variants)
+- [x] `CommandDispatcher::dispatch("Batch", msg)` delegates to `BatchBuilder`
+- [x] Verify CLI and Node can batch through reflection API
 
 **Step 2: Typed methods wrap dispatch**
 - [ ] `put(k,v)` builds `PutRequest`, calls `dispatch("Put", msg)`

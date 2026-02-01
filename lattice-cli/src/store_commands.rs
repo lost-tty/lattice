@@ -831,23 +831,56 @@ async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, opera
         }
     };
     
-    // Build DynamicMessage from CLI args
+    // Build DynamicMessage from CLI args (supports S-expression syntax)
     let input_desc = method.input();
     let mut dynamic_msg = DynamicMessage::new(input_desc.clone());
     
     let field_names: Vec<_> = input_desc.fields().map(|f| f.name().to_string()).collect();
     let mut positional_index = 0;
     
-    for arg in method_args {
-        if let Some((k, v)) = arg.split_once('=') {
+    // Join args to handle S-expressions
+    // We manually reconstruct the string to avoid `shlex` introducing single quotes ('...') 
+    // which lexpr interprets as the quote macro. We use double quotes where needed.
+    let joined_args = reconstruct_args(method_args);
+    
+    // Use lexpr::Parser to parse multiple top-level values
+    let parser = lexpr::Parser::from_str(&joined_args);
+    
+    for item in parser {
+        let token = match item {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = writeln!(w, "Parse error: {}", e);
+                return Ok(Continue);
+            }
+        };
+        
+        // Handle named argument (key=value) in Symbol or String
+        let named_match = match &token {
+            lexpr::Value::Symbol(s) | lexpr::Value::String(s) => s.split_once('='),
+            _ => None,
+        };
+
+        if let Some((k, v)) = named_match {
             if let Some(field) = input_desc.get_field_by_name(k) {
                 let value = parse_value_for_field(&field, v);
                 dynamic_msg.set_field(&field, value);
+                continue;
             }
-        } else if positional_index < field_names.len() {
+        }
+        
+        // Positional argument
+        if positional_index < field_names.len() {
             if let Some(field) = input_desc.get_field_by_name(&field_names[positional_index]) {
-                let value = parse_value_for_field(&field, arg);
-                dynamic_msg.set_field(&field, value);
+                match sexpr_to_value(&token, &field) {
+                    Ok(value) => {
+                        dynamic_msg.set_field(&field, value);
+                    }
+                    Err(e) => {
+                        let _ = writeln!(w, "Error parsing '{}': {}", field.name(), e);
+                        return Ok(Continue);
+                    }
+                }
                 positional_index += 1;
             }
         }
@@ -882,6 +915,175 @@ async fn cmd_dynamic_command(backend: &dyn LatticeBackend, store_id: Uuid, opera
     
     Ok(Continue)
 }
+
+// ==================== S-Expression Parsing ====================
+
+// We now use the `lexpr` crate for parsing.
+// The functions below convert `lexpr::Value` to `prost_reflect::Value`.
+
+
+/// Convert S-expression to proto Value using field descriptor
+fn sexpr_to_value(expr: &lexpr::Value, field: &prost_reflect::FieldDescriptor) -> Result<prost_reflect::Value, String> {
+    use prost_reflect::{Kind, Value};
+    
+    match expr {
+        // Handle atoms (Strings, Numbers, Bools, Symbols)
+        lexpr::Value::String(s) => Ok(parse_value_for_field(field, s)),
+        lexpr::Value::Symbol(s) => Ok(parse_value_for_field(field, s)),
+        lexpr::Value::Number(n) => Ok(parse_value_for_field(field, &n.to_string())), // Convert to string and let parse_value handle it for now, or optimize later
+        lexpr::Value::Bool(b) => Ok(Value::Bool(*b)),
+        lexpr::Value::Nil => {
+            // Nil treated as empty list if field is repeated, or error/default? 
+            if field.is_list() {
+                 Ok(Value::List(vec![]))
+            } else {
+                 Err(format!("Unexpected nil for field {}", field.name()))
+            }
+        }
+        
+        // Handle Lists
+        lexpr::Value::Cons(_) => {
+             // lexpr Cons is a linked list. Convert to iterator.
+             if field.is_list() {
+                let element_kind = field.kind();
+                let list_iter = match expr.to_vec() {
+                    Some(v) => v,
+                    None => return Err(format!("Invalid list structure for field {}", field.name())),
+                };
+                
+                let values: Result<Vec<Value>, String> = list_iter.iter()
+                    .map(|child| sexpr_to_element_value(child, &element_kind))
+                    .collect();
+                Ok(Value::List(values?))
+             } else if matches!(field.kind(), Kind::Message(_)) {
+                 // Single message with positional fields
+                if let Kind::Message(msg_desc) = field.kind() {
+                    let children = match expr.to_vec() {
+                        Some(v) => v,
+                        None => return Err(format!("Invalid list structure for message field {}", field.name())),
+                    };
+                    sexpr_to_message(&children, &msg_desc)
+                } else {
+                    Err("Expected message type".to_string())
+                }
+             } else {
+                 Err(format!("Unexpected list for scalar field {}", field.name()))
+             }
+        }
+        _ => Err(format!("Cannot convert {:?} for field {}", expr, field.name())),
+    }
+}
+
+/// Convert S-expression to element value (for list elements)
+fn sexpr_to_element_value(expr: &lexpr::Value, kind: &prost_reflect::Kind) -> Result<prost_reflect::Value, String> {
+    use prost_reflect::{Kind, Value};
+    
+
+    match (expr, kind) {
+        (lexpr::Value::String(s), Kind::String) => Ok(Value::String(s.to_string())),
+        (lexpr::Value::Symbol(s), Kind::String) => Ok(Value::String(s.to_string())),
+        
+        (lexpr::Value::String(s), Kind::Bytes) => Ok(Value::Bytes(s.as_bytes().to_vec().into())),
+        (lexpr::Value::Symbol(s), Kind::Bytes) => Ok(Value::Bytes(s.as_bytes().to_vec().into())),
+        
+        (lexpr::Value::Bool(b), Kind::Bool) => Ok(Value::Bool(*b)),
+        (lexpr::Value::Symbol(s), Kind::Bool) => Ok(Value::Bool(s.parse().unwrap_or(false))),
+        
+        (lexpr::Value::Number(n), Kind::Uint64 | Kind::Fixed64) => Ok(Value::U64(n.as_u64().unwrap_or(0))),
+        (lexpr::Value::Number(n), Kind::Uint32 | Kind::Fixed32) => Ok(Value::U32(n.as_u64().unwrap_or(0) as u32)),
+        (lexpr::Value::Number(n), Kind::Int64 | Kind::Sint64 | Kind::Sfixed64) => Ok(Value::I64(n.as_i64().unwrap_or(0))),
+        (lexpr::Value::Number(n), Kind::Int32 | Kind::Sint32 | Kind::Sfixed32) => Ok(Value::I32(n.as_i64().unwrap_or(0) as i32)),
+        (lexpr::Value::Number(n), Kind::Float) => Ok(Value::F32(n.as_f64().unwrap_or(0.0) as f32)),
+        (lexpr::Value::Number(n), Kind::Double) => Ok(Value::F64(n.as_f64().unwrap_or(0.0))),
+
+        // Fallback for strings representing numbers
+        (lexpr::Value::String(s), _) | (lexpr::Value::Symbol(s), _) => {
+             // Re-use parse_value logic for scalar types
+             // We can construct a temp dynamic message or just call helper
+             // But parse_value_for_field needs a FieldDescriptor.
+             // We only have Kind here.
+             // We'll reproduce logic briefly or extraction.
+             match kind {
+                 Kind::Uint64 | Kind::Fixed64 => Ok(Value::U64(s.parse().unwrap_or(0))),
+                 Kind::Uint32 | Kind::Fixed32 => Ok(Value::U32(s.parse().unwrap_or(0))),
+                 Kind::Int64 | Kind::Sint64 | Kind::Sfixed64 => Ok(Value::I64(s.parse().unwrap_or(0))),
+                 Kind::Int32 | Kind::Sint32 | Kind::Sfixed32 => Ok(Value::I32(s.parse().unwrap_or(0))),
+                 Kind::Float => Ok(Value::F32(s.parse().unwrap_or(0.0))),
+                 Kind::Double => Ok(Value::F64(s.parse().unwrap_or(0.0))),
+                 _ => Err(format!("Cannot convert string {:?} to {:?}", s, kind)),
+             }
+        }
+        
+        (lexpr::Value::Cons(_), Kind::Message(msg_desc)) => {
+            let children = expr.to_vec().ok_or_else(|| "Invalid list".to_string())?;
+            sexpr_to_message(&children, msg_desc)
+        }
+        _ => Err(format!("Cannot convert {:?} to {:?}", expr, kind)),
+    }
+}
+
+/// Convert S-expression children to a proto message (handles oneof)
+fn sexpr_to_message(children: &[lexpr::Value], msg_desc: &prost_reflect::MessageDescriptor) -> Result<prost_reflect::Value, String> {
+    use prost_reflect::Value;
+    
+    // Check if message has a oneof at root (like BatchOp)
+    if let Some(oneof) = msg_desc.oneofs().next() {
+        // First child should be variant name
+        let variant_name = match children.first() {
+            Some(lexpr::Value::Symbol(name)) => name,
+            Some(lexpr::Value::String(name)) => name,
+            _ => return Err("Expected variant name as first element".to_string()),
+        };
+        
+        // Find the oneof field matching this variant
+        let field = oneof.fields()
+            .find(|f| f.name().eq_ignore_ascii_case(variant_name))
+            .ok_or_else(|| format!("Unknown variant: {}", variant_name))?;
+        
+        // Build the variant message
+        let mut msg = DynamicMessage::new(msg_desc.clone());
+        
+        if let Kind::Message(inner_msg_desc) = field.kind() {
+            // Variant has nested message - parse remaining children as its fields
+            let inner_fields: Vec<_> = inner_msg_desc.fields().collect();
+            let mut inner_msg = DynamicMessage::new(inner_msg_desc.clone());
+            
+            for (i, child) in children.iter().skip(1).enumerate() {
+                if i < inner_fields.len() {
+                    let inner_field = &inner_fields[i];
+                    let value = sexpr_to_value(child, inner_field)?;
+                    inner_msg.set_field(inner_field, value);
+                }
+            }
+            
+            msg.set_field(&field, Value::Message(inner_msg));
+        } else {
+            // Variant is scalar - use second child
+            if let Some(child) = children.get(1) {
+                let value = sexpr_to_value(child, &field)?;
+                msg.set_field(&field, value);
+            }
+        }
+        
+        Ok(Value::Message(msg))
+    } else {
+        // No oneof - positional field assignment
+        let fields: Vec<_> = msg_desc.fields().collect();
+        let mut msg = DynamicMessage::new(msg_desc.clone());
+        
+        for (i, child) in children.iter().enumerate() {
+            if i < fields.len() {
+                let field = &fields[i];
+                let value = sexpr_to_value(child, field)?;
+                msg.set_field(field, value);
+            }
+        }
+        
+        Ok(Value::Message(msg))
+    }
+}
+
+use prost_reflect::Kind;
 
 fn parse_value_for_field(field: &prost_reflect::FieldDescriptor, s: &str) -> prost_reflect::Value {
     use prost_reflect::{Kind, Value};
@@ -1185,4 +1387,66 @@ pub async fn cmd_unsub(registry: &Arc<SubscriptionRegistry>, target: &str, write
         let _ = writeln!(w, "Usage: unsub <id> or unsub all");
     }
     Ok(Continue)
+}
+
+
+
+
+fn reconstruct_args(args: &[String]) -> String {
+    args.iter().map(|arg| {
+        // Detect trailing closing parentheses which are likely structural
+        let suffix_start = arg.rfind(|c| c != ')').map(|i| i + 1).unwrap_or(0);
+        // Handle case where string is all parens ")))"
+        if suffix_start == 0 && arg.chars().all(|c| c == ')') {
+             if arg.is_empty() { return "\"\"".to_string(); } // Was empty string
+             return arg.clone(); 
+        }
+        
+        let (stem, suffix) = arg.split_at(suffix_start);
+        
+        // Quote stem if it has spaces or is empty (and we have no suffix or explicit empty)
+        if stem.contains(' ') || stem.contains('\t') || stem.contains('\n') || stem.is_empty() {
+             format!("\"{}\"{}", stem.replace('\"', "\\\""), suffix)
+        } else {
+             arg.clone()
+        }
+    }).collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reconstruct_args() {
+        // Case 1: unquoted
+        let args = vec!["((put".to_string(), "c".to_string(), "foo))".to_string()];
+        assert_eq!(reconstruct_args(&args), "((put c foo))");
+
+        // Case 2: spaces (shlex stripped quotes)
+        // User typed: ((put c "Hello world"))
+        // Shlex gave: ["((put", "c", "Hello world))"]  <-- Wait, shlex splits by space unless quoted.
+        // Actually, "Hello world" -> Hello world.
+        // So args are: ["((put", "c", "Hello", "world))"] ??
+        // If user typed `((put c "Hello world"))`
+        // shlex sees: `((put`, `c`, `"Hello world"` (quoted), `))`
+        // If they are adjacent? `((put c "Hello world"))` -> `((put`, `c`, `Hello world))` tokens. (Because shlex handles adjacent quotes).
+        // So args is ["((put", "c", "Hello world))"]
+        let args = vec!["((put".to_string(), "c".to_string(), "Hello world))".to_string()];
+        // We expect: ((put c "Hello world"))
+        assert_eq!(reconstruct_args(&args), "((put c \"Hello world\"))");
+        
+        // Case 3: Proper spacing
+        // User typed: ((put c "Hello world" ))
+        // Shlex: ["((put", "c", "Hello world", "))"]
+        let args = vec!["((put".to_string(), "c".to_string(), "Hello world".to_string(), "))".to_string()];
+        assert_eq!(reconstruct_args(&args), "((put c \"Hello world\" ))");
+        
+        // Case 4: No spaces, tokens with parens
+        // User typed: ((put c x))
+        // Shlex: ["((put", "c", "x))"]
+        let args = vec!["((put".to_string(), "c".to_string(), "x))".to_string()];
+        assert_eq!(reconstruct_args(&args), "((put c x))");
+        // This confirms fixing the "quote" error for case 4.
+    }
 }

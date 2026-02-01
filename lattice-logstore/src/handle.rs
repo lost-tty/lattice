@@ -5,7 +5,8 @@
 use crate::state::{LogState, LogEntry};
 use lattice_model::{StateWriter, StateWriterError, Hash};
 use lattice_storage::PersistentState;
-use lattice_store_base::HandleBase;
+use lattice_store_base::{HandleBase, dispatch::dispatch_method};
+use crate::proto::{AppendRequest, AppendResponse, ReadRequest, ReadResponse};
 use std::ops::Deref;
 
 /// Handle for log operations
@@ -83,52 +84,26 @@ impl<W: StateWriter + AsRef<PersistentState<LogState>>> LogHandle<W> {
     /// Dispatch a command dynamically.
     /// Reads go to state, writes go through StateWriter.
     pub async fn dispatch(&self, method_name: &str, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+        let desc = crate::LOG_SERVICE_DESCRIPTOR.clone();
         match method_name {
-            "Append" => self.dispatch_append(request).await,
-            "Read" => self.dispatch_read(request),
+            "Append" => dispatch_method(method_name, request, desc, |req| self.handle_append(req)).await,
+            "Read" => dispatch_method(method_name, request, desc, |req| self.handle_read(req)).await,
             _ => Err(format!("Unknown method: {}", method_name).into())
         }
     }
     
-    async fn dispatch_append(&self, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
-        let content = request.get_field_by_name("content")
-            .map(|v| v.as_bytes().map(|b| b.to_vec()).unwrap_or_default())
-            .unwrap_or_default();
-        
-        let hash = self.append(&content).await?;
-        
-        let output_desc = crate::LOG_SERVICE_DESCRIPTOR
-            .methods()
-            .find(|m| m.name() == "Append")
-            .ok_or("Method not found")?
-            .output();
-        let mut resp = prost_reflect::DynamicMessage::new(output_desc);
-        resp.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.0.to_vec().into()));
-        Ok(resp)
+    async fn handle_append(&self, req: AppendRequest) -> Result<AppendResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let hash = self.append(&req.content).await?;
+        Ok(AppendResponse { hash: hash.0.to_vec() })
     }
     
-    fn dispatch_read(&self, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
-        let tail = if request.has_field_by_name("tail") {
-            request.get_field_by_name("tail")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize)
-        } else {
-            None
-        };
-            
+    async fn handle_read(&self, req: ReadRequest) -> Result<ReadResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let tail = req.tail.map(|v| v as usize);
         let entries = self.read(tail);
         
-        let output_desc = crate::LOG_SERVICE_DESCRIPTOR
-            .methods()
-            .find(|m| m.name() == "Read")
-            .ok_or("Method not found")?
-            .output();
-        let mut resp = prost_reflect::DynamicMessage::new(output_desc);
-        let entry_values: Vec<prost_reflect::Value> = entries.iter().map(|e| {
-            prost_reflect::Value::String(String::from_utf8_lossy(&e.content).to_string())
-        }).collect();
-        resp.set_field_by_name("entries", prost_reflect::Value::List(entry_values));
-        Ok(resp)
+        let entry_values = entries.iter().map(|e| e.content.clone()).collect();
+        
+        Ok(ReadResponse { entries: entry_values })
     }
 }
 
@@ -148,3 +123,55 @@ impl<W: StateWriter + AsRef<PersistentState<LogState>> + Send + Sync> Dispatchab
 
 // NOTE: StreamReflectable is now provided by the blanket impl in lattice-store-base
 // via StateProvider + StreamProvider. No manual implementation needed.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_mockkernel::MockWriter;
+    use lattice_store_base::Introspectable;
+    use lattice_model::Uuid;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_dispatch_log() {
+        use crate::proto::{AppendRequest, ReadRequest};
+        use prost::Message as ProstMessage;
+        use prost_reflect::prost::Message as ReflectMessage;
+        
+        let dir = tempdir().unwrap();
+        let state = Arc::new(LogState::open(Uuid::new_v4(), dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = LogHandle::new(writer);
+        
+        // 1. Dispatch Append
+        let req = AppendRequest { content: b"dispatch_msg".to_vec() };
+        let mut buf = Vec::new();
+        ProstMessage::encode(&req, &mut buf).unwrap();
+        
+        let method = handle.service_descriptor().methods().find(|m| m.name() == "Append").unwrap();
+        let mut dynamic_req = prost_reflect::DynamicMessage::new(method.input());
+        ReflectMessage::merge(&mut dynamic_req, buf.as_slice()).unwrap();
+        
+        let resp = handle.dispatch("Append", dynamic_req).await.unwrap();
+        assert!(resp.has_field_by_name("hash"));
+        
+        // 2. Dispatch Read
+        let req = ReadRequest { tail: None };
+        let mut buf = Vec::new();
+        ProstMessage::encode(&req, &mut buf).unwrap();
+        
+        let method = handle.service_descriptor().methods().find(|m| m.name() == "Read").unwrap();
+        let mut dynamic_req = prost_reflect::DynamicMessage::new(method.input());
+        ReflectMessage::merge(&mut dynamic_req, buf.as_slice()).unwrap();
+        
+        let resp = handle.dispatch("Read", dynamic_req).await.unwrap();
+        
+        let entries_val = resp.get_field_by_name("entries").unwrap();
+        let entries_list = entries_val.as_list().unwrap();
+        assert_eq!(entries_list.len(), 1);
+        
+        let content = entries_list[0].as_bytes().unwrap();
+        assert_eq!(content.as_ref(), b"dispatch_msg");
+    }
+}

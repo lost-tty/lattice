@@ -9,6 +9,17 @@ service KvStore {
     rpc Get (GetRequest) returns (GetResponse);
     rpc Delete (DeleteRequest) returns (DeleteResponse);
     rpc List (ListRequest) returns (ListResponse);
+    rpc Batch (BatchRequest) returns (BatchResponse);
+}
+
+// --- Batch Operations ---
+
+message BatchRequest {
+    repeated Operation ops = 1;
+}
+
+message BatchResponse {
+    bytes hash = 1;  // Entry hash of the atomic batch
 }
 
 // --- Service Request/Response ---

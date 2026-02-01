@@ -8,10 +8,11 @@ use crate::{KvState, Head, KvPayload, Operation, Merge};
 use lattice_storage::StateDbError;
 use lattice_storage::PersistentState;
 use lattice_model::{StateWriter, StateWriterError};
-use lattice_store_base::{Introspectable, StateProvider, HandleBase};
+use lattice_store_base::{Introspectable, StateProvider, HandleBase, dispatch::dispatch_method};
 use lattice_model::types::Hash;
 use lattice_model::replication::EntryStreamProvider;
 use prost::Message;
+use crate::proto::{PutRequest, PutResponse, GetRequest, GetResponse, DeleteRequest, DeleteResponse, ListRequest, ListResponse, BatchRequest, BatchResponse};
 use regex::bytes::Regex;
 use tokio::sync::broadcast;
 use crate::{WatchEvent, WatchError};
@@ -70,72 +71,34 @@ impl<W: StateWriter + AsRef<PersistentState<KvState>>> KvHandle<W> {
     /// Dispatch a command dynamically. 
     /// Reads go to state, writes go through StateWriter.
     pub async fn dispatch(&self, method_name: &str, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+        let desc = self.service_descriptor();
         match method_name {
-            "Put" => self.dispatch_put(request).await,
-            "Delete" => self.dispatch_delete(request).await,
-            "Get" => self.dispatch_get(request),
-            "List" => self.dispatch_list(request),
+            "Put" => dispatch_method(method_name, request, desc, |req| self.handle_put(req)).await,
+            "Delete" => dispatch_method(method_name, request, desc, |req| self.handle_delete(req)).await,
+            "Get" => dispatch_method(method_name, request, desc, |req| self.handle_get(req)).await,
+            "List" => dispatch_method(method_name, request, desc, |req| self.handle_list(req)).await,
+            "Batch" => dispatch_method(method_name, request, desc, |req| self.handle_batch(req)).await,
             _ => Err(format!("Unknown method: {}", method_name).into()),
         }
     }
-    
-    async fn dispatch_put(&self, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
-        let key = request.get_field_by_name("key")
-            .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
-            .unwrap_or_default();
-        let value = request.get_field_by_name("value")
-            .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
-            .unwrap_or_default();
-        
-        let hash = self.put(&key, &value).await?;
-        
-        let method = self.service_descriptor().methods().find(|m| m.name() == "Put").ok_or("Method not found")?;
-        let mut response = prost_reflect::DynamicMessage::new(method.output());
-        response.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.to_vec().into()));
-        Ok(response)
+
+    async fn handle_put(&self, req: PutRequest) -> Result<PutResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let hash = self.put(&req.key, &req.value).await?;
+        Ok(PutResponse { hash: hash.to_vec() })
     }
-    
-    async fn dispatch_delete(&self, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
-        let key = request.get_field_by_name("key")
-            .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
-            .unwrap_or_default();
-        
-        let hash = self.delete(&key).await?;
-        
-        let method = self.service_descriptor().methods().find(|m| m.name() == "Delete").ok_or("Method not found")?;
-        let mut response = prost_reflect::DynamicMessage::new(method.output());
-        response.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.to_vec().into()));
-        Ok(response)
+
+    async fn handle_delete(&self, req: DeleteRequest) -> Result<DeleteResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let hash = self.delete(&req.key).await?;
+        Ok(DeleteResponse { hash: hash.to_vec() })
     }
-    
-    fn dispatch_get(&self, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
-        use crate::proto::{GetRequest, GetResponse};
-        use prost::Message as ProstMessage;
-        
-        let mut buf = Vec::new();
-        { use prost_reflect::prost::Message; request.encode(&mut buf)?; }
-        let req = GetRequest::decode(buf.as_slice())?;
-        
+
+    async fn handle_get(&self, req: GetRequest) -> Result<GetResponse, Box<dyn std::error::Error + Send + Sync>> {
         let heads = self.get(&req.key)?;
         let val = heads.lww().unwrap_or_default();
-        let resp = GetResponse { value: val };
-        
-        let mut resp_buf = Vec::new();
-        resp.encode(&mut resp_buf)?;
-        let method = self.service_descriptor().methods().find(|m| m.name() == "Get").ok_or("Method not found")?;
-        let mut dynamic = prost_reflect::DynamicMessage::new(method.output());
-        { use prost_reflect::prost::Message; dynamic.merge(resp_buf.as_slice())?; }
-        Ok(dynamic)
+        Ok(GetResponse { value: val })
     }
-    
-    fn dispatch_list(&self, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
-        use crate::proto::{ListRequest, ListResponse};
-        use prost::Message as ProstMessage;
-        
-        let mut buf = Vec::new();
-        { use prost_reflect::prost::Message; request.encode(&mut buf)?; }
-        let req = ListRequest::decode(buf.as_slice())?;
-        
+
+    async fn handle_list(&self, req: ListRequest) -> Result<ListResponse, Box<dyn std::error::Error + Send + Sync>> {
         let mut items = Vec::new();
         self.scan(&req.prefix, None, |key, heads| {
             if let Some(val) = heads.lww() {
@@ -143,14 +106,27 @@ impl<W: StateWriter + AsRef<PersistentState<KvState>>> KvHandle<W> {
             }
             Ok(true)
         })?;
+        Ok(ListResponse { items })
+    }
+
+    async fn handle_batch(&self, req: BatchRequest) -> Result<BatchResponse, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::operation;
         
-        let resp = ListResponse { items };
-        let mut resp_buf = Vec::new();
-        resp.encode(&mut resp_buf)?;
-        let method = self.service_descriptor().methods().find(|m| m.name() == "List").ok_or("Method not found")?;
-        let mut dynamic = prost_reflect::DynamicMessage::new(method.output());
-        { use prost_reflect::prost::Message; dynamic.merge(resp_buf.as_slice())?; }
-        Ok(dynamic)
+        let mut batch = self.batch();
+        for op in req.ops {
+            match op.op_type {
+                Some(operation::OpType::Put(put)) => {
+                    batch = batch.put(&put.key, &put.value);
+                }
+                Some(operation::OpType::Delete(del)) => {
+                    batch = batch.delete(&del.key);
+                }
+                None => {}
+            }
+        }
+        
+        let hash = batch.commit().await?;
+        Ok(BatchResponse { hash: hash.to_vec() })
     }
 }
 
@@ -1078,4 +1054,44 @@ mod tests {
             None => panic!("Event kind is None"),
         }
     }
+
+    #[tokio::test]
+    async fn test_dispatch_batch() {
+        use crate::proto::{BatchRequest, Operation, PutOp, DeleteOp, operation};
+        use prost::Message as ProstMessage;
+        
+        let dir = tempdir().unwrap();
+        let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());
+        let writer = MockWriter::new(state.clone());
+        let handle = KvHandle::new(writer);
+        
+        // Build BatchRequest with put + delete operations via proto
+        let req = BatchRequest {
+            ops: vec![
+                Operation { op_type: Some(operation::OpType::Put(PutOp { key: b"k1".to_vec(), value: b"v1".to_vec() })) },
+                Operation { op_type: Some(operation::OpType::Put(PutOp { key: b"k2".to_vec(), value: b"v2".to_vec() })) },
+                Operation { op_type: Some(operation::OpType::Delete(DeleteOp { key: b"k1".to_vec() })) },
+            ],
+        };
+        
+        // Encode to DynamicMessage
+        let mut buf = Vec::new();
+        req.encode(&mut buf).unwrap();
+        let method = handle.service_descriptor().methods().find(|m| m.name() == "Batch").unwrap();
+        let mut dynamic_req = prost_reflect::DynamicMessage::new(method.input());
+        { use prost_reflect::prost::Message; dynamic_req.merge(buf.as_slice()).unwrap(); }
+        
+        // Dispatch
+        let response = handle.dispatch("Batch", dynamic_req).await.unwrap();
+        
+        // Verify response has hash
+        let hash_value = response.get_field_by_name("hash").unwrap();
+        let hash_bytes = hash_value.as_bytes().unwrap();
+        assert!(!hash_bytes.is_empty(), "Batch should return entry hash");
+        
+        // Verify state: k1 deleted (last op), k2 exists
+        assert!(handle.get(b"k1").unwrap().lww().is_none(), "k1 should be deleted");
+        assert_eq!(handle.get(b"k2").unwrap().lww(), Some(b"v2".to_vec()), "k2 should exist");
+    }
 }
+
