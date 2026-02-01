@@ -1,4 +1,4 @@
-//! Introspection traits for generic CLI and API support (Roadmap 4E)
+//! Introspection traits for generic CLI and API support
 //!
 //! These traits enable dynamic command discovery and execution without
 //! compile-time knowledge of specific state machine types.
@@ -74,7 +74,7 @@ pub trait CommandDispatcher: Introspectable {
 }
 
 // ============================================================================
-// Stream Introspection (Roadmap 8D)
+// Stream Introspection
 // ============================================================================
 
 /// Descriptor for a subscribable event stream.

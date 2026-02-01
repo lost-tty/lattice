@@ -10,7 +10,6 @@ pub mod state_machine;
 pub mod log_traits;
 pub mod replication;
 pub mod node_identity;
-pub mod introspection;
 pub mod peer_provider;
 pub mod net_event;
 pub mod node_provider;
@@ -26,7 +25,6 @@ pub use hlc::HLC;
 pub use clock::{Clock, SystemClock, MockClock};
 pub use state_machine::{StateMachine, StateWriter, StateWriterError, Op};
 pub use log_traits::{LogEntry, LogManager, ChainTipInfo, LogValidation, Identity};
-pub use introspection::{Introspectable, CommandDispatcher, FieldFormat, StreamDescriptor, StreamReflectable, StreamError, BoxByteStream};
 pub use replication::{
     // Traits
     SyncProvider,

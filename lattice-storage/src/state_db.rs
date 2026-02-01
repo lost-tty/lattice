@@ -488,20 +488,65 @@ pub fn xor_hash(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
 }
 // ==================== Composition Pattern ====================
 
-use lattice_model::{Introspectable, StreamReflectable, StreamDescriptor};
+use lattice_store_base::{Introspectable, StreamReflectable, StreamDescriptor, FieldFormat};
 use prost_reflect::DynamicMessage;
 use std::collections::HashMap;
 
-/// Logic trait for implementing state machine operations over a storage backend.
+/// Core trait for Lattice state machines.
 /// 
-/// Types implementing this trait (e.g. KvState, LogState) provide the domain-specific
-/// `apply` logic, while `Store<T>` handles the infrastructure (snapshot/restore).
+/// Provides the unified apply pattern: txn → verify → mutate → update identity → commit → notify
+/// 
+/// Implementors provide:
+/// - `backend()` - access to storage backend
+/// - `mutate()` - decode payload and apply mutations
+/// - `notify()` - notify watchers of changes
 pub trait StateLogic: Send + Sync {
+    /// Store-specific notification data type.
+    type Updates;
+    
     /// Access the underlying backend.
     fn backend(&self) -> &StateBackend;
     
+    /// Decode payload and apply mutations to the table.
+    /// Returns (notification data, identity diff).
+    fn mutate(
+        &self,
+        table: &mut redb::Table<&[u8], &[u8]>,
+        op: &Op,
+    ) -> Result<(Self::Updates, Hash), StateDbError>;
+    
+    /// Notify watchers of changes.
+    fn notify(&self, updates: Self::Updates);
+    
     /// Apply an operation to the state.
-    fn apply(&self, op: &Op) -> Result<(), StateDbError>;
+    /// 
+    /// Default implementation: begin txn → verify chain → mutate → update identity → commit → notify
+    fn apply(&self, op: &Op) -> Result<(), StateDbError> {
+        let write_txn = self.backend().db().begin_write()?;
+        let updates = {
+            let mut table = write_txn.open_table(TABLE_DATA)?;
+            
+            // 0. Validate Chain Integrity
+            let should_apply = self.backend().verify_and_update_tip(&write_txn, &op.author, op.id, op.prev_hash)?;
+            if !should_apply {
+                return Ok(()); // Idempotent duplicate
+            }
+
+            // 1. Apply mutations
+            let (updates, identity_diff) = self.mutate(&mut table, op)?;
+            
+            // 2. Update State Identity
+            self.backend().update_state_identity(&write_txn, identity_diff)?;
+            
+            updates
+        };
+        write_txn.commit()?;
+        
+        // 3. Notify watchers
+        self.notify(updates);
+        
+        Ok(())
+    }
 }
 
 /// A composite StateMachine wrapper.
@@ -618,7 +663,7 @@ impl<T: StateLogic + Introspectable> Introspectable for PersistentState<T> {
         self.inner.command_docs()
     }
 
-    fn field_formats(&self) -> HashMap<String, lattice_model::introspection::FieldFormat> {
+    fn field_formats(&self) -> HashMap<String, FieldFormat> {
         self.inner.field_formats()
     }
 

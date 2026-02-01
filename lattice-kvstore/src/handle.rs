@@ -4,17 +4,16 @@
 //! - Reads: Direct from KvState (sync)
 //! - Writes: Via StateWriter (goes through replication)
 
-use std::sync::Arc;
 use crate::{KvState, Head, KvPayload, Operation, Merge};
 use lattice_storage::StateDbError;
 use lattice_storage::PersistentState;
-use lattice_model::{StateWriter, StateWriterError, Introspectable, CommandDispatcher};
+use lattice_model::{StateWriter, StateWriterError};
+use lattice_store_base::{Introspectable, StateProvider, HandleBase};
 use lattice_model::types::Hash;
 use lattice_model::replication::EntryStreamProvider;
 use prost::Message;
 use regex::bytes::Regex;
 use tokio::sync::broadcast;
-use futures_util::StreamExt;
 use crate::{WatchEvent, WatchError};
 use std::future::Future;
 use std::pin::Pin;
@@ -30,244 +29,172 @@ fn validate_key(key: &[u8]) -> Result<(), StateWriterError> {
 
 /// High-level KV handle with read/write operations
 /// 
+/// Wraps `HandleBase` for common boilerplate, adds KV-specific methods.
+/// 
 /// Generic over `W: StateWriter` to support different write backends:
 /// - `Replica` for production (writes go through replication)
 /// - `MockWriter` for tests (writes apply directly)
-#[derive(Debug)]
-pub struct KvHandle<W: StateWriter> {
-    writer: W,
-}
+pub struct KvHandle<W>(HandleBase<PersistentState<KvState>, W>);
 
-impl<W: StateWriter + Clone> Clone for KvHandle<W> {
+impl<W: Clone> Clone for KvHandle<W> {
     fn clone(&self) -> Self {
-        Self {
-            writer: self.writer.clone(),
-        }
+        Self(self.0.clone())
     }
 }
 
-impl<W: StateWriter + AsRef<PersistentState<KvState>>> KvHandle<W> {
+impl<W> KvHandle<W> {
     /// Create a new KvHandle
     pub fn new(writer: W) -> Self {
-        Self { writer }
-    }
-    
-    /// Get the underlying state for direct reads
-    pub fn state(&self) -> &KvState {
-        &*self.writer.as_ref()
+        Self(HandleBase::new(writer))
     }
     
     /// Get the underlying writer (e.g., Replica for replication operations)
     pub fn writer(&self) -> &W {
-        &self.writer
+        self.0.writer()
+    }
+}
+
+impl<W: AsRef<PersistentState<KvState>>> KvHandle<W> {
+    /// Get the underlying state for direct reads
+    pub fn state(&self) -> &KvState {
+        self.0.state()
     }
     
     /// Get the service descriptor for introspection
     pub fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
         self.state().service_descriptor()
     }
-    
+}
+
+impl<W: StateWriter + AsRef<PersistentState<KvState>>> KvHandle<W> {
     /// Dispatch a command dynamically. 
     /// Reads go to state, writes go through StateWriter.
     pub async fn dispatch(&self, method_name: &str, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
-        use crate::proto::{GetRequest, GetResponse, ListRequest, ListResponse};
-        use prost::Message as ProstMessage;
-        
-        let desc = self.service_descriptor();
-        
         match method_name {
-            "Put" => {
-                // Extract key and value from DynamicMessage
-                let key = request.get_field_by_name("key")
-                    .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
-                    .unwrap_or_default();
-                let value = request.get_field_by_name("value")
-                    .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
-                    .unwrap_or_default();
-                
-                let hash = self.put(&key, &value).await?;
-                
-                // Build response
-                let method = desc.methods().find(|m| m.name() == "Put").ok_or("Method not found")?;
-                let mut response = prost_reflect::DynamicMessage::new(method.output());
-                response.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.to_vec().into()));
-                Ok(response)
-            }
-            "Delete" => {
-                let key = request.get_field_by_name("key")
-                    .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
-                    .unwrap_or_default();
-                
-                let hash = self.delete(&key).await?;
-                
-                let method = desc.methods().find(|m| m.name() == "Delete").ok_or("Method not found")?;
-                let mut response = prost_reflect::DynamicMessage::new(method.output());
-                response.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.to_vec().into()));
-                Ok(response)
-            }
-            "Get" => {
-                // Decode request
-                let mut buf = Vec::new();
-                { use prost_reflect::prost::Message; request.encode(&mut buf)?; }
-                let req = GetRequest::decode(buf.as_slice())?;
-                
-                let heads = self.get(&req.key)?;
-                let val = heads.lww().unwrap_or_default();
-                let resp = GetResponse { value: val };
-                
-                // Pack response
-                let mut resp_buf = Vec::new();
-                resp.encode(&mut resp_buf)?;
-                let method = desc.methods().find(|m| m.name() == "Get").ok_or("Method not found")?;
-                let mut dynamic = prost_reflect::DynamicMessage::new(method.output());
-                { use prost_reflect::prost::Message; dynamic.merge(resp_buf.as_slice())?; }
-                Ok(dynamic)
-            }
-            "List" => {
-                let mut buf = Vec::new();
-                { use prost_reflect::prost::Message; request.encode(&mut buf)?; }
-                let req = ListRequest::decode(buf.as_slice())?;
-                
-                let mut items = Vec::new();
-                self.scan(&req.prefix, None, |key, heads| {
-                    if let Some(val) = heads.lww() {
-                        items.push(crate::proto::KeyValuePair { key, value: val });
-                    }
-                    Ok(true)
-                })?;
-                
-                let resp = ListResponse { items };
-                let mut resp_buf = Vec::new();
-                resp.encode(&mut resp_buf)?;
-                let method = desc.methods().find(|m| m.name() == "List").ok_or("Method not found")?;
-                let mut dynamic = prost_reflect::DynamicMessage::new(method.output());
-                { use prost_reflect::prost::Message; dynamic.merge(resp_buf.as_slice())?; }
-                Ok(dynamic)
-            }
+            "Put" => self.dispatch_put(request).await,
+            "Delete" => self.dispatch_delete(request).await,
+            "Get" => self.dispatch_get(request),
+            "List" => self.dispatch_list(request),
             _ => Err(format!("Unknown method: {}", method_name).into()),
         }
     }
+    
+    async fn dispatch_put(&self, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+        let key = request.get_field_by_name("key")
+            .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
+            .unwrap_or_default();
+        let value = request.get_field_by_name("value")
+            .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
+            .unwrap_or_default();
+        
+        let hash = self.put(&key, &value).await?;
+        
+        let method = self.service_descriptor().methods().find(|m| m.name() == "Put").ok_or("Method not found")?;
+        let mut response = prost_reflect::DynamicMessage::new(method.output());
+        response.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.to_vec().into()));
+        Ok(response)
+    }
+    
+    async fn dispatch_delete(&self, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+        let key = request.get_field_by_name("key")
+            .and_then(|v| v.as_bytes().map(|b| b.to_vec()))
+            .unwrap_or_default();
+        
+        let hash = self.delete(&key).await?;
+        
+        let method = self.service_descriptor().methods().find(|m| m.name() == "Delete").ok_or("Method not found")?;
+        let mut response = prost_reflect::DynamicMessage::new(method.output());
+        response.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.to_vec().into()));
+        Ok(response)
+    }
+    
+    fn dispatch_get(&self, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::{GetRequest, GetResponse};
+        use prost::Message as ProstMessage;
+        
+        let mut buf = Vec::new();
+        { use prost_reflect::prost::Message; request.encode(&mut buf)?; }
+        let req = GetRequest::decode(buf.as_slice())?;
+        
+        let heads = self.get(&req.key)?;
+        let val = heads.lww().unwrap_or_default();
+        let resp = GetResponse { value: val };
+        
+        let mut resp_buf = Vec::new();
+        resp.encode(&mut resp_buf)?;
+        let method = self.service_descriptor().methods().find(|m| m.name() == "Get").ok_or("Method not found")?;
+        let mut dynamic = prost_reflect::DynamicMessage::new(method.output());
+        { use prost_reflect::prost::Message; dynamic.merge(resp_buf.as_slice())?; }
+        Ok(dynamic)
+    }
+    
+    fn dispatch_list(&self, request: prost_reflect::DynamicMessage) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::{ListRequest, ListResponse};
+        use prost::Message as ProstMessage;
+        
+        let mut buf = Vec::new();
+        { use prost_reflect::prost::Message; request.encode(&mut buf)?; }
+        let req = ListRequest::decode(buf.as_slice())?;
+        
+        let mut items = Vec::new();
+        self.scan(&req.prefix, None, |key, heads| {
+            if let Some(val) = heads.lww() {
+                items.push(crate::proto::KeyValuePair { key, value: val });
+            }
+            Ok(true)
+        })?;
+        
+        let resp = ListResponse { items };
+        let mut resp_buf = Vec::new();
+        resp.encode(&mut resp_buf)?;
+        let method = self.service_descriptor().methods().find(|m| m.name() == "List").ok_or("Method not found")?;
+        let mut dynamic = prost_reflect::DynamicMessage::new(method.output());
+        { use prost_reflect::prost::Message; dynamic.merge(resp_buf.as_slice())?; }
+        Ok(dynamic)
+    }
 }
 
-// Implement CommandDispatcher trait for KvHandle (only dispatch - introspection via Introspectable)
-impl<W: StateWriter + AsRef<PersistentState<KvState>> + Send + Sync> CommandDispatcher for KvHandle<W> {
-    fn dispatch<'a>(
+// Dispatchable impl - enables blanket CommandDispatcher
+use lattice_store_base::Dispatchable;
+impl<W: StateWriter + AsRef<PersistentState<KvState>> + Send + Sync> Dispatchable for KvHandle<W> {
+    fn dispatch_command<'a>(
         &'a self,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
         Box::pin(async move {
-            // Delegate to the inherent async method
-            KvHandle::dispatch(self, method_name, request).await
+            self.dispatch(method_name, request).await
         })
     }
 }
 
-// Implement Introspectable trait for KvHandle (delegates to state)
-impl<W: StateWriter + AsRef<PersistentState<KvState>> + Send + Sync> lattice_model::Introspectable for KvHandle<W> {
-    fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
-        self.state().service_descriptor()
-    }
-
-    fn decode_payload(&self, payload: &[u8]) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
-        self.state().decode_payload(payload)
-    }
-
-    fn command_docs(&self) -> std::collections::HashMap<String, String> {
-        self.state().command_docs()
-    }
-
-    fn field_formats(&self) -> std::collections::HashMap<String, lattice_model::introspection::FieldFormat> {
-        self.state().field_formats()
-    }
-
-    fn matches_filter(&self, payload: &prost_reflect::DynamicMessage, filter: &str) -> bool {
-        self.state().matches_filter(payload, filter)
-    }
-
-    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<String> {
-        self.state().summarize_payload(payload)
-    }
-}
-
-// Implement StreamReflectable for KvHandle (delegates to state, implements subscribe)
-impl<W: StateWriter + AsRef<PersistentState<KvState>> + Send + Sync> lattice_model::StreamReflectable for KvHandle<W> {
-    fn stream_descriptors(&self) -> Vec<lattice_model::StreamDescriptor> {
-        self.state().stream_descriptors()
-    }
+// Implement StateProvider to get Introspectable via blanket impl
+impl<W: StateWriter + AsRef<PersistentState<KvState>> + Send + Sync> StateProvider for KvHandle<W> {
+    type State = KvState;
     
-    fn subscribe(&self, stream_name: &str, params: &[u8]) -> Result<lattice_model::BoxByteStream, lattice_model::StreamError> {
-        use lattice_model::StreamError;
-        use prost::Message;
-        
-        if stream_name != "Watch" {
-            return Err(StreamError::NotFound(stream_name.to_string()));
-        }
-        
-        // Decode WatchParams to get pattern
-        let watch_params = crate::proto::WatchParams::decode(params)
-            .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
-        let pattern = watch_params.pattern;
-        
-        // Compile regex for filtering
-        let re = Regex::new(&pattern)
-            .map_err(|e| StreamError::InvalidParams(format!("Invalid regex: {}", e)))?;
-        
-        // Subscribe to state's broadcast channel
-        let state_rx = self.state().subscribe();
-        
-        // Use BroadcastStream - handles Lagged internally, cleaner than manual loop
-        use tokio_stream::wrappers::BroadcastStream;
-        let stream = BroadcastStream::new(state_rx)
-            .filter_map(move |result| {
-                let re = re.clone();
-                async move {
-                    let event = result.ok()?;
-                    if !re.is_match(&event.key) { return None; }
-                    
-                    let kind = match event.kind {
-                        crate::WatchEventKind::Update { heads } => {
-                            let lww_value = heads.lww().unwrap_or_default();
-                            Some(crate::kv_types::watch_event_proto::Kind::Value(lww_value))
-                        }
-                        crate::WatchEventKind::Delete => {
-                            Some(crate::kv_types::watch_event_proto::Kind::Deleted(true))
-                        }
-                    };
-                    
-                    let proto_event = crate::kv_types::WatchEventProto { key: event.key, kind };
-                    let mut buf = Vec::new();
-                    proto_event.encode(&mut buf).ok()?;
-                    Some(buf)
-                }
-            });
-        
-        Ok(Box::pin(stream))
+    fn state(&self) -> &KvState {
+        self.0.state()
     }
 }
 
 impl<W: StateWriter + AsRef<PersistentState<KvState>>> AsRef<PersistentState<KvState>> for KvHandle<W> {
     fn as_ref(&self) -> &PersistentState<KvState> {
-        self.writer.as_ref()
+        self.0.writer().as_ref()
     }
 }
 
-// Deref to the underlying writer (e.g. Store) to expose its methods directly.
+// Deref to the underlying writer for convenience.
 // This allows `handle.log_seq()` to work seamlessly.
 impl<W: StateWriter> std::ops::Deref for KvHandle<W> {
     type Target = W;
 
     fn deref(&self) -> &Self::Target {
-        &self.writer
+        self.0.writer()
     }
 }
 
-// DerefMut to the underlying writer
-impl<W: StateWriter> std::ops::DerefMut for KvHandle<W> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.writer
-    }
-}
+// NOTE: DerefMut removed - HandleBase doesn't expose mutable writer access.
+// If mutable writer access is needed, add a writer_mut() method to HandleBase.
 
 impl<W: StateWriter> StateWriter for KvHandle<W> {
     fn submit(
@@ -275,13 +202,13 @@ impl<W: StateWriter> StateWriter for KvHandle<W> {
         payload: Vec<u8>,
         causal_deps: Vec<Hash>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
-        self.writer.submit(payload, causal_deps)
+        self.0.writer().submit(payload, causal_deps)
     }
 }
 
 impl<W: lattice_model::replication::EntryStreamProvider + Send + Sync + StateWriter> lattice_model::replication::EntryStreamProvider for KvHandle<W> {
     fn subscribe_entries(&self) -> Box<dyn futures_util::Stream<Item = Vec<u8>> + Send + Unpin> {
-        self.writer.subscribe_entries()
+        self.0.writer().subscribe_entries()
     }
 }
 
@@ -551,141 +478,15 @@ impl<W: StateWriter + EntryStreamProvider + Clone + Send + Sync + AsRef<Persiste
     }
 }
 
-// ==================== Mock StateWriter for tests ====================
 
-/// A mock StateWriter that applies operations directly to a KvState
-/// 
-/// Useful for testing without the full replication stack.
-#[doc(hidden)]
-pub struct MockWriter {
-    state: Arc<PersistentState<KvState>>,
-    next_hash: Arc<std::sync::atomic::AtomicU64>,
-    pub entry_tx: broadcast::Sender<Vec<u8>>,
-}
-
-impl MockWriter {
-    pub fn new(state: Arc<PersistentState<KvState>>) -> Self {
-        let (entry_tx, _) = broadcast::channel(128);
-        Self {
-            state,
-            next_hash: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            entry_tx,
-        }
-    }
-}
-
-impl AsRef<PersistentState<KvState>> for MockWriter {
-    fn as_ref(&self) -> &PersistentState<KvState> {
-        &*self.state
-    }
-}
-
-impl Clone for MockWriter {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            next_hash: self.next_hash.clone(),
-            entry_tx: self.entry_tx.clone(),
-        }
-    }
-}
-
-impl lattice_model::replication::EntryStreamProvider for MockWriter {
-    fn subscribe_entries(&self) -> Box<dyn futures_util::Stream<Item = Vec<u8>> + Send + Unpin> {
-        let rx = self.entry_tx.subscribe();
-        Box::new(tokio_stream::wrappers::BroadcastStream::new(rx).map(|r| r.expect("MockWriter stream lagged")))
-    }
-}
-
-impl StateWriter for MockWriter {
-    fn submit(
-        &self,
-        payload: Vec<u8>,
-        causal_deps: Vec<Hash>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
-        use lattice_model::hlc::HLC;
-        use lattice_model::types::PubKey;
-        use lattice_model::Op;
-        use lattice_model::StateMachine;
-        
-        let state = self.state.clone();
-            let hash_num = self.next_hash.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let tx = self.entry_tx.clone();
-            
-            Box::pin(async move {
-                // Generate a unique hash avoiding collisions on restart
-                // Hash = blake3(count + timestamp + payload)
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(&hash_num.to_le_bytes());
-                hasher.update(&timestamp.to_le_bytes());
-                hasher.update(&payload);
-                let hash = Hash::from(*hasher.finalize().as_bytes());
-
-                // Use a fixed author for the mock to simulate a real single-writer session
-                let author = PubKey::from([1u8; 32]);
-            
-            // Find correct prev_hash by querying current state
-            // This ensures valid chain links regardless of how many ops we submit
-            let chaintips = state.applied_chaintips()
-                .map_err(|e| StateWriterError::SubmitFailed(format!("Failed to read tips: {}", e)))?;
-                
-            let prev_hash = chaintips.into_iter()
-                .find(|(a, _)| a == &author)
-                .map(|(_, h)| h)
-                .unwrap_or(Hash::ZERO);
-
-            // Create an Op and apply
-            let op = Op {
-                id: hash,
-                causal_deps: &causal_deps,
-                payload: &payload,
-                author,
-                timestamp: HLC::now(),
-                prev_hash,
-            };
-            
-            state.apply(&op)
-                .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
-            
-            // Emit entry if successful
-             use lattice_proto::storage::{Entry, SignedEntry};
-             use prost::Message;
-
-             // Create ProtoEntry
-             let entry = Entry {
-                 version: 1,
-                 prev_hash: prev_hash.to_vec(),
-                 seq: 1, // Mock doesn't track seq perfectly but that's ok for generic Op tests
-                 timestamp: Some(HLC::now().into()),
-                 causal_deps: causal_deps.iter().map(|h| h.to_vec()).collect(),
-                 payload: payload.clone(),
-             };
-             let entry_bytes = entry.encode_to_vec();
-
-             // Create SignedEntry
-             let signed = SignedEntry {
-                entry_bytes,
-                signature: vec![],
-                author_id: author.to_vec(),
-             };
-             
-             let _ = tx.send(signed.encode_to_vec());
-            
-            Ok(hash)
-        })
-    }
-}
-
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::WatchEventKind;
+    use std::sync::Arc;
+    
+    /// Type alias for the shared MockWriter from lattice-mockkernel.
+    type MockWriter = lattice_mockkernel::MockWriter<KvState>;
     use tempfile::tempdir;
     use tokio::time::{timeout, Duration};
     use futures_util::StreamExt;
@@ -847,7 +648,7 @@ mod tests {
         let (_, mut rx) = handle.watch(".*").await.unwrap();
 
         // Inject garbage data directly into the MockWriter's stream
-        let _ = writer.entry_tx.send(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let _ = writer.entry_tx().send(vec![0xDE, 0xAD, 0xBE, 0xEF]);
         
         // Ensure the watcher didn't crash and can still process valid entries
         // We wait a bit to ensure the processing loop had a chance to consume the garbage
@@ -1193,7 +994,7 @@ mod tests {
     async fn test_subscribe_stream_tombstone_should_not_resurrect() {
         use prost::Message;
         use crate::kv_types::WatchEventProto;
-        use lattice_model::StreamReflectable;
+        use lattice_store_base::StreamReflectable;
         
         let dir = tempdir().unwrap();
         let state = Arc::new(KvState::open(Uuid::new_v4(), dir.path()).unwrap());

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
+lattice-store-base = { workspace = true }
 lattice-kvstore = { workspace = true }
 lattice-logstore = { workspace = true }
 lattice-net-types = { workspace = true }

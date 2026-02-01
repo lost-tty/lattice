@@ -1,5 +1,5 @@
 use lattice_kvstore::{KvState, KvHandle};
-use lattice_kvstore::handle::MockWriter;
+use lattice_mockkernel::MockWriter;
 use lattice_model::Op;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::hlc::HLC;

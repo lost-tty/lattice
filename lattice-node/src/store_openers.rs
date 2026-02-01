@@ -5,7 +5,8 @@ use crate::StoreRegistry;
 use crate::{KvStore, LogStore};
 use crate::StoreHandle;
 use lattice_kernel::{Store, SyncProvider, StoreInspector};
-use lattice_model::{Uuid, CommandDispatcher, StoreType, StreamReflectable, Openable, StoreInfo};
+use lattice_model::{Uuid, StoreType, Openable, StoreInfo};
+use lattice_store_base::{CommandDispatcher, StreamReflectable};
 use std::sync::Arc;
 
 // ==================== StoreHandle Implementations ====================

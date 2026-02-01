@@ -14,6 +14,8 @@ members = [
     "lattice-runtime",
     "lattice-bindings",
     "lattice-storage",
+    "lattice-store-base",
+    "lattice-mockkernel",
 ]
 
 # lattice-bindings is excluded from default members to prevent slow linking (cdylib)
@@ -31,6 +33,7 @@ default-members = [
     "lattice-logstore",
     "lattice-runtime",
     "lattice-storage",
+    "lattice-store-base",
 ]
 
 [workspace.package]
@@ -47,6 +50,8 @@ lattice-model = { path = "lattice-model" }
 lattice-kvstore = { path = "lattice-kvstore" }
 lattice-logstore = { path = "lattice-logstore" }
 lattice-storage = { path = "lattice-storage" }
+lattice-store-base = { path = "lattice-store-base" }
+lattice-mockkernel = { path = "lattice-mockkernel" }
 lattice-net-types = { path = "lattice-net-types" }
 lattice-proto = { path = "lattice-proto" }
 lattice-api = { path = "lattice-api" }

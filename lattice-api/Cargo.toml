@@ -19,6 +19,7 @@ ffi = ["uniffi"]
 lattice-node = { workspace = true }
 lattice-net = { workspace = true }
 lattice-model = { workspace = true }
+lattice-store-base = { workspace = true }
 tonic = "0.12"
 prost = { workspace = true }
 prost-reflect = { workspace = true }

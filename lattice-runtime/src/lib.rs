@@ -20,7 +20,8 @@ pub use backend_rpc::RpcBackend;
 pub use runtime::{Runtime, RuntimeBuilder, RuntimeError};
 
 // Re-export types consumers need
-pub use lattice_model::{FieldFormat, types::{PubKey, Hash}};
+pub use lattice_store_base::FieldFormat;
+pub use lattice_model::types::{PubKey, Hash};
 
 // Internal re-exports (not public API)
 pub(crate) use lattice_net::MeshService;

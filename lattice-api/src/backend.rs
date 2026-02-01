@@ -18,7 +18,7 @@ pub use crate::proto::{
 };
 
 // Re-export model types needed by backends
-pub use lattice_model::{StreamDescriptor, BoxByteStream};
+pub use lattice_store_base::{StreamDescriptor, BoxByteStream};
 
 // ==================== Error Types ====================
 

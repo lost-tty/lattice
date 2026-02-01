@@ -1,0 +1,17 @@
+[package]
+name = "lattice-store-base"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Base traits and infrastructure for Lattice store handles"
+
+[dependencies]
+# Reflection
+prost-reflect = { workspace = true }
+
+# Async
+futures-core = "0.3"
+
+# Utilities
+thiserror = { workspace = true }
+

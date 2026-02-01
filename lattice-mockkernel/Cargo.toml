@@ -1,0 +1,17 @@
+[package]
+name = "lattice-mockkernel"
+description = "Test-only mock kernel for testing stores without real replication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-model = { workspace = true }
+lattice-storage = { workspace = true }
+lattice-store-base = { workspace = true }
+lattice-proto = { workspace = true }
+blake3 = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+futures-util = { workspace = true }

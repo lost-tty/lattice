@@ -10,7 +10,8 @@
 use crate::kv_types::{operation, KvPayload, WatchEvent, WatchEventKind};
 use crate::head::Head;
 use crate::merge::Merge;
-use lattice_model::{Op, Introspectable, Uuid, Hash};
+use lattice_model::{Op, Uuid, Hash};
+use lattice_store_base::{Introspectable, FieldFormat};
 use crate::kv_types::{HeadInfo as ProtoHeadInfo, HeadList};
 use prost::Message;
 use prost_reflect::{DescriptorPool, ReflectMessage};
@@ -265,101 +266,78 @@ pub fn extract_literal_prefix(pattern: &str) -> Option<Vec<u8>> {
 // ==================== StateLogic trait implementation ====================
 
 impl StateLogic for KvState {
+    type Updates = Vec<(Vec<u8>, Vec<Head>)>;
+
     fn backend(&self) -> &StateBackend {
         &self.backend
     }
 
-    fn apply(&self, op: &Op) -> Result<(), StateDbError> {
-        // Decode KV payload first to verify validity before starting transaction
+    /// Decode payload and apply KV mutations to the table.
+    fn mutate(
+        &self,
+        table: &mut redb::Table<&[u8], &[u8]>,
+        op: &Op,
+    ) -> Result<(Self::Updates, Hash), StateDbError> {
+        // Decode payload
         let kv_payload = KvPayload::decode(op.payload.as_ref())
             .map_err(|e| StateDbError::Conversion(e.to_string()))?;
         
-        // Track changes to notify watchers after commit
         let mut updates: Vec<(Vec<u8>, Vec<Head>)> = Vec::new();
+        let mut identity_diff = Hash::ZERO;
 
-        let write_txn = self.backend.db().begin_write()?;
-        {
-            let mut table_kv = write_txn.open_table(TABLE_DATA)?;
-            // Check Identity Diff Accumulator locally
-            let mut identity_diff = Hash::ZERO;
-            
-            // 0. Validate Chain Integrity (using shared backend logic)
-            // Checks Link, Genesis, and Idempotency
-            let should_apply = self.backend.verify_and_update_tip(&write_txn, &op.author, op.id, op.prev_hash)?;
-                 
-            if !should_apply {
-                 // Idempotent duplicate
-                 return Ok(());
-            }
-
-            // 1. Apply KV operations in reverse order.
-            // This ensures "last op wins" for same-key operations within a batch,
-            // since all ops have the same HLC timestamp and apply_head uses first-wins.
-            for kv_op in kv_payload.ops.iter().rev() {
-                if let Some(op_type) = &kv_op.op_type {
-                    match op_type {
-                        operation::OpType::Put(put) => {
-                            let new_head = Head {
-                                value: put.value.clone(),
-                                hlc: op.timestamp,
-                                author: op.author,
-                                hash: op.id,
-                                tombstone: false,
-                            };
-                            if let Some(change) = self.apply_head(&mut table_kv, &put.key, new_head, &op.causal_deps)? {
-                                updates.push((put.key.clone(), change.new_heads));
-                                
-                                // Update identity diff
-                                if let Some(old) = change.old_bytes {
-                                    let h = Self::hash_kv_entry(&put.key, &old);
-                                    identity_diff = Self::xor_hash(identity_diff, h);
-                                }
-                                let h = Self::hash_kv_entry(&put.key, &change.new_bytes);
-                                identity_diff = Self::xor_hash(identity_diff, h);
+        // Apply KV operations (in reverse order for "last op wins" within batch)
+        for kv_op in kv_payload.ops.iter().rev() {
+            if let Some(op_type) = &kv_op.op_type {
+                match op_type {
+                    operation::OpType::Put(put) => {
+                        let new_head = Head {
+                            value: put.value.clone(),
+                            hlc: op.timestamp,
+                            author: op.author,
+                            hash: op.id,
+                            tombstone: false,
+                        };
+                        if let Some(change) = self.apply_head(table, &put.key, new_head, &op.causal_deps)? {
+                            updates.push((put.key.clone(), change.new_heads));
+                            if let Some(old) = change.old_bytes {
+                                identity_diff = Self::xor_hash(identity_diff, Self::hash_kv_entry(&put.key, &old));
                             }
+                            identity_diff = Self::xor_hash(identity_diff, Self::hash_kv_entry(&put.key, &change.new_bytes));
                         }
-                        operation::OpType::Delete(del) => {
-                            let tombstone = Head {
-                                value: vec![],
-                                hlc: op.timestamp,
-                                author: op.author,
-                                hash: op.id,
-                                tombstone: true,
-                            };
-                            if let Some(change) = self.apply_head(&mut table_kv, &del.key, tombstone, &op.causal_deps)? {
-                                updates.push((del.key.clone(), change.new_heads));
-                                
-                                // Update identity diff
-                                if let Some(old) = change.old_bytes {
-                                    let h = Self::hash_kv_entry(&del.key, &old);
-                                    identity_diff = Self::xor_hash(identity_diff, h);
-                                }
-                                let h = Self::hash_kv_entry(&del.key, &change.new_bytes);
-                                identity_diff = Self::xor_hash(identity_diff, h);
+                    }
+                    operation::OpType::Delete(del) => {
+                        let tombstone = Head {
+                            value: vec![],
+                            hlc: op.timestamp,
+                            author: op.author,
+                            hash: op.id,
+                            tombstone: true,
+                        };
+                        if let Some(change) = self.apply_head(table, &del.key, tombstone, &op.causal_deps)? {
+                            updates.push((del.key.clone(), change.new_heads));
+                            if let Some(old) = change.old_bytes {
+                                identity_diff = Self::xor_hash(identity_diff, Self::hash_kv_entry(&del.key, &old));
                             }
+                            identity_diff = Self::xor_hash(identity_diff, Self::hash_kv_entry(&del.key, &change.new_bytes));
                         }
                     }
                 }
             }
-            
-            // 2. Update State Identity (using shared backend logic)
-            self.backend.update_state_identity(&write_txn, identity_diff)?;
         }
-        write_txn.commit()?;
-        
-        // Notify watchers after successful commit
+
+        Ok((updates, identity_diff))
+    }
+
+    /// Notify watchers of changes.
+    fn notify(&self, updates: Self::Updates) {
         for (key, heads) in updates {
             let kind = if heads.is_empty() || heads.iter().all(|h| h.tombstone) {
                 WatchEventKind::Delete
             } else {
                 WatchEventKind::Update { heads: heads.clone() }
             };
-            
-            let event = WatchEvent { key, kind };
-            let _ = self.watcher_tx.send(event);
+            let _ = self.watcher_tx.send(WatchEvent { key, kind });
         }
-        
-        Ok(())
     }
 }
 
@@ -409,8 +387,7 @@ impl Introspectable for KvState {
         docs
     }
 
-    fn field_formats(&self) -> std::collections::HashMap<String, lattice_model::introspection::FieldFormat> {
-        use lattice_model::introspection::FieldFormat;
+    fn field_formats(&self) -> std::collections::HashMap<String, FieldFormat> {
         let mut formats = std::collections::HashMap::new();
         // Request/Response hints
         formats.insert("PutResponse.hash".to_string(), FieldFormat::Hex);
@@ -520,17 +497,72 @@ mod payload_summary {
     }
 }
 
-// Implement StreamReflectable for KvState
-impl lattice_model::StreamReflectable for KvState {
-    fn stream_descriptors(&self) -> Vec<lattice_model::StreamDescriptor> {
+// Implement StreamProvider for KvState - enables blanket StreamReflectable on handles
+use lattice_store_base::{StreamProvider, StreamHandler, StreamDescriptor, StreamError, BoxByteStream};
+
+impl StreamProvider for KvState {
+    fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
         vec![
-            lattice_model::StreamDescriptor {
-                name: "Watch".to_string(),
-                description: "Subscribe to key changes matching a regex pattern".to_string(),
-                param_schema: Some("lattice.kv.WatchParams".to_string()),
-                event_schema: Some("lattice.kv.WatchEventProto".to_string()),
+            StreamHandler {
+                descriptor: StreamDescriptor {
+                    name: "Watch".to_string(),
+                    description: "Subscribe to key changes matching a regex pattern".to_string(),
+                    param_schema: Some("lattice.kv.WatchParams".to_string()),
+                    event_schema: Some("lattice.kv.WatchEventProto".to_string()),
+                },
+                subscribe: Self::subscribe_watch,
             }
         ]
+    }
+}
+
+impl KvState {
+    /// Subscribe to key changes matching a regex pattern.
+    pub fn subscribe_watch(&self, params: &[u8]) -> Result<BoxByteStream, StreamError> {
+        use prost::Message;
+        
+        // Decode WatchParams to get pattern
+        let watch_params = crate::proto::WatchParams::decode(params)
+            .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
+        let pattern = watch_params.pattern;
+        
+        // Compile regex for filtering
+        let re = Regex::new(&pattern)
+            .map_err(|e| StreamError::InvalidParams(format!("Invalid regex: {}", e)))?;
+        
+        // Subscribe to state's broadcast channel
+        let mut state_rx = self.subscribe();
+        
+        // Use async_stream for cleaner async handling
+        let stream = async_stream::stream! {
+            loop {
+                match state_rx.recv().await {
+                    Ok(event) => {
+                        if !re.is_match(&event.key) { continue; }
+                        
+                        let kind = match event.kind {
+                            crate::WatchEventKind::Update { heads } => {
+                                let lww_value = heads.lww().unwrap_or_default();
+                                Some(crate::kv_types::watch_event_proto::Kind::Value(lww_value))
+                            }
+                            crate::WatchEventKind::Delete => {
+                                Some(crate::kv_types::watch_event_proto::Kind::Deleted(true))
+                            }
+                        };
+                        
+                        let proto_event = crate::kv_types::WatchEventProto { key: event.key.clone(), kind };
+                        let mut buf = Vec::new();
+                        if proto_event.encode(&mut buf).is_ok() {
+                            yield buf;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        };
+        
+        Ok(Box::pin(stream))
     }
 }
 

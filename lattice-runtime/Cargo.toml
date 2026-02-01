@@ -10,6 +10,7 @@ lattice-node = { workspace = true }
 lattice-kernel = { workspace = true }
 lattice-net = { workspace = true }
 lattice-model = { workspace = true }
+lattice-store-base = { workspace = true }
 lattice-api = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }

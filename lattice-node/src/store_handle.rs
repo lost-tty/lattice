@@ -6,7 +6,8 @@
 
 use crate::SyncProvider;
 use lattice_kernel::StoreInspector;
-use lattice_model::{CommandDispatcher, Uuid, StoreType, StreamReflectable};
+use lattice_model::{Uuid, StoreType};
+use lattice_store_base::{CommandDispatcher, StreamReflectable};
 use std::sync::Arc;
 
 /// A unified interface for store handles.

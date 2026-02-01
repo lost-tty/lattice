@@ -566,11 +566,11 @@ impl Lattice {
 }
 
 impl Lattice {
-    fn build_stream_params(&self, desc: &lattice_model::StreamDescriptor, args: &[ArgValue], pool: Option<&DescriptorPool>) -> Result<Vec<u8>, LatticeError> {
+    fn build_stream_params(&self, desc: &lattice_store_base::StreamDescriptor, args: &[ArgValue], pool: Option<&DescriptorPool>) -> Result<Vec<u8>, LatticeError> {
         let Some(schema) = desc.param_schema.as_ref().filter(|s| !s.is_empty()) else { return Ok(vec![]) };
         let Some(pool) = pool else { return Ok(vec![]) };
         let msg_desc = pool.get_message_by_name(schema)
-            .ok_or_else(|| LatticeError::TypeNotFound { name: schema.clone() })?;
+            .ok_or_else(|| LatticeError::TypeNotFound { name: schema.to_string() })?;
         
         let mut msg = DynamicMessage::new(msg_desc.clone());
         let fields: Vec<_> = msg_desc.fields().collect();
@@ -603,8 +603,8 @@ pub struct StreamInfo {
     pub event_schema: Option<String>,
 }
 
-impl From<lattice_model::StreamDescriptor> for StreamInfo {
-    fn from(s: lattice_model::StreamDescriptor) -> Self {
+impl From<lattice_store_base::StreamDescriptor> for StreamInfo {
+    fn from(s: lattice_store_base::StreamDescriptor) -> Self {
         Self { name: s.name, param_schema: s.param_schema, event_schema: s.event_schema }
     }
 }

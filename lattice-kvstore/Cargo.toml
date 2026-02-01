@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 lattice-model = { workspace = true }
+lattice-store-base = { workspace = true }
 lattice-storage = { path = "../lattice-storage" }
 lattice-proto = { workspace = true }
 redb = { workspace = true }
@@ -32,3 +33,4 @@ prost-build = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+lattice-mockkernel = { workspace = true }

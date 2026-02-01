@@ -26,22 +26,45 @@
   - `lattice-kvstore` uses `StateLogic` / `PersistentState`
   - `lattice-logstore` uses `StateLogic` / `PersistentState`
   
-### 9B: Batch Operations via Reflection
-> Unify typed and reflection access by exposing BatchBuilder through CommandDispatcher.
-- [ ] Add `Batch` proto message (list of operations)
-- [ ] `CommandDispatcher` handles `Batch` → delegates to `BatchBuilder`
-- [ ] Eliminate `typed_handle` from `OpenedStore` (node uses reflection like CLI)
+### 9B: Unified Store Access API
+> All callers (Node internals, CLI, RPC, FFI) use the same access path. Typed methods become thin wrappers around `dispatch()`.
+
+**Design:**
+```
+All Callers → dispatch(method, DynamicMessage) → StateLogic::apply(Op)
+                    ↑
+Typed wrappers:  put(k,v) → dispatch("Put", PutRequest{k,v})
+```
+
+**Step 1: Batch via dispatch (prerequisite - Node uses batch heavily)**
+- [ ] Add `Batch` proto message (list of `BatchOp` with put/delete variants)
+- [ ] `CommandDispatcher::dispatch("Batch", msg)` delegates to `BatchBuilder`
+- [ ] Verify CLI and Node can batch through reflection API
+
+**Step 2: Typed methods wrap dispatch**
+- [ ] `put(k,v)` builds `PutRequest`, calls `dispatch("Put", msg)`
+- [ ] Single audit path: all operations flow through dispatch
+
+**Step 3: Simplify OpenedStore** 
+- [ ] Remove `typed_handle` - only `Arc<dyn StoreHandle>` remains
+- [ ] Mesh uses `store_handle.dispatch()` directly (or extension traits)
 
 ### 9C: Handle Consolidation
 > Simplify store handle layer by unifying patterns across KvStore and LogStore.
-- [ ] Merge or simplify `handle.rs` across stores
-- [ ] Unify service descriptors in stores
+- [x] Create `lattice-store-base` crate with shared reflection traits
+  - Moved `Introspectable`, `CommandDispatcher`, `StreamReflectable` from `lattice-model`
+  - Updated 8 consumer crates to import directly
+- [x] Implement `StateProvider` trait with blanket `Introspectable` impl
+  - KvHandle now uses blanket impl (~20 lines removed)
+- [x] Create `lattice-mockkernel` crate with generic `MockWriter<S>`
+  - Shared test infrastructure for stores without real replication
+  - KvStore tests now use `MockWriter<KvState>` from shared crate
+- [x] Migrate LogState to implement `Introspectable` (already in state.rs)
 
 ### 9D: State Machine Unification
 > Reduce duplication between `KvState` and `LogState` implementations.
-- [ ] **Standardize Open Boilerplate**: Extract `setup_persistent_state<L>()` helper
-- [ ] **Unified Entry Handling**: `StorageEntry` trait for key derivation and encode/decode
-- [ ] **Shared Apply Template**: Factor verify → mutate → notify into `StateLogic` default impl
+- [x] **Standardize Open Boilerplate**: `setup_persistent_state<L>()` helper exists in `lattice-storage`
+- [x] **Shared Apply Template**: Unified step structure (0→chain, 1→mutate, 2→identity, 3→notify) with matching comments
 
 ### 9E: State Machine Interface Documentation
 > Clearly document the contract for implementing a new store type.
