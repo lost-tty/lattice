@@ -142,6 +142,12 @@ pub struct PeerSyncInfo {
 // Traits
 // ============================================================================
 
+/// Trait for signaling shutdown of a store or actor
+pub trait Shutdownable: Send + Sync {
+    /// Request shutdown (non-blocking)
+    fn shutdown(&self);
+}
+
 /// Type alias for boxed async streams
 pub type EntryStream<'a> = Pin<Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + 'a>>;
 

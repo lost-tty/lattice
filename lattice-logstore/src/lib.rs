@@ -2,12 +2,15 @@
 //!
 //! A minimal store type to validate multi-store infrastructure.
 //! Supports: append, cat, tail operations.
+//!
+//! Use `Store<PersistentLogState>` directly with the replication layer.
 
 mod state;
-mod handle;
 
 pub use state::{LogState, LogEvent};
-pub use handle::LogHandle;
+
+/// Type alias for Log store state wrapped in PersistentState for use with direct_opener()
+pub type PersistentLogState = lattice_storage::PersistentState<LogState>;
 
 // Include the generated FileDescriptorSet
 pub const LOG_DESCRIPTOR_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/log_descriptor.bin"));
@@ -28,16 +31,4 @@ pub static LOG_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
 // Generated proto types
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/lattice.log.rs"));
-}
-
-// Openable trait implementation
-
-
-// Implement StoreInfo for LogHandle
-use lattice_model::{StoreInfo, StateWriter};
-
-impl<W: StateWriter> StoreInfo for LogHandle<W> {
-    fn store_type(&self) -> lattice_model::StoreType {
-        lattice_model::StoreType::LogStore
-    }
 }

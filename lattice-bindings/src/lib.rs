@@ -531,7 +531,7 @@ impl Lattice {
         let params = self.build_stream_params(stream_desc, &args, pool.as_ref())?;
         
         // Subscribe
-        let stream = r.backend().store_subscribe(id, &stream_desc.name, &params)
+        let stream = self.rt.block_on(r.backend().store_subscribe(id, &stream_desc.name, &params))
             .map_err(|e| LatticeError::from_backend(e))?;
         
         // Bridge stream to channel for blocking iteration

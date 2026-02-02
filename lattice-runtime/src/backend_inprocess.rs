@@ -52,11 +52,11 @@ impl InProcessBackend {
             .ok_or_else(|| "Store not found".into())
     }
     
-    fn find_store_name(&self, store_id: Uuid) -> Option<String> {
+    async fn find_store_name(&self, store_id: Uuid) -> Option<String> {
         if let Ok(meshes) = self.node.meta().list_meshes() {
             for (mesh_id, _) in meshes {
                 if let Some(mesh) = self.node.mesh_by_id(mesh_id) {
-                    if let Ok(stores) = mesh.list_stores() {
+                    if let Ok(stores) = mesh.list_stores().await {
                         if let Some(s) = stores.into_iter().find(|s| s.id == store_id) {
                             return s.name;
                         }
@@ -123,7 +123,7 @@ impl LatticeBackend for InProcessBackend {
             let mesh_id = self.node.create_mesh().await?;
             let mesh = self.get_mesh(mesh_id)?;
             let peer_count = mesh.list_peers().await.map(|p| p.len() as u32).unwrap_or(0);
-            let store_count = mesh.list_stores().map(|s| s.len() as u32).unwrap_or(0);
+            let store_count = mesh.list_stores().await.map(|s| s.len() as u32).unwrap_or(0);
             
             Ok(MeshInfo {
                 id: mesh_id.as_bytes().to_vec(),
@@ -141,7 +141,7 @@ impl LatticeBackend for InProcessBackend {
             for (id, _info) in meshes {
                 let (peer_count, store_count) = if let Some(mesh) = self.node.mesh_by_id(id) {
                     let peers = mesh.list_peers().await.map(|p| p.len() as u32).unwrap_or(0);
-                    let stores = mesh.list_stores().map(|s| s.len() as u32).unwrap_or(0);
+                    let stores = mesh.list_stores().await.map(|s| s.len() as u32).unwrap_or(0);
                     (peers, stores)
                 } else {
                     (0, 0)
@@ -162,7 +162,7 @@ impl LatticeBackend for InProcessBackend {
         Box::pin(async move {
             let mesh = self.get_mesh(mesh_id)?;
             let peer_count = mesh.list_peers().await.map(|p| p.len() as u32).unwrap_or(0);
-            let store_count = mesh.list_stores().map(|s| s.len() as u32).unwrap_or(0);
+            let store_count = mesh.list_stores().await.map(|s| s.len() as u32).unwrap_or(0);
             
             Ok(MeshInfo {
                 id: mesh_id.as_bytes().to_vec(),
@@ -249,7 +249,7 @@ impl LatticeBackend for InProcessBackend {
     fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreInfo>> {
         Box::pin(async move {
             let mesh = self.get_mesh(mesh_id)?;
-            let stores = mesh.list_stores()?;
+            let stores = mesh.list_stores().await?;
             
             Ok(stores.into_iter().map(|s| StoreInfo {
                 id: s.id.as_bytes().to_vec(),
@@ -268,7 +268,7 @@ impl LatticeBackend for InProcessBackend {
             
             let sync_state = inspector.sync_state().await?;
             let log_stats = inspector.log_stats().await;
-            let name = self.find_store_name(store_id);
+            let name = self.find_store_name(store_id).await;
             
             Ok(StoreInfo {
                 id: store_id.as_bytes().to_vec(),
@@ -424,9 +424,11 @@ impl LatticeBackend for InProcessBackend {
         })
     }
     
-    fn store_subscribe(&self, store_id: Uuid, stream_name: &str, params: &[u8]) -> BackendResult<BoxByteStream> {
-        let store = self.get_store(store_id)?;
-        let stream = store.as_stream_reflectable().subscribe(stream_name, params)?;
-        Ok(stream)
+    fn store_subscribe<'a>(&'a self, store_id: Uuid, stream_name: &'a str, params: &'a [u8]) -> AsyncResult<'a, BoxByteStream> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            let stream = store.as_stream_reflectable().subscribe(stream_name, params).await?;
+            Ok(stream)
+        })
     }
 }

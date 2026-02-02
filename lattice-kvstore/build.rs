@@ -10,11 +10,11 @@ fn main() -> Result<()> {
     let mut config = prost_build::Config::new();
     config
         .file_descriptor_set_path(&descriptor_path)
-        // Use lattice_proto's storage types instead of generating duplicates
-        .extern_path(".lattice.storage", "::lattice_proto::storage")
+        // Use lattice_proto to link against existing messages
+        .extern_path(".lattice", "::lattice_proto")
         .compile_protos(
-            &["proto/kv_store.proto"],
-            &["proto/", "../lattice-proto/proto/"],
+             &["../lattice-proto/proto/kv_store.proto"],
+             &["../lattice-proto/proto/"],
         )?;
 
     Ok(())

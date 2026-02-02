@@ -27,7 +27,7 @@ pub use state_machine::{StateMachine, StateWriter, StateWriterError, Op};
 pub use log_traits::{LogEntry, LogManager, ChainTipInfo, LogValidation, Identity};
 pub use replication::{
     // Traits
-    SyncProvider,
+    SyncProvider, Shutdownable,
     // Types
     ReplicationError, IngestResult, SyncState,
     ChainTip, OrphanInfo, LogFileInfo, LogStats,
@@ -37,6 +37,6 @@ pub use node_identity::{NodeIdentity, NodeError, PeerStatus};
 pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream, GossipPeer};
 pub use net_event::NetEvent;
 pub use node_provider::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
-pub use store_type::{StoreType, ParseStoreTypeError};
+pub use store_type::{StoreType, ParseStoreTypeError, StoreTypeProvider};
 pub use openable::{Openable, OpenError};
 pub use store_info::StoreInfo;

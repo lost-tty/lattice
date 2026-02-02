@@ -128,9 +128,12 @@ pub trait StreamReflectable: Send + Sync {
     
     /// Subscribe to a named stream with the given parameters.
     ///
-    /// Returns a stream of serialized proto events.
-    /// Default implementation returns NotFound for all streams.
-    fn subscribe(&self, stream_name: &str, _params: &[u8]) -> Result<BoxByteStream, StreamError> {
-        Err(StreamError::NotFound(stream_name.to_string()))
+    /// Returns a Future that yields a stream of serialized proto events.
+    /// The Future allows ensuring that subscription setup (regex compilation, channel creation)
+    /// succeeds before returning the stream.
+    fn subscribe<'a>(&'a self, stream_name: &'a str, _params: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(StreamError::NotFound(stream_name.to_string()))
+        })
     }
 }

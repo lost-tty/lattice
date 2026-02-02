@@ -1288,7 +1288,7 @@ pub async fn cmd_stream_subscribe(
     
     let params = build_stream_params(&stream_desc, args, pool.as_ref());
     
-    let Ok(stream) = backend.store_subscribe(store_id, &stream_desc.name, &params) else {
+    let Ok(stream) = backend.store_subscribe(store_id, &stream_desc.name, &params).await else {
         let _ = writeln!(w, "Error subscribing to {}", stream_name);
         return Ok(Continue);
     };

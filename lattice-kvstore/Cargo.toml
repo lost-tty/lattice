@@ -8,8 +8,9 @@ license.workspace = true
 [dependencies]
 lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
-lattice-storage = { path = "../lattice-storage" }
+lattice-storage = { workspace = true }
 lattice-proto = { workspace = true }
+lattice-kvstore-client = { path = "../lattice-kvstore-client" }
 redb = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
@@ -30,6 +31,7 @@ async-stream = "0.3"
 
 [build-dependencies]
 prost-build = { workspace = true }
+lattice-proto = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

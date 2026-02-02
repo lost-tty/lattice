@@ -1,13 +1,23 @@
-use lattice_node::{NodeBuilder, StoreType};
+use lattice_node::{NodeBuilder, StoreType, direct_opener};
 use lattice_node::data_dir::DataDir;
+use lattice_kvstore::PersistentKvState;
+use lattice_kvstore_client::{KvStoreExt, Operation};
+use lattice_logstore::PersistentLogState;
 use std::time::Duration;
+
+/// Helper to create a node with openers registered (using handle-less pattern)
+fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
+    NodeBuilder::new(data_dir)
+        .with_opener(StoreType::KvStore, |registry| direct_opener::<PersistentKvState>(registry))
+        .with_opener(StoreType::LogStore, |registry| direct_opener::<PersistentLogState>(registry))
+}
 
 #[tokio::test]
 async fn test_store_declaration_and_reconciliation() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
     
-    let node = NodeBuilder::new(DataDir::new(data_dir.base())).build().unwrap();
+    let node = test_node_builder(DataDir::new(data_dir.base())).build().unwrap();
     let mesh_id = node.create_mesh().await.unwrap();
     let mesh = node.mesh_by_id(mesh_id).unwrap();
     let store_manager = mesh.store_manager();
@@ -17,7 +27,7 @@ async fn test_store_declaration_and_reconciliation() {
     let store_id = mesh.create_store(store_name.clone(), StoreType::KvStore).await.unwrap();
     
     // Verify it's listed (via Mesh)
-    let stores = mesh.list_stores().unwrap();
+    let stores = mesh.list_stores().await.unwrap();
     println!("DEBUG: list_stores returned {} stores", stores.len());
     for s in &stores {
         println!("DEBUG: store {:?} archived={}", s.id, s.archived);
@@ -45,7 +55,7 @@ async fn test_store_declaration_and_reconciliation() {
     mesh.delete_store(store_id).await.unwrap();
     
     // Verify archived in list
-    let stores = mesh.list_stores().unwrap();
+    let stores = mesh.list_stores().await.unwrap();
     assert!(stores[0].archived);
     
     // 5. Wait for store to be closed (watcher should auto-close)
@@ -65,7 +75,7 @@ async fn test_watcher_reacts_to_changes() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
     
-    let node = NodeBuilder::new(DataDir::new(data_dir.base())).build().unwrap();
+    let node = test_node_builder(DataDir::new(data_dir.base())).build().unwrap();
     let mesh_id = node.create_mesh().await.unwrap();
     let mesh = node.mesh_by_id(mesh_id).unwrap();
     let store_manager = mesh.store_manager();
@@ -110,7 +120,7 @@ async fn test_store_emits_network_event() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
     
-    let node = NodeBuilder::new(DataDir::new(data_dir.base())).build().unwrap();
+    let node = test_node_builder(DataDir::new(data_dir.base())).build().unwrap();
     let mesh_id = node.create_mesh().await.unwrap();
     let mesh = node.mesh_by_id(mesh_id).unwrap();
     let store_manager = mesh.store_manager();
@@ -162,7 +172,7 @@ async fn test_archived_store_hidden_from_network() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
     
-    let node = NodeBuilder::new(DataDir::new(data_dir.base())).build().unwrap();
+    let node = test_node_builder(DataDir::new(data_dir.base())).build().unwrap();
     let mesh_id = node.create_mesh().await.unwrap();
     let mesh = node.mesh_by_id(mesh_id).unwrap();
     let store_manager = mesh.store_manager();
@@ -212,7 +222,7 @@ async fn test_synced_store_declaration_auto_opened() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
     
-    let node = NodeBuilder::new(DataDir::new(data_dir.base())).build().unwrap();
+    let node = test_node_builder(DataDir::new(data_dir.base())).build().unwrap();
     let mesh_id = node.create_mesh().await.unwrap();
     let mesh = node.mesh_by_id(mesh_id).unwrap();
     let store_manager = mesh.store_manager();
@@ -226,12 +236,11 @@ async fn test_synced_store_declaration_auto_opened() {
     let type_key = format!("/stores/{}/type", foreign_store_id);
     let created_key = format!("/stores/{}/created_at", foreign_store_id);
     
-    root.batch()
-        .put(type_key.as_bytes(), b"kv-store")
-        .put(created_key.as_bytes(), b"1234567890")
-        .commit()
-        .await
-        .expect("Failed to write store declaration");
+    let ops = vec![
+        Operation::put(type_key.into_bytes(), b"kv-store".to_vec()),
+        Operation::put(created_key.into_bytes(), b"1234567890".to_vec()),
+    ];
+    root.batch_commit(ops).await.expect("Failed to write store declaration");
     
     // Create the store files manually (simulating that they were synced too)
     data_dir.ensure_store_dirs(foreign_store_id).unwrap();
@@ -268,7 +277,7 @@ async fn test_stores_opened_on_startup() {
     let store_id;
     let mesh_id;
     {
-        let node = NodeBuilder::new(DataDir::new(data_dir.base())).build().unwrap();
+        let node = test_node_builder(DataDir::new(data_dir.base())).build().unwrap();
         mesh_id = node.create_mesh().await.unwrap();
         let mesh = node.mesh_by_id(mesh_id).unwrap();
         
@@ -288,7 +297,7 @@ async fn test_stores_opened_on_startup() {
     
     // Phase 2: Restart node - stores should be opened on startup
     {
-        let node = NodeBuilder::new(DataDir::new(data_dir.base())).build().unwrap();
+        let node = test_node_builder(DataDir::new(data_dir.base())).build().unwrap();
         
         // Start triggers store loading
         node.start().await.expect("node start");
@@ -325,7 +334,7 @@ async fn test_multi_mesh_store_isolation() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
     
-    let node = NodeBuilder::new(DataDir::new(data_dir.base())).build().unwrap();
+    let node = test_node_builder(DataDir::new(data_dir.base())).build().unwrap();
     
     // Create two meshes
     let mesh_a_id = node.create_mesh().await.unwrap();
@@ -370,7 +379,7 @@ async fn test_multi_mesh_store_isolation() {
     assert!(store_manager.store_ids().contains(&store_b), "Store B should STILL be open (not touched by mesh A's watcher)");
     
     // Double-check: mesh B's store is not declared in mesh A, but should NOT have been closed
-    let mesh_a_declarations = mesh_a.list_stores().unwrap();
+    let mesh_a_declarations = mesh_a.list_stores().await.unwrap();
     assert!(
         !mesh_a_declarations.iter().any(|d| d.id == store_b),
         "Store B should not appear in mesh A's declarations"

@@ -1,70 +1,47 @@
-//! Store opener implementations
+//! Store opener factory
+//!
+//! Provides a generic opener factory for creating StoreOpener implementations.
+//! Uses the handle-less architecture where Store<S> implements StoreHandle directly.
 
-use crate::store_manager::{StoreOpener, StoreManagerError, OpenedStore};
+use crate::store_manager::{StoreManagerError, StoreOpener, OpenedStore};
 use crate::StoreRegistry;
-use crate::{KvStore, LogStore};
-use crate::StoreHandle;
-use lattice_kernel::{Store, SyncProvider, StoreInspector};
-use lattice_model::{Uuid, StoreType, Openable, StoreInfo};
-use lattice_store_base::{CommandDispatcher, StreamReflectable};
+use lattice_model::{Uuid, Openable};
 use std::sync::Arc;
 
-// ==================== StoreHandle Implementations ====================
+// ==== Direct opener (handle-less pattern) ====
 
-impl StoreHandle for KvStore {
-    fn id(&self) -> Uuid { self.writer().id() }
-    fn store_type(&self) -> StoreType { StoreInfo::store_type(self) }
-    fn as_dispatcher(&self) -> Arc<dyn CommandDispatcher> { Arc::new(self.clone()) }
-    fn as_sync_provider(&self) -> Arc<dyn SyncProvider> { Arc::new(self.writer().clone()) }
-    fn as_inspector(&self) -> Arc<dyn StoreInspector> { Arc::new(self.writer().clone()) }
-    fn as_stream_reflectable(&self) -> Arc<dyn StreamReflectable> { Arc::new(self.clone()) }
-}
+use lattice_store_base::{Introspectable, Dispatcher, StreamProvider};
+use lattice_model::StoreTypeProvider;
 
-impl StoreHandle for LogStore {
-    fn id(&self) -> Uuid { self.writer().id() }
-    fn store_type(&self) -> StoreType { StoreInfo::store_type(self) }
-    fn as_dispatcher(&self) -> Arc<dyn CommandDispatcher> { Arc::new(self.clone()) }
-    fn as_sync_provider(&self) -> Arc<dyn SyncProvider> { Arc::new(self.writer().clone()) }
-    fn as_inspector(&self) -> Arc<dyn StoreInspector> { Arc::new(self.writer().clone()) }
-    fn as_stream_reflectable(&self) -> Arc<dyn StreamReflectable> { Arc::new(self.clone()) }
-}
-
-// ==================== Opener Factory ====================
-
-/// Create a store opener for any state machine implementing `Openable`.
-pub fn opener<S, H>(
-    registry: Arc<StoreRegistry>,
-    wrap_fn: impl Fn(Store<S>) -> H + Send + Sync + 'static,
-) -> Box<dyn StoreOpener>
+/// Create a store opener that returns `Store<S>` directly without a wrapper handle.
+/// 
+/// This is the standard pattern - no separate handle type needed.
+/// The `Store<S>` implements `StoreHandle` directly when `S` satisfies the required traits.
+/// Note: Clone bound is NOT required on S because Store<S> wraps state in Arc.
+pub fn direct_opener<S>(registry: Arc<StoreRegistry>) -> Box<dyn StoreOpener>
 where
-    S: Openable,
-    H: StoreHandle + Clone + 'static,
+    S: Openable + Introspectable + Dispatcher + StreamProvider + StoreTypeProvider + Send + Sync + 'static,
 {
-    Box::new(OpenerImpl::<S, H, _> { registry, wrap_fn, _marker: std::marker::PhantomData })
+    Box::new(DirectOpenerImpl::<S> { registry, _marker: std::marker::PhantomData })
 }
 
-struct OpenerImpl<S, H, F> {
+struct DirectOpenerImpl<S> {
     registry: Arc<StoreRegistry>,
-    wrap_fn: F,
-    _marker: std::marker::PhantomData<fn() -> (S, H)>,
+    _marker: std::marker::PhantomData<fn() -> S>,
 }
 
-impl<S, H, F> StoreOpener for OpenerImpl<S, H, F>
+impl<S> StoreOpener for DirectOpenerImpl<S>
 where
-    S: Openable,
-    H: StoreHandle + Clone + 'static,
-    F: Fn(Store<S>) -> H + Send + Sync + 'static,
+    S: Openable + Introspectable + Dispatcher + StreamProvider + StoreTypeProvider + Send + Sync + 'static,
 {
     fn open(&self, store_id: Uuid) -> Result<OpenedStore, StoreManagerError> {
         let (store, _) = self.registry.get_or_open(store_id, |path| {
             S::open(store_id, path).map_err(|e| lattice_kernel::store::StateError::Backend(e))
         }).map_err(|e| StoreManagerError::Registry(e.to_string()))?;
-        
-        let handle = (self.wrap_fn)(store);
 
         Ok(OpenedStore {
-            typed_handle: Box::new(handle.clone()),
-            store_handle: Arc::new(handle),
+            typed_handle: Box::new(store.clone()),
+            store_handle: Arc::new(store),
         })
     }
 }

@@ -42,8 +42,9 @@ Typed wrappers:  put(k,v) → dispatch("Put", PutRequest{k,v})
 - [x] Verify CLI and Node can batch through reflection API
 
 **Step 2: Typed methods wrap dispatch**
-- [ ] `put(k,v)` builds `PutRequest`, calls `dispatch("Put", msg)`
-- [ ] Single audit path: all operations flow through dispatch
+- [x] `put(k,v)` builds `PutRequest`, calls `dispatch("Put", msg)`
+- [x] Single audit path: all operations flow through dispatch
+- [x] Refactor GetRequest/Response: use idiomatic Proto3 optional, support 'verbose' metadata
 
 **Step 3: Simplify OpenedStore** 
 - [ ] Remove `typed_handle` - only `Arc<dyn StoreHandle>` remains
@@ -60,6 +61,7 @@ Typed wrappers:  put(k,v) → dispatch("Put", PutRequest{k,v})
   - Shared test infrastructure for stores without real replication
   - KvStore tests now use `MockWriter<KvState>` from shared crate
 - [x] Migrate LogState to implement `Introspectable` (already in state.rs)
+- [x] **Async Stream Subscription**: Refactor `StreamReflectable::subscribe` to return `BoxFuture`. This ensures setup errors (like invalid regex) are propagated before the stream begins.
 
 ### 9D: State Machine Unification
 > Reduce duplication between `KvState` and `LogState` implementations.

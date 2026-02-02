@@ -2,7 +2,7 @@
 
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::hlc::HLC;
-use crate::kv_types::HeadInfo as ProtoHeadInfo;
+use crate::proto::HeadInfo as ProtoHeadInfo;
 use lattice_proto::storage::Hlc as ProtoHlc; // Shared from lattice-proto
 use thiserror::Error;
 

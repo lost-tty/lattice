@@ -7,17 +7,19 @@ license.workspace = true
 
 [dependencies]
 lattice-model = { workspace = true }
+lattice-store-base = { workspace = true }
 lattice-proto = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 prost = { workspace = true }
+prost-reflect = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 blake3 = { workspace = true }
 hex = { workspace = true }
 redb = { workspace = true }
 uuid = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 futures-core = "0.3.31"
 futures-util.workspace = true

@@ -105,7 +105,7 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
         let req = request.into_inner();
         let store_id = Self::parse_uuid(&req.store_id)?;
         
-        let stream = self.backend.store_subscribe(store_id, &req.stream_name, &req.params)
+        let stream = self.backend.store_subscribe(store_id, &req.stream_name, &req.params).await
             .map_err(|e| Status::internal(e.to_string()))?;
         
         // Convert BoxStream to ReceiverStream via channel

@@ -6,21 +6,23 @@ use crate::{
     store_registry::StoreRegistry,
     mesh::Mesh,
     peer_manager::{PeerManager, PeerManagerError, Peer},
+    KvStore,
 };
+use lattice_storage::PersistentState;
+use lattice_kvstore::KvState;
 use lattice_kernel::{
     NodeIdentity, NodeError as IdentityError, PeerStatus,
     store::{StateError, LogError, Store},
 };
-use lattice_storage::PersistentState;
-use crate::KvStore;
-use lattice_kvstore::{KvHandle, KvHandleError, KvState};
-use lattice_logstore::LogHandle;
-use lattice_model::{types::PubKey, NetEvent};
+use lattice_kvstore_client::KvStoreExt;
+use lattice_model::NetEvent;
+use lattice_model::types::PubKey;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::RwLock;
 use thiserror::Error;
 use tokio::sync::broadcast;
+use tracing::error;
 
 /// Regex pattern for peer status keys
 pub const PEER_STATUS_PATTERN: &str = r"^/nodes/([a-f0-9]+)/status$";
@@ -79,8 +81,11 @@ pub enum NodeError {
     #[error("Store error: {0}")]
     StoreError(#[from] lattice_kernel::store::StoreError),
     
-    #[error("KvHandle error: {0}")]
-    KvHandle(#[from] KvHandleError),
+    #[error("Dispatch error: {0}")]
+    Dispatch(#[from] lattice_kvstore_client::DispatchError),
+
+    #[error("Other error: {0}")]
+    Other(String),
 }
 
 pub struct NodeInfo {
@@ -128,11 +133,13 @@ pub struct NodeBuilder {
     /// and pass it to ensure proper ownership.
     net_tx: Option<broadcast::Sender<NetEvent>>,
     name: Option<String>,
+    /// Store opener factories to call after registry is created
+    opener_factories: Vec<(crate::StoreType, Box<dyn FnOnce(std::sync::Arc<StoreRegistry>) -> Box<dyn crate::StoreOpener> + Send>)>,
 }
 
 impl NodeBuilder {
     pub fn new(data_dir: DataDir) -> Self {
-        Self { data_dir, net_tx: None, name: None }
+        Self { data_dir, net_tx: None, name: None, opener_factories: Vec::new() }
     }
     
     /// Set data directory
@@ -151,6 +158,17 @@ impl NodeBuilder {
     /// Set explicit node name (overrides system hostname)
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+    
+    /// Register a store opener factory for a given store type.
+    /// The factory receives the registry and returns the opener.
+    /// This allows openers to be created after the registry exists.
+    pub fn with_opener<F>(mut self, store_type: crate::StoreType, factory: F) -> Self
+    where
+        F: FnOnce(std::sync::Arc<StoreRegistry>) -> Box<dyn crate::StoreOpener> + Send + 'static,
+    {
+        self.opener_factories.push((store_type, Box::new(factory)));
         self
     }
 
@@ -189,9 +207,11 @@ impl NodeBuilder {
         let registry = std::sync::Arc::new(StoreRegistry::new(self.data_dir.clone(), meta.clone(), node.clone()));
         let store_manager = std::sync::Arc::new(crate::StoreManager::new(registry.clone(), event_tx.clone(), net_tx.clone()));
         
-        // Register built-in store openers
-        store_manager.register_opener(crate::StoreType::KvStore, crate::opener(registry.clone(), KvHandle::new));
-        store_manager.register_opener(crate::StoreType::LogStore, crate::opener(registry.clone(), LogHandle::new));
+        // Create openers from factories and register
+        for (store_type, factory) in self.opener_factories {
+            let opener = factory(registry.clone());
+            store_manager.register_opener(store_type, opener);
+        }
 
         Ok(Node {
             data_dir: self.data_dir,
@@ -313,7 +333,8 @@ impl Node {
         if let Some(name) = self.name() {
             let root = mesh.root_store();
             let name_key = Peer::key_name(self.node.public_key());
-            root.put(&name_key, name.as_bytes()).await?;
+            root.put(name_key, name.as_bytes().to_vec()).await
+                .map_err(|e| NodeError::Other(e.to_string()))?;
         }
         Ok(())
     }
@@ -402,13 +423,19 @@ impl Node {
         
         let kv = mesh.root_store();
         let pubkey = self.node.public_key();
-        if let Some(name) = self.name() {
-            kv.put(&Peer::key_name(pubkey), name.as_bytes()).await?;
-        }
+        let name = self.name();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs()).unwrap_or(0);
-        kv.put(&Peer::key_added_at(pubkey), now.to_string().as_bytes()).await?;
-        kv.put(&Peer::key_status(pubkey), PeerStatus::Active.as_str().as_bytes()).await?;
+
+        let mut batch = kv.batch()
+            .put(Peer::key_added_at(pubkey), now.to_string().as_bytes().to_vec())
+            .put(Peer::key_status(pubkey), PeerStatus::Active.as_str().as_bytes().to_vec());
+        
+        if let Some(name) = name {
+            batch = batch.put(Peer::key_name(pubkey), name.as_bytes().to_vec());
+        }
+        
+        batch.commit().await.map_err(|e| NodeError::Other(e.to_string()))?;
 
         Ok(mesh_id)
     }
@@ -552,7 +579,7 @@ impl Node {
     }
     
     /// Get PeerManager for a specific mesh
-    pub fn peer_manager_for(&self, mesh_id: Uuid) -> Option<std::sync::Arc<PeerManager>> {
+    pub fn peer_manager_for(&self, mesh_id: Uuid) -> Option<std::sync::Arc<PeerManager<KvStore>>> {
         self.mesh_by_id(mesh_id).map(|m| m.peer_manager().clone())
     }
     
@@ -637,7 +664,18 @@ impl NodeProviderExt for Node {
 mod tests {
     use super::*;
     use lattice_model::types::PubKey;
-    use lattice_kvstore::{KvHandle, Merge};
+    use lattice_kvstore::PersistentKvState;
+    use lattice_kvstore_client::KvStoreExt; // Import extension trait for put/get/delete
+    use lattice_logstore::PersistentLogState;
+    use crate::{direct_opener, StoreType};
+    
+    /// Helper to create node builder with openers registered for tests that use mesh/store manager
+    fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
+        NodeBuilder::new(data_dir)
+            .with_opener(StoreType::KvStore, |registry| direct_opener::<PersistentKvState>(registry))
+            .with_opener(StoreType::LogStore, |registry| direct_opener::<PersistentLogState>(registry))
+    }
+
 
     #[tokio::test]
     async fn test_create_and_open_store() {
@@ -656,9 +694,9 @@ mod tests {
         assert!(stores.contains(&store_id));
         
         let (store, _) = node.open_root_store(store_id).expect("Failed to open store");
-        let handle = KvHandle::new(store);
-        handle.put(b"/key", b"value").await.expect("put failed");
-        assert_eq!(handle.get(b"/key").unwrap().lww(), Some(b"value".to_vec()));
+        store.put(b"/key".to_vec(), b"value".to_vec()).await.expect("put failed");
+        let val = store.get(b"/key".to_vec()).await.expect("get failed");
+        assert_eq!(val, Some(b"value".to_vec()));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -675,14 +713,14 @@ mod tests {
         let store_b = node.create_store().expect("create B");
         
         let (store_a, _) = node.open_root_store(store_a).expect("open A");
-        let handle_a = KvHandle::new(store_a);
-        handle_a.put(b"/key", b"from A").await.expect("put A");
+        store_a.put(b"/key".to_vec(), b"from A".to_vec()).await.expect("put A");
         
         let (store_b, _) = node.open_root_store(store_b).expect("open B");
-        let handle_b = KvHandle::new(store_b);
-        assert_eq!(handle_b.get(b"/key").unwrap().lww(), None);
+        let val_b = store_b.get(b"/key".to_vec()).await.expect("B get");
+        assert_eq!(val_b, None);
         
-        assert_eq!(handle_a.get(b"/key").unwrap().lww(), Some(b"from A".to_vec()));
+        let val_a = store_a.get(b"/key".to_vec()).await.expect("A get");
+        assert_eq!(val_a, Some(b"from A".to_vec()));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -691,7 +729,7 @@ mod tests {
     async fn test_init_creates_root_store() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder::new(data_dir.clone())
+        let node = test_node_builder(data_dir.clone())
             .build()
             .expect("create node");
         
@@ -709,7 +747,7 @@ mod tests {
     async fn test_create_multiple_meshes() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder::new(data_dir.clone())
+        let node = test_node_builder(data_dir.clone())
             .build()
             .expect("create node");
         
@@ -731,7 +769,7 @@ mod tests {
         // First session: create mesh
         let mesh_id;
         {
-            let node = NodeBuilder::new(data_dir.clone())
+            let node = test_node_builder(data_dir.clone())
                 .build()
                 .expect("create node");
             mesh_id = node.create_mesh().await.expect("create_mesh");
@@ -739,7 +777,7 @@ mod tests {
         } // End first session
         
         // Second session: mesh should persist in meta.db
-        let node = NodeBuilder::new(data_dir.clone())
+        let node = test_node_builder(data_dir.clone())
             .build()
             .expect("reload node");
         
@@ -755,7 +793,7 @@ mod tests {
     async fn test_set_name_updates_store() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder::new(data_dir.clone())
+        let node = test_node_builder(data_dir.clone())
             .build()
             .expect("create node");
         
@@ -771,7 +809,8 @@ mod tests {
         let name_key = format!("/nodes/{}/name", pubkey_hex);
         {
             let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-            let stored_name = store.get(name_key.as_bytes()).unwrap().lww();
+            // Use trait method KvStoreExt::get
+            let stored_name = store.get(name_key.as_bytes().to_vec()).await.unwrap();
             assert_eq!(stored_name, Some(initial_name.as_bytes().to_vec()));
         }
         
@@ -785,7 +824,7 @@ mod tests {
         // Verify store updated
         {
             let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-            let stored_name = store.get(name_key.as_bytes()).unwrap().lww();
+            let stored_name = store.get(name_key.as_bytes().to_vec()).await.unwrap();
             assert_eq!(stored_name, Some(new_name.as_bytes().to_vec()));
         }
         
@@ -796,7 +835,7 @@ mod tests {
     async fn test_create_invite_token() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder::new(data_dir.clone())
+        let node = test_node_builder(data_dir.clone())
             .build()
             .expect("create node");
         
@@ -818,7 +857,7 @@ mod tests {
     async fn test_accept_join() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder::new(data_dir.clone())
+        let node = test_node_builder(data_dir.clone())
             .build()
             .expect("create node");
         
@@ -851,10 +890,10 @@ mod tests {
         let tmp_b = tempfile::tempdir().unwrap();
         let data_dir_b = DataDir::new(tmp_b.path().to_path_buf());
         
-        let node_a = NodeBuilder::new(data_dir_a.clone())
+        let node_a = test_node_builder(data_dir_a.clone())
             .build()
             .expect("create node A");
-        let node_b = NodeBuilder::new(data_dir_b.clone())
+        let node_b = test_node_builder(data_dir_b.clone())
             .build()
             .expect("create node B");
         
@@ -881,19 +920,19 @@ mod tests {
         assert_eq!(store_b.id(), invite.mesh_id);
         
         // Step 6: A writes data
-        store_a.put(b"/key", b"from A").await.expect("A put");
+        store_a.put(b"/key".to_vec(), b"from A".to_vec()).await.expect("A put");
         
         // Step 7: B writes data independently
-        store_b.put(b"/key", b"from B").await.expect("B put");
+        store_b.put(b"/key".to_vec(), b"from B".to_vec()).await.expect("B put");
         
         // Each store has its own local state (not synced yet)
-        let a_val = store_a.get(b"/key").unwrap().lww().unwrap();
-        let b_val = store_b.get(b"/key").unwrap().lww().unwrap();
+        let a_val = store_a.get(b"/key".to_vec()).await.expect("A get");
+        let b_val = store_b.get(b"/key".to_vec()).await.expect("B get");
         
         // A sees "from A" (its own write wins locally)
-        assert_eq!(a_val, b"from A".to_vec());
+        assert_eq!(a_val, Some(b"from A".to_vec()));
         // B sees "from B" (its own write wins locally)  
-        assert_eq!(b_val, b"from B".to_vec());
+        assert_eq!(b_val, Some(b"from B".to_vec()));
         
         // Cleanup
         let _ = std::fs::remove_dir_all(data_dir_a.base());

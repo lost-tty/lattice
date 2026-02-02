@@ -7,12 +7,18 @@
 //! Tables:
 //! - kv: Vec<u8> → HeadList (multi-head DAG tips per key)
 
-use crate::kv_types::{operation, KvPayload, WatchEvent, WatchEventKind};
+// Internal table names
+use lattice_storage::{StateBackend, StateDbError, TABLE_DATA, PersistentState, StateLogic, StateFactory, setup_persistent_state};
+use std::pin::Pin;
+use std::future::Future;
+
+use crate::{WatchEvent, WatchEventKind};
 use crate::head::Head;
 use crate::merge::Merge;
+use crate::proto::{operation, KvPayload};
+use crate::proto::{HeadInfo as ProtoHeadInfo, HeadList};
 use lattice_model::{Op, Uuid, Hash};
 use lattice_store_base::{Introspectable, FieldFormat};
-use crate::kv_types::{HeadInfo as ProtoHeadInfo, HeadList};
 use prost::Message;
 use prost_reflect::{DescriptorPool, ReflectMessage};
 use std::collections::HashSet;
@@ -20,9 +26,6 @@ use std::path::Path;
 use redb::{Database, ReadableTable};
 use tokio::sync::broadcast;
 use regex::bytes::Regex;
-
-// Internal table names
-use lattice_storage::{StateBackend, StateDbError, TABLE_DATA, PersistentState, StateLogic, StateFactory, setup_persistent_state};
 
 /// Persistent state for KV with DAG conflict resolution.
 /// 
@@ -232,37 +235,6 @@ impl KvState {
     }
 }
 
-/// Extract literal prefix from a regex pattern for efficient DB queries.
-/// Uses regex-syntax to parse the pattern and extract leading literals.
-///
-/// Examples:
-/// - `^/nodes/.*` -> Some("/nodes/")
-/// - `^/stores/[a-f0-9]+/data` -> Some("/stores/")  
-/// - `foo|bar` -> None (alternation, no common prefix)
-pub fn extract_literal_prefix(pattern: &str) -> Option<Vec<u8>> {
-    use regex_syntax::hir::literal::Extractor;
-
-    let hir = regex_syntax::parse(pattern).ok()?;
-    let seq = Extractor::new().extract(&hir);
-
-    // Get literals if any exist
-    let literals = seq.literals()?;
-    if literals.is_empty() {
-        return None;
-    }
-
-    // Return first (prefix) literal
-    let lit = literals.first()?;
-    let bytes = lit.as_bytes();
-
-    // Only use if prefix is non-empty
-    if bytes.is_empty() {
-        None
-    } else {
-        Some(bytes.to_vec())
-    }
-}
-
 // ==================== StateLogic trait implementation ====================
 
 impl StateLogic for KvState {
@@ -334,7 +306,9 @@ impl StateLogic for KvState {
             let kind = if heads.is_empty() || heads.iter().all(|h| h.tombstone) {
                 WatchEventKind::Delete
             } else {
-                WatchEventKind::Update { heads: heads.clone() }
+                // Resolve to LWW value for the public event
+                let value = heads.lww().unwrap_or_default();
+                WatchEventKind::Update { value }
             };
             let _ = self.watcher_tx.send(WatchEvent { key, kind });
         }
@@ -345,6 +319,15 @@ impl StateFactory for KvState {
     fn create(backend: StateBackend) -> Self {
         let (watcher_tx, _) = broadcast::channel(1024);
         Self { backend, watcher_tx }
+    }
+}
+
+// StoreTypeProvider - declares this is a KvStore
+use lattice_model::StoreTypeProvider;
+
+impl StoreTypeProvider for KvState {
+    fn store_type() -> lattice_model::StoreType {
+        lattice_model::StoreType::KvStore
     }
 }
 
@@ -505,7 +488,7 @@ impl StreamProvider for KvState {
         vec![
             StreamHandler {
                 descriptor: StreamDescriptor {
-                    name: "Watch".to_string(),
+                    name: "watch".to_string(),
                     description: "Subscribe to key changes matching a regex pattern".to_string(),
                     param_schema: Some("lattice.kv.WatchParams".to_string()),
                     event_schema: Some("lattice.kv.WatchEventProto".to_string()),
@@ -518,11 +501,15 @@ impl StreamProvider for KvState {
 
 impl KvState {
     /// Subscribe to key changes matching a regex pattern.
-    pub fn subscribe_watch(&self, params: &[u8]) -> Result<BoxByteStream, StreamError> {
-        use prost::Message;
+    /// Subscribe to key changes matching a regex pattern.
+    pub fn subscribe_watch<'a>(&'a self, params: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+        let params = params.to_vec();
+        Box::pin(async move {
+            use prost::Message;
+
         
         // Decode WatchParams to get pattern
-        let watch_params = crate::proto::WatchParams::decode(params)
+        let watch_params = crate::proto::WatchParams::decode(params.as_slice())
             .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
         let pattern = watch_params.pattern;
         
@@ -541,16 +528,15 @@ impl KvState {
                         if !re.is_match(&event.key) { continue; }
                         
                         let kind = match event.kind {
-                            crate::WatchEventKind::Update { heads } => {
-                                let lww_value = heads.lww().unwrap_or_default();
-                                Some(crate::kv_types::watch_event_proto::Kind::Value(lww_value))
+                            crate::WatchEventKind::Update { value } => {
+                                Some(crate::proto::watch_event_proto::Kind::Value(value))
                             }
                             crate::WatchEventKind::Delete => {
-                                Some(crate::kv_types::watch_event_proto::Kind::Deleted(true))
+                                Some(crate::proto::watch_event_proto::Kind::Deleted(true))
                             }
                         };
                         
-                        let proto_event = crate::kv_types::WatchEventProto { key: event.key.clone(), kind };
+                        let proto_event = crate::proto::WatchEventProto { key: event.key.clone(), kind };
                         let mut buf = Vec::new();
                         if proto_event.encode(&mut buf).is_ok() {
                             yield buf;
@@ -562,14 +548,153 @@ impl KvState {
             }
         };
         
-        Ok(Box::pin(stream))
+            Ok(Box::pin(stream) as BoxByteStream)
+        })
+    }
+}
+
+// ==================== Dispatcher Implementation ====================
+//
+// Enables PersistentState<KvState> to handle commands directly without a wrapper handle.
+// Write operations use the injected StateWriter.
+
+use lattice_store_base::{Dispatcher, dispatch::dispatch_method};
+use lattice_model::StateWriter;
+use crate::proto::{PutRequest, PutResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse, ListRequest, ListResponse, BatchRequest, BatchResponse, Operation};
+
+/// Validate a key for KV operations (build-time validation).
+/// Returns error if key is empty.
+fn validate_key(key: &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if key.is_empty() {
+        return Err("Key cannot be empty".into());
+    }
+    Ok(())
+}
+
+impl Dispatcher for KvState {
+    fn dispatch<'a>(
+        &'a self,
+        writer: &'a dyn StateWriter,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+        let desc = self.service_descriptor();
+        Box::pin(async move {
+            match method_name {
+                "Put" => dispatch_method(method_name, request, desc, |req| self.handle_put(writer, req)).await,
+                "Delete" => dispatch_method(method_name, request, desc, |req| self.handle_delete(writer, req)).await,
+                "Get" => dispatch_method(method_name, request, desc, |req| self.handle_get(req)).await,
+                "List" => dispatch_method(method_name, request, desc, |req| self.handle_list(req)).await,
+                "Batch" => dispatch_method(method_name, request, desc, |req| self.handle_batch(writer, req)).await,
+                _ => Err(format!("Unknown method: {}", method_name).into()),
+            }
+        })
+    }
+}
+
+impl KvState {
+    async fn handle_put(&self, writer: &dyn StateWriter, req: PutRequest) -> Result<PutResponse, Box<dyn std::error::Error + Send + Sync>> {
+        validate_key(&req.key)?;
+
+        // Fetch current heads to build causal dependency graph
+        let heads = self.get(&req.key).map_err(|e| format!("State error: {}", e))?;
+        let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
+
+        let op = Operation::put(req.key, req.value);
+        let kv_payload = KvPayload { ops: vec![op] };
+        let payload = kv_payload.encode_to_vec();
+        
+        let hash = writer.submit(payload, causal_deps).await?;
+        Ok(PutResponse { hash: hash.to_vec() })
+    }
+
+    async fn handle_delete(&self, writer: &dyn StateWriter, req: DeleteRequest) -> Result<DeleteResponse, Box<dyn std::error::Error + Send + Sync>> {
+        validate_key(&req.key)?;
+
+        // Fetch current heads for causal deps
+        let heads = self.get(&req.key).map_err(|e| format!("State error: {}", e))?;
+        let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
+
+        let op = Operation::delete(req.key);
+        let kv_payload = KvPayload { ops: vec![op] };
+        let payload = kv_payload.encode_to_vec();
+        
+        let hash = writer.submit(payload, causal_deps).await?;
+        Ok(DeleteResponse { hash: hash.to_vec() })
+    }
+
+    async fn handle_get(&self, req: GetRequest) -> Result<GetResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let heads = self.get(&req.key).map_err(|e| format!("State error: {}", e))?;
+        let value = heads.lww();
+        Ok(GetResponse { value })
+    }
+
+    async fn handle_list(&self, req: ListRequest) -> Result<ListResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let mut items = Vec::new();
+        let prefix = req.prefix;
+        
+        self.scan(&prefix, None, |key, heads| {
+            if let Some(val) = heads.lww() {
+                items.push(crate::proto::KeyValuePair { key, value: val });
+            }
+            Ok(true)
+        }).map_err(|e| format!("State error: {}", e))?;
+        Ok(ListResponse { items })
+    }
+
+    async fn handle_batch(&self, writer: &dyn StateWriter, req: BatchRequest) -> Result<BatchResponse, Box<dyn std::error::Error + Send + Sync>> {
+        if req.ops.is_empty() {
+            return Err("Batch cannot be empty".into());
+        }
+        
+        // Validation: check keys
+        for op in &req.ops {
+            if let Some(key) = op.key() {
+                 if key.is_empty() {
+                     return Err("Empty key not allowed".into());
+                 }
+            }
+        }
+
+        // Dedupe: keep only the last op per key
+        let mut seen_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut deduped_ops: Vec<Operation> = Vec::new();
+        
+        for op in req.ops.into_iter().rev() {
+            if let Some(key) = op.key() {
+                if seen_keys.insert(key.to_vec()) {
+                    deduped_ops.push(op);
+                }
+            }
+        }
+        deduped_ops.reverse();
+        
+        // Collect causal deps from all affected keys
+        let mut causal_deps = Vec::new();
+        for op in &deduped_ops {
+            if let Some(key) = op.key() {
+                if let Ok(heads) = self.get(key) {
+                    for head in heads {
+                        if !causal_deps.contains(&head.hash) {
+                            causal_deps.push(head.hash);
+                        }
+                    }
+                }
+            }
+        }
+        
+        let kv_payload = KvPayload { ops: deduped_ops };
+        let payload = kv_payload.encode_to_vec();
+        
+        let hash = writer.submit(payload, causal_deps).await?;
+        Ok(BatchResponse { hash: hash.to_vec() })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_types::Operation;
+    use crate::proto::Operation;
     use lattice_model::StateMachine;
     use lattice_model::hlc::HLC;
     use lattice_model::PubKey;

@@ -3,7 +3,7 @@
 //! Uses factory registration pattern: register StoreOpener for each type,
 //! then call open(id, type) to get handles.
 
-use crate::{StoreType, StoreRegistry, peer_manager::PeerManager, NodeEvent};
+use crate::{StoreType, StoreRegistry, peer_manager::PeerManager, NodeEvent, KvStore};
 use crate::StoreHandle;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore};
 use lattice_model::{NetEvent, Uuid};
@@ -47,7 +47,7 @@ pub trait StoreOpener: Send + Sync {
 pub struct StoreInfo {
     pub id: Uuid,
     pub store_type: StoreType,
-    pub peer_manager: Arc<PeerManager>,
+    pub peer_manager: Arc<PeerManager<KvStore>>,
 }
 
 /// A stored entry with both typed and type-erased handles
@@ -55,7 +55,7 @@ struct StoredEntry {
     typed_handle: Box<dyn Any + Send + Sync>,
     store_handle: Arc<dyn StoreHandle>,
     store_type: StoreType,
-    peer_manager: Arc<PeerManager>,
+    peer_manager: Arc<PeerManager<KvStore>>,
 }
 
 /// A store registry that holds open stores.
@@ -123,7 +123,7 @@ impl StoreManager {
         store_id: Uuid,
         opened: OpenedStore,
         store_type: StoreType,
-        peer_manager: Arc<PeerManager>,
+        peer_manager: Arc<PeerManager<KvStore>>,
     ) -> Result<(), StoreManagerError> {
         {
             let mut stores = self.stores.write()
@@ -176,7 +176,7 @@ impl StoreManager {
     }
     
     /// Get the peer_manager for a store.
-    pub fn get_peer_manager(&self, store_id: &Uuid) -> Option<Arc<PeerManager>> {
+    pub fn get_peer_manager(&self, store_id: &Uuid) -> Option<Arc<PeerManager<KvStore>>> {
         self.get_info(store_id).map(|info| info.peer_manager)
     }
     

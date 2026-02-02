@@ -79,7 +79,7 @@ pub trait LatticeBackend: Send + Sync {
     /// List available streams for a store
     fn store_list_streams(&self, store_id: Uuid) -> AsyncResult<'_, Vec<StreamDescriptor>>;
     /// Subscribe to a store stream
-    fn store_subscribe(&self, store_id: Uuid, stream_name: &str, params: &[u8]) -> BackendResult<BoxByteStream>;
+    fn store_subscribe<'a>(&'a self, store_id: Uuid, stream_name: &'a str, params: &'a [u8]) -> AsyncResult<'a, BoxByteStream>;
 }
 
 /// Type alias for shared backend reference

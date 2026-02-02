@@ -14,7 +14,8 @@ fn main() -> Result<()> {
         .compile_protos(
             &[
                 "proto/storage.proto", 
-                "proto/network.proto"
+                "proto/network.proto",
+                "proto/kv_store.proto"
             ],
             &["proto/"],
         )?;

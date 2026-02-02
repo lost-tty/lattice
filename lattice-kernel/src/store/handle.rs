@@ -44,6 +44,63 @@ impl<S: StateMachine + Send + Sync + 'static> StoreHandle for Store<S> {
     }
 }
 
+// Implement Shutdownable from lattice-model
+use lattice_model::Shutdownable;
+
+impl<S: StateMachine + Send + Sync + 'static> Shutdownable for Store<S> {
+    fn shutdown(&self) {
+        Store::shutdown(self);
+    }
+}
+
+// =============================================================================
+// Store Handle Traits - Enables Store<S> to implement the node-level StoreHandle
+// =============================================================================
+
+use std::ops::Deref;
+use lattice_store_base::{StateProvider, Dispatchable, Dispatcher};
+use std::pin::Pin;
+use std::future::Future;
+
+// Store<S> derefs to S for ergonomic state access
+impl<S: StateMachine> Deref for Store<S> {
+    type Target = S;
+    fn deref(&self) -> &S {
+        self.state()
+    }
+}
+
+// StateProvider enables blanket Introspectable impl
+impl<S: StateMachine + Send + Sync + 'static> StateProvider for Store<S> {
+    type State = S;
+    fn state(&self) -> &S {
+        Store::state(self)
+    }
+}
+
+// Dispatchable enables blanket CommandDispatcher impl
+// Delegates to S::Dispatcher (when S: Dispatcher)
+impl<S: StateMachine + Dispatcher + Send + Sync + 'static> Dispatchable for Store<S> {
+    fn dispatch_command<'a>(
+        &'a self,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+        // Delegate to state's Dispatcher, passing self as the writer
+        self.state().dispatch(self, method_name, request)
+    }
+}
+
+// StoreInfo enables blanket StoreHandle impl
+// Delegates to S::StoreTypeProvider to get store type
+use lattice_model::{StoreInfo as ModelStoreInfo, StoreTypeProvider};
+
+impl<S: StateMachine + StoreTypeProvider + Send + Sync + 'static> ModelStoreInfo for Store<S> {
+    fn store_type(&self) -> lattice_model::StoreType {
+        S::store_type()
+    }
+}
+
 /// A handle to a replicated state machine
 ///
 /// Generic over state machine type `S`. Provides:
@@ -413,8 +470,6 @@ impl<S: StateMachine> StateWriter for Store<S> {
 // ==================== SyncProvider implementation ====================
 
 use crate::sync_provider::SyncProvider;
-use std::future::Future;
-use std::pin::Pin;
 
 impl<S: StateMachine + 'static> SyncProvider for Store<S> {
     fn id(&self) -> Uuid {

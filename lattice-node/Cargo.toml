@@ -10,6 +10,7 @@ lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
 lattice-kvstore = { workspace = true }
+lattice-kvstore-client = { workspace = true }
 lattice-logstore = { workspace = true }
 lattice-net-types = { workspace = true }
 lattice-storage = { workspace = true }

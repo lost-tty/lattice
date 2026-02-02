@@ -22,9 +22,9 @@ pub mod store_handle;
 
 pub use token::Invite;
 pub use store_manager::{StoreManager, StoreManagerError, StoreOpener, OpenedStore};
-pub use store_openers::opener;
+pub use store_openers::direct_opener;
 pub use store_registry::StoreRegistry;
-pub use store_handle::StoreHandle;
+pub use store_handle::{StoreHandle, HandleWithWriter};
 
 // Re-export StoreType from lattice-model (canonical location)
 pub use lattice_model::StoreType;
@@ -56,17 +56,11 @@ pub use mesh::{Mesh, MeshError, StoreDeclaration};
 pub use data_dir::DataDir;
 pub use meta_store::MetaStore;
 
-// Re-export from lattice-kvstore
-use lattice_kvstore::KvState;
-pub use lattice_kvstore::{Head, KvHandle};
-use lattice_storage::PersistentState;
+// KvStore type alias used by mesh.rs (root store operations)
+use lattice_kvstore::PersistentKvState;
 
-/// Type alias for the KvHandle wrapping a Store.
-pub type KvStore = KvHandle<Store<PersistentState<KvState>>>;
+/// Internal type alias for the root KvStore - now uses Store<S> directly
+pub(crate) type KvStore = Store<PersistentKvState>;
 
-// Re-export from lattice-logstore
-use lattice_logstore::LogState;
-pub use lattice_logstore::LogHandle;
-
-/// Type alias for the LogHandle wrapping a Store.
-pub type LogStore = LogHandle<Store<PersistentState<LogState>>>;
+// Re-export Head for existing consumers (used by node.rs tests)
+pub use lattice_kvstore::Head;

@@ -1,16 +1,27 @@
 //! Integration tests for gap filling between networked peers
 
-use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, KvStore, KvHandle, Uuid};
-use lattice_kvstore::Merge;
+use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, Uuid, direct_opener, StoreType, Store};
+use lattice_kvstore::{Merge, PersistentKvState};
+use lattice_logstore::PersistentLogState;
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
 use std::sync::Arc;
+
+/// Type alias for KvStore - now uses Store<S> directly (handle-less architecture)
+type KvStore = Store<PersistentKvState>;
 
 /// Helper to create a temp data dir for testing
 fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     let path = std::env::temp_dir().join(format!("lattice_integ_test_{}", name));
     let _ = std::fs::remove_dir_all(&path);
     lattice_node::DataDir::new(path)
+}
+
+/// Helper to create node builder with openers registered (using handle-less pattern)
+fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
+    NodeBuilder::new(data_dir)
+        .with_opener(StoreType::KvStore, |registry| direct_opener::<PersistentKvState>(registry))
+        .with_opener(StoreType::LogStore, |registry| direct_opener::<PersistentLogState>(registry))
 }
 
 /// Test helper: Create MeshService from Node (replaces removed new_from_node)
@@ -57,16 +68,15 @@ async fn test_targeted_author_sync() {
     let data_a = temp_data_dir("author_sync_a2");
     let data_b = temp_data_dir("author_sync_b2");
     
-    let node_a = Arc::new(NodeBuilder::new(data_a.clone()).build().expect("node a"));
-    let node_b = Arc::new(NodeBuilder::new(data_b.clone()).build().expect("node b"));
+    let node_a = Arc::new(test_node_builder(data_a.clone()).build().expect("node a"));
+    let node_b = Arc::new(test_node_builder(data_b.clone()).build().expect("node b"));
     
     let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
     let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
     
     // Node A inits and creates invite token
     let store_id = node_a.create_mesh().await.expect("init a");
-    let (store_a_raw, _) = node_a.open_root_store(store_id).expect("open a");
-    let store_a = KvHandle::new(store_a_raw);
+    let (store_a, _) = node_a.open_root_store(store_id).expect("open a");
     
     let token_string = node_a.mesh_by_id(store_id).expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");
@@ -82,17 +92,17 @@ async fn test_targeted_author_sync() {
         .expect("B should successfully join A's mesh");
     
     // A writes entries AFTER B joined
-    store_a.put(b"/data", b"test").await.expect("put");
+    lattice_kvstore_client::KvStoreExt::put(&store_a, b"/data".to_vec(), b"test".to_vec()).await.expect("put");
     
     // Verify gap exists (B doesn't have A's data yet - gossip wouldn't have propagated)
-    assert!(store_b.get(b"/data").expect("get").lww().is_none(), "B should not have data before sync");
+    assert!(store_b.state().get(b"/data").expect("get").lww().is_none(), "B should not have data before sync");
     
     // B syncs specifically for A's author (synchronous RPC pull)
     let author = PubKey::from(*node_a.node_id());
     let _applied = server_b.sync_author_all_by_id(store_b.id(), author).await.expect("sync author");
     
     // Verify entry arrived after sync - no sleep needed, proves RPC pull worked
-    let val = store_b.get(b"/data").expect("get").lww();
+    let val = store_b.state().get(b"/data").expect("get").lww();
     assert_eq!(val, Some(b"test".to_vec()));
     
     let _ = std::fs::remove_dir_all(data_a.base());
@@ -105,15 +115,14 @@ async fn test_sync_multiple_entries() {
     let data_a = temp_data_dir("multi_sync_a");
     let data_b = temp_data_dir("multi_sync_b");
     
-    let node_a = Arc::new(NodeBuilder::new(data_a.clone()).build().expect("node a"));
-    let node_b = Arc::new(NodeBuilder::new(data_b.clone()).build().expect("node b"));
+    let node_a = Arc::new(test_node_builder(data_a.clone()).build().expect("node a"));
+    let node_b = Arc::new(test_node_builder(data_b.clone()).build().expect("node b"));
     
     let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
     let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
     
     let store_id = node_a.create_mesh().await.expect("init a");
-    let (store_a_raw, _) = node_a.open_root_store(store_id).expect("open a");
-    let store_a = KvHandle::new(store_a_raw);
+    let (store_a, _) = node_a.open_root_store(store_id).expect("open a");
     
     let token_string = node_a.mesh_by_id(store_id).expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");
@@ -129,11 +138,11 @@ async fn test_sync_multiple_entries() {
     
     // A writes multiple entries AFTER B joined
     for i in 1..=5 {
-        store_a.put(format!("/key{}", i).as_bytes(), format!("value{}", i).as_bytes()).await.expect("put");
+        lattice_kvstore_client::KvStoreExt::put(&store_a, format!("/key{}", i).into_bytes(), format!("value{}", i).into_bytes()).await.expect("put");
     }
     
     // Verify gap exists (B doesn't have A's data yet - gossip wouldn't have propagated)
-    assert!(store_b.get(b"/key1").expect("get").lww().is_none(), "B should not have data before sync");
+    assert!(store_b.state().get(b"/key1").expect("get").lww().is_none(), "B should not have data before sync");
     
     // B syncs to get the new entries (synchronous RPC pull)
     let _results = server_b.sync_all_by_id(store_b.id()).await.expect("sync");
@@ -142,7 +151,7 @@ async fn test_sync_multiple_entries() {
     for i in 1..=5 {
         let key = format!("/key{}", i);
         let expected = format!("value{}", i);
-        let val = store_b.get(key.as_bytes()).expect("get").lww();
+        let val = store_b.state().get(key.as_bytes()).expect("get").lww();
         assert_eq!(val, Some(expected.into_bytes()), "key{} should sync", i);
     }
     

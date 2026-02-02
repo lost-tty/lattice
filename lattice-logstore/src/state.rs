@@ -7,7 +7,10 @@ use lattice_model::{Op, PubKey, Uuid, Hash};
 
 use std::path::Path;
 use redb::{ReadableTable, ReadableTableMetadata};
+
 use tokio::sync::broadcast;
+use std::pin::Pin;
+use std::future::Future;
 
 /// Event emitted when a new log entry is appended
 #[derive(Debug, Clone)]
@@ -209,6 +212,15 @@ impl AsRef<LogState> for LogState {
     }
 }
 
+// StoreTypeProvider - declares this is a LogStore
+use lattice_model::StoreTypeProvider;
+
+impl StoreTypeProvider for LogState {
+    fn store_type() -> lattice_model::StoreType {
+        lattice_model::StoreType::LogStore
+    }
+}
+
 // Implement Introspectable for LogState
 impl lattice_store_base::Introspectable for LogState {
     fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
@@ -282,34 +294,78 @@ impl StreamProvider for LogState {
 
 impl LogState {
     /// Subscribe to new log entries as they are appended.
-    pub fn subscribe_follow(&self, _params: &[u8]) -> Result<BoxByteStream, StreamError> {
+    pub fn subscribe_follow<'a>(&'a self, _params: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
         use prost::Message;
+        
+        Box::pin(async move {
+            // Subscribe to state's broadcast channel
+            let mut state_rx = self.subscribe();
             
-        // Subscribe to state's broadcast channel
-        let mut state_rx = self.subscribe();
-        
-        // Create stream that converts events to proto and serializes
-        let stream = async_stream::stream! {
-            loop {
-                match state_rx.recv().await {
-                    Ok(event) => {
-                        // Convert to proto LogEvent
-                        let proto_event = crate::proto::LogEvent {
-                            content: event.content,
-                        };
-                        
-                        // Serialize to bytes
-                        let mut buf = Vec::new();
-                        proto_event.encode(&mut buf).ok();
-                        yield buf;
+            // Create stream that converts events to proto and serializes
+            let stream = async_stream::stream! {
+                loop {
+                    match state_rx.recv().await {
+                        Ok(event) => {
+                            // Convert to proto LogEvent
+                            let proto_event = crate::proto::LogEvent {
+                                content: event.content,
+                            };
+                            
+                            // Serialize to bytes
+                            let mut buf = Vec::new();
+                            proto_event.encode(&mut buf).ok();
+                            yield buf;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
+            };
+            
+            Ok(Box::pin(stream) as BoxByteStream)
+        })
+    }
+}
+
+// ==================== Dispatcher Implementation ====================
+//
+// Enables LogState to handle commands directly without a wrapper handle.
+// Write operations use the injected StateWriter.
+
+use lattice_store_base::{Dispatcher, dispatch::dispatch_method};
+use lattice_model::StateWriter;
+use crate::proto::{AppendRequest, AppendResponse, ReadRequest, ReadResponse};
+
+impl Dispatcher for LogState {
+    fn dispatch<'a>(
+        &'a self,
+        writer: &'a dyn StateWriter,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+        let desc = crate::LOG_SERVICE_DESCRIPTOR.clone();
+        Box::pin(async move {
+            match method_name {
+                "Append" => dispatch_method(method_name, request, desc, |req| self.handle_append(writer, req)).await,
+                "Read" => dispatch_method(method_name, request, desc, |req| self.handle_read(req)).await,
+                _ => Err(format!("Unknown method: {}", method_name).into()),
             }
-        };
-        
-        Ok(Box::pin(stream))
+        })
+    }
+}
+
+impl LogState {
+    async fn handle_append(&self, writer: &dyn StateWriter, req: AppendRequest) -> Result<AppendResponse, Box<dyn std::error::Error + Send + Sync>> {
+        // Log entries don't have causal dependencies on each other
+        let hash = writer.submit(req.content, vec![]).await?;
+        Ok(AppendResponse { hash: hash.0.to_vec() })
+    }
+
+    async fn handle_read(&self, req: ReadRequest) -> Result<ReadResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let tail = req.tail.map(|v| v as usize);
+        let entries = self.read(tail);
+        let entry_values = entries.iter().map(|e| e.content.clone()).collect();
+        Ok(ReadResponse { entries: entry_values })
     }
 }
 

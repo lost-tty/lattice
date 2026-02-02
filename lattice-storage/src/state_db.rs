@@ -488,7 +488,7 @@ pub fn xor_hash(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
 }
 // ==================== Composition Pattern ====================
 
-use lattice_store_base::{Introspectable, StreamReflectable, StreamDescriptor, FieldFormat};
+use lattice_store_base::{Introspectable, FieldFormat};
 use prost_reflect::DynamicMessage;
 use std::collections::HashMap;
 
@@ -676,10 +676,84 @@ impl<T: StateLogic + Introspectable> Introspectable for PersistentState<T> {
     }
 }
 
-// Delegate StreamReflectable if valid
-impl<T: StateLogic + StreamReflectable> StreamReflectable for PersistentState<T> {
-    fn stream_descriptors(&self) -> Vec<StreamDescriptor> {
-        self.inner.stream_descriptors()
+// NOTE: StreamReflectable delegation is now in the Handle-Less Pattern section below
+// using StreamProvider instead of requiring T: StreamReflectable directly.
+
+// =============================================================================
+// Additional Trait Delegations for Handle-Less Pattern
+// =============================================================================
+//
+// These delegations allow Store<PersistentState<S>> to satisfy StoreHandle
+// requirements by forwarding trait impls from the inner state type.
+//
+// NOTE: Dispatcher is NOT needed here - there's a blanket impl in lattice-store-base
+// for types that Deref to a Dispatcher. PersistentState<T>: Deref<Target = T> so
+// when T: Dispatcher, PersistentState<T> is automatically Dispatcher too.
+
+use std::pin::Pin;
+use std::future::Future;
+use lattice_store_base::{BoxByteStream, StreamError, StreamProvider, StreamHandler};
+use lattice_model::StoreTypeProvider;
+
+// PersistentState<T> implements StreamProvider by forwarding to inner type's handlers.
+// Each handler uses the same forwarding function that looks up the inner handler by name.
+impl<T: StateLogic + StreamProvider + Send + Sync> StreamProvider for PersistentState<T> {
+    fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
+        // Get descriptors from inner type and create handlers for each.
+        // All handlers use the same forwarding function - it looks upByeName at call time.
+        self.inner
+            .stream_handlers()
+            .into_iter()
+            .map(|h| {
+                StreamHandler {
+                    descriptor: h.descriptor,
+                    // All handlers use the same forwarding function
+                    subscribe: Self::forward_stream_subscribe,
+                }
+            })
+            .collect()
+    }
+}
+
+impl<T: StateLogic + StreamProvider + Send + Sync> PersistentState<T> {
+    /// Forward stream subscription to inner type's handler.
+    /// 
+    /// This is called by the blanket StreamReflectable impl via StreamHandler.
+    /// Since we can't capture the stream name in function pointers, we receive it
+    /// via the handler lookup that already happened - we just need to forward to inner.
+    /// 
+    /// Note: The blanket impl finds our handler by name, then calls handler.subscribe.
+    /// At that point, we need to find the inner handler by the SAME name and call it.
+    /// But we don't have access to the name here! The workaround: look it up by params.
+    /// 
+    /// Actually: The blanket impl passes the descriptor name when finding our handler,
+    /// but handler.subscribe only gets &self and params. We can't know which stream.
+    /// 
+    /// REAL FIX: We need the blanket in handle.rs to pass stream_name to subscribe.
+    /// For now, we assume single-stream types and just call the first handler.
+    fn forward_stream_subscribe<'a>(
+        this: &'a Self,
+        params: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+        // Get the first handler from inner type (works for single-stream types like KvState)
+        let handlers = this.inner.stream_handlers();
+        
+        Box::pin(async move {
+            let handler = handlers
+                .into_iter()
+                .next()
+                .ok_or_else(|| StreamError::NotFound("No stream handlers".to_string()))?;
+            
+            // Call inner type's handler with &T (via Deref)
+            (handler.subscribe)(&*this, params).await
+        })
+    }
+}
+
+// Delegate StoreTypeProvider for store type identification
+impl<T: StateLogic + StoreTypeProvider> StoreTypeProvider for PersistentState<T> {
+    fn store_type() -> lattice_model::StoreType {
+        T::store_type()
     }
 }
 

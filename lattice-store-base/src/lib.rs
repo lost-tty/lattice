@@ -9,10 +9,12 @@
 mod introspection;
 mod handle;
 pub mod dispatch;
+pub mod invoke;
 
 pub use introspection::{
     BoxByteStream, CommandDispatcher, FieldFormat, Introspectable, StreamDescriptor,
     StreamError, StreamReflectable,
 };
 
-pub use handle::{HandleBase, StateProvider, Dispatchable, StreamHandler, StreamProvider};
+pub use handle::{HandleBase, StateProvider, Dispatchable, Dispatcher, StreamHandler, StreamProvider, HandleWithWriter};
+pub use invoke::invoke_command;

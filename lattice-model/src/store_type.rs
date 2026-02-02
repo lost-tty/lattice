@@ -14,6 +14,14 @@ pub enum StoreType {
     LogStore,
 }
 
+/// Trait for state types to declare their store type.
+/// 
+/// Implement this on state types (KvState, LogState) to enable
+/// automatic `StoreInfo` implementation on `Store<S>`.
+pub trait StoreTypeProvider {
+    fn store_type() -> StoreType;
+}
+
 /// Error parsing a store type from string
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParseStoreTypeError;

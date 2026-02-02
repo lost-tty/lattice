@@ -22,8 +22,9 @@ use crate::{
 };
 use lattice_kernel::NodeIdentity;
 use lattice_model::types::PubKey;
+use futures_util::StreamExt;
 use crate::Uuid;
-use lattice_kvstore::Merge;
+use lattice_kvstore_client::KvStoreExt;
 use rand::RngCore;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -33,7 +34,7 @@ use tracing::{info, warn, debug};
 #[derive(Debug, thiserror::Error)]
 pub enum MeshError {
     #[error("Store error: {0}")]
-    Store(#[from] lattice_kvstore::KvHandleError),
+    Store(#[from] lattice_kvstore_client::DispatchError),
     #[error("Actor error: {0}")]
     Actor(String),
     #[error("PeerManager error: {0}")]
@@ -57,7 +58,7 @@ pub enum MeshError {
 /// Use `mesh.peer_manager()` for network layer integration.
 pub struct Mesh {
     root_store_id: Uuid,
-    peer_manager: Arc<PeerManager>,
+    peer_manager: Arc<PeerManager<KvStore>>,
     store_manager: Arc<StoreManager>,
     /// Shutdown signal for watcher
     shutdown_tx: broadcast::Sender<()>,
@@ -89,7 +90,7 @@ impl Mesh {
         let root_store: KvStore = *opened.typed_handle.downcast()
             .map_err(|_| MeshError::Other("Failed to downcast KvStore".into()))?;
         
-        let peer_manager = PeerManager::new(root_store, node).await?;
+        let peer_manager = PeerManager::new(Arc::new(root_store.clone()), node).await?;
         
         // Register root store immediately
         let opened_for_reg = store_manager.open(root_store_id, StoreType::KvStore)?;
@@ -129,7 +130,7 @@ impl Mesh {
         let root_store: KvStore = *opened.typed_handle.downcast()
             .map_err(|_| MeshError::Other("Failed to downcast KvStore".into()))?;
         
-        let peer_manager = PeerManager::new(root_store, node).await?;
+        let peer_manager = PeerManager::new(Arc::new(root_store.clone()), node).await?;
         
         // Register root store immediately
         let opened_for_reg = store_manager.open(store_id, StoreType::KvStore)?;
@@ -170,7 +171,7 @@ impl Mesh {
     }
     
     /// Get peer manager for network layer integration.
-    pub fn peer_manager(&self) -> Arc<PeerManager> {
+    pub fn peer_manager(&self) -> Arc<PeerManager<KvStore>> {
         self.peer_manager.clone()
     }
     
@@ -225,9 +226,9 @@ impl Mesh {
         
         tokio::spawn(async move {
             // Watch for changes to /stores/ prefix
-            let watch_result = root_store.watch("^/stores/").await;
-            let (_initial, mut rx) = match watch_result {
-                Ok(r) => r,
+            // 1. Subscribe stream using UFCS to use trait method (bypass inherent shadowing)
+            let mut stream = match KvStoreExt::watch(&root_store, "^/stores/").await {
+                Ok(s) => s,
                 Err(e) => {
                     warn!(error = %e, "Failed to start store watcher");
                     return;
@@ -236,27 +237,33 @@ impl Mesh {
             
             debug!("Store watcher started for mesh {}", root_store_id);
             
-            // Initial reconciliation to open existing stores
-            if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores) {
+            // 2. Initial reconcile (manual list)
+            if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores).await {
                 warn!(error = %e, "Initial reconcile failed");
             }
             
+            // 3. Process stream
             loop {
                 tokio::select! {
                     _ = shutdown_rx.recv() => {
                         debug!("Store watcher shutting down");
                         break;
                     }
-                    event = rx.recv() => {
-                        match event {
-                            Ok(_evt) => {
+                    next = stream.next() => {
+                        match next {
+                            Some(Ok(_evt)) => {
                                 // Reconcile on any change
-                                if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores) {
+                                if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores).await {
                                     warn!(error = %e, "Reconcile failed");
                                 }
                             }
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(broadcast::error::RecvError::Closed) => break,
+                            Some(Err(e)) => {
+                                warn!(error = %e, "Watch stream error");
+                                // Simple retry strategy: break (reconcile loop will stop) 
+                                // Ideally duplicate logic from PeerManager to re-sync
+                                // This needs to be in roadmap M9 (implemented, carefully tested)
+                            }
+                            None => break,
                         }
                     }
                 }
@@ -266,14 +273,14 @@ impl Mesh {
     
     /// Reconcile stores with declarations in root store.
     /// Tracks which stores this mesh opened, and only closes those when undeclared.
-    fn reconcile_stores(
+    async fn reconcile_stores(
         store_manager: &Arc<StoreManager>, 
         root: &KvStore, 
         root_store_id: Uuid,
-        peer_manager: &Arc<PeerManager>,
+        peer_manager: &Arc<PeerManager<KvStore>>,
         opened_stores: &Arc<RwLock<std::collections::HashSet<Uuid>>>,
     ) -> Result<(), MeshError> {
-        let declarations = Self::list_declarations(root)?;
+        let declarations = Self::list_declarations(root).await?;
         
         // Get IDs of stores we have opened (from our tracking set)
         let our_stores: std::collections::HashSet<Uuid> = opened_stores.read()
@@ -341,36 +348,53 @@ impl Mesh {
     }
     
     /// List store declarations from root store.
-    fn list_declarations(root: &KvStore) -> Result<Vec<StoreDeclaration>, MeshError> {
-        let entries = root.list()
+    async fn list_declarations(root: &KvStore) -> Result<Vec<StoreDeclaration>, MeshError> {
+        let entries = root.list().await
             .map_err(|e| MeshError::Other(e.to_string()))?;
         
-        let declarations = entries.iter()
-            .filter(|(k, _)| k.starts_with(b"/stores/") && k.ends_with(b"/type"))
-            .filter_map(|(k, _)| Self::parse_declaration(root, k))
-            .collect();
+        // entries is Vec<KeyValuePair>
+        let mut declarations = Vec::new();
+        for kv in entries {
+             if kv.key.starts_with(b"/stores/") && kv.key.ends_with(b"/type") {
+                 if let Some(decl) = Self::parse_declaration(root, &kv.key).await {
+                     declarations.push(decl);
+                 }
+             }
+        }
         
         Ok(declarations)
     }
     
     /// Parse a store declaration from a `/stores/{uuid}/type` key.
-    fn parse_declaration(root: &KvStore, type_key: &[u8]) -> Option<StoreDeclaration> {
+    async fn parse_declaration(root: &KvStore, type_key: &[u8]) -> Option<StoreDeclaration> {
         let key_str = String::from_utf8_lossy(type_key);
         let uuid_str = key_str.split('/').nth(2)?;
         let id = Uuid::parse_str(uuid_str).ok()?;
+        // We use explicit calls to avoid lifetime issues with closures taking references
+        // Or just inline it since it's simple
+        let type_key = format!("/stores/{}/type", uuid_str);
+        let type_str = match root.get(type_key.into_bytes()).await {
+             Ok(Some(v)) => String::from_utf8_lossy(&v).to_string(),
+             _ => return None, // Type is mandatory
+        };
         
-        let get_str = |suffix: &str| -> Option<String> {
-            let key = format!("/stores/{}/{}", uuid_str, suffix);
-            root.get(key.as_bytes()).ok()?.lww().map(|v| String::from_utf8_lossy(&v).to_string())
+        let name_key = format!("/stores/{}/name", uuid_str);
+        let name = match root.get(name_key.into_bytes()).await {
+             Ok(Some(v)) => Some(String::from_utf8_lossy(&v).to_string()),
+             _ => None,
+        };
+
+        let archived_key = format!("/stores/{}/archived", uuid_str);
+        let archived = match root.get(archived_key.into_bytes()).await {
+             Ok(Some(_)) => true,
+             _ => false,
         };
         
         Some(StoreDeclaration {
             id,
-            store_type: get_str("type")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(StoreType::KvStore),
-            name: get_str("name"),
-            archived: get_str("archived").is_some(),
+            store_type: type_str.parse().ok().unwrap_or(StoreType::KvStore),
+            name,
+            archived,
         })
     }
     
@@ -378,9 +402,9 @@ impl Mesh {
     
     /// List all store declarations in this mesh.
     /// Returns all stores declared in /stores/* (excludes root store).
-    pub fn list_stores(&self) -> Result<Vec<StoreDeclaration>, MeshError> {
+    pub async fn list_stores(&self) -> Result<Vec<StoreDeclaration>, MeshError> {
         let root = self.root_store();
-        Self::list_declarations(&root)
+        Self::list_declarations(&root).await
     }
     
     /// Create a new store declaration in root store.
@@ -394,38 +418,42 @@ impl Mesh {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         
-        // Atomically write all store declaration keys
+        // Atomically write all store declaration keys using Batch
         let type_key = format!("/stores/{}/type", store_id);
         let created_key = format!("/stores/{}/created_at", store_id);
         
         let mut batch = root.batch()
-            .put(type_key.as_bytes(), store_type.as_str().as_bytes())
-            .put(created_key.as_bytes(), now_secs.to_string().as_bytes());
-        
+            .put(type_key.into_bytes(), store_type.as_str().as_bytes().to_vec())
+            .put(created_key.into_bytes(), now_secs.to_string().as_bytes().to_vec());
+
         if let Some(ref name) = name {
             let name_key = format!("/stores/{}/name", store_id);
-            batch = batch.put(name_key.as_bytes(), name.as_bytes());
+            batch = batch.put(name_key.into_bytes(), name.as_bytes().to_vec());
         }
         
-        batch.commit().await?;
+        batch.commit().await.map_err(|e| MeshError::Other(e.to_string()))?;
         
         info!(store_id = %store_id, "Created store declaration");
         Ok(store_id)
     }
     
-    /// Archive (soft-delete) a store.
     pub async fn delete_store(&self, store_id: Uuid) -> Result<(), MeshError> {
         let root = self.root_store();
         
         // Verify store exists
         let type_key = format!("/stores/{}/type", store_id);
-        if root.get(type_key.as_bytes()).unwrap_or_default().lww().is_none() {
-            return Err(MeshError::Other(format!("Store {} not found", store_id)));
+        let exists = root.get(type_key.as_bytes().to_vec()).await
+            .map_err(|e| MeshError::Other(e.to_string()))?
+            .is_some();
+
+        if !exists {
+             return Err(MeshError::Other(format!("Store {} not found", store_id)));
         }
         
         // Write archived flag
         let archived_key = format!("/stores/{}/archived", store_id);
-        root.put(archived_key.as_bytes(), b"true").await?;
+        root.put(archived_key.into_bytes(), b"true".to_vec()).await
+             .map_err(|e| MeshError::Other(e.to_string()))?;
         
         info!(store_id = %store_id, "Archived store");
         Ok(())
@@ -451,7 +479,8 @@ impl Mesh {
         let hash = blake3::hash(&secret);
         let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
         let root = self.root_store();
-        root.put(key.as_bytes(), b"valid").await?;
+        root.put(key.into_bytes(), b"valid".to_vec()).await
+             .map_err(|e| MeshError::Other(e.to_string()))?;
         
         let invite = Invite::new(inviter, self.id(), secret.to_vec());
         Ok(invite.to_string())
@@ -464,8 +493,14 @@ impl Mesh {
         
         let root = self.root_store();
         
-        if let Ok(Some(_)) = root.get(key.as_bytes()).map(|h| h.lww()) {
-            root.delete(key.as_bytes()).await?;
+        // Check if exists
+        let exists = root.get(key.as_bytes().to_vec()).await
+             .map_err(|e| MeshError::Other(e.to_string()))?
+             .is_some();
+
+        if exists {
+            root.delete(key.into_bytes()).await
+                 .map_err(|e| MeshError::Other(e.to_string()))?;
             Ok(true)
         } else {
             Ok(false)

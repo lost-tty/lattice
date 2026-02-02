@@ -282,34 +282,36 @@ impl LatticeBackend for RpcBackend {
         })
     }
     
-    fn store_subscribe(&self, store_id: Uuid, stream_name: &str, params: &[u8]) -> BackendResult<BoxByteStream> {
+    fn store_subscribe<'a>(&'a self, store_id: Uuid, stream_name: &'a str, params: &'a [u8]) -> AsyncResult<'a, BoxByteStream> {
         use lattice_api::proto::SubscribeRequest;
         
         let client = self.client.clone();
         let stream_name = stream_name.to_string();
         let params = params.to_vec();
         
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
-        
-        tokio::spawn(async move {
-            let mut dynamic = client.dynamic;
-            let resp = dynamic.subscribe(SubscribeRequest {
-                store_id: store_id.as_bytes().to_vec(),
-                stream_name,
-                params,
-            }).await;
+        Box::pin(async move {
+            let (tx, rx) = tokio::sync::mpsc::channel(128);
             
-            if let Ok(resp) = resp {
-                let mut stream = resp.into_inner();
-                // Use tokio_stream's StreamExt (already imported at top)
-                while let Some(Ok(event)) = StreamExt::next(&mut stream).await {
-                    if tx.send(event.payload).await.is_err() {
-                        break;
+            tokio::spawn(async move {
+                let mut dynamic = client.dynamic;
+                let resp = dynamic.subscribe(SubscribeRequest {
+                    store_id: store_id.as_bytes().to_vec(),
+                    stream_name,
+                    params,
+                }).await;
+                
+                if let Ok(resp) = resp {
+                    let mut stream = resp.into_inner();
+                    // Use tokio_stream's StreamExt (already imported at top)
+                    while let Some(Ok(event)) = StreamExt::next(&mut stream).await {
+                        if tx.send(event.payload).await.is_err() {
+                            break;
+                        }
                     }
                 }
-            }
-        });
-        
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            });
+            
+            Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)) as BoxByteStream)
+        })
     }
 }

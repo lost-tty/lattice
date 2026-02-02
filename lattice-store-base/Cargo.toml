@@ -6,6 +6,9 @@ license.workspace = true
 description = "Base traits and infrastructure for Lattice store handles"
 
 [dependencies]
+# Lattice crates
+lattice-model = { workspace = true }
+
 # Reflection
 prost-reflect = { workspace = true }
 
@@ -15,4 +18,3 @@ futures-core = "0.3"
 
 # Utilities
 thiserror = { workspace = true }
-

@@ -1,0 +1,251 @@
+mod common;
+use common::TestStore;
+use lattice_kvstore_client::{KvStoreExt, WatchEventKind};
+use lattice_model::types::{Hash, PubKey};
+use lattice_model::hlc::HLC;
+use lattice_model::{Op, StateMachine};
+use lattice_kvstore::{KvPayload, Operation};
+use prost::Message;
+use futures::StreamExt;
+use std::time::Duration;
+
+
+fn create_test_op(key: &[u8], value: &[u8], author: PubKey, id: Hash, timestamp: HLC, prev_hash: Hash, deps: &[Hash]) -> Op<'static> {
+    let kv_op = Operation::put(key, value);
+    let payload = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    
+    let deps_leaked = Box::leak(deps.to_vec().into_boxed_slice());
+
+    Op {
+        id,
+        causal_deps: deps_leaked,
+        payload: Box::leak(payload.into_boxed_slice()),
+        author,
+        timestamp,
+        prev_hash,
+    }
+}
+
+fn create_delete_op(key: &[u8], author: PubKey, id: Hash, timestamp: HLC, prev_hash: Hash, deps: &[Hash]) -> Op<'static> {
+    let kv_op = Operation::delete(key);
+    let payload = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    
+    let deps_leaked = Box::leak(deps.to_vec().into_boxed_slice());
+
+    Op {
+        id,
+        causal_deps: deps_leaked,
+        payload: Box::leak(payload.into_boxed_slice()),
+        author,
+        timestamp,
+        prev_hash,
+    }
+}
+
+// Manually increment HLC for testing logical clock progression
+fn next_hlc(hlc: HLC) -> HLC {
+    // HLC display: <phys>:<logical>
+    // We just want ANY strictly greater HLC.
+    // Assuming HLC impl has public fields or we construct new one.
+    // If we can't access fields easily, HLC::now() might work if we verify it's > prev.
+    // But safely, let's wait a tick or use a mock.
+    // Actually, lattice-model HLC usually has standard traits. 
+    // Let's assume we can rely on thread::sleep for now OR check if we have method.
+    // Safer: Just loop HLC::now() until it's greater.
+    let mut next = HLC::now();
+    while next <= hlc {
+        std::thread::yield_now();
+        next = HLC::now();
+    }
+    next
+}
+
+#[tokio::test]
+async fn test_subscribe_stream_tombstone_should_not_resurrect() {
+    let store = TestStore::new();
+    let key = b"resurrect_test";
+    
+
+    let mut stream = store.watch("resurrect_test").await.expect("watch failed");
+    
+    // 2. Put
+    store.put(key.to_vec(), b"val1".to_vec()).await.expect("put failed");
+    
+    let event = stream.next().await.expect("stream closed").expect("error in stream");
+    assert_eq!(event.key, key);
+    match event.kind {
+        WatchEventKind::Update { value } => assert_eq!(value, b"val1"),
+        _ => panic!("Expected update"),
+    }
+    
+    // 3. Delete
+    store.delete(key.to_vec()).await.expect("delete failed");
+    
+    // Expect Delete
+    let event = stream.next().await.expect("stream closed").expect("error in stream");
+    assert_eq!(event.key, key);
+    match event.kind {
+        WatchEventKind::Delete => {},
+        _ => panic!("Expected delete"),
+    }
+    
+    let timeout = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+    assert!(timeout.is_err(), "Stream should be silent after delete, but got event");
+}
+
+#[test]
+fn test_concurrent_genesis_merge() {
+    let store = TestStore::new();
+    let state = &store.state;
+    
+    let key = b"genesis_key";
+    let author1 = PubKey::from([0xA0; 32]);
+    let author2 = PubKey::from([0xB0; 32]);
+    let hlc = HLC::now();
+    
+    // Two genesis ops (no common ancestor, empty deps)
+    let op1 = create_test_op(key, b"val_a", author1, Hash::from([0xA1; 32]), hlc, Hash::ZERO, &[]);
+    let op2 = create_test_op(key, b"val_b", author2, Hash::from([0xB1; 32]), hlc, Hash::ZERO, &[]);
+    
+    state.apply(&op1).unwrap();
+    state.apply(&op2).unwrap();
+    
+    let heads = state.get(key).expect("key missing");
+    assert_eq!(heads.len(), 2, "Should preserve both genesis heads");
+    
+    let values: Vec<&[u8]> = heads.iter().map(|h| h.value.as_slice()).collect();
+    assert!(values.contains(&&b"val_a"[..]));
+    assert!(values.contains(&&b"val_b"[..]));
+}
+
+#[test]
+fn test_concurrent_writes_produce_multi_heads() {
+    let store = TestStore::new();
+    let state = &store.state;
+    
+    let key = b"conflict_key";
+    let author1 = PubKey::from([1u8; 32]);
+    let author2 = PubKey::from([2u8; 32]);
+    let start_hlc = HLC::now();
+    
+    // 1. Concurrent writes (same history = genesis)
+    let op1 = create_test_op(key, b"val1", author1, Hash::from([0xA1; 32]), start_hlc, Hash::ZERO, &[]);
+    let op2 = create_test_op(key, b"val2", author2, Hash::from([0xB2; 32]), start_hlc, Hash::ZERO, &[]);
+    
+    state.apply(&op1).unwrap();
+    state.apply(&op2).unwrap();
+    
+
+    let heads = state.get(key).expect("key missing");
+    assert_eq!(heads.len(), 2, "Expected 2 concurrent heads");
+    
+    let values: Vec<&[u8]> = heads.iter().map(|h| h.value.as_slice()).collect();
+    assert!(values.contains(&&b"val1"[..]));
+    assert!(values.contains(&&b"val2"[..]));
+}
+
+#[test]
+fn test_causal_dependency_chain() {
+    let store = TestStore::new();
+    let state = &store.state;
+    let key = b"chain_key";
+    let author = PubKey::from([1u8; 32]);
+    let hlc1 = HLC::now();
+    
+    // 1. Genesis
+    let hash1 = Hash::from([0x11; 32]);
+    let op1 = create_test_op(key, b"v1", author, hash1, hlc1, Hash::ZERO, &[]);
+    state.apply(&op1).unwrap();
+    
+    let heads = state.get(key).unwrap();
+    assert_eq!(heads.len(), 1);
+    assert_eq!(heads[0].hash, hash1);
+    
+    // 2. Child (points to hash1, later time)
+    let hlc2 = next_hlc(hlc1);
+    let hash2 = Hash::from([0x22; 32]);
+    let op2 = create_test_op(key, b"v2", author, hash2, hlc2, hash1, &[hash1]); // Prev=hash1, Deps=[hash1]
+    state.apply(&op2).unwrap();
+    
+    let heads = state.get(key).unwrap();
+    assert_eq!(heads.len(), 1, "Op2 should supersede Op1");
+    assert_eq!(heads[0].hash, hash2);
+    assert_eq!(heads[0].value, b"v2");
+}
+
+#[test]
+fn test_concurrent_put_and_delete_conflict() {
+    let store = TestStore::new();
+    let state = &store.state;
+    let key = b"pd_conflict";
+    let author1 = PubKey::from([1u8; 32]);
+    let author2 = PubKey::from([2u8; 32]);
+    let hlc = HLC::now();
+    
+    // 1. Common ancestor
+    let hash1 = Hash::from([0x11; 32]);
+    let op1 = create_test_op(key, b"v1", author1, hash1, hlc, Hash::ZERO, &[]);
+    state.apply(&op1).unwrap();
+    
+    // 2. Concurrent Branch A: Put v2 (Author 1)
+    let hlc_a = next_hlc(hlc);
+    let hash2a = Hash::from([0x2A; 32]);
+    let op2a = create_test_op(key, b"v2", author1, hash2a, hlc_a, hash1, &[hash1]);
+    
+    let hlc_b = hlc_a; 
+    let hash2b = Hash::from([0x2B; 32]);
+    let op2b = create_delete_op(key, author2, hash2b, hlc_b, Hash::ZERO, &[hash1]);
+    
+    state.apply(&op2a).unwrap();
+    state.apply(&op2b).unwrap();
+    
+    let heads = state.get(key).unwrap();
+    assert_eq!(heads.len(), 2, "Expected conflict between Put and Delete");
+
+    let has_val = heads.iter().any(|h| h.value == b"v2" && !h.tombstone);
+    let has_tomb = heads.iter().any(|h| h.tombstone);
+    
+    assert!(has_val, "Value head missing");
+    assert!(has_tomb, "Tombstone head missing");
+    
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _resolved = rt.block_on(async {
+        store.get(key.to_vec()).await.unwrap()
+    });
+}
+
+#[test]
+fn test_resurrection_causality() {
+    let store = TestStore::new();
+    let state = &store.state;
+    let key = b"zombie_key";
+    let author = PubKey::from([1u8; 32]);
+    let hlc1 = HLC::now();
+    
+    // 1. Put v1
+    let hash1 = Hash::from([0x11; 32]);
+    let op1 = create_test_op(key, b"v1", author, hash1, hlc1, Hash::ZERO, &[]);
+    state.apply(&op1).unwrap();
+    
+    // 2. Delete (Child of op1)
+    let hlc2 = next_hlc(hlc1);
+    let hash2 = Hash::from([0x22; 32]);
+    let op2 = create_delete_op(key, author, hash2, hlc2, hash1, &[hash1]);
+    state.apply(&op2).unwrap();
+    
+    // 3. Resurrect (Put v2 pointing to Delete) - Valid child of delete
+    let hlc3 = next_hlc(hlc2);
+    let hash3 = Hash::from([0x33; 32]);
+    let op3 = create_test_op(key, b"v2", author, hash3, hlc3, hash2, &[hash2]);
+    
+    state.apply(&op3).unwrap();
+    
+    let heads = state.get(key).unwrap();
+    assert_eq!(heads.len(), 1, "Resurrection should simply advance the chain");
+    
+    assert_eq!(heads[0].value, b"v2");
+    assert!(!heads[0].tombstone);
+}

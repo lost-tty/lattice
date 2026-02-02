@@ -3,19 +3,30 @@
 //! These tests replicate PRODUCTION usage exactly - no manual gossip setup.
 //! They rely purely on the event-driven flow that happens in the CLI.
 
-use lattice_node::{NodeBuilder, NodeEvent, Node, KvStore, token::Invite, Uuid};
-use lattice_kvstore::Merge;
+use lattice_node::{NodeBuilder, NodeEvent, Node, token::Invite, Uuid, direct_opener, StoreType, Store};
+use lattice_kvstore::{Merge, PersistentKvState};
+use lattice_logstore::PersistentLogState;
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
+/// Type alias for KvStore - now uses Store<S> directly (handle-less architecture)
+type KvStore = Store<PersistentKvState>;
+
 /// Helper to create a temp data dir for testing
 fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     let path = std::env::temp_dir().join(format!("lattice_gossip_test_{}", name));
     let _ = std::fs::remove_dir_all(&path);
     lattice_node::DataDir::new(path)
+}
+
+/// Helper to create node builder with openers registered (using handle-less pattern)
+fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
+    NodeBuilder::new(data_dir)
+        .with_opener(StoreType::KvStore, |registry| direct_opener::<PersistentKvState>(registry))
+        .with_opener(StoreType::LogStore, |registry| direct_opener::<PersistentLogState>(registry))
 }
 
 /// Test helper: Create MeshService from Node (replaces removed new_from_node)
@@ -60,7 +71,7 @@ async fn wait_for_entry(store: &KvStore, key: &[u8], expected: &[u8]) -> bool {
     let start = std::time::Instant::now();
     
     while start.elapsed() < timeout {
-        if let Some(val) = store.get(key).unwrap_or_default().lww_head() {
+        if let Some(val) = store.state().get(key).unwrap_or_default().lww_head() {
             if val.value == expected {
                 return true;
             }
@@ -85,7 +96,7 @@ async fn test_production_flow_gossip() {
     // === Session 1: Node A runs `lattice init` ===
     let mesh_id;
     {
-        let node_a = Arc::new(NodeBuilder::new(data_a.clone()).build().expect("node a"));
+        let node_a = Arc::new(test_node_builder(data_a.clone()).build().expect("node a"));
         mesh_id = node_a.create_mesh().await.expect("init a");
         // Node A exits after init - explicit shutdown required for clean DB release
         node_a.shutdown().await;
@@ -93,7 +104,7 @@ async fn test_production_flow_gossip() {
     
     // === Session 2: Both nodes run `lattice daemon` ===
     // Node A: already initialized, will call start()
-    let node_a = Arc::new(NodeBuilder::new(data_a.clone()).build().expect("node a session 2"));
+    let node_a = Arc::new(test_node_builder(data_a.clone()).build().expect("node a session 2"));
     
     let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
     node_a.start().await.expect("start a");  // Emits NetworkStore → gossip setup
@@ -103,7 +114,7 @@ async fn test_production_flow_gossip() {
     let store_a = mesh_a.root_store().clone();
     
     // Node B: not yet initialized
-    let node_b = Arc::new(NodeBuilder::new(data_b.clone()).build().expect("node b"));
+    let node_b = Arc::new(test_node_builder(data_b.clone()).build().expect("node b"));
     let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
     
     // Add A's address to B's discovery for reliable connection
@@ -125,7 +136,7 @@ async fn test_production_flow_gossip() {
     let _a_gossip_peers = server_a.connected_peers();
     
     // === Test A → B direction ===
-    store_a.put(b"/from_a", b"hello from A").await.expect("put from A");
+    lattice_kvstore_client::KvStoreExt::put(&store_a, b"/from_a".to_vec(), b"hello from A".to_vec()).await.expect("put from A");
     
     // Wait for gossip propagation (no explicit sync!)
     // Wait for gossip propagation (no explicit sync!)
@@ -134,7 +145,7 @@ async fn test_production_flow_gossip() {
     assert!(received_at_b, "B should receive A's entry via gossip (A→B direction)");
     
     // === Test B → A direction ===
-    store_b.put(b"/from_b", b"hello from B").await.expect("put from B");
+    lattice_kvstore_client::KvStoreExt::put(&store_b, b"/from_b".to_vec(), b"hello from B".to_vec()).await.expect("put from B");
     
     let received_at_a = wait_for_entry(&store_a, b"/from_b", b"hello from B").await;
     

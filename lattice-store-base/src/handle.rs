@@ -64,6 +64,9 @@ impl<Wrapper, W: Clone> Clone for HandleBase<Wrapper, W> {
     }
 }
 
+// HandleBase-based types get the marker, allowing blanket StoreHandle to match them
+impl<Wrapper, W> HandleWithWriter for HandleBase<Wrapper, W> {}
+
 /// Access the inner state via wrapper.
 /// 
 /// Works when:
@@ -79,6 +82,19 @@ where
         &*self.writer.as_ref()
     }
 }
+
+// =============================================================================
+// HandleWithWriter Marker Trait
+// =============================================================================
+
+/// Marker trait for handle types that wrap a separate writer type.
+/// 
+/// Used to disambiguate blanket `StoreHandle` implementations.
+/// - Wrapper handles (KvHandle, LogHandle) implement this marker
+/// - `Store<S>` does NOT implement this marker
+/// 
+/// This allows both blanket impls and specialized impls to coexist.
+pub trait HandleWithWriter {}
 
 // =============================================================================
 // StateProvider Trait
@@ -160,12 +176,70 @@ where
 }
 
 // =============================================================================
+// Dispatcher Trait - Command routing for state types
+// =============================================================================
+
+use lattice_model::StateWriter;
+use std::future::Future;
+use std::pin::Pin;
+
+/// Trait for state types that can dispatch commands.
+/// 
+/// This trait enables state implementations (KvState, LogState) to handle
+/// commands without needing a wrapper handle. The writer is passed as a
+/// parameter, allowing the state to perform mutations via the provided writer.
+/// 
+/// # Example
+/// ```ignore
+/// impl Dispatcher for PersistentState<KvState> {
+///     fn dispatch<'a>(
+///         &'a self,
+///         writer: &'a dyn StateWriter,
+///         method: &'a str,
+///         request: DynamicMessage,
+///     ) -> Pin<Box<dyn Future<Output = Result<DynamicMessage, _>> + Send + 'a>> {
+///         Box::pin(async move {
+///             match method {
+///                 "Get" => self.handle_get(request),
+///                 "Put" => self.handle_put(writer, request),
+///                 _ => Err("Unknown method".into())
+///             }
+///         })
+///     }
+/// }
+/// ```
+pub trait Dispatcher: Send + Sync {
+    /// Dispatch a command, using the provided writer for mutations.
+    fn dispatch<'a>(
+        &'a self,
+        writer: &'a dyn StateWriter,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>;
+}
+
+/// Blanket impl: Any type that derefs to a Dispatcher is also a Dispatcher.
+/// This allows `PersistentState<KvState>` to implement Dispatcher when `KvState` does.
+impl<T> Dispatcher for T
+where
+    T: std::ops::Deref + Send + Sync,
+    T::Target: Dispatcher,
+{
+    fn dispatch<'a>(
+        &'a self,
+        writer: &'a dyn StateWriter,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+        (**self).dispatch(writer, method_name, request)
+    }
+}
+
+// =============================================================================
 // Dispatchable Trait + Blanket CommandDispatcher
 // =============================================================================
 
 use crate::CommandDispatcher;
-use std::future::Future;
-use std::pin::Pin;
 
 /// Trait for types that can dispatch commands via an inherent async method.
 /// 
@@ -246,7 +320,8 @@ use crate::{StreamReflectable, StreamDescriptor, StreamError, BoxByteStream};
 /// A stream handler definition - pairs a descriptor with a subscribe function.
 pub struct StreamHandler<S: ?Sized> {
     pub descriptor: StreamDescriptor,
-    pub subscribe: fn(&S, params: &[u8]) -> Result<BoxByteStream, StreamError>,
+    // Subscribe function returns a Future with HRTB for lifetime safety
+    pub subscribe: for<'a> fn(&'a S, params: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>>,
 }
 
 /// Trait for state types that provide stream handlers.
@@ -284,12 +359,24 @@ where
         self.state().stream_handlers().into_iter().map(|h| h.descriptor).collect()
     }
     
-    fn subscribe(&self, stream_name: &str, params: &[u8]) -> Result<BoxByteStream, StreamError> {
+    fn subscribe<'a>(&'a self, stream_name: &'a str, params: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
         let handlers = self.state().stream_handlers();
-        let handler = handlers
-            .iter()
-            .find(|h| h.descriptor.name == stream_name)
-            .ok_or_else(|| StreamError::NotFound(stream_name.to_string()))?;
-        (handler.subscribe)(self.state(), params)
+        
+        // We must clone the descriptor name needed or process handlers before async block
+        // to avoid lifetime issues with `stream_name`.
+        // Actually, we can just find the handler inside the async block if we own the resources or 
+        // if we process it outside. 
+        // The issue is `stream_name` is &str.
+        
+        let found_handler = handlers
+            .into_iter()
+            .find(|h| h.descriptor.name == stream_name);
+            
+        Box::pin(async move {
+             let handler = found_handler
+                .ok_or_else(|| StreamError::NotFound(stream_name.to_string()))?;
+            
+             (handler.subscribe)(self.state(), params).await
+        })
     }
 }
