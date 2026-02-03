@@ -50,7 +50,7 @@ fn encode_heads(heads: &[Head]) -> Vec<u8> {
 #[test]
 fn test_sync_metadata_tracking() {
     let dir = tempdir().unwrap();
-    let state = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+    let state = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
     
     let author1 = PubKey::from([1u8; 32]);
     let hash1 = Hash::from([0xAA; 32]);
@@ -119,7 +119,7 @@ fn test_sync_metadata_tracking() {
 fn test_snapshot_restore() {
     let dir1 = tempdir().unwrap();
     let store_id = Uuid::new_v4();
-    let state1 = KvState::open(store_id, dir1.path()).unwrap();
+    let state1 = KvState::open(store_id, dir1.path(), None).unwrap();
     
     let author = PubKey::from([1u8; 32]);
     let hash = Hash::from([0xCC; 32]);
@@ -133,7 +133,7 @@ fn test_snapshot_restore() {
     
     // Create fresh state
     let dir2 = tempdir().unwrap();
-    let state2 = KvState::open(store_id, dir2.path()).unwrap();
+    let state2 = KvState::open(store_id, dir2.path(), None).unwrap();
     
     // Restore
     state2.restore(snapshot).unwrap();
@@ -155,10 +155,10 @@ fn test_snapshot_restore() {
 #[test]
 fn test_convergence_concurrent_operations() {
     let dir1 = tempdir().unwrap();
-    let state1 = KvState::open(Uuid::new_v4(), dir1.path()).unwrap();
+    let state1 = KvState::open(Uuid::new_v4(), dir1.path(), None).unwrap();
     
     let dir2 = tempdir().unwrap();
-    let state2 = KvState::open(Uuid::new_v4(), dir2.path()).unwrap();
+    let state2 = KvState::open(Uuid::new_v4(), dir2.path(), None).unwrap();
     
     let start_hlc = HLC::now();
     
@@ -205,7 +205,7 @@ fn test_convergence_concurrent_operations() {
 fn test_restore_overwrites_existing_data() {
     let dir = tempdir().unwrap();
     let store_id = Uuid::new_v4();
-    let state = KvState::open(store_id, dir.path()).unwrap();
+    let state = KvState::open(store_id, dir.path(), None).unwrap();
     
     let author = PubKey::from([1u8; 32]);
     let start_hlc = HLC::now();
@@ -221,7 +221,7 @@ fn test_restore_overwrites_existing_data() {
     // We do this by creating a separate state/db, adding key_new, taking snapshot.
     let dir_snap = tempdir().unwrap();
     // MUST use same store_id for restore to work
-    let state_snap = KvState::open(store_id, dir_snap.path()).unwrap();
+    let state_snap = KvState::open(store_id, dir_snap.path(), None).unwrap();
     let hash2 = Hash::from([0xBB; 32]);
     let op2 = create_test_op(b"key_new", b"val_new", author, hash2, start_hlc, Hash::ZERO);
     state_snap.apply(&op2).unwrap();
@@ -265,7 +265,7 @@ fn create_delete_op(key: &[u8], author: PubKey, id: Hash, timestamp: HLC, prev_h
 #[test]
 fn test_delete_correctness() {
     let dir = tempdir().unwrap();
-    let state = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+    let state = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
     
     let author = PubKey::from([1u8; 32]);
     let start_hlc = HLC::now();
@@ -303,7 +303,7 @@ fn test_delete_correctness() {
 #[test]
 fn test_chain_rules_compliance() {
     let dir = tempdir().unwrap();
-    let state = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+    let state = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
     let author = PubKey::from([0x99; 32]);
     let hlc = HLC::now();
     
@@ -337,7 +337,7 @@ fn test_chain_rules_compliance() {
 fn test_snapshot_checksum_failure() {
     let dir1 = tempdir().unwrap();
     let store_id = Uuid::new_v4();
-    let state1 = KvState::open(store_id, dir1.path()).unwrap();
+    let state1 = KvState::open(store_id, dir1.path(), None).unwrap();
     
     // Add some data
     let author = PubKey::from([1u8; 32]);
@@ -358,7 +358,7 @@ fn test_snapshot_checksum_failure() {
     corrupt_checksum[len - 1] ^= 0xFF; 
     
     let dir2 = tempdir().unwrap();
-    let state2 = KvState::open(store_id, dir2.path()).unwrap();
+    let state2 = KvState::open(store_id, dir2.path(), None).unwrap();
     
     let err = state2.restore(Box::new(std::io::Cursor::new(corrupt_checksum))).unwrap_err();
     assert!(format!("{}", err).contains("Checksum mismatch"));
@@ -381,13 +381,13 @@ fn test_snapshot_checksum_failure() {
 #[test]
 fn test_snapshot_uuid_mismatch() {
     let dir1 = tempdir().unwrap();
-    let state1 = KvState::open(Uuid::new_v4(), dir1.path()).unwrap();
+    let state1 = KvState::open(Uuid::new_v4(), dir1.path(), None).unwrap();
     
     let snapshot = state1.snapshot().unwrap();
     
     let dir2 = tempdir().unwrap();
     // Open with DIFFERENT UUID
-    let state2 = KvState::open(Uuid::new_v4(), dir2.path()).unwrap();
+    let state2 = KvState::open(Uuid::new_v4(), dir2.path(), None).unwrap();
     
     let err = state2.restore(snapshot).unwrap_err();
     assert!(format!("{}", err).contains("Store ID mismatch"), "Error was: {}", err);

@@ -1,9 +1,9 @@
 //! Store Manager - manages a registry of open stores
 //!
-//! Uses factory registration pattern: register StoreOpener for each type,
+//! Uses factory registration pattern: register StoreOpener for each type string,
 //! then call open(id, type) to get handles.
 
-use crate::{StoreType, StoreRegistry, peer_manager::PeerManager, NodeEvent};
+use crate::{StoreRegistry, peer_manager::PeerManager, NodeEvent};
 use crate::StoreHandle;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore};
 use lattice_model::{NetEvent, Uuid};
@@ -24,7 +24,7 @@ pub enum StoreManagerError {
     #[error("Lock error: {0}")]
     Lock(String),
     #[error("No opener registered for type: {0}")]
-    NoOpener(StoreType),
+    NoOpener(String),
 }
 
 /// Trait for opening stores of a specific type
@@ -37,14 +37,14 @@ pub trait StoreOpener: Send + Sync {
 #[derive(Clone)]
 pub struct StoreInfo {
     pub id: Uuid,
-    pub store_type: StoreType,
+    pub store_type: String,
     pub peer_manager: Arc<PeerManager<dyn StoreHandle>>,
 }
 
 /// A stored entry with type-erased handle
 struct StoredEntry {
     store_handle: Arc<dyn StoreHandle>,
-    store_type: StoreType,
+    store_type: String,
     peer_manager: Arc<PeerManager<dyn StoreHandle>>,
 }
 
@@ -55,7 +55,7 @@ pub struct StoreManager {
     event_tx: broadcast::Sender<NodeEvent>,
     net_tx: broadcast::Sender<NetEvent>,
     stores: RwLock<HashMap<Uuid, StoredEntry>>,
-    openers: RwLock<HashMap<StoreType, Box<dyn StoreOpener>>>,
+    openers: RwLock<HashMap<String, Box<dyn StoreOpener>>>,
 }
 
 impl StoreManager {
@@ -79,31 +79,43 @@ impl StoreManager {
         &self.registry
     }
     
-    /// Register an opener for a store type.
-    pub fn register_opener(&self, store_type: StoreType, opener: Box<dyn StoreOpener>) {
+    /// Register an opener for a store type string.
+    pub fn register_opener(&self, store_type: impl Into<String>, opener: Box<dyn StoreOpener>) {
         if let Ok(mut openers) = self.openers.write() {
-            openers.insert(store_type, opener);
+            openers.insert(store_type.into(), opener);
         }
     }
     
     /// Open a store by ID and type using the registered opener.
     /// Does NOT register the store - call register() after.
-    pub fn open(&self, store_id: Uuid, store_type: StoreType) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
+    pub fn open(&self, store_id: Uuid, store_type: &str) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
         let openers = self.openers.read()
             .map_err(|_| StoreManagerError::Lock("openers lock poisoned".into()))?;
         
-        let opener = openers.get(&store_type)
-            .ok_or_else(|| StoreManagerError::NoOpener(store_type))?;
+        let opener = openers.get(store_type)
+            .ok_or_else(|| StoreManagerError::NoOpener(store_type.to_string()))?;
         
         opener.open(store_id)
     }
     
     /// Create a new store with a fresh UUID.
     /// Does NOT register the store - call register() after.
-    pub fn create(&self, store_type: StoreType) -> Result<(Uuid, Arc<dyn StoreHandle>), StoreManagerError> {
+    pub fn create(&self, store_type: &str) -> Result<(Uuid, Arc<dyn StoreHandle>), StoreManagerError> {
         let store_id = Uuid::new_v4();
         let opened = self.open(store_id, store_type)?;
         Ok((store_id, opened))
+    }
+
+    /// Open an existing store by ID, resolving its type from persisted metadata.
+    /// Does not register the store - call register() after.
+    pub fn open_existing(&self, store_id: Uuid) -> Result<(Arc<dyn StoreHandle>, String), StoreManagerError> {
+        // Peek metadata from disk
+        let (_, store_type, _version) = self.registry.peek_store_info(store_id)
+            .map_err(|e| StoreManagerError::Store(e.to_string()))?;
+        
+        // Open using the resolved type string directly
+        let handle = self.open(store_id, &store_type)?;
+        Ok((handle, store_type))
     }
     
     /// Register an opened store with its peer_manager. Emits NetEvent::StoreReady.
@@ -112,9 +124,10 @@ impl StoreManager {
         mesh_id: Uuid,
         store_id: Uuid,
         store_handle: Arc<dyn StoreHandle>,
-        store_type: StoreType,
+        store_type: impl Into<String>,
         peer_manager: Arc<PeerManager<dyn StoreHandle>>,
     ) -> Result<(), StoreManagerError> {
+        let store_type = store_type.into();
         {
             let mut stores = self.stores.write()
                 .map_err(|_| StoreManagerError::Lock("stores lock poisoned".into()))?;
@@ -125,7 +138,7 @@ impl StoreManager {
             
             stores.insert(store_id, StoredEntry {
                 store_handle,
-                store_type,
+                store_type: store_type.clone(),
                 peer_manager,
             });
             
@@ -152,7 +165,7 @@ impl StoreManager {
         let entry = stores.get(store_id)?;
         Some(StoreInfo {
             id: *store_id,
-            store_type: entry.store_type,
+            store_type: entry.store_type.clone(),
             peer_manager: entry.peer_manager.clone(),
         })
     }
@@ -170,9 +183,9 @@ impl StoreManager {
     }
     
     /// List all stores with their types.
-    pub fn list(&self) -> Vec<(Uuid, StoreType)> {
+    pub fn list(&self) -> Vec<(Uuid, String)> {
         self.stores.read()
-            .map(|s| s.iter().map(|(id, entry)| (*id, entry.store_type)).collect())
+            .map(|s| s.iter().map(|(id, entry)| (*id, entry.store_type.clone())).collect())
             .unwrap_or_default()
     }
     

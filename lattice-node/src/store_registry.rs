@@ -36,6 +36,16 @@ impl StoreRegistry {
             handles: std::sync::Mutex::new(Vec::new()),
         }
     }
+
+    /// Peek store metadata (type, version) from disk without fully opening it.
+    /// Returns (store_id, store_type_string, schema_version) if the store exists.
+    pub fn peek_store_info(&self, store_id: Uuid) -> Result<(Uuid, String, u64), StateError> {
+        let store_dir = self.data_dir.store_dir(store_id);
+        let state_dir = store_dir.join("state");
+        
+        lattice_storage::StateBackend::peek_info(&state_dir)
+            .map_err(|e| StateError::Backend(e.to_string()))
+    }
     
     /// Create a new store (registers in meta.db, creates storage)
     /// Does NOT open or spawn actor - use get_or_open() for that

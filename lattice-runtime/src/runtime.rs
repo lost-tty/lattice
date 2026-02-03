@@ -2,7 +2,7 @@
 
 use crate::backend_inprocess::InProcessBackend;
 use crate::{LatticeBackend, MeshService, Node, NodeBuilder, RpcServer};
-use lattice_model::StoreType;
+use lattice_node::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, STORE_TYPE_KVSTORE_LEGACY, STORE_TYPE_LOGSTORE_LEGACY};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -97,12 +97,20 @@ impl RuntimeBuilder {
         let data_dir = lattice_node::data_dir::DataDir::new(data_path);
 
         // Build node with openers (using handle-less pattern)
+        // Register both new and legacy type strings for backward compat
         let mut builder = NodeBuilder::new(data_dir)
             .with_net_tx(net_tx)
-            .with_opener(StoreType::KvStore, |registry| {
+            .with_opener(STORE_TYPE_KVSTORE, |registry| {
                 lattice_node::direct_opener::<lattice_kvstore::PersistentKvState>(registry)
             })
-            .with_opener(StoreType::LogStore, |registry| {
+            .with_opener(STORE_TYPE_LOGSTORE, |registry| {
+                lattice_node::direct_opener::<lattice_logstore::PersistentLogState>(registry)
+            })
+            // Legacy aliases for existing stores on disk
+            .with_opener(STORE_TYPE_KVSTORE_LEGACY, |registry| {
+                lattice_node::direct_opener::<lattice_kvstore::PersistentKvState>(registry)
+            })
+            .with_opener(STORE_TYPE_LOGSTORE_LEGACY, |registry| {
                 lattice_node::direct_opener::<lattice_logstore::PersistentLogState>(registry)
             });
         if let Some(name) = self.name {

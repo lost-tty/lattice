@@ -15,7 +15,6 @@ pub mod store_registry;
 pub mod meta_store;
 pub mod data_dir;
 pub mod token;
-pub mod store_type;
 pub mod store_manager;
 pub mod store_openers;
 pub mod store_handle;
@@ -26,8 +25,8 @@ pub use store_openers::direct_opener;
 pub use store_registry::StoreRegistry;
 pub use store_handle::{StoreHandle, HandleWithWriter};
 
-// Re-export StoreType from lattice-model (canonical location)
-pub use lattice_model::StoreType;
+// Re-export store type constants from lattice-model (canonical location)
+pub use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, STORE_TYPE_KVSTORE_LEGACY, STORE_TYPE_LOGSTORE_LEGACY, CORE_STORE_TYPES};
 
 // Re-export from lattice-kernel (replication engine)
 pub use lattice_kernel::{

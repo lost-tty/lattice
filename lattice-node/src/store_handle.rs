@@ -10,7 +10,7 @@
 //! - Implements `StoreInfo` for store type detection
 
 use lattice_kernel::{SyncProvider, StoreInspector};
-use lattice_model::{Uuid, StoreType, Shutdownable};
+use lattice_model::{Uuid, Shutdownable};
 use lattice_store_base::{CommandDispatcher, StreamReflectable};
 
 use std::sync::Arc;
@@ -27,8 +27,8 @@ pub trait StoreHandle: Send + Sync {
     /// Get the store's unique identifier
     fn id(&self) -> Uuid;
     
-    /// Get the store type (KvStore, LogStore, etc.)
-    fn store_type(&self) -> StoreType;
+    /// Get the store type string (e.g., "core:kvstore")
+    fn store_type(&self) -> &str;
     
     /// Get a CommandDispatcher for introspection and command execution
     /// (CommandDispatcher extends Introspectable, so all introspection methods are available)
@@ -81,7 +81,7 @@ where
         SyncProvider::id(self)
     }
     
-    fn store_type(&self) -> StoreType {
+    fn store_type(&self) -> &str {
         S::store_type()
     }
     

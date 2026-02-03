@@ -9,8 +9,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ffi_records = [
             "NodeStatus",
             "MeshInfo", 
-            "StoreInfo",
+            "StoreRef",
             "StoreDetails",
+            "StoreMeta",
             "PeerInfo",
             "HistoryEntry",
             "AuthorState",

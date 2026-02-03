@@ -8,7 +8,7 @@ use prost_reflect::prost::Message;
 
 // Re-export proto types directly (have UniFFI derives via lattice-api ffi feature)
 pub use lattice_api::proto::{
-    NodeStatus, MeshInfo, StoreInfo, StoreDetails, PeerInfo, 
+    NodeStatus, MeshInfo, StoreRef, StoreMeta, StoreDetails, PeerInfo, 
     HistoryEntry, AuthorState, CleanupResult, JoinResponse,
 };
 
@@ -301,7 +301,7 @@ impl Lattice {
     }
 
     // Store
-    pub fn store_create(&self, mesh_id: String, name: Option<String>, store_type: String) -> Result<StoreInfo, LatticeError> {
+    pub fn store_create(&self, mesh_id: String, name: Option<String>, store_type: String) -> Result<StoreRef, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&mesh_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
@@ -309,7 +309,7 @@ impl Lattice {
             .map_err(|e| LatticeError::from_backend(e))
     }
 
-    pub fn store_list(&self, mesh_id: String) -> Result<Vec<StoreInfo>, LatticeError> {
+    pub fn store_list(&self, mesh_id: String) -> Result<Vec<StoreRef>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&mesh_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
@@ -317,7 +317,7 @@ impl Lattice {
             .map_err(|e| LatticeError::from_backend(e))
     }
 
-    pub fn store_status(&self, store_id: String) -> Result<StoreInfo, LatticeError> {
+    pub fn store_status(&self, store_id: String) -> Result<StoreMeta, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;

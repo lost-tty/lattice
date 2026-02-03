@@ -1,7 +1,7 @@
 //! Local Lattice node API with multi-store support
 
 use crate::{
-    DataDir, MetaStore, Uuid, StoreType,
+    DataDir, MetaStore, Uuid,
     meta_store::MetaStoreError,
     store_registry::StoreRegistry,
     mesh::Mesh,
@@ -136,7 +136,7 @@ pub struct NodeBuilder {
     net_tx: Option<broadcast::Sender<NetEvent>>,
     name: Option<String>,
     /// Store opener factories to call after registry is created
-    opener_factories: Vec<(crate::StoreType, Box<dyn FnOnce(std::sync::Arc<StoreRegistry>) -> Box<dyn crate::StoreOpener> + Send>)>,
+    opener_factories: Vec<(String, Box<dyn FnOnce(std::sync::Arc<StoreRegistry>) -> Box<dyn crate::StoreOpener> + Send>)>,
 }
 
 impl NodeBuilder {
@@ -163,14 +163,14 @@ impl NodeBuilder {
         self
     }
     
-    /// Register a store opener factory for a given store type.
+    /// Register a store opener factory for a given store type string.
     /// The factory receives the registry and returns the opener.
     /// This allows openers to be created after the registry exists.
-    pub fn with_opener<F>(mut self, store_type: crate::StoreType, factory: F) -> Self
+    pub fn with_opener<F>(mut self, store_type: impl Into<String>, factory: F) -> Self
     where
         F: FnOnce(std::sync::Arc<StoreRegistry>) -> Box<dyn crate::StoreOpener> + Send + 'static,
     {
-        self.opener_factories.push((store_type, Box::new(factory)));
+        self.opener_factories.push((store_type.into(), Box::new(factory)));
         self
     }
 
@@ -528,7 +528,7 @@ impl Node {
     /// If uuid is None, a random one is generated.
     pub fn create_store(&self, uuid: Option<Uuid>) -> Result<Uuid, NodeError> {
         let id = uuid.unwrap_or_else(Uuid::new_v4);
-        let _ = self.store_manager.open(id, StoreType::KvStore)?;
+        let _ = self.store_manager.open(id, crate::STORE_TYPE_KVSTORE)?;
         // Register with meta store so it appears in list_stores()
         self.meta.add_store(id).map_err(|e| NodeError::Store(StateError::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -626,13 +626,13 @@ mod tests {
     use lattice_kvstore::PersistentKvState;
     use lattice_kvstore_client::KvStoreExt; // Import extension trait for put/get/delete
     use lattice_logstore::PersistentLogState;
-    use crate::{direct_opener, StoreType};
+    use crate::{direct_opener, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
     
     /// Helper to create node builder with openers registered for tests that use mesh/store manager
     fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
         NodeBuilder::new(data_dir)
-            .with_opener(StoreType::KvStore, |registry| direct_opener::<PersistentKvState>(registry))
-            .with_opener(StoreType::LogStore, |registry| direct_opener::<PersistentLogState>(registry))
+            .with_opener(STORE_TYPE_KVSTORE, |registry| direct_opener::<PersistentKvState>(registry))
+            .with_opener(STORE_TYPE_LOGSTORE, |registry| direct_opener::<PersistentLogState>(registry))
     }
 
     #[tokio::test]
@@ -651,7 +651,7 @@ mod tests {
         let stores: Vec<_> = node.meta().list_stores().expect("list failed").into_iter().map(|(id, _)| id).collect();
         assert!(stores.contains(&store_id));
         
-        let store = node.store_manager().open(store_id, StoreType::KvStore).expect("Failed to open store");
+        let store = node.store_manager().open(store_id, STORE_TYPE_KVSTORE).expect("Failed to open store");
         store.put(b"/key".to_vec(), b"value".to_vec()).await.expect("put failed");
         let val = store.get(b"/key".to_vec()).await.expect("get failed");
         assert_eq!(val, Some(b"value".to_vec()));
@@ -670,10 +670,10 @@ mod tests {
         let store_a = node.create_store(None).expect("create A");
         let store_b = node.create_store(None).expect("create B");
         
-        let store_a = node.store_manager().open(store_a, StoreType::KvStore).expect("open A");
+        let store_a = node.store_manager().open(store_a, STORE_TYPE_KVSTORE).expect("open A");
         store_a.put(b"/key".to_vec(), b"from A".to_vec()).await.expect("put A");
         
-        let store_b = node.store_manager().open(store_b, StoreType::KvStore).expect("open B");
+        let store_b = node.store_manager().open(store_b, STORE_TYPE_KVSTORE).expect("open B");
         let val_b = store_b.get(b"/key".to_vec()).await.expect("B get");
         assert_eq!(val_b, None);
         

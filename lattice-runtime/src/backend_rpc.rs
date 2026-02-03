@@ -140,7 +140,7 @@ impl LatticeBackend for RpcBackend {
         })
     }
     
-    fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreInfo> {
+    fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef> {
         let store_type = store_type.to_string();
         Box::pin(async move {
             let mut client = self.client.clone();
@@ -153,7 +153,7 @@ impl LatticeBackend for RpcBackend {
         })
     }
     
-    fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreInfo>> {
+    fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreRef>> {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.store.list(MeshId { id: mesh_id.as_bytes().to_vec() }).await?;
@@ -161,10 +161,18 @@ impl LatticeBackend for RpcBackend {
         })
     }
     
-    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreInfo> {
+    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreMeta> {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.store.get_status(StoreId { id: store_id.as_bytes().to_vec() }).await?;
+            Ok(resp.into_inner())
+        })
+    }
+    
+    fn store_details(&self, store_id: Uuid) -> AsyncResult<'_, StoreDetails> {
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client.store.get_details(StoreId { id: store_id.as_bytes().to_vec() }).await?;
             Ok(resp.into_inner())
         })
     }

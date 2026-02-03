@@ -120,18 +120,29 @@ message CreateStoreRequest {
   string store_type = 3;
 }
 
-message StoreInfo {
+// Store reference
+message StoreRef {
   bytes id = 1;
-  string name = 2;
-  string store_type = 3;
+  string store_type = 2;
+  string name = 3;
   bool archived = 4;
-  StoreDetails details = 5;  // Populated by GetStatus, null in List
 }
 
+// Store metadata
+message StoreMeta {
+  bytes id = 1;
+  string store_type = 2;
+  string name = 3;
+  uint64 schema_version = 4;
+  bytes state_hash = 5;
+}
+
+// List of store references
 message StoreList {
-  repeated StoreInfo stores = 1;
+  repeated StoreRef stores = 1;
 }
 
+// Runtime statistics
 message StoreDetails {
   uint32 author_count = 1;
   uint32 log_file_count = 2;

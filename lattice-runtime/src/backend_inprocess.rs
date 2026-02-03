@@ -4,6 +4,7 @@
 
 use crate::backend::*;
 use crate::StoreHandle;
+use lattice_api::proto::{StoreMeta, StoreRef};
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
 use lattice_node::{mesh::Mesh, Node};
@@ -228,59 +229,63 @@ impl LatticeBackend for InProcessBackend {
         })
     }
     
-    fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreInfo> {
+    fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef> {
         let store_type_str = store_type.to_string();
         Box::pin(async move {
             let mesh = self.get_mesh(mesh_id)?;
-            let stype: lattice_node::StoreType = store_type_str.parse()
-                .map_err(|_| format!("Unknown store type: {}", store_type_str))?;
-            let store_id = mesh.create_store(name.clone(), stype).await?;
+            let store_id = mesh.create_store(name.clone(), &store_type_str).await?;
             
-            Ok(StoreInfo {
+            Ok(StoreRef {
                 id: store_id.as_bytes().to_vec(),
+                store_type: store_type_str,
                 name: name.unwrap_or_default(),
-                store_type: stype.to_string(),
                 archived: false,
-                details: None,
             })
         })
     }
     
-    fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreInfo>> {
+    fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreRef>> {
         Box::pin(async move {
             let mesh = self.get_mesh(mesh_id)?;
             let stores = mesh.list_stores().await?;
             
-            Ok(stores.into_iter().map(|s| StoreInfo {
+            Ok(stores.into_iter().map(|s| StoreRef {
                 id: s.id.as_bytes().to_vec(),
-                name: s.name.unwrap_or_default(),
                 store_type: s.store_type.to_string(),
+                name: s.name.unwrap_or_default(),
                 archived: s.archived,
-                details: None,
             }).collect())
         })
     }
     
-    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreInfo> {
+    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreMeta> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            let inspector = store.as_inspector();
+            
+            let mut store_meta = inspector.store_meta().await;
+            // Prefer name from store's own meta table, fall back to declaration for legacy stores
+            if store_meta.name.is_none() {
+                store_meta.name = self.find_store_name(store_id).await;
+            }
+            
+            Ok(store_meta.into())
+        })
+    }
+    
+    fn store_details(&self, store_id: Uuid) -> AsyncResult<'_, StoreDetails> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
             
             let sync_state = inspector.sync_state().await?;
             let log_stats = inspector.log_stats().await;
-            let name = self.find_store_name(store_id).await;
             
-            Ok(StoreInfo {
-                id: store_id.as_bytes().to_vec(),
-                name: name.unwrap_or_default(),
-                store_type: store.store_type().to_string(),
-                archived: false,
-                details: Some(StoreDetails {
-                    author_count: sync_state.authors().len() as u32,
-                    log_file_count: log_stats.file_count as u32,
-                    log_bytes: log_stats.total_bytes,
-                    orphan_count: log_stats.orphan_count as u32,
-                }),
+            Ok(StoreDetails {
+                author_count: sync_state.authors().len() as u32,
+                log_file_count: log_stats.file_count as u32,
+                log_bytes: log_stats.total_bytes,
+                orphan_count: log_stats.orphan_count as u32,
             })
         })
     }

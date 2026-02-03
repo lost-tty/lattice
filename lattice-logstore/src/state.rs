@@ -48,8 +48,8 @@ impl std::fmt::Debug for LogState {
 
 impl LogState {
     /// Open or create a log state in the given directory.
-    pub fn open(id: Uuid, path: &Path) -> Result<PersistentState<Self>, StateDbError> {
-        setup_persistent_state(id, path, |backend| {
+    pub fn open(id: Uuid, path: &Path, name: Option<&str>) -> Result<PersistentState<Self>, StateDbError> {
+        setup_persistent_state(id, path, name, |backend| {
             let (event_tx, _) = broadcast::channel(256);
             Self { backend, event_tx }
         })
@@ -213,11 +213,11 @@ impl AsRef<LogState> for LogState {
 }
 
 // StoreTypeProvider - declares this is a LogStore
-use lattice_model::StoreTypeProvider;
+use lattice_model::{StoreTypeProvider, STORE_TYPE_LOGSTORE};
 
 impl StoreTypeProvider for LogState {
-    fn store_type() -> lattice_model::StoreType {
-        lattice_model::StoreType::LogStore
+    fn store_type() -> &'static str {
+        STORE_TYPE_LOGSTORE
     }
 }
 
@@ -383,7 +383,7 @@ mod tests {
         // Create initial state
         let author = PubKey::from([1u8; 32]);
         let id = Uuid::new_v4();
-        let state = LogState::open(id, dir.path()).unwrap();
+        let state = LogState::open(id, dir.path(), None).unwrap();
         
         let op = Op {
             id: Hash::from([42u8; 32]),
@@ -400,7 +400,7 @@ mod tests {
         drop(state);
         
         // Re-open with SAME ID
-        let state2 = LogState::open(id, dir.path()).unwrap();
+        let state2 = LogState::open(id, dir.path(), None).unwrap();
         assert_eq!(state2.read(None).len(), 1);
         assert_eq!(state2.read(None)[0].content, b"hello world");
     }
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn test_ordering() {
         let dir = tempdir().unwrap();
-        let state = LogState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let state = LogState::open(Uuid::new_v4(), dir.path(), None).unwrap();
         
         let author1 = PubKey::from([1u8; 32]);
         let author2 = PubKey::from([2u8; 32]);
@@ -465,7 +465,7 @@ mod tests {
         let store_id = Uuid::new_v4();
         
         let dir1 = tempdir().unwrap();
-        let state1 = LogState::open(store_id, dir1.path()).unwrap();
+        let state1 = LogState::open(store_id, dir1.path(), None).unwrap();
         
         let author = PubKey::from([1u8; 32]);
         let start_hlc = HLC::now();
@@ -484,7 +484,7 @@ mod tests {
         
         // Restore to fresh state with SAME store ID (restore validates ID)
         let dir2 = tempdir().unwrap();
-        let state2 = LogState::open(store_id, dir2.path()).unwrap();
+        let state2 = LogState::open(store_id, dir2.path(), None).unwrap();
         state2.restore(snapshot).unwrap();
         
         // Verify

@@ -33,9 +33,10 @@ service MeshService {
 // ============================================================================
 
 service StoreService {
-  rpc Create(CreateStoreRequest) returns (StoreInfo);
+  rpc Create(CreateStoreRequest) returns (StoreRef);
   rpc List(MeshId) returns (StoreList);
-  rpc GetStatus(StoreId) returns (StoreInfo);
+  rpc GetStatus(StoreId) returns (StoreMeta);
+  rpc GetDetails(StoreId) returns (StoreDetails);
   rpc Delete(StoreId) returns (Empty);
   rpc Sync(StoreId) returns (Empty);
   rpc Debug(StoreId) returns (DebugInfo);

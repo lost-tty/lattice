@@ -121,7 +121,8 @@ pub async fn cmd_store_use(
     }
     
     // Find matching store from declarations
-    let matches: Vec<_> = stores.iter()
+    let matches: Vec<_> = stores
+        .iter()
         .filter(|s| format_id(&s.id).starts_with(uuid_prefix))
         .collect();
     
@@ -185,22 +186,29 @@ pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uui
     };
     
     match backend.store_status(store_id).await {
-        Ok(status) => {
-            let _ = writeln!(w, "Store ID: {}", format_id(&status.id));
-            if !status.name.is_empty() {
-                let _ = writeln!(w, "Name:     {}", status.name);
+        Ok(meta) => {
+            let _ = writeln!(w, "Store ID:  {}", format_id(&meta.id));
+            if !meta.name.is_empty() {
+                let _ = writeln!(w, "Name:      {}", meta.name);
             }
-            let _ = writeln!(w, "Type:     {}", status.store_type);
+            let _ = writeln!(w, "Type:      {}", meta.store_type);
+            if meta.schema_version > 0 {
+                let _ = writeln!(w, "Schema:    v{}", meta.schema_version);
+            }
+            if !meta.state_hash.is_empty() {
+                let _ = writeln!(w, "StateHash: {}", hex::encode(&meta.state_hash[..8.min(meta.state_hash.len())]));
+            }
             
-            if let Some(details) = &status.details {
+            // Fetch runtime statistics
+            if let Ok(details) = backend.store_details(store_id).await {
                 if details.author_count > 0 {
-                    let _ = writeln!(w, "Authors:  {}", details.author_count);
+                    let _ = writeln!(w, "Authors:   {}", details.author_count);
                 }
                 if details.log_file_count > 0 {
-                    let _ = writeln!(w, "Logs:     {} files, {} bytes", details.log_file_count, details.log_bytes);
+                    let _ = writeln!(w, "Logs:      {} files, {} bytes", details.log_file_count, details.log_bytes);
                 }
                 if details.orphan_count > 0 {
-                    let _ = writeln!(w, "Orphans:  {} (pending parent entries)", details.orphan_count);
+                    let _ = writeln!(w, "Orphans:   {} (pending parent entries)", details.orphan_count);
                 }
             }
         }

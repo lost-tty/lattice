@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 // Re-export proto types as the canonical backend types
 pub use crate::proto::{
-    NodeStatus, MeshInfo, PeerInfo, StoreInfo, StoreDetails,
+    NodeStatus, MeshInfo, PeerInfo, StoreDetails, StoreMeta, StoreRef,
     AuthorState, HistoryEntry, SyncResult,
     // Event types - inner enum for consumer matching
     MeshReadyEvent, StoreReadyEvent, JoinFailedEvent, SyncResultEvent,
@@ -59,9 +59,10 @@ pub trait LatticeBackend: Send + Sync {
     fn mesh_revoke(&self, mesh_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()>;
     
     // ---- Store operations ----
-    fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreInfo>;
-    fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreInfo>>;
-    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreInfo>;
+    fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef>;
+    fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreRef>>;
+    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreMeta>;
+    fn store_details(&self, store_id: Uuid) -> AsyncResult<'_, StoreDetails>;
     fn store_delete(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
     fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
     fn store_debug(&self, store_id: Uuid) -> AsyncResult<'_, Vec<AuthorState>>;

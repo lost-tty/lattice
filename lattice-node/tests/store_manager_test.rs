@@ -1,4 +1,4 @@
-use lattice_node::{NodeBuilder, StoreType, direct_opener};
+use lattice_node::{NodeBuilder, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, direct_opener};
 use lattice_node::data_dir::DataDir;
 use lattice_kvstore::PersistentKvState;
 use lattice_kvstore_client::{KvStoreExt, Operation};
@@ -8,8 +8,8 @@ use std::time::Duration;
 /// Helper to create a node with openers registered (using handle-less pattern)
 fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
-        .with_opener(StoreType::KvStore, |registry| direct_opener::<PersistentKvState>(registry))
-        .with_opener(StoreType::LogStore, |registry| direct_opener::<PersistentLogState>(registry))
+        .with_opener(STORE_TYPE_KVSTORE, |registry| direct_opener::<PersistentKvState>(registry))
+        .with_opener(STORE_TYPE_LOGSTORE, |registry| direct_opener::<PersistentLogState>(registry))
 }
 
 #[tokio::test]
@@ -24,7 +24,7 @@ async fn test_store_declaration_and_reconciliation() {
     
     // 1. Create a store declaration (via Mesh)
     let store_name = Some("my-app-store".to_string());
-    let store_id = mesh.create_store(store_name.clone(), StoreType::KvStore).await.unwrap();
+    let store_id = mesh.create_store(store_name.clone(), STORE_TYPE_KVSTORE).await.unwrap();
     
     // Verify it's listed (via Mesh)
     let stores = mesh.list_stores().await.unwrap();
@@ -48,7 +48,7 @@ async fn test_store_declaration_and_reconciliation() {
     // Verify it's open in stores
     assert!(store_manager.store_ids().contains(&store_id), "Store should be open");
     if let Some(info) = store_manager.get_info(&store_id) {
-        assert_eq!(info.store_type, StoreType::KvStore);
+        assert_eq!(info.store_type, STORE_TYPE_KVSTORE);
     }
     
     // 4. Archive the store (via Mesh)
@@ -86,7 +86,7 @@ async fn test_watcher_reacts_to_changes() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     
     // Create store -> Watcher should pick it up
-    let store_id = mesh.create_store(None, StoreType::KvStore).await.unwrap();
+    let store_id = mesh.create_store(None, STORE_TYPE_KVSTORE).await.unwrap();
     
     // Wait for eventual consistency
     let mut found = false;
@@ -132,7 +132,7 @@ async fn test_store_emits_network_event() {
     while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(10), rx.recv()).await {}
     
     // Create store declaration (via Mesh)
-    let store_id = mesh.create_store(None, StoreType::KvStore).await.unwrap();
+    let store_id = mesh.create_store(None, STORE_TYPE_KVSTORE).await.unwrap();
     
     // Wait for watcher to reconcile and open the store
     for _ in 0..20 {
@@ -178,7 +178,7 @@ async fn test_archived_store_hidden_from_network() {
     let store_manager = mesh.store_manager();
     
     // Create a store via Mesh
-    let store_id = mesh.create_store(None, StoreType::KvStore).await.unwrap();
+    let store_id = mesh.create_store(None, STORE_TYPE_KVSTORE).await.unwrap();
     
     // Wait for watcher to open the store
     for _ in 0..20 {
@@ -237,7 +237,7 @@ async fn test_synced_store_declaration_auto_opened() {
     let created_key = format!("/stores/{}/created_at", foreign_store_id);
     
     let ops = vec![
-        Operation::put(type_key.into_bytes(), b"kv-store".to_vec()),
+        Operation::put(type_key.into_bytes(), b"core:kvstore".to_vec()),
         Operation::put(created_key.into_bytes(), b"1234567890".to_vec()),
     ];
     root.batch_commit(ops).await.expect("Failed to write store declaration");
@@ -281,7 +281,7 @@ async fn test_stores_opened_on_startup() {
         mesh_id = node.create_mesh().await.unwrap();
         let mesh = node.mesh_by_id(mesh_id).unwrap();
         
-        store_id = mesh.create_store(None, StoreType::KvStore).await.unwrap();
+        store_id = mesh.create_store(None, STORE_TYPE_KVSTORE).await.unwrap();
         
         // Wait for store to be opened
         for _ in 0..20 {
@@ -347,8 +347,8 @@ async fn test_multi_mesh_store_isolation() {
     let store_manager = node.store_manager();
     
     // Each mesh creates a store
-    let store_a = mesh_a.create_store(Some("mesh-a-store".into()), StoreType::KvStore).await.unwrap();
-    let store_b = mesh_b.create_store(Some("mesh-b-store".into()), StoreType::KvStore).await.unwrap();
+    let store_a = mesh_a.create_store(Some("mesh-a-store".into()), STORE_TYPE_KVSTORE).await.unwrap();
+    let store_b = mesh_b.create_store(Some("mesh-b-store".into()), STORE_TYPE_KVSTORE).await.unwrap();
     
     // Wait for watchers to open both stores
     for _ in 0..30 {

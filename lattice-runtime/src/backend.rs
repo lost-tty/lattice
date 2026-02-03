@@ -13,6 +13,6 @@ pub use lattice_api::backend::{
 
 // Re-export proto types for consumers
 pub use lattice_api::proto::{
-    NodeStatus, MeshInfo, PeerInfo, StoreInfo, StoreDetails,
+    NodeStatus, MeshInfo, PeerInfo, StoreDetails, StoreMeta, StoreRef,
     AuthorState, HistoryEntry, SyncResult,
 };

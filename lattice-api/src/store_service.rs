@@ -4,7 +4,7 @@ use crate::backend::Backend;
 use crate::proto::{
     store_service_server::StoreService, AuthorStateRequest, AuthorStateResponse,
     CleanupResult, CreateStoreRequest, DebugInfo, Empty,
-    HistoryRequest, HistoryResponse, MeshId, StoreId, StoreInfo, StoreList,
+    HistoryRequest, HistoryResponse, MeshId, StoreId, StoreRef, StoreMeta, StoreList, StoreDetails,
 };
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -25,7 +25,7 @@ impl StoreServiceImpl {
 
 #[tonic::async_trait]
 impl StoreService for StoreServiceImpl {
-    async fn create(&self, request: Request<CreateStoreRequest>) -> Result<Response<StoreInfo>, Status> {
+    async fn create(&self, request: Request<CreateStoreRequest>) -> Result<Response<StoreRef>, Status> {
         let req = request.into_inner();
         let mesh_id = Self::parse_uuid(&req.mesh_id)?;
         let name = if req.name.is_empty() { None } else { Some(req.name) };
@@ -41,9 +41,16 @@ impl StoreService for StoreServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))
     }
 
-    async fn get_status(&self, request: Request<StoreId>) -> Result<Response<StoreInfo>, Status> {
+    async fn get_status(&self, request: Request<StoreId>) -> Result<Response<StoreMeta>, Status> {
         let store_id = Self::parse_uuid(&request.into_inner().id)?;
         self.backend.store_status(store_id).await
+            .map(Response::new)
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    async fn get_details(&self, request: Request<StoreId>) -> Result<Response<StoreDetails>, Status> {
+        let store_id = Self::parse_uuid(&request.into_inner().id)?;
+        self.backend.store_details(store_id).await
             .map(Response::new)
             .map_err(|e| Status::internal(e.to_string()))
     }

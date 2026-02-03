@@ -18,11 +18,10 @@ use crate::{
     token::Invite,
     PeerInfo,
     StoreHandle,
-    StoreType,
 };
 use lattice_kernel::NodeIdentity;
 use lattice_model::types::PubKey;
-use lattice_model::PeerProvider;
+use lattice_model::{PeerProvider, STORE_TYPE_KVSTORE};
 use futures_util::StreamExt;
 use crate::Uuid;
 use lattice_kvstore_client::{KvStoreExt, BatchBuilder};
@@ -87,7 +86,7 @@ impl Mesh {
         store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
         // Create a fresh store via store_manager
-        let (root_store_id, root_store) = store_manager.create(StoreType::KvStore)?;
+        let (root_store_id, root_store) = store_manager.create(STORE_TYPE_KVSTORE)?;
         
         // PeerManager needs a reference to the store handle
         let peer_manager = PeerManager::new(root_store.clone(), node).await?;
@@ -97,7 +96,7 @@ impl Mesh {
             root_store_id, // mesh_id = root_store_id
             root_store_id,
             root_store,
-            StoreType::KvStore,
+            STORE_TYPE_KVSTORE,
             peer_manager.clone(),
         )?;
         
@@ -125,7 +124,7 @@ impl Mesh {
         store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
         // Open existing store via store_manager
-        let root_store = store_manager.open(store_id, StoreType::KvStore)?;
+        let root_store = store_manager.open(store_id, STORE_TYPE_KVSTORE)?;
         
         let peer_manager = PeerManager::new(root_store.clone(), node).await?;
         
@@ -134,7 +133,7 @@ impl Mesh {
             store_id, // mesh_id = root_store_id
             store_id,
             root_store,
-            StoreType::KvStore,
+            STORE_TYPE_KVSTORE,
             peer_manager.clone(),
         )?;
         
@@ -177,17 +176,17 @@ impl Mesh {
     }
 
     /// Resolve a store alias (UUID string or prefix) to store info.
-    /// Returns the store ID and type.
-    pub fn resolve_store_info(&self, id_or_prefix: &str) -> Result<(Uuid, StoreType), MeshError> {
+    /// Returns the store ID and type string.
+    pub fn resolve_store_info(&self, id_or_prefix: &str) -> Result<(Uuid, String), MeshError> {
         // Find matching store IDs
-        let matches: Vec<(Uuid, StoreType)> = self.store_manager.list()
+        let matches: Vec<(Uuid, String)> = self.store_manager.list()
             .into_iter()
             .filter(|(id, _)| id.to_string().starts_with(id_or_prefix))
             .collect();
         
         match matches.len() {
             0 => Err(MeshError::Other(format!("Store '{}' not found", id_or_prefix))),
-            1 => Ok(matches[0]),
+            1 => Ok(matches[0].clone()),
             _ => Err(MeshError::Other(format!("Ambiguous ID '{}'", id_or_prefix))),
         }
     }
@@ -301,10 +300,10 @@ impl Mesh {
             } else {
                 // Should be open - open if not open
                 if !current_ids.contains(&decl.id) {
-                    match store_manager.open(decl.id, decl.store_type) {
+                    match store_manager.open(decl.id, &decl.store_type) {
                         Ok(opened) => {
                             // Register with same peer_manager as root store
-                            if let Err(e) = store_manager.register(root_store_id, decl.id, opened, decl.store_type, peer_manager.clone()) {
+                            if let Err(e) = store_manager.register(root_store_id, decl.id, opened, &decl.store_type, peer_manager.clone()) {
                                 warn!(store_id = %decl.id, error = ?e, "Failed to register store");
                             } else {
                                 // Track that we opened this store
@@ -381,7 +380,7 @@ impl Mesh {
         
         Some(StoreDeclaration {
             id,
-            store_type: type_str.parse().ok().unwrap_or(StoreType::KvStore),
+            store_type: type_str,
             name,
             archived,
         })
@@ -398,7 +397,7 @@ impl Mesh {
     
     /// Create a new store declaration in root store.
     /// Returns the new store's UUID.
-    pub async fn create_store(&self, name: Option<String>, store_type: StoreType) -> Result<Uuid, MeshError> {
+    pub async fn create_store(&self, name: Option<String>, store_type: &str) -> Result<Uuid, MeshError> {
         let root = self.root_store();
         let store_id = Uuid::new_v4();
         
@@ -413,7 +412,7 @@ impl Mesh {
         
         // Using BatchBuilder explicitly for generic handle
         let mut batch = BatchBuilder::new(root.as_ref())
-            .put(type_key.into_bytes(), store_type.as_str().as_bytes().to_vec())
+            .put(type_key.into_bytes(), store_type.as_bytes().to_vec())
             .put(created_key.into_bytes(), now_secs.to_string().as_bytes().to_vec());
 
         if let Some(ref name) = name {
@@ -549,7 +548,7 @@ impl Mesh {
 /// Store declaration (parsed from root store)
 pub struct StoreDeclaration {
     pub id: Uuid,
-    pub store_type: StoreType,
+    pub store_type: String,
     pub name: Option<String>,
     pub archived: bool,
 }

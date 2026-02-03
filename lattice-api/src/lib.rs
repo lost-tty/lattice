@@ -12,6 +12,19 @@ pub mod proto {
     tonic::include_proto!("lattice.daemon.v1");
 }
 
+// Conversions from model types to proto types
+impl From<lattice_model::StoreMeta> for proto::StoreMeta {
+    fn from(m: lattice_model::StoreMeta) -> Self {
+        proto::StoreMeta {
+            id: m.store_id.as_bytes().to_vec(),
+            store_type: m.store_type,
+            name: m.name.unwrap_or_default(),
+            schema_version: m.schema_version,
+            state_hash: m.state_hash,
+        }
+    }
+}
+
 pub mod backend;
 
 #[cfg(feature = "server")]

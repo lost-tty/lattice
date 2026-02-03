@@ -42,6 +42,12 @@ pub trait StateMachine: Send + Sync {
 
     /// Returns all author public keys and their last applied operation hash.
     fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error>;
+    
+    /// Returns store metadata (id, type, name, schema_version, state_hash).
+    /// Default implementation returns default/empty values.
+    fn store_meta(&self) -> crate::StoreMeta {
+        crate::StoreMeta::default()
+    }
 }
 
 /// Submit operations to the log (client write path).

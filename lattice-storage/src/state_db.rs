@@ -2,7 +2,7 @@ use redb::{Database, TableDefinition, ReadableTable, TableHandle};
 use std::path::Path;
 use std::io::{Read, Write};
 use uuid::Uuid;
-use lattice_model::{Hash, PubKey, StateMachine, Op};
+use lattice_model::{Hash, PubKey, StateMachine, Op, StoreMeta};
 use thiserror::Error;
 use blake3::Hasher;
 
@@ -12,6 +12,9 @@ pub const TABLE_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta
 
 // Meta Keys
 pub const KEY_STORE_ID: &[u8] = b"store_id";
+pub const KEY_STORE_TYPE: &[u8] = b"store_type";
+pub const KEY_STORE_NAME: &[u8] = b"store_name";
+pub const KEY_SCHEMA_VERSION: &[u8] = b"schema_version";
 pub const KEY_STATE_HASH: &[u8] = b"state_hash";
 pub const PREFIX_TIP: &[u8] = b"tip/";
 
@@ -25,6 +28,8 @@ pub enum StateDbError {
     Io(#[from] std::io::Error),
     #[error("Store ID mismatch: expected {expected}, got {got}")]
     StoreIdMismatch { expected: Uuid, got: Uuid },
+    #[error("Store Type mismatch: expected {expected}, got {got}")]
+    StoreTypeMismatch { expected: String, got: String },
     #[error("Invalid chain: {0}")]
     InvalidChain(String),
     #[error("Conversion error: {0}")]
@@ -51,10 +56,75 @@ pub struct StateBackend {
 }
 
 impl StateBackend {
+    /// Peek metadata (ID, Type, Version) without fully initializing the backend.
+    pub fn peek_info(state_dir: impl AsRef<Path>) -> Result<(Uuid, String, u64), StateDbError> {
+        let dir = state_dir.as_ref();
+        let state_db_path = dir.join("state.db");
+        if !state_db_path.exists() {
+             return Err(StateDbError::Io(std::io::Error::new(
+                 std::io::ErrorKind::NotFound, 
+                 "state.db not found"
+             )));
+        }
+
+        let db = Database::open(&state_db_path)?;
+        let read_txn = db.begin_read()?;
+        let table = read_txn.open_table(TABLE_META)?;
+
+        let id = table.get(KEY_STORE_ID)?
+            .map(|v| Uuid::from_bytes(v.value().try_into().unwrap_or_default()))
+            .ok_or_else(|| StateDbError::Conversion("Missing store_id".into()))?;
+
+        let type_str = table.get(KEY_STORE_TYPE)?
+            .map(|v| String::from_utf8_lossy(v.value()).to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let version = table.get(KEY_SCHEMA_VERSION)?
+            .map(|v| u64::from_le_bytes(v.value().try_into().unwrap_or_default()))
+            .unwrap_or(0);
+
+        Ok((id, type_str, version))
+    }
+    
+    /// Get store metadata from an open backend.
+    pub fn get_meta(&self) -> StoreMeta {
+        let read_txn = match self.db.begin_read() {
+            Ok(txn) => txn,
+            Err(_) => return StoreMeta { store_id: self.id, ..Default::default() },
+        };
+        let table = match read_txn.open_table(TABLE_META) {
+            Ok(t) => t,
+            Err(_) => return StoreMeta { store_id: self.id, ..Default::default() },
+        };
+        
+        let store_type = table.get(KEY_STORE_TYPE).ok().flatten()
+            .map(|v| String::from_utf8_lossy(v.value()).to_string())
+            .unwrap_or_default();
+        
+        let name = table.get(KEY_STORE_NAME).ok().flatten()
+            .map(|v| String::from_utf8_lossy(v.value()).to_string());
+        
+        let schema_version = table.get(KEY_SCHEMA_VERSION).ok().flatten()
+            .map(|v| u64::from_le_bytes(v.value().try_into().unwrap_or_default()))
+            .unwrap_or(0);
+        
+        let state_hash = table.get(KEY_STATE_HASH).ok().flatten()
+            .map(|v| v.value().to_vec())
+            .unwrap_or_default();
+        
+        StoreMeta { store_id: self.id, store_type, name, schema_version, state_hash }
+    }
+
     /// Open or create a store at the given path.
     /// 
-    /// Performs standard cleanup (renaming log.db -> state.db) and verifies the store ID.
-    pub fn open(id: Uuid, state_dir: impl AsRef<Path>) -> Result<Self, StateDbError> {
+    /// Performs standard cleanup (renaming log.db -> state.db) and verifies the store ID and Type.
+    pub fn open(
+        id: Uuid, 
+        state_dir: impl AsRef<Path>, 
+        expected_type: Option<&str>,
+        name: Option<&str>,
+        expected_version: u64
+    ) -> Result<Self, StateDbError> {
         let dir = state_dir.as_ref();
         if !dir.exists() {
             std::fs::create_dir_all(dir)?;
@@ -104,7 +174,7 @@ impl StateBackend {
         }
         write_txn.commit()?;
         
-        // Verify Store ID
+        // Verify Store ID & Type
         let write_txn = db.begin_write()?;
         {
             let mut table_meta = write_txn.open_table(TABLE_META)?;
@@ -113,11 +183,46 @@ impl StateBackend {
                 .map(|v| Uuid::from_bytes(v.value().try_into().unwrap_or_default()));
                 
             if let Some(existing_id) = existing_id {
+                // Verify ID
                 if existing_id != id {
                     return Err(StateDbError::StoreIdMismatch { expected: id, got: existing_id });
                 }
+                
+                // Verify Type (if expected is provided)
+                if let Some(expected_type_str) = expected_type {
+                    let existing_type = table_meta.get(KEY_STORE_TYPE)?
+                        .map(|v| String::from_utf8_lossy(v.value()).to_string());
+                        
+                    if let Some(existing_type_str) = existing_type {
+                        if existing_type_str != expected_type_str {
+                             return Err(StateDbError::StoreTypeMismatch { 
+                                 expected: expected_type_str.to_string(), 
+                                 got: existing_type_str 
+                             });
+                        }
+                    } else {
+                        // Migration: If no type exists, write it now (assume it matches expected)
+                        table_meta.insert(KEY_STORE_TYPE, expected_type_str.as_bytes())?;
+                        table_meta.insert(KEY_SCHEMA_VERSION, expected_version.to_le_bytes().as_slice())?;
+                    }
+                }
+                
+                // Update name if provided and not already set
+                if let Some(name_str) = name {
+                    if table_meta.get(KEY_STORE_NAME)?.is_none() {
+                        table_meta.insert(KEY_STORE_NAME, name_str.as_bytes())?;
+                    }
+                }
             } else {
+                // New Store or Missing ID
                 table_meta.insert(KEY_STORE_ID, id.as_bytes().as_slice())?;
+                if let Some(type_str) = expected_type {
+                     table_meta.insert(KEY_STORE_TYPE, type_str.as_bytes())?;
+                     table_meta.insert(KEY_SCHEMA_VERSION, expected_version.to_le_bytes().as_slice())?;
+                }
+                if let Some(name_str) = name {
+                     table_meta.insert(KEY_STORE_NAME, name_str.as_bytes())?;
+                }
             }
         }
         write_txn.commit()?;
@@ -603,6 +708,10 @@ impl<T: StateLogic> StateMachine for PersistentState<T> {
     fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
         self.inner.backend().get_applied_chaintips()
     }
+    
+    fn store_meta(&self) -> StoreMeta {
+        self.inner.backend().get_meta()
+    }
 }
 
 // ==================== StateHasher Strategy ====================
@@ -752,7 +861,7 @@ impl<T: StateLogic + StreamProvider + Send + Sync> PersistentState<T> {
 
 // Delegate StoreTypeProvider for store type identification
 impl<T: StateLogic + StoreTypeProvider> StoreTypeProvider for PersistentState<T> {
-    fn store_type() -> lattice_model::StoreType {
+    fn store_type() -> &'static str {
         T::store_type()
     }
 }
@@ -760,12 +869,14 @@ impl<T: StateLogic + StoreTypeProvider> StoreTypeProvider for PersistentState<T>
 /// Helper to standardize the "Open" ceremony for PersistentState.
 /// 
 /// Handles opening the StateBackend, creating the inner logic, and wrapping it in PersistentState.
-pub fn setup_persistent_state<L: StateLogic>(
+pub fn setup_persistent_state<L: StateLogic + StoreTypeProvider>(
     id: Uuid, 
-    path: &Path, 
+    path: &Path,
+    name: Option<&str>,
     constructor: impl FnOnce(StateBackend) -> L
 ) -> Result<PersistentState<L>, StateDbError> {
-    let backend = StateBackend::open(id, path)?;
+    let store_type = L::store_type();
+    let backend = StateBackend::open(id, path, Some(store_type), name, 1)?;
     Ok(PersistentState::new(constructor(backend)))
 }
 
@@ -776,11 +887,11 @@ pub trait StateFactory: StateLogic {
     fn create(backend: StateBackend) -> Self;
 }
 
-// Generic implementation of Openable for any PersistentState<T> where T implements StateFactory.
+// Generic implementation of Openable for any PersistentState<T> where T implements StateFactory + StoreTypeProvider.
 // This solves the Orphan Rule violation by implementing it in the crate where PersistentState is defined.
-impl<T: StateFactory + 'static> lattice_model::Openable for PersistentState<T> {
+impl<T: StateFactory + StoreTypeProvider + 'static> lattice_model::Openable for PersistentState<T> {
     fn open(id: Uuid, path: &Path) -> Result<Self, String> {
-        setup_persistent_state(id, path, T::create)
+        setup_persistent_state(id, path, None, T::create)
             .map_err(|e| e.to_string())
     }
 }

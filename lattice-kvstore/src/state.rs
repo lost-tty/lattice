@@ -55,8 +55,8 @@ struct HeadChange {
 // KvState is the logic. PersistentState<KvState> is the StateMachine.
 impl KvState {
     /// Open or create a KvState in the given directory.
-    pub fn open(id: Uuid, state_dir: impl AsRef<Path>) -> Result<PersistentState<Self>, StateDbError> {
-        setup_persistent_state(id, state_dir.as_ref(), |backend| {
+    pub fn open(id: Uuid, state_dir: impl AsRef<Path>, name: Option<&str>) -> Result<PersistentState<Self>, StateDbError> {
+        setup_persistent_state(id, state_dir.as_ref(), name, |backend| {
             let (watcher_tx, _) = broadcast::channel(1024);
             Self { backend, watcher_tx }
         })
@@ -323,11 +323,11 @@ impl StateFactory for KvState {
 }
 
 // StoreTypeProvider - declares this is a KvStore
-use lattice_model::StoreTypeProvider;
+use lattice_model::{StoreTypeProvider, STORE_TYPE_KVSTORE};
 
 impl StoreTypeProvider for KvState {
-    fn store_type() -> lattice_model::StoreType {
-        lattice_model::StoreType::KvStore
+    fn store_type() -> &'static str {
+        STORE_TYPE_KVSTORE
     }
 }
 
@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn test_state_machine_apply_put() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
 
         // Create an Op with a Put payload
         let key = b"test/key";
@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn test_state_machine_concurrent_puts() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
 
         let key = b"shared/key";
         
@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn test_state_machine_apply_delete() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
 
         let key = b"to/delete";
         
@@ -874,7 +874,7 @@ mod tests {
     #[test]
     fn test_apply_op_duplicate_keys_last_wins() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
         
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn test_apply_op_put_then_delete_same_key() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
         
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -923,7 +923,7 @@ mod tests {
     #[test]
     fn test_apply_op_delete_then_put_same_key() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
         
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -949,7 +949,7 @@ mod tests {
     #[test]
     fn test_apply_op_empty_key_allowed() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
         
         let author = PubKey::from([1u8; 32]);
         let hash = Hash::from([2u8; 32]);

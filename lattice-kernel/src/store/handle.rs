@@ -17,6 +17,7 @@ use lattice_model::replication::EntryStreamProvider;
 use prost::Message;
 use super::sigchain::SigChainManager;
 use std::collections::HashMap;
+use lattice_model::StoreMeta;
 
 /// Information about a store open operation
 #[derive(Debug, Clone)]
@@ -96,7 +97,7 @@ impl<S: StateMachine + Dispatcher + Send + Sync + 'static> Dispatchable for Stor
 use lattice_model::{StoreInfo as ModelStoreInfo, StoreTypeProvider};
 
 impl<S: StateMachine + StoreTypeProvider + Send + Sync + 'static> ModelStoreInfo for Store<S> {
-    fn store_type(&self) -> lattice_model::StoreType {
+    fn store_type(&self) -> &str {
         S::store_type()
     }
 }
@@ -617,6 +618,12 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
             }
             
             Ok(entries)
+        })
+    }
+    
+    fn store_meta(&self) -> Pin<Box<dyn Future<Output = StoreMeta> + Send + '_>> {
+        Box::pin(async move {
+            self.state.store_meta()
         })
     }
 }
