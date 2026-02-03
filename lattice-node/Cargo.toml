@@ -9,13 +9,12 @@ license.workspace = true
 lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
-lattice-kvstore = { workspace = true }
 lattice-kvstore-client = { workspace = true }
-lattice-logstore = { workspace = true }
 lattice-net-types = { workspace = true }
 lattice-storage = { workspace = true }
 ed25519-dalek = { workspace = true }
 prost = { workspace = true }
+prost-reflect = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
 hex = { workspace = true }
@@ -33,5 +32,7 @@ futures-util = "0.3"
 tokio-stream = "0.1"
 
 [dev-dependencies]
+lattice-logstore = { workspace = true }
+lattice-kvstore = { workspace = true }
 tokio-test = { workspace = true }
 tempfile = "3"

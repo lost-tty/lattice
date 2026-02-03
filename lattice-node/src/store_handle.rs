@@ -105,3 +105,66 @@ where
         Shutdownable::shutdown(self);
     }
 }
+
+// =============================================================================
+// Trait Implementations for dyn StoreHandle
+// =============================================================================
+//
+// These implementations allow `dyn StoreHandle` to satisfy `KvStoreExt`,
+// enabling typed operations (put/get) on opaque handles.
+
+impl Introspectable for dyn StoreHandle {
+    fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
+        self.as_dispatcher().service_descriptor()
+    }
+    
+    fn decode_payload(&self, payload: &[u8]) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+        self.as_dispatcher().decode_payload(payload)
+    }
+    
+    fn command_docs(&self) -> std::collections::HashMap<String, String> {
+        self.as_dispatcher().command_docs()
+    }
+    
+    fn field_formats(&self) -> std::collections::HashMap<String, lattice_store_base::FieldFormat> {
+        self.as_dispatcher().field_formats()
+    }
+
+    fn matches_filter(&self, payload: &prost_reflect::DynamicMessage, filter: &str) -> bool {
+        self.as_dispatcher().matches_filter(payload, filter)
+    }
+
+    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<String> {
+        self.as_dispatcher().summarize_payload(payload)
+    }
+}
+
+impl CommandDispatcher for dyn StoreHandle {
+    fn dispatch<'a>(
+        &'a self,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+        let dispatcher = self.as_dispatcher();
+        Box::pin(async move {
+            dispatcher.dispatch(method_name, request).await
+        })
+    }
+}
+
+impl StreamReflectable for dyn StoreHandle {
+    fn stream_descriptors(&self) -> Vec<lattice_store_base::StreamDescriptor> {
+        self.as_stream_reflectable().stream_descriptors()
+    }
+    
+    fn subscribe<'a>(
+        &'a self,
+        stream_name: &'a str,
+        params: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<lattice_store_base::BoxByteStream, lattice_store_base::StreamError>> + Send + 'a>> {
+        let stream_ref = self.as_stream_reflectable();
+        Box::pin(async move {
+            stream_ref.subscribe(stream_name, params).await
+        })
+    }
+}

@@ -47,8 +47,9 @@ Typed wrappers:  put(k,v) → dispatch("Put", PutRequest{k,v})
 - [x] Refactor GetRequest/Response: use idiomatic Proto3 optional, support 'verbose' metadata
 
 **Step 3: Simplify OpenedStore** 
-- [ ] Remove `typed_handle` - only `Arc<dyn StoreHandle>` remains
-- [ ] Mesh uses `store_handle.dispatch()` directly (or extension traits)
+- [x] Remove `typed_handle` - only `Arc<dyn StoreHandle>` remains
+- [x] Mesh uses `store_handle.dispatch()` directly (or extension traits)
+- [x] Added blanket impls for `Arc<T>` in `lattice-store-base` enabling `KvStoreExt` on `Arc<dyn StoreHandle>`
 
 ### 9C: Handle Consolidation
 > Simplify store handle layer by unifying patterns across KvStore and LogStore.

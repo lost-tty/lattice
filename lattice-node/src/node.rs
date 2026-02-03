@@ -1,20 +1,19 @@
 //! Local Lattice node API with multi-store support
 
 use crate::{
-    DataDir, MetaStore, Uuid,
+    DataDir, MetaStore, Uuid, StoreType,
     meta_store::MetaStoreError,
     store_registry::StoreRegistry,
     mesh::Mesh,
     peer_manager::{PeerManager, PeerManagerError, Peer},
-    KvStore,
+    StoreHandle,
 };
-use lattice_storage::PersistentState;
-use lattice_kvstore::KvState;
+// Removed unused imports: PersistentState, KvState
 use lattice_kernel::{
     NodeIdentity, NodeError as IdentityError, PeerStatus,
-    store::{StateError, LogError, Store},
+    store::{StateError, LogError},
 };
-use lattice_kvstore_client::KvStoreExt;
+use lattice_kvstore_client::{KvStoreExt, BatchBuilder};
 use lattice_model::NetEvent;
 use lattice_model::types::PubKey;
 use std::collections::HashMap;
@@ -83,6 +82,9 @@ pub enum NodeError {
     
     #[error("Dispatch error: {0}")]
     Dispatch(#[from] lattice_kvstore_client::DispatchError),
+
+    #[error("StoreManager error: {0}")]
+    StoreManager(#[from] crate::StoreManagerError),
 
     #[error("Other error: {0}")]
     Other(String),
@@ -175,15 +177,7 @@ impl NodeBuilder {
     pub fn build(self) -> Result<Node, NodeError> {
         self.data_dir.ensure_dirs()?;
 
-        let key_path = self.data_dir.identity_key();
-        let is_new = !key_path.exists();
-        let node = if key_path.exists() {
-            NodeIdentity::load(&key_path)?
-        } else {
-            let node = NodeIdentity::generate();
-            node.save(&key_path)?;
-            node
-        };
+        let (node, is_new) = NodeIdentity::load_or_generate(&self.data_dir.identity_key())?;
 
         let meta = MetaStore::open(self.data_dir.meta_db())?;
         
@@ -222,7 +216,7 @@ impl NodeBuilder {
             event_tx,
             net_tx,
             meshes: RwLock::new(HashMap::new()),
-            pending_joins: RwLock::new(std::collections::HashSet::new()),
+            pending_joins: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 }
@@ -242,7 +236,7 @@ pub struct Node {
     /// All active meshes by ID (multi-mesh support)
     meshes: RwLock<HashMap<Uuid, Mesh>>,
     /// Set of mesh IDs currently being joined
-    pending_joins: RwLock<std::collections::HashSet<Uuid>>,
+    pending_joins: std::sync::Mutex<std::collections::HashSet<Uuid>>,
 }
 
 impl Node {
@@ -427,7 +421,7 @@ impl Node {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs()).unwrap_or(0);
 
-        let mut batch = kv.batch()
+        let mut batch = BatchBuilder::new(kv.as_ref())
             .put(Peer::key_added_at(pubkey), now.to_string().as_bytes().to_vec())
             .put(Peer::key_status(pubkey), PeerStatus::Active.as_str().as_bytes().to_vec());
         
@@ -451,7 +445,7 @@ impl Node {
         
         // Check if join is already in progress
         {
-            let mut pending = self.pending_joins.write()
+            let mut pending = self.pending_joins.lock()
                 .map_err(|_| NodeError::LockPoisoned)?;
             if pending.contains(&mesh_id) {
                 return Err(NodeError::Validation(format!("Join for mesh {} is already in progress", mesh_id)));
@@ -470,7 +464,7 @@ impl Node {
         mesh_id: Uuid, 
         authorized_authors_bytes: Vec<Vec<u8>>, 
         via_peer: PubKey
-    ) -> Result<KvStore, NodeError> {
+    ) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
         // 1. Initialize Mesh (must be done first)
         let store = self.complete_join(mesh_id, Some(via_peer)).await?;
         
@@ -484,7 +478,7 @@ impl Node {
         }
         
         // Clear from pending joins
-        if let Ok(mut pending) = self.pending_joins.write() {
+        if let Ok(mut pending) = self.pending_joins.lock() {
             pending.remove(&mesh_id);
         }
         
@@ -497,12 +491,7 @@ impl Node {
     /// Complete joining a mesh - creates store with given UUID, caches handle.
     /// Called after receiving store_id from peer's JoinResponse.
     /// If `via_peer` is provided, server will sync with that peer after registration.
-    pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<KvStore, NodeError> {
-        // Create local store file with that UUID (store_manager.open will use it)
-        self.registry.create(store_id, |path| {
-            KvState::open(store_id, path).map_err(|e| StateError::Backend(e.to_string()))
-        })?;
-        
+    pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
         // Record in meta.db (as member)
         self.meta.add_mesh(store_id, &lattice_kernel::proto::storage::MeshInfo {
             joined_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
@@ -526,60 +515,30 @@ impl Node {
     /// 
     /// Note: This remains on Node as a facade for the network layer, which may not yet have a Mesh reference
     pub async fn accept_join(&self, pubkey: PubKey, mesh_id: Uuid, secret: &[u8]) -> Result<JoinAcceptance, NodeError> {
-        // Verify we're in this mesh
         let mesh = self.mesh_by_id(mesh_id)
             .ok_or_else(|| NodeError::Actor(format!("Not a member of mesh {}", mesh_id)))?;
 
-        // Check invite token
-        let valid_token = match mesh.consume_invite_secret(secret).await {
-            Ok(v) => v,
-            Err(_) => false, // Token validation failed
-        };
-        
-        // If token invalid, check if already active (re-join)
-        // We use can_join which checks for Active status (Invited status is no longer used)
-        let is_already_authorized = !valid_token && mesh.peer_manager().can_join(&pubkey);
-        
-        if !valid_token && !is_already_authorized {
-            return Err(NodeError::Store(StateError::Unauthorized(
-                format!("Peer {} provided invalid token and is not already authorized", hex::encode(pubkey))
-            )));
-        }
-        
-        // Activate peer (idempotent)
-        mesh.activate_peer(pubkey).await?;
-        
-        // Get list of authorized authors to send to the joining peer
-        let authorized_authors = mesh.peer_manager().list_acceptable_authors();
-        
+        let authorized_authors = mesh.handle_peer_join(pubkey, secret).await
+            .map_err(|e| NodeError::Store(StateError::Unauthorized(e.to_string())))?;
+
         Ok(JoinAcceptance { store_id: mesh_id, authorized_authors })
     }
 
-    pub fn create_store(&self) -> Result<Uuid, NodeError> {
-        let store_id = Uuid::new_v4();
-        self.create_store_internal(store_id)
-    }
-    
-    /// Create a store with a specific UUID (for joining existing mesh)
-    pub fn create_store_with_uuid(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
-        self.create_store_internal(store_id)
-    }
-    
-    fn create_store_internal(&self, store_id: Uuid) -> Result<Uuid, NodeError> {
-        self.registry.create(store_id, |path| {
-            KvState::open(store_id, path).map_err(|e| StateError::Backend(e.to_string()))
-        })?;
-        Ok(store_id)
+    /// Create a store, optionally specifying the UUID.
+    /// If uuid is None, a random one is generated.
+    pub fn create_store(&self, uuid: Option<Uuid>) -> Result<Uuid, NodeError> {
+        let id = uuid.unwrap_or_else(Uuid::new_v4);
+        let _ = self.store_manager.open(id, StoreType::KvStore)?;
+        // Register with meta store so it appears in list_stores()
+        self.meta.add_store(id).map_err(|e| NodeError::Store(StateError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        ))))?;
+        Ok(id)
     }
 
-    pub fn open_root_store(&self, store_id: Uuid) -> Result<(Store<PersistentState<KvState>>, StoreInfo), NodeError> {
-        self.registry.get_or_open(store_id, |path| {
-            KvState::open(store_id, path).map_err(|e| StateError::Backend(e.to_string()))
-        }).map_err(NodeError::from)
-    }
-    
     /// Get PeerManager for a specific mesh
-    pub fn peer_manager_for(&self, mesh_id: Uuid) -> Option<std::sync::Arc<PeerManager<KvStore>>> {
+    pub fn peer_manager_for(&self, mesh_id: Uuid) -> Option<std::sync::Arc<PeerManager<dyn crate::StoreHandle>>> {
         self.mesh_by_id(mesh_id).map(|m| m.peer_manager().clone())
     }
     
@@ -676,24 +635,23 @@ mod tests {
             .with_opener(StoreType::LogStore, |registry| direct_opener::<PersistentLogState>(registry))
     }
 
-
     #[tokio::test]
     async fn test_create_and_open_store() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder::new(data_dir.clone())
+        let node = test_node_builder(data_dir.clone())
             .build()
             .expect("Failed to create node");
         
         assert!(node.info().stores.is_empty());
-        let store_id = node.create_store().expect("Failed to create store");
+        let store_id = node.create_store(None).expect("Failed to create store");
         
         // Verify it's in the list
         let stores: Vec<_> = node.meta().list_stores().expect("list failed").into_iter().map(|(id, _)| id).collect();
         assert!(stores.contains(&store_id));
         
-        let (store, _) = node.open_root_store(store_id).expect("Failed to open store");
+        let store = node.store_manager().open(store_id, StoreType::KvStore).expect("Failed to open store");
         store.put(b"/key".to_vec(), b"value".to_vec()).await.expect("put failed");
         let val = store.get(b"/key".to_vec()).await.expect("get failed");
         assert_eq!(val, Some(b"value".to_vec()));
@@ -705,17 +663,17 @@ mod tests {
     async fn test_store_isolation() {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
-        let node = NodeBuilder::new(data_dir.clone())
+        let node = test_node_builder(data_dir.clone())
             .build()
             .expect("Failed to create node");
         
-        let store_a = node.create_store().expect("create A");
-        let store_b = node.create_store().expect("create B");
+        let store_a = node.create_store(None).expect("create A");
+        let store_b = node.create_store(None).expect("create B");
         
-        let (store_a, _) = node.open_root_store(store_a).expect("open A");
+        let store_a = node.store_manager().open(store_a, StoreType::KvStore).expect("open A");
         store_a.put(b"/key".to_vec(), b"from A".to_vec()).await.expect("put A");
         
-        let (store_b, _) = node.open_root_store(store_b).expect("open B");
+        let store_b = node.store_manager().open(store_b, StoreType::KvStore).expect("open B");
         let val_b = store_b.get(b"/key".to_vec()).await.expect("B get");
         assert_eq!(val_b, None);
         

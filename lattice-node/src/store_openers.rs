@@ -3,8 +3,8 @@
 //! Provides a generic opener factory for creating StoreOpener implementations.
 //! Uses the handle-less architecture where Store<S> implements StoreHandle directly.
 
-use crate::store_manager::{StoreManagerError, StoreOpener, OpenedStore};
-use crate::StoreRegistry;
+use crate::store_manager::{StoreManagerError, StoreOpener};
+use crate::{StoreRegistry, StoreHandle};
 use lattice_model::{Uuid, Openable};
 use std::sync::Arc;
 
@@ -34,14 +34,11 @@ impl<S> StoreOpener for DirectOpenerImpl<S>
 where
     S: Openable + Introspectable + Dispatcher + StreamProvider + StoreTypeProvider + Send + Sync + 'static,
 {
-    fn open(&self, store_id: Uuid) -> Result<OpenedStore, StoreManagerError> {
+    fn open(&self, store_id: Uuid) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
         let (store, _) = self.registry.get_or_open(store_id, |path| {
             S::open(store_id, path).map_err(|e| lattice_kernel::store::StateError::Backend(e))
         }).map_err(|e| StoreManagerError::Registry(e.to_string()))?;
 
-        Ok(OpenedStore {
-            typed_handle: Box::new(store.clone()),
-            store_handle: Arc::new(store),
-        })
+        Ok(Arc::new(store))
     }
 }

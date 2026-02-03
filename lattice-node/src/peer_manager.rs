@@ -12,9 +12,9 @@ use crate::{
     node::parse_peer_status_key,
     PeerInfo,
 };
+use tracing::error;
 use lattice_kernel::{NodeIdentity, PeerStatus};
-use lattice_kvstore::Merge;
-use crate::KvStore;
+use lattice_kvstore_client::{KvStoreExt, BatchBuilder};
 use lattice_model::types::PubKey;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, Mutex};
@@ -24,7 +24,7 @@ use tokio::sync::broadcast;
 #[derive(Debug, thiserror::Error)]
 pub enum PeerManagerError {
     #[error("Store error: {0}")]
-    Store(#[from] lattice_kvstore::KvHandleError),
+    Store(#[from] lattice_kvstore_client::DispatchError),
     #[error("State writer error: {0}")]
     StateWriter(#[from] lattice_model::StateWriterError),
     #[error("State error: {0}")]
@@ -32,7 +32,7 @@ pub enum PeerManagerError {
     #[error("Storage error: {0}")]
     Storage(#[from] lattice_storage::StateDbError),
     #[error("Watch error: {0}")]
-    Watch(#[from] lattice_kvstore::WatchError),
+    Watch(#[from] lattice_kvstore_client::WatchError),
     #[error("Lock poisoned")]
     LockPoisoned,
     #[error("Peer not found: {0}")]
@@ -137,8 +137,6 @@ pub struct Peer {
 }
 
 impl Peer {
-
-    
     /// Create a minimal Peer with just pubkey and status.
     fn minimal(pubkey: PubKey, status: PeerStatus) -> Self {
         Self {
@@ -200,25 +198,24 @@ impl Peer {
     }
     
     /// Load a Peer from the store (atomic read via list_by_prefix).
-    pub async fn load(kv: &KvStore, pubkey: PubKey) -> Result<Option<Self>, PeerManagerError> {
+    pub async fn load<S: KvStoreExt + ?Sized>(kv: &S, pubkey: PubKey) -> Result<Option<Self>, PeerManagerError> {
         let pubkey_hex = hex::encode(pubkey);
         let prefix = format!("/nodes/{}/", pubkey_hex);
         
         // Single atomic query for all peer attributes
-        let entries = kv.list_by_prefix(prefix.as_bytes())?;
+        // Client API returns resolved values, so we don't need to merge heads manually
+        let entries = kv.list_by_prefix(prefix.as_bytes().to_vec()).await.map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
         
         if entries.is_empty() {
             return Ok(None);
         }
         
         let mut attrs = Vec::new();
-        for (key, heads) in entries {
-            let key_str = String::from_utf8_lossy(&key);
+        for kv_pair in entries {
+            let key_str = String::from_utf8_lossy(&kv_pair.key);
             if let Some(attr) = key_str.strip_prefix(&prefix) {
-                if let Some(winner) = heads.lww_head() {
-                    let value_str = String::from_utf8_lossy(&winner.value);
-                    attrs.push((attr.to_string(), value_str.to_string()));
-                }
+                let value_str = String::from_utf8_lossy(&kv_pair.value);
+                attrs.push((attr.to_string(), value_str.to_string()));
             }
         }
         
@@ -226,9 +223,9 @@ impl Peer {
     }
     
     /// Save a Peer to the store
-    pub async fn save(&self, kv: &KvStore) -> Result<(), PeerManagerError> {
-        // Build batch with all peer attributes
-        let mut batch = kv.batch()
+    pub async fn save<S: KvStoreExt + ?Sized>(&self, kv: &S) -> Result<(), PeerManagerError> {
+        // Build batch with all peer attributes using fluent API
+        let mut batch = BatchBuilder::new(kv)
             .put(Self::key_status(self.pubkey), self.status.as_str().as_bytes());
         
         if let Some(ref name) = self.name {
@@ -243,7 +240,7 @@ impl Peer {
             batch = batch.put(Self::key_added_by(self.pubkey), hex::encode(added_by).as_bytes());
         }
         
-        batch.commit().await?;
+        batch.commit().await.map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
         Ok(())
     }
     
@@ -288,7 +285,7 @@ impl Peer {
 /// PeerManager monitors `/nodes/{pubkey}/status` keys in the root store and maintains
 /// a cache for fast authorization checks. It also provides methods for peer operations
 /// like invite, join, set_status, and revoke.
-pub struct PeerManager {
+pub struct PeerManager<S: KvStoreExt + Send + Sync + ?Sized + 'static> {
     /// Encapsulated peer cache (no direct lock access)
     peers: Arc<PeerCache>,
     /// Broadcast channel for peer status change events
@@ -296,7 +293,7 @@ pub struct PeerManager {
     /// Bootstrap authors trusted during initial sync (cleared after first sync)
     bootstrap_authors: Arc<RwLock<HashSet<PubKey>>>,
     /// KV handle for reads and writes (uses StateWriter for writes)
-    kv: KvStore,
+    kv: Arc<S>,
     /// Our own identity
     identity: NodeIdentity,
     /// Handle to the background watcher task (abort on drop)
@@ -316,7 +313,7 @@ pub struct PeerManager {
 // Thread A (PeerManager): Holds peers lock -> Waiting on Actor (KV op)
 // Thread B (ActorRunner): Processing validation -> Waiting on peers lock (PeerProvider)
 
-impl std::fmt::Debug for PeerManager {
+impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> std::fmt::Debug for PeerManager<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PeerManager")
             .field("my_pubkey", &self.identity.public_key())
@@ -324,19 +321,19 @@ impl std::fmt::Debug for PeerManager {
     }
 }
 
-impl PeerManager {
+impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> PeerManager<S> {
     /// Create a new PeerManager that manages peers via the given store.
     /// 
     /// This initializes the peer cache from the current store state and spawns a
     /// background task to keep it updated.
-    pub async fn new(store: KvStore, identity: &NodeIdentity) -> Result<Arc<Self>, PeerManagerError> {
+    pub async fn new(store: Arc<S>, identity: &NodeIdentity) -> Result<Arc<Self>, PeerManagerError> {
         let (peer_event_tx, _) = broadcast::channel(64);
         
         let manager = Arc::new(Self {
             peers: Arc::new(PeerCache::new()),
             peer_event_tx,
             bootstrap_authors: Arc::new(RwLock::new(HashSet::new())),
-            kv: store.clone(),
+            kv: store,
             identity: identity.clone(),
             watcher_task: Mutex::new(None),
         });
@@ -353,13 +350,15 @@ impl PeerManager {
     
     /// Set a peer's name.
     pub async fn set_peer_name(&self, pubkey: PubKey, name: &str) -> Result<(), PeerManagerError> {
-        self.kv.put(&Peer::key_name(pubkey), name.as_bytes()).await?;
+        self.kv.put(Peer::key_name(pubkey), name.as_bytes().to_vec())
+            .await.map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
         Ok(())
     }
     
     /// Set a peer's status.
     pub async fn set_peer_status(&self, pubkey: PubKey, status: PeerStatus) -> Result<(), PeerManagerError> {
-        self.kv.put(&Peer::key_status(pubkey), status.as_str().as_bytes()).await?;
+        self.kv.put(Peer::key_status(pubkey), status.as_str().as_bytes().to_vec())
+            .await.map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
         Ok(())
     }
     
@@ -380,7 +379,7 @@ impl PeerManager {
     
     /// Get a peer's full info from the store.
     pub async fn get_peer(&self, pubkey: PubKey) -> Result<Option<Peer>, PeerManagerError> {
-        Peer::load(&self.kv, pubkey).await
+        Peer::load(self.kv.as_ref(), pubkey).await
     }
     
     // ==================== Bootstrap Authors ====================
@@ -406,20 +405,20 @@ impl PeerManager {
     
     /// List all peers with their full info (name, added_at, etc.)
     pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
-        let nodes = self.kv.list_by_prefix(b"/nodes/")?;
+        let nodes = self.kv.list_by_prefix(b"/nodes/".to_vec()).await
+            .map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
         
         // Group attributes by pubkey hex
         let mut peers_attrs: HashMap<String, Vec<(String, String)>> = HashMap::new();
         
-        for (key, heads) in &nodes {
-            let key_str = String::from_utf8_lossy(key);
+        for kv_pair in nodes {
+            let key_str = String::from_utf8_lossy(&kv_pair.key);
             
             // Parse key: /nodes/{pubkey}/{attr}
             let Some(rest) = key_str.strip_prefix("/nodes/") else { continue };
             let Some((pubkey_hex, attr)) = rest.split_once('/') else { continue };
             
-            let Some(value) = heads.lww() else { continue };
-            let value_str = String::from_utf8_lossy(&value);
+            let value_str = String::from_utf8_lossy(&kv_pair.value);
             
             peers_attrs.entry(pubkey_hex.to_string())
                 .or_default()
@@ -437,8 +436,6 @@ impl PeerManager {
             })
             .collect();
         
-
-        
         Ok(peers)
     }
     
@@ -450,51 +447,44 @@ impl PeerManager {
     /// This ensures read-your-writes consistency (local writes trigger events)
     /// as well as consistency with external changes (e.g. from gossip).
     async fn start_watching(self: &Arc<Self>) -> Result<(), PeerManagerError> {
+        use futures_util::StreamExt;
         // Watch pattern for all peer statuses
         let pattern = r"^/nodes/.*/status$";
         
-        // Use the watch API which handles initial scan + subscription atomically (preventing races)
-        let (initial, mut rx) = self.kv.watch(pattern).await?;
+        // 1. Start watch stream first (to buffer updates during scan)
+        let mut stream = self.kv.watch(pattern).await
+           .map_err(|e| PeerManagerError::Watch(lattice_kvstore_client::WatchError::Storage(e.to_string())))?;
         
-        // 1. Process initial state
-        for (key, heads) in initial {
-            if let Some((pubkey, status)) = Self::parse_peer_state(&key, &heads) {
+        // 2. Perform initial scan
+        let initial = self.kv.list_by_prefix(b"/nodes/".to_vec()).await
+             .map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
+
+        for kv_pair in initial {
+            // Filter for status keys purely by parsing
+             if let Some((pubkey, status)) = Self::parse_peer_state(&kv_pair.key, &kv_pair.value) {
                 self.peers.insert(pubkey, Peer::minimal(pubkey, status));
-            }
+             }
         }
         
         // 2. Spawn watcher task for ongoing updates
         let peers = self.peers.clone();
         let notify = self.peer_event_tx.clone();
-        let kv = self.kv.clone(); // Clone KV for re-syncing on lag
+        let _kv = self.kv.clone(); // Clone KV for re-syncing on lag
         
         let task = tokio::spawn(async move {
             loop {
-                match rx.recv().await {
-                    Ok(event) => {
+                match stream.next().await {
+                    Some(Ok(event)) => {
                         Self::handle_watch_event(event, &peers, &notify);
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("PeerManager watcher lagged by {} messages - triggering re-sync", n);
-                        
-                        // Re-sync on lag to ensure consistency
-                        // We list all status keys and re-apply them
-                        let prefix = b"/nodes/";
-                        match kv.list_by_prefix(prefix) {
-                            Ok(entries) => {
-                                for (key, heads) in entries {
-                                    // Filter for status keys purely by parsing
-                                    if let Some((pubkey, status)) = Self::parse_peer_state(&key, &heads) {
-                                        Self::update_peer_cache(&peers, pubkey, Some(status), &notify);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to re-sync PeerManager after lag: {}", e);
-                            }
-                        }
+                    Some(Err(e)) => {
+                         // Ideally we should re-connect, but for now we break/log
+                         // The client stream might implement reconnect internally?
+                         // If we break, we lose updates. -> this needs to be in roadmap M9 (implemented, carefully tested)
+                         error!("Peer watch stream error: {}", e);
+                         break;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    None => break, // Stream closed
                 }
             }
         });
@@ -525,34 +515,35 @@ impl PeerManager {
     }
 
     /// Parse peer state from KV entry (helper for initial load and updates)
-    fn parse_peer_state(key: &[u8], heads: &[lattice_kvstore::Head]) -> Option<(PubKey, PeerStatus)> {
+    /// Parse peer state from KV entry (helper for initial load and updates)
+    fn parse_peer_state(key: &[u8], value: &[u8]) -> Option<(PubKey, PeerStatus)> {
         let pubkey_hex = parse_peer_status_key(key)?;
         let pubkey_bytes = hex::decode(&pubkey_hex).ok()?;
         let pubkey = PubKey::try_from(pubkey_bytes).ok()?;
 
-        let winner = heads.lww_head()?;
-        let status_str = String::from_utf8_lossy(&winner.value);
+        let status_str = String::from_utf8_lossy(value);
         let status = PeerStatus::from_str(&status_str)?;
         
         Some((pubkey, status))
     }
 
     /// Handle a single watch event to update cache and notify listeners
+    /// Handle a single watch event to update cache and notify listeners
     fn handle_watch_event(
-        event: lattice_kvstore::WatchEvent,
+        event: lattice_kvstore_client::WatchEvent,
         peers: &Arc<PeerCache>,
         notify: &broadcast::Sender<PeerEvent>
     ) {
-        let lattice_kvstore::WatchEvent { key, kind } = event;
+        let lattice_kvstore_client::WatchEvent { key, kind } = event;
 
         let (pubkey, new_status) = match kind {
-            lattice_kvstore::WatchEventKind::Update { heads } => {
-                match Self::parse_peer_state(&key, &heads) {
+            lattice_kvstore_client::WatchEventKind::Update { value } => {
+                match Self::parse_peer_state(&key, &value) {
                     Some((pk, status)) => (pk, Some(status)),
                     None => return, // Malformed or irrelevant update
                 }
             }
-            lattice_kvstore::WatchEventKind::Delete => {
+            lattice_kvstore_client::WatchEventKind::Delete => {
                  // Try to recover pubkey from key even without value
                  if let Some(pubkey_hex) = parse_peer_status_key(&key) {
                     if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
@@ -583,7 +574,7 @@ impl PeerManager {
     }
 }
 
-impl Drop for PeerManager {
+impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> Drop for PeerManager<S> {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.watcher_task.lock() {
             if let Some(task) = guard.take() {
@@ -595,7 +586,7 @@ impl Drop for PeerManager {
 
 // ==================== PeerProvider Implementation ====================
 
-impl PeerProvider for PeerManager {
+impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> PeerProvider for PeerManager<S> {
     fn can_join(&self, peer: &PubKey) -> bool {
         self.peers.can_join(peer)
     }

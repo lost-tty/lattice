@@ -137,3 +137,58 @@ pub trait StreamReflectable: Send + Sync {
         })
     }
 }
+
+// ============================================================================
+// Blanket implementations for Arc<T>
+// ============================================================================
+// These enable traits on Arc<dyn TraitObject> by delegating to the inner type.
+
+impl<T: Introspectable + ?Sized> Introspectable for std::sync::Arc<T> {
+    fn service_descriptor(&self) -> ServiceDescriptor {
+        (**self).service_descriptor()
+    }
+
+    fn decode_payload(&self, payload: &[u8]) -> Result<DynamicMessage, Box<dyn Error + Send + Sync>> {
+        (**self).decode_payload(payload)
+    }
+
+    fn command_docs(&self) -> std::collections::HashMap<String, String> {
+        (**self).command_docs()
+    }
+
+    fn field_formats(&self) -> std::collections::HashMap<String, FieldFormat> {
+        (**self).field_formats()
+    }
+
+    fn matches_filter(&self, payload: &DynamicMessage, filter: &str) -> bool {
+        (**self).matches_filter(payload, filter)
+    }
+
+    fn summarize_payload(&self, payload: &DynamicMessage) -> Vec<String> {
+        (**self).summarize_payload(payload)
+    }
+}
+
+impl<T: CommandDispatcher + ?Sized> CommandDispatcher for std::sync::Arc<T> {
+    fn dispatch<'a>(
+        &'a self,
+        method_name: &'a str,
+        request: DynamicMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<DynamicMessage, Box<dyn Error + Send + Sync>>> + Send + 'a>> {
+        (**self).dispatch(method_name, request)
+    }
+}
+
+impl<T: StreamReflectable + ?Sized> StreamReflectable for std::sync::Arc<T> {
+    fn stream_descriptors(&self) -> Vec<StreamDescriptor> {
+        (**self).stream_descriptors()
+    }
+    
+    fn subscribe<'a>(
+        &'a self,
+        stream_name: &'a str,
+        params: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+        (**self).subscribe(stream_name, params)
+    }
+}

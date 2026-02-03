@@ -3,17 +3,15 @@
 //! These tests replicate PRODUCTION usage exactly - no manual gossip setup.
 //! They rely purely on the event-driven flow that happens in the CLI.
 
-use lattice_node::{NodeBuilder, NodeEvent, Node, token::Invite, Uuid, direct_opener, StoreType, Store};
-use lattice_kvstore::{Merge, PersistentKvState};
+use lattice_node::{NodeBuilder, NodeEvent, Node, token::Invite, Uuid, direct_opener, StoreType, StoreHandle};
+use lattice_kvstore::PersistentKvState;
 use lattice_logstore::PersistentLogState;
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
+use lattice_kvstore_client::KvStoreExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-
-/// Type alias for KvStore - now uses Store<S> directly (handle-less architecture)
-type KvStore = Store<PersistentKvState>;
 
 /// Helper to create a temp data dir for testing
 fn temp_data_dir(name: &str) -> lattice_node::DataDir {
@@ -37,7 +35,7 @@ async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<MeshService>, Box<dyn
 }
 
 /// Helper: Join mesh via node.join() and wait for MeshReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<KvStore> {
+async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<Arc<dyn StoreHandle>> {
     // Subscribe before requesting join
     let mut events = node.subscribe_events();
     
@@ -66,13 +64,13 @@ async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, se
     }
 }
 
-async fn wait_for_entry(store: &KvStore, key: &[u8], expected: &[u8]) -> bool {
+async fn wait_for_entry(store: &Arc<dyn StoreHandle>, key: &[u8], expected: &[u8]) -> bool {
     let timeout = Duration::from_secs(5);
     let start = std::time::Instant::now();
     
     while start.elapsed() < timeout {
-        if let Some(val) = store.state().get(key).unwrap_or_default().lww_head() {
-            if val.value == expected {
+        if let Ok(Some(val)) = store.get(key.to_vec()).await {
+            if val == expected {
                 return true;
             }
         }

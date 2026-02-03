@@ -17,14 +17,15 @@ use crate::{
     store_manager::StoreManager,
     token::Invite,
     PeerInfo,
-    KvStore,
+    StoreHandle,
     StoreType,
 };
 use lattice_kernel::NodeIdentity;
 use lattice_model::types::PubKey;
+use lattice_model::PeerProvider;
 use futures_util::StreamExt;
 use crate::Uuid;
-use lattice_kvstore_client::KvStoreExt;
+use lattice_kvstore_client::{KvStoreExt, BatchBuilder};
 use rand::RngCore;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -54,11 +55,11 @@ pub enum MeshError {
 /// - The PeerManager (peer cache + operations)
 /// - The Store Watcher (monitors root for /stores/* declarations)
 ///
-/// Use `mesh.root_store()` for data operations.
+/// Use `mesh.root_store()` for data operations (as type-erased handle).
 /// Use `mesh.peer_manager()` for network layer integration.
 pub struct Mesh {
     root_store_id: Uuid,
-    peer_manager: Arc<PeerManager<KvStore>>,
+    peer_manager: Arc<PeerManager<dyn StoreHandle>>,
     store_manager: Arc<StoreManager>,
     /// Shutdown signal for watcher
     shutdown_tx: broadcast::Sender<()>,
@@ -86,18 +87,16 @@ impl Mesh {
         store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
         // Create a fresh store via store_manager
-        let (root_store_id, opened) = store_manager.create(StoreType::KvStore)?;
-        let root_store: KvStore = *opened.typed_handle.downcast()
-            .map_err(|_| MeshError::Other("Failed to downcast KvStore".into()))?;
+        let (root_store_id, root_store) = store_manager.create(StoreType::KvStore)?;
         
-        let peer_manager = PeerManager::new(Arc::new(root_store.clone()), node).await?;
+        // PeerManager needs a reference to the store handle
+        let peer_manager = PeerManager::new(root_store.clone(), node).await?;
         
         // Register root store immediately
-        let opened_for_reg = store_manager.open(root_store_id, StoreType::KvStore)?;
         store_manager.register(
             root_store_id, // mesh_id = root_store_id
             root_store_id,
-            opened_for_reg,
+            root_store,
             StoreType::KvStore,
             peer_manager.clone(),
         )?;
@@ -126,18 +125,15 @@ impl Mesh {
         store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
         // Open existing store via store_manager
-        let opened = store_manager.open(store_id, StoreType::KvStore)?;
-        let root_store: KvStore = *opened.typed_handle.downcast()
-            .map_err(|_| MeshError::Other("Failed to downcast KvStore".into()))?;
+        let root_store = store_manager.open(store_id, StoreType::KvStore)?;
         
-        let peer_manager = PeerManager::new(Arc::new(root_store.clone()), node).await?;
+        let peer_manager = PeerManager::new(root_store.clone(), node).await?;
         
         // Register root store immediately
-        let opened_for_reg = store_manager.open(store_id, StoreType::KvStore)?;
         store_manager.register(
             store_id, // mesh_id = root_store_id
             store_id,
-            opened_for_reg,
+            root_store,
             StoreType::KvStore,
             peer_manager.clone(),
         )?;
@@ -164,14 +160,14 @@ impl Mesh {
     }
     
     /// Get the root store handle.
-    /// Panics if root store is not registered (should never happen - registered during Mesh construction).
-    pub fn root_store(&self) -> KvStore {
-        self.store_manager.get::<KvStore>(&self.root_store_id)
-            .expect("Root store not registered - this is a bug, registration should happen during Mesh::open/create_new")
+    /// Parnics if root store is not registered (should never happen).
+    pub fn root_store(&self) -> Arc<dyn StoreHandle> {
+        self.store_manager.get_handle(&self.root_store_id)
+            .expect("Root store not registered - this is a bug")
     }
     
     /// Get peer manager for network layer integration.
-    pub fn peer_manager(&self) -> Arc<PeerManager<KvStore>> {
+    pub fn peer_manager(&self) -> Arc<PeerManager<dyn StoreHandle>> {
         self.peer_manager.clone()
     }
     
@@ -196,16 +192,12 @@ impl Mesh {
         }
     }
 
-    /// Resolve a store alias (UUID string or prefix) to a KvStore handle.
-    /// Note: Only works for KvStore type. For other types, use resolve_store_info().
-    pub fn resolve_store(&self, id_or_prefix: &str) -> Result<KvStore, MeshError> {
-        let (id, store_type) = self.resolve_store_info(id_or_prefix)?;
+    /// Resolve a store alias (UUID string or prefix) to a StoreHandle.
+    /// Previously enforced KvStore return type, now general handle.
+    pub fn resolve_store(&self, id_or_prefix: &str) -> Result<Arc<dyn StoreHandle>, MeshError> {
+        let (id, _store_type) = self.resolve_store_info(id_or_prefix)?;
         
-        if store_type != StoreType::KvStore {
-            return Err(MeshError::Other(format!("Store '{}' is a {} (expected KvStore)", id_or_prefix, store_type)));
-        }
-        
-        self.store_manager.get::<KvStore>(&id)
+        self.store_manager.get_handle(&id)
             .ok_or_else(|| MeshError::Other(format!("Store '{}' not found in manager", id_or_prefix)))
     }
     
@@ -219,15 +211,14 @@ impl Mesh {
         let opened_stores = self.opened_stores.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         
-        let Some(root_store) = self.store_manager.get::<KvStore>(&self.root_store_id) else {
+        let Some(root_store) = self.store_manager.get_handle(&self.root_store_id) else {
             warn!("Cannot start store watcher: root store not available");
             return;
         };
         
         tokio::spawn(async move {
-            // Watch for changes to /stores/ prefix
-            // 1. Subscribe stream using UFCS to use trait method (bypass inherent shadowing)
-            let mut stream = match KvStoreExt::watch(&root_store, "^/stores/").await {
+            // Watch for changes to /stores/ prefix using trait method
+            let mut stream = match KvStoreExt::watch(root_store.as_ref(), "^/stores/").await {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(error = %e, "Failed to start store watcher");
@@ -260,8 +251,6 @@ impl Mesh {
                             Some(Err(e)) => {
                                 warn!(error = %e, "Watch stream error");
                                 // Simple retry strategy: break (reconcile loop will stop) 
-                                // Ideally duplicate logic from PeerManager to re-sync
-                                // This needs to be in roadmap M9 (implemented, carefully tested)
                             }
                             None => break,
                         }
@@ -275,9 +264,9 @@ impl Mesh {
     /// Tracks which stores this mesh opened, and only closes those when undeclared.
     async fn reconcile_stores(
         store_manager: &Arc<StoreManager>, 
-        root: &KvStore, 
+        root: &Arc<dyn StoreHandle>, 
         root_store_id: Uuid,
-        peer_manager: &Arc<PeerManager<KvStore>>,
+        peer_manager: &Arc<PeerManager<dyn StoreHandle>>,
         opened_stores: &Arc<RwLock<std::collections::HashSet<Uuid>>>,
     ) -> Result<(), MeshError> {
         let declarations = Self::list_declarations(root).await?;
@@ -348,7 +337,7 @@ impl Mesh {
     }
     
     /// List store declarations from root store.
-    async fn list_declarations(root: &KvStore) -> Result<Vec<StoreDeclaration>, MeshError> {
+    async fn list_declarations(root: &Arc<dyn StoreHandle>) -> Result<Vec<StoreDeclaration>, MeshError> {
         let entries = root.list().await
             .map_err(|e| MeshError::Other(e.to_string()))?;
         
@@ -366,7 +355,7 @@ impl Mesh {
     }
     
     /// Parse a store declaration from a `/stores/{uuid}/type` key.
-    async fn parse_declaration(root: &KvStore, type_key: &[u8]) -> Option<StoreDeclaration> {
+    async fn parse_declaration(root: &Arc<dyn StoreHandle>, type_key: &[u8]) -> Option<StoreDeclaration> {
         let key_str = String::from_utf8_lossy(type_key);
         let uuid_str = key_str.split('/').nth(2)?;
         let id = Uuid::parse_str(uuid_str).ok()?;
@@ -422,7 +411,8 @@ impl Mesh {
         let type_key = format!("/stores/{}/type", store_id);
         let created_key = format!("/stores/{}/created_at", store_id);
         
-        let mut batch = root.batch()
+        // Using BatchBuilder explicitly for generic handle
+        let mut batch = BatchBuilder::new(root.as_ref())
             .put(type_key.into_bytes(), store_type.as_str().as_bytes().to_vec())
             .put(created_key.into_bytes(), now_secs.to_string().as_bytes().to_vec());
 
@@ -510,6 +500,31 @@ impl Mesh {
     /// Activate a peer (set status to Active).
     pub async fn activate_peer(&self, pubkey: PubKey) -> Result<(), PeerManagerError> {
         self.peer_manager.activate_peer(pubkey).await
+    }
+    
+    /// Handle a peer join request: validate token, activate peer, return authorized authors.
+    /// Encapsulates all join logic that was previously in Node::accept_join.
+    pub async fn handle_peer_join(&self, pubkey: PubKey, secret: &[u8]) -> Result<Vec<PubKey>, MeshError> {
+        // Check invite token
+        let valid_token = match self.consume_invite_secret(secret).await {
+            Ok(v) => v,
+            Err(_) => false,
+        };
+        
+        // If token invalid, check if already authorized (re-join)
+        let is_already_authorized = !valid_token && self.peer_manager.can_join(&pubkey);
+        
+        if !valid_token && !is_already_authorized {
+            return Err(MeshError::Other(
+                format!("Peer {} provided invalid token and is not already authorized", hex::encode(pubkey))
+            ));
+        }
+        
+        // Activate peer (idempotent)
+        self.activate_peer(pubkey).await?;
+        
+        // Return authorized authors
+        Ok(self.peer_manager.list_acceptable_authors())
     }
     
     // ==================== Bootstrap Authors ====================

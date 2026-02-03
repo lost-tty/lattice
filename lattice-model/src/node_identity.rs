@@ -46,14 +46,15 @@ impl NodeIdentity {
     }
 
     /// Load a node's identity from a key file, or generate and save if it doesn't exist.
-    pub fn load_or_generate(path: impl AsRef<Path>) -> Result<Self, NodeError> {
+    /// Returns (identity, is_new) where is_new is true if a new identity was generated.
+    pub fn load_or_generate(path: impl AsRef<Path>) -> Result<(Self, bool), NodeError> {
         let path = path.as_ref();
         if path.exists() {
-            Self::load(path)
+            Ok((Self::load(path)?, false))
         } else {
             let node = Self::generate();
             node.save(path)?;
-            Ok(node)
+            Ok((node, true))
         }
     }
 
@@ -228,12 +229,14 @@ mod tests {
         fs::remove_file(&temp_path).ok();
         
         // First call: generates
-        let node1 = NodeIdentity::load_or_generate(&temp_path).unwrap();
+        let (node1, is_new1) = NodeIdentity::load_or_generate(&temp_path).unwrap();
         let pk1 = node1.public_key();
+        assert!(is_new1, "should be newly generated");
         
         // Second call: loads existing
-        let node2 = NodeIdentity::load_or_generate(&temp_path).unwrap();
+        let (node2, is_new2) = NodeIdentity::load_or_generate(&temp_path).unwrap();
         let pk2 = node2.public_key();
+        assert!(!is_new2, "should load existing");
         
         assert_eq!(pk1, pk2);
         

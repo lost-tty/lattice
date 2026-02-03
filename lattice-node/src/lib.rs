@@ -21,7 +21,7 @@ pub mod store_openers;
 pub mod store_handle;
 
 pub use token::Invite;
-pub use store_manager::{StoreManager, StoreManagerError, StoreOpener, OpenedStore};
+pub use store_manager::{StoreManager, StoreManagerError, StoreOpener};
 pub use store_openers::direct_opener;
 pub use store_registry::StoreRegistry;
 pub use store_handle::{StoreHandle, HandleWithWriter};
@@ -55,12 +55,3 @@ pub use mesh::{Mesh, MeshError, StoreDeclaration};
 // Other exports
 pub use data_dir::DataDir;
 pub use meta_store::MetaStore;
-
-// KvStore type alias used by mesh.rs (root store operations)
-use lattice_kvstore::PersistentKvState;
-
-/// Internal type alias for the root KvStore - now uses Store<S> directly
-pub(crate) type KvStore = Store<PersistentKvState>;
-
-// Re-export Head for existing consumers (used by node.rs tests)
-pub use lattice_kvstore::Head;

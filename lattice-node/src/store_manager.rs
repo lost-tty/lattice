@@ -3,11 +3,10 @@
 //! Uses factory registration pattern: register StoreOpener for each type,
 //! then call open(id, type) to get handles.
 
-use crate::{StoreType, StoreRegistry, peer_manager::PeerManager, NodeEvent, KvStore};
+use crate::{StoreType, StoreRegistry, peer_manager::PeerManager, NodeEvent};
 use crate::StoreHandle;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore};
 use lattice_model::{NetEvent, Uuid};
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
@@ -28,18 +27,10 @@ pub enum StoreManagerError {
     NoOpener(StoreType),
 }
 
-/// Result of opening a store - contains both typed handle and StoreHandle
-pub struct OpenedStore {
-    /// Typed handle for downcasting (e.g., KvHandle<Store<PersistentState<KvState>>>)
-    pub typed_handle: Box<dyn Any + Send + Sync>,
-    /// Type-erased StoreHandle for generic access
-    pub store_handle: Arc<dyn StoreHandle>,
-}
-
 /// Trait for opening stores of a specific type
 pub trait StoreOpener: Send + Sync {
-    /// Open or create a store by ID, returning both typed handle and StoreHandle
-    fn open(&self, store_id: Uuid) -> Result<OpenedStore, StoreManagerError>;
+    /// Open or create a store by ID, returning StoreHandle
+    fn open(&self, store_id: Uuid) -> Result<Arc<dyn StoreHandle>, StoreManagerError>;
 }
 
 /// Metadata about a managed store
@@ -47,15 +38,14 @@ pub trait StoreOpener: Send + Sync {
 pub struct StoreInfo {
     pub id: Uuid,
     pub store_type: StoreType,
-    pub peer_manager: Arc<PeerManager<KvStore>>,
+    pub peer_manager: Arc<PeerManager<dyn StoreHandle>>,
 }
 
-/// A stored entry with both typed and type-erased handles
+/// A stored entry with type-erased handle
 struct StoredEntry {
-    typed_handle: Box<dyn Any + Send + Sync>,
     store_handle: Arc<dyn StoreHandle>,
     store_type: StoreType,
-    peer_manager: Arc<PeerManager<KvStore>>,
+    peer_manager: Arc<PeerManager<dyn StoreHandle>>,
 }
 
 /// A store registry that holds open stores.
@@ -98,7 +88,7 @@ impl StoreManager {
     
     /// Open a store by ID and type using the registered opener.
     /// Does NOT register the store - call register() after.
-    pub fn open(&self, store_id: Uuid, store_type: StoreType) -> Result<OpenedStore, StoreManagerError> {
+    pub fn open(&self, store_id: Uuid, store_type: StoreType) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
         let openers = self.openers.read()
             .map_err(|_| StoreManagerError::Lock("openers lock poisoned".into()))?;
         
@@ -110,7 +100,7 @@ impl StoreManager {
     
     /// Create a new store with a fresh UUID.
     /// Does NOT register the store - call register() after.
-    pub fn create(&self, store_type: StoreType) -> Result<(Uuid, OpenedStore), StoreManagerError> {
+    pub fn create(&self, store_type: StoreType) -> Result<(Uuid, Arc<dyn StoreHandle>), StoreManagerError> {
         let store_id = Uuid::new_v4();
         let opened = self.open(store_id, store_type)?;
         Ok((store_id, opened))
@@ -121,9 +111,9 @@ impl StoreManager {
         &self,
         mesh_id: Uuid,
         store_id: Uuid,
-        opened: OpenedStore,
+        store_handle: Arc<dyn StoreHandle>,
         store_type: StoreType,
-        peer_manager: Arc<PeerManager<KvStore>>,
+        peer_manager: Arc<PeerManager<dyn StoreHandle>>,
     ) -> Result<(), StoreManagerError> {
         {
             let mut stores = self.stores.write()
@@ -134,8 +124,7 @@ impl StoreManager {
             }
             
             stores.insert(store_id, StoredEntry {
-                typed_handle: opened.typed_handle,
-                store_handle: opened.store_handle,
+                store_handle,
                 store_type,
                 peer_manager,
             });
@@ -148,13 +137,6 @@ impl StoreManager {
         let _ = self.net_tx.send(NetEvent::StoreReady { store_id });
         
         Ok(())
-    }
-    
-    /// Get a typed handle by ID. Returns None if not found or wrong type.
-    pub fn get<H: Any + Clone + 'static>(&self, store_id: &Uuid) -> Option<H> {
-        let stores = self.stores.read().ok()?;
-        let entry = stores.get(store_id)?;
-        entry.typed_handle.downcast_ref::<H>().cloned()
     }
     
     /// Get a StoreHandle by ID. Returns None if not found.
@@ -176,7 +158,7 @@ impl StoreManager {
     }
     
     /// Get the peer_manager for a store.
-    pub fn get_peer_manager(&self, store_id: &Uuid) -> Option<Arc<PeerManager<KvStore>>> {
+    pub fn get_peer_manager(&self, store_id: &Uuid) -> Option<Arc<PeerManager<dyn StoreHandle>>> {
         self.get_info(store_id).map(|info| info.peer_manager)
     }
     
