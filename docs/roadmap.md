@@ -71,10 +71,16 @@ Typed wrappers:  put(k,v) → dispatch("Put", PutRequest{k,v})
 
 ### 9E: State Machine Interface Documentation
 > Clearly document the contract for implementing a new store type.
-- [ ] Document `StateLogic` trait requirements and lifecycle
-- [ ] Document `Openable` / `StoreOpener` patterns
-- [ ] Document `ServiceDescriptor` integration for reflection
-- [ ] Provide minimal example skeleton for new store implementations
+- [x] Document `StateLogic` trait requirements and lifecycle (see `docs/implementation/store_interface.md`)
+- [x] Document `Openable` / `StoreOpener` patterns
+- [x] Document `ServiceDescriptor` integration for reflection
+- [x] Provide minimal example skeleton for new store implementations
+
+### 9F: Store Identity, Metadata & Lifecycle
+> Enable stores to be self-descriptive and openable without prior configuration.
+- [ ] **Store Header Strategy**: Persist `store_type` (String) and `schema_version` (u64) in the existing `meta` table (defined in `lattice-storage`).
+- [ ] **Type Registry**: runtime mapping of `store_type` (String) → `Box<dyn StoreOpener>`.
+- [ ] **Generic Open**: `StoreManager` peeks `meta` to resolve type, then delegates to correct opener.
 
 ---
 
