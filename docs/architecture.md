@@ -3,11 +3,11 @@
 ## Terminology
 
 - **Lattice**: The distributed storage system (this software)
-- **Mesh**: A group of nodes sharing a root store + subordinated stores (the cluster they form)
 - **Node**: A single Lattice instance with its own identity (keypair)
-- **Store**: A replicated key-value store with SigChain entries
-- **Root Store**: The mesh control plane containing peer list, store declarations, and configuration
-- **Subordinated Store**: Application stores declared in root store, sharing the mesh peer list
+- **Store**: A replicated key-value store with SigChain entries. Can contain references to child stores.
+- **Root Store**: *Role* - The top-level store of a hierarchy (e.g. "Home"). Contains peer list and child store declarations.
+- **Child Store**: *Role* - A store referenced by a parent store, inheriting peers/config if configured.
+- **Mesh**: *Deprecated* - See **Root Store**. A hierarchy of stores sharing a common root.
 - **SigChain**: An append-only, hash-chained log of signed entries per author
 - **Entry**: A signed, timestamped operation in a SigChain
 - **MeshNetwork**: The network layer providing sync/gossip/join operations
@@ -34,8 +34,9 @@
 ## Concepts
 
 - Transitive Pairing: Nodes can introduce new nodes to the mesh.
-- Multi-Mesh: A node can participate in multiple meshes (clusters). Each mesh is a group of nodes sharing data.
-- Root Store: Joining a mesh means joining the Root Store which defines mesh membership. Contains node info (`/nodes/{pubkey}/...`).
+- **Fractal Stores**: Any store can be a parent to other stores, forming a directory-like hierarchy (ADR 001).
+- **Multi-Hierarchy**: A node can participate in multiple disjoint store graphs (e.g. Work vs Personal).
+- **Root Store**: The entry point for a hierarchy. Stores `/nodes/{pubkey}/...` and `/stores/{uuid}/...` to manage membership and children.
 
 ## Crate Architecture
 
@@ -516,103 +517,41 @@ meta               "root_store"            [u8; 16] (UUID)            Root store
 
 - log_frontiers: `HashMap<AuthorId, (seq, hash)>` — rebuilt from log files on startup
 
-### Multi-Store Architecture
+### Fractal Store Architecture (ADR 001)
 
-The root store acts as the **control plane** for all stores in the mesh. Additional stores are declared in root store and automatically created/removed on all nodes.
+Lattice uses a **Fractal Store Model** where any store can declare references to other stores, forming a service-level graph. This replaces the flat "Mesh" concept with a flexible hierarchy.
 
-**Store Lifecycle:**
+**Unified Store Model:**
 
-1. **Declaration**: Any node writes `/stores/{uuid}/...` entries to root store
-2. **Propagation**: Changes sync to all peers via normal gossip/sync
-3. **Materialization**: Each node watches `/stores/` prefix, creates/deletes local stores
-4. **Sync**: Each store syncs independently using its own gossip topic
+Every store has two distinct storage areas:
+1.  **Meta Table:** Managed by `lattice-node`. Stores peer authorization (`status`), substore references (`children`), and config.
+2.  **Data Table:** Managed by the specific Store Type (KV, Blob, SQL). Stores application data.
 
-**Store Type Convention:**
+**The "Root Store" Role:**
 
-| Store Role         | Type              | Rationale                                                                                                 |
-|--------------------|-------------------|-----------------------------------------------------------------------------------------------------------|
-| Root Store         | KV (always)       | Holds mesh control plane data (`/nodes/*`, `/stores/*`, `/config/*`) which is inherently key-value shaped |
-| Subordinate Stores | Flexible (future) | Can be KV, Blob, SQL, etc. Type declared in root store at `/stores/{uuid}/type`                           |
+A "Root Store" is simply a store with `PeerStrategy::Independent`.
+- It acts as the identity and trust anchor for a hierarchy.
+- Its **Meta Table** defines who can write (peer authorization).
+- Its **Data Table** (KV) replicates peer metadata like display names (`/nodes/{pubkey}/name`).
 
-The root store being KV is a design convention, not a limitation. This simplifies the bootstrap path (`Node::open_store()` knows root is always KV) while allowing subordinate stores to use different backends via factory dispatch in `Mesh::open_channel()`.
+**Context Inheritance:**
 
-**Root Store Keys for Stores:**
-
-```
-/stores/{uuid}/name      = "My App Data"           # Optional display name
-/stores/{uuid}/created_at = 1703548800000          # HLC timestamp
-/stores/{uuid}/created_by = {author_pubkey}        # Creator's key
-/stores/{uuid}/deleted_at = ...                    # Soft-delete (tombstone)
-```
-
-**Shared Peer Model:**
-
-All stores inherit the peer list from root store (`/nodes/` prefix). This simplifies:
-- No duplicate peer management per store
-- Single trust domain per mesh
-- Peer authorization checked against root store on entry ingest
+Substores usually use `PeerStrategy::Inherited`, meaning they delegate peer lookups to their parent.
+- **Authorization:** Checked against the parent's Meta table.
+- **Display Names:** Resolved from the root store's Data table.
 
 ```
-Root Store                     Side Stores
-┌─────────────────┐           ┌─────────────────┐
-│ /nodes/abc/...  │           │ app data        │
-│ /nodes/def/...  │──────────▶│ (any keys)      │
-│ /stores/xxx/... │  peers    │                 │
+Root Store (Team)
+┌─────────────────┐           Substore (Project A)
+│ Meta: Peers     │           ┌─────────────────┐
+│ Data: Names     │◀──────────│ Meta: Inherited │
+│ Children: [Proj]│           │ Data: App Data  │
 └─────────────────┘           └─────────────────┘
-                              ┌─────────────────┐
-                              │ another store   │
-                              │                 │
-                              └─────────────────┘
 ```
 
-**Mesh API Facade Pattern (Future):**
+**Common Store API:**
 
-To solve Primitive Obsession and provide clear semantic distinction between "mesh controller" and "data channel", introduce a `Mesh` wrapper:
-
-```rust
-/// Mesh: Semantic view over a Root StoreHandle
-/// Provides type safety: "Am I allowed to invite peers to this?"
-pub struct Mesh {
-    root: StoreHandle,        // The root/administrator store
-    provider: Arc<dyn PeerProvider>,
-}
-
-impl Mesh {
-    /// Create new mesh - generates UUID, initializes root store
-    pub async fn init(node: &Node, alias: &str) -> Result<Self, NodeError>;
-    
-    /// Peer management - writes /nodes/{pk}/status
-    pub async fn invite_peer(&self, pubkey: PubKey) -> Result<(), NodeError>;
-    pub async fn revoke_peer(&self, pubkey: PubKey) -> Result<(), NodeError>;
-    pub async fn list_peers(&self) -> Result<Vec<(PubKey, PeerStatus)>, NodeError>;
-    
-    /// Factory for subordinate stores - injects PeerProvider
-    pub fn open_channel(&self, uuid: Uuid) -> StoreHandle {
-        StoreHandle::spawn(uuid, ..., Some(self.provider.clone()))
-    }
-    
-    /// Access underlying store for data operations
-    pub fn store(&self) -> &StoreHandle { &self.root }
-}
-```
-
-**Benefits:**
-
-| Aspect | Raw `StoreHandle` | `Mesh` Wrapper |
-|--------|-------------------|----------------|
-| Type Safety | Compiler can't distinguish root vs subordinate | `Mesh` = controller, `StoreHandle` = data channel |
-| Intent | Ambiguous API surface | Clear semantic methods |
-| DI Wiring | Manual per-store | Factory encapsulates injection |
-| Future-Proofing | Generic store logic | Place for mesh policies (retention, etc.) |
-
-**Node API with Mesh:**
-
-```rust
-impl Node {
-    pub fn get_mesh(&self, id: Uuid) -> Option<Mesh>;     // Returns controller
-    pub fn get_store(&self, id: Uuid) -> Option<StoreHandle>; // Raw access
-}
-```
+All stores implement `PeerManager` and `SubstoreManager` trails, interacting with their local Meta table. The legacy `Mesh` struct is removed.
 
 **HTTP API Access Tokens:**
 

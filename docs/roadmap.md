@@ -1,4 +1,11 @@
-# Lattice Roadmap
+## Lattice Roadmap
+
+**Status:** Milestone 10 (Fractal Stores) in progress.
+
+This document outlines the development plan for Lattice.
+- **Completed M1-M9:** Core RSM platform, Handle-Less Architecture, Typed API.
+- **Current Focus (M10):** Unifying Mesh/Store concepts into a recursive graph (Fractal Store Model).
+- **Upcoming:** CAS (M11), Weaver Protocol (M12).
 
 ## Completed
 
@@ -16,76 +23,93 @@
 
 ---
 
-## Milestone 10: Concrete RootStore Implementation
+## Milestone 10: Fractal Store Implementation
 
-**Goal:** Move root store functionality from Node into a specialized store implementation with proper business logic.
+**Goal:** Implement the **Fractal Store Model** (ADR 001), replacing the legacy `Mesh` struct with a recursive store hierarchy.
 
-> Currently, peer/store management logic is scattered in `Node` and `Mesh`. This milestone consolidates it into a proper state machine with typed operations.
+> **Why:** The distinction between `Mesh` and `Store` is artificial. By treating everything as a store, we simplify the codebase, enable infinite nesting, and unify peer management.
 
-### 10A: RootStore State Machine
-- [ ] Define `RootOp` enum: `AddPeer`, `RevokePeer`, `DeclareStore`, `RemoveStore`
-- [ ] Create `RootState` implementing `StateMachine` trait
-- [ ] `apply(op, store: &mut dyn StateStorage)` enforces invariants (e.g., "only admins can add peers")
+### 10A: Common Store API (Meta Table)
+- [ ] Implement `StoreMeta` schema update: `children: Vec<StoreLink>`, `parents: Vec<StoreLink>`
+- [ ] Implement generic `PeerManager` trait on `StoreMeta` (Independent/Inherited/Snapshot)
+- [ ] Implement `SubstoreManager` trait on `StoreMeta`
+- [ ] Migrate `StoreManager` to use recursive discovery (graph walker)
 
-### 10B: Refactor Node/Mesh
-- [ ] `PeerManager` submits `RootOp::AddPeer` instead of writing raw keys
-- [ ] `StoreManager` submits `RootOp::DeclareStore` instead of direct writes
-- [ ] Remove ad-hoc `/nodes/*` and `/stores/*` key manipulation
-- [ ] Unified Store Registry: `Node` becomes single source of truth (eliminate race conditions with `MeshNetwork`)
+### 10B: Root Store & Identity
+- [ ] Define "Root Store" as `PeerStrategy::Independent`
+- [ ] Implement **Peer Name Cache** in the Root Store's Data table (`/nodes/{pubkey}/name`)
+- [ ] Update `lattice-node` to bootstrap from a list of Root Stores (instead of meshes)
 
-### 10C: Access Control
-- [ ] Define admin role in root store (`/acl/admins/{pubkey}`)
-- [ ] Policy enforcement in `RootState::apply()`
-
----
-
-## Milestone 11: Embedded Proof ("Lattice Nano")
-
-**Goal:** Running the Kernel on the RP2350.
-
-> Because CLI is already separated from Daemon (M7) and storage is abstracted (M9), only the Daemon needs porting.
-
-### 11A: `no_std` Refactoring
-- [ ] Split `lattice-kernel` into `core` (logic) and `std` (IO)
-- [ ] Replace `wasmtime` (JIT) with `wasmi` (Interpreter) for embedded target
-- [ ] Port storage layer to `sequential-storage` (Flash) via `StorageBackend`
-
-### 11B: The "Continuity" Demo
-- [ ] Build physical USB stick prototype
-- [ ] Implement BLE/Serial transport
-- **The Reveal:** Sync a file from Laptop → Stick → Phone without Internet
+### 10C: Legacy Migration
+- [ ] Convert existing `Mesh` structs to Root Stores
+- [ ] Provide migration tool for existing data directories
+- [ ] Remove `Mesh` and `ControlPlane` code
 
 ---
 
-## Milestone 12: The Weaver Protocol (Data Model Refactor)
+## Milestone 11: Content-Addressable Store (CAS)
+
+**Goal:** Blob storage for large files (prerequisite for Lattice Drive). We use **CIDs (Content Identifiers)** for self-describing formats and IPFS/IPLD compatibility.
+
+### 11A: CAS Integration
+- [ ] `lattice-cas` crate with pluggable backend (local FS, Garage S3)
+- [ ] `put_blob(data) -> CID`, `get_blob(CID) -> data`
+
+### 11B: Metadata & Pinning
+- [ ] `/cas/pins/{node_id}/{hash}` in root store
+- [ ] Pin reconciler: watch pins, trigger fetch
+
+### 11C: CLI
+- [ ] `cas put`, `cas get`, `cas pin`, `cas ls`
+
+---
+
+## Milestone 12: Lattice Drive MVP (File Sync)
+
+**Goal:** A functioning file sync tool that proves the architecture. Requires Fractal Stores (M10) and CAS (M11).
+
+> **Note:** We are prioritizing this over Weaver Protocol to get a user-facing product sooner.
+
+### 12A: Filesystem Logic
+- [ ] Define `DirEntry` schema: `{ name, mode, cid, modified_at }` in KV Store
+- [ ] Map file operations (`write`, `mkdir`, `rename`) to KV Ops
+
+### 12B: FUSE Interface
+- [ ] Write `lattice-fs` using the `fuser` crate
+- [ ] Mount the Store as a folder on Linux/macOS
+- [ ] **Demo:** `cp photo.jpg ~/lattice/` → Syncs to second node
+
+---
+
+## Milestone 13: The Weaver Protocol (Data Model Refactor)
 
 **Goal:** Implement the "Ly" data model by splitting the monolithic `Entry` into `Intention` (Transport-Agnostic Signal) and `Witness` (Chain-Specific Ordering). This decoupling enables "Ghost Parent" resolution and selective data sharing.
 
 > **See:** [Ly Architecture](ly_architecture.md) for full protocol details.
 
-### 12A: The Intention
+### 13A: The Intention
 - [ ] Define `Intention` struct: `{ payload: Vec<u8>, author: PubKey, seq: u64, prev_hash: Hash, sig: Signature }`
 - [ ] Implement `Intention` validation (author signature check + seq/hash continuity)
 - [ ] Ensure `Intention` is valid independent of any chain (floating message)
 
-### 12B: The Witness
+### 13B: The Witness
 - [ ] Define `Witness` event in `Entry`: `Entry { parent: Hash, event: Witness(Intention), sig: MySig }`
 - [ ] Update `SigChain` to append `Witness` events
 - [ ] Implement "Ingest/Digest" envelope pattern for Gossip
 
 ---
 
-## Milestone 13: Negentropy Sync Protocol
+## Milestone 14: Negentropy Sync Protocol
 
 **Goal:** Replace O(n) vector clock sync with sub-linear bandwidth using range-based set reconciliation.
 
 Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
-### 13A: Infrastructure
+### 14A: Infrastructure
 - [ ] Add hash→entry index (for efficient fetch-by-hash)
 - [ ] Implement negentropy fingerprint generation per store
 
-### 13B: Protocol Migration
+### 14B: Protocol Migration
 - [ ] Replace `SyncState` protocol with negentropy exchange
 - [ ] Decouple `seq` from network sync protocol (keep internal only)
 - [ ] Update `FetchRequest` to use hashes instead of seq ranges
@@ -106,83 +130,66 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 ---
 
-## Milestone 14: Wasm Runtime
+## Milestone 15: Wasm Runtime
 
 **Goal:** Replace hardcoded state machine logic with dynamic Wasm modules.
 
-### 14A: Wasm Integration
+### 15A: Wasm Integration
 - [ ] Integrate `wasmtime` into the Kernel
 - [ ] Define minimal Host ABI: `kv_get`, `kv_set`, `log_append`, `get_head`
 - [ ] Replace hardcoded `KvStore::apply()` with `WasmRuntime::call_apply()`
 - [ ] Map Host Functions to `StorageBackend` calls (M9 prerequisite)
 
-### 14B: Data Structures & Verification
+### 15B: Data Structures & Verification
 - [ ] Finalize `Entry`, `SignedEntry`, `Hash`, `PubKey` structs for Wasm boundary
 - [ ] Wasm-side SigChain verification (optional, for paranoid clients)
 - **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
 
 ---
 
-## Milestone 15: Content-Addressable Store (CAS)
-
-**Goal:** Blob storage for large files (prerequisite for Lattice Drive). We use **CIDs (Content Identifiers)** for self-describing formats and IPFS/IPLD compatibility.
-
-### 15A: CAS Integration
-- [ ] `lattice-cas` crate with pluggable backend (local FS, Garage S3)
-- [ ] `put_blob(data) -> CID`, `get_blob(CID) -> data`
-
-### 15B: Metadata & Pinning
-- [ ] `/cas/pins/{node_id}/{hash}` in root store
-- [ ] Pin reconciler: watch pins, trigger fetch
-
-### 15C: CLI
-- [ ] `cas put`, `cas get`, `cas pin`, `cas ls`
-
----
-
-## Milestone 16: Lattice Drive MVP
-
-**Goal:** A functioning file sync tool that proves the architecture.
-
-> **Depends on:** M14 (Wasm) + M15 (CAS)
-
-### 16A: Filesystem Logic
-- [ ] Write `filesystem.wasm` (in Rust, compiled to wasm32-wasi)
-- [ ] Map file operations (`write`, `mkdir`, `rename`) to Log Ops
-- [ ] Store file content in CAS, reference hashes in sigchain
-
-### 16B: FUSE Interface
-- [ ] Write `lattice-fs` using the `fuser` crate
-- [ ] FUSE talks to Daemon via same gRPC interface as CLI
-- [ ] Mount the Store as a folder on Linux/macOS
-- **Demo:** `cp photo.jpg ~/lattice/` → Syncs to second node
-
----
-
-## Milestone 17: Log Lifecycle & Pruning
+## Milestone 16: Log Lifecycle & Pruning
 
 **Goal:** Enable long-running nodes to manage log growth through snapshots, pruning, and finality checkpoints.
 
 > **See:** [DAG-Based Pruning Architecture](pruning.md) for details on Ancestry-based metrics and Log Rewriting.
 
-### 17A: Snapshotting
+### 16A: Snapshotting
 - [ ] `state.snapshot()` when log grows large
 - [ ] Store snapshots in `snapshot.db`
 - [ ] Bootstrap new peers from snapshot instead of full log replay
 
-### 17B: Waterlevel Pruning
+### 16B: Waterlevel Pruning
 - [ ] Calculate stability frontier (min seq acknowledged by all peers)
 - [ ] `truncate_prefix(seq)` for old log entries
 - [ ] Preserve entries newer than frontier
 
-### 17C: Checkpointing / Finality
+### 16C: Checkpointing / Finality
 - [ ] Periodically finalize state hash (protect against "Deep History Attacks")
 - [ ] Signed checkpoint entries in sigchain
 - [ ] Nodes reject entries that contradict finalized checkpoints
 
-### 17D: Hash Index Optimization
+### 16D: Hash Index Optimization
 - [ ] Replace in-memory `HashSet<Hash>` with on-disk index (redb) or Bloom Filter
 - [ ] Support 100M+ entries without excessive RAM
+
+---
+
+## Milestone 17: Embedded Proof ("Lattice Nano")
+
+**Goal:** Running the Kernel on the RP2350.
+
+> Because CLI is already separated from Daemon (M7) and storage is abstracted (M9), only the Daemon needs porting.
+> **Note:** Requires substantial refactoring of `lattice-kernel` to support `no_std`.
+
+### 17A: `no_std` Refactoring
+- [ ] Split `lattice-kernel` into `core` (logic) and `std` (IO)
+- [ ] Replace `wasmtime` (JIT) with `wasmi` (Interpreter) for embedded target
+- [ ] Port storage layer to `sequential-storage` (Flash) via `StorageBackend`
+
+### 17B: The "Continuity" Demo
+- [ ] Build physical USB stick prototype
+- [ ] Implement BLE/Serial transport
+- **The Reveal:** Sync a file from Laptop → Stick → Phone without Internet
 
 ---
 
