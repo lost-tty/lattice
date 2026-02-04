@@ -71,8 +71,13 @@ pub async fn cmd_list(backend: &dyn LatticeBackend, writer: Writer) -> CmdResult
             } else {
                 let _ = writeln!(w, "Meshes ({}):", meshes.len());
                 for mesh in meshes {
-                    let _ = writeln!(w, "  {} ({} peers, {} stores)", 
-                        format_id(&mesh.id), mesh.peer_count, mesh.store_count);
+                    if !mesh.name.is_empty() {
+                         let _ = writeln!(w, "  {} ({})", 
+                            format_id(&mesh.id), mesh.name);
+                    } else {
+                        let _ = writeln!(w, "  {}", 
+                            format_id(&mesh.id));
+                    }
                 }
             }
         }
@@ -140,8 +145,9 @@ pub async fn cmd_status(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, wri
     match backend.mesh_status(mesh_id).await {
         Ok(info) => {
             let _ = writeln!(w, "Mesh ID:  {}", format_id(&info.id));
-            let _ = writeln!(w, "Peers:    {}", info.peer_count);
-            let _ = writeln!(w, "Stores:   {}", info.store_count);
+            if !info.name.is_empty() {
+                let _ = writeln!(w, "Name:     {}", info.name);
+            }
         }
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);

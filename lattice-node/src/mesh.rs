@@ -474,8 +474,8 @@ impl Mesh {
     // ==================== Peer Management ====================
     
     /// List all peers in the mesh.
-    pub fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
-        self.peer_manager.list_peers()
+    pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
+        self.peer_manager.list_peers().await
     }
     
     /// Revoke a peer's access.

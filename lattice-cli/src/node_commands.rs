@@ -18,9 +18,6 @@ pub async fn cmd_status(backend: &dyn LatticeBackend, writer: Writer) -> CmdResu
                 let _ = writeln!(w, "Data:     {}", status.data_path);
             }
             let _ = writeln!(w, "Meshes:   {}", status.mesh_count);
-            if status.peer_count > 0 {
-                let _ = writeln!(w, "Peers:    {}", status.peer_count);
-            }
         }
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);

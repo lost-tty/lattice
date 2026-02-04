@@ -186,9 +186,17 @@ impl PeerManager {
 
     // ==================== Read Operations (from SystemStore) ====================
     
-    /// List all peers
-    pub fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
-        self.store.get_peers().map_err(PeerManagerError::Store)
+    /// List all peers (async, fetches names from root store)
+    pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
+        let mut peers = self.store.get_peers().map_err(PeerManagerError::Store)?;
+        
+        for peer in &mut peers {
+            if let Some(name) = self.get_peer_name(&peer.pubkey).await {
+                peer.name = Some(name);
+            }
+        }
+        
+        Ok(peers)
     }
     
     /// Get a specific peer's status (O(1) lookup)
@@ -323,6 +331,7 @@ impl PeerProvider for PeerManager {
     }
     
     fn list_peers(&self) -> Vec<lattice_model::GossipPeer> {
+        // Synchronous version for gossip (names not needed)
         self.store.get_peers()
             .unwrap_or_default()
             .into_iter()

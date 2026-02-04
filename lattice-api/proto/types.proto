@@ -17,7 +17,6 @@ message NodeStatus {
   string display_name = 2;
   string data_path = 3;
   uint32 mesh_count = 4;
-  uint32 peer_count = 5;
 }
 
 message SetNameRequest {
@@ -68,8 +67,7 @@ message MeshId {
 
 message MeshInfo {
   bytes id = 1;
-  uint32 peer_count = 2;
-  uint32 store_count = 3;
+  string name = 2;
 }
 
 message MeshList {

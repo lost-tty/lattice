@@ -36,7 +36,7 @@ This document outlines the development plan for Lattice.
 - [x] System table interception layer in `PersistentState::apply()`
 - [x] Removed dead code: `HandleBase`, `PeerManager`/`SubstoreManager` traits, `as_writer`
 - [x] Added `list_all()` API and `store system show` CLI command for debugging
-- [ ] CLI `mesh peers` does not yet show peer names. Is it wired up?
+- [x] CLI `mesh peers` does not yet show peer names. Is it wired up?
 - [ ] Add child store hierarchy (`child/{uuid}/status`, `child/{uuid}/name`)
 - [ ] Add `strategy` key for persisted `PeerStrategy` (Independent/Inherited)
 - [ ] Add invite handling (`invite/{token_hash}/status`, `invited_by`, `claimed_by`)
@@ -53,6 +53,7 @@ This document outlines the development plan for Lattice.
 ### 10D: Legacy Cleanup
 - [ ] Convert existing `Mesh` structs to Root Stores
 - [ ] Remove `Mesh` and `ControlPlane` code
+- [ ] What is `StoreManagers` role? Should it get a `StoreFactory`?
 
 ---
 

@@ -57,23 +57,11 @@ impl InProcessBackend {
 impl LatticeBackend for InProcessBackend {
     fn node_status(&self) -> AsyncResult<'_, NodeStatus> {
         Box::pin(async move {
-            let mut peer_count = 0;
-            if let Ok(meshes) = self.node.meta().list_meshes() {
-                for (mesh_id, _) in &meshes {
-                    if let Some(mesh) = self.node.mesh_by_id(*mesh_id) {
-                        if let Ok(peers) = mesh.list_peers() {
-                            peer_count += peers.len() as u32;
-                        }
-                    }
-                }
-            }
-            
             Ok(NodeStatus {
                 public_key: self.node.node_id().to_vec(),
                 display_name: self.node.name().unwrap_or_default(),
                 data_path: self.node.data_path().display().to_string(),
                 mesh_count: self.node.list_mesh_ids().len() as u32,
-                peer_count,
             })
         })
     }
@@ -107,14 +95,15 @@ impl LatticeBackend for InProcessBackend {
     fn mesh_create(&self) -> AsyncResult<'_, MeshInfo> {
         Box::pin(async move {
             let mesh_id = self.node.create_mesh().await?;
-            let mesh = self.get_mesh(mesh_id)?;
-            let peer_count = mesh.list_peers().map(|p| p.len() as u32).unwrap_or(0);
-            let store_count = mesh.list_stores().await.map(|s| s.len() as u32).unwrap_or(0);
             
+            let name = self.node.store_manager().get_handle(&mesh_id)
+                .and_then(|h| h.as_system())
+                .and_then(|s| s.get_name().ok().flatten())
+                .unwrap_or_default();
+
             Ok(MeshInfo {
                 id: mesh_id.as_bytes().to_vec(),
-                peer_count,
-                store_count,
+                name,
             })
         })
     }
@@ -125,18 +114,14 @@ impl LatticeBackend for InProcessBackend {
             let mut result = Vec::new();
             
             for (id, _info) in meshes {
-                let (peer_count, store_count) = if let Some(mesh) = self.node.mesh_by_id(id) {
-                    let peers = mesh.list_peers().map(|p| p.len() as u32).unwrap_or(0);
-                    let stores = mesh.list_stores().await.map(|s| s.len() as u32).unwrap_or(0);
-                    (peers, stores)
-                } else {
-                    (0, 0)
-                };
-                
+                let name = self.node.store_manager().get_handle(&id)
+                    .and_then(|h| h.as_system())
+                    .and_then(|s| s.get_name().ok().flatten())
+                    .unwrap_or_default();
+
                 result.push(MeshInfo {
                     id: id.as_bytes().to_vec(),
-                    peer_count,
-                    store_count,
+                    name,
                 });
             }
             
@@ -146,14 +131,14 @@ impl LatticeBackend for InProcessBackend {
     
     fn mesh_status(&self, mesh_id: Uuid) -> AsyncResult<'_, MeshInfo> {
         Box::pin(async move {
-            let mesh = self.get_mesh(mesh_id)?;
-            let peer_count = mesh.list_peers().map(|p| p.len() as u32).unwrap_or(0);
-            let store_count = mesh.list_stores().await.map(|s| s.len() as u32).unwrap_or(0);
+            let name = self.node.store_manager().get_handle(&mesh_id)
+                .and_then(|h| h.as_system())
+                .and_then(|s| s.get_name().ok().flatten())
+                .unwrap_or_default();
             
             Ok(MeshInfo {
                 id: mesh_id.as_bytes().to_vec(),
-                peer_count,
-                store_count,
+                name,
             })
         })
     }
@@ -178,7 +163,7 @@ impl LatticeBackend for InProcessBackend {
     fn mesh_peers(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>> {
         Box::pin(async move {
             let mesh = self.get_mesh(mesh_id)?;
-            let peers = mesh.list_peers()?;
+            let peers = mesh.list_peers().await?;
             
             // Get online status from network layer
             let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = self.mesh_network

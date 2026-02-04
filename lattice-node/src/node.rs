@@ -784,7 +784,7 @@ mod tests {
         assert_eq!(acceptance.store_id, store_id);
         
         // Peer should now be Active
-        let peers = node.mesh_by_id(store_id).unwrap().list_peers().expect("list_peers");
+        let peers = node.mesh_by_id(store_id).unwrap().list_peers().await.expect("list_peers");
         let peer = peers.iter().find(|p| p.pubkey == peer_pubkey);
         assert!(peer.is_some(), "Should find peer");
         assert_eq!(peer.unwrap().status, PeerStatus::Active);
