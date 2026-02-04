@@ -110,16 +110,29 @@ message HierarchyOp {
     oneof op {
         ChildAdd add_child = 1;
         ChildRemove remove_child = 2;
+        ChildSetStatus set_status = 3;
     }
 }
 
 message ChildAdd {
     bytes target_id = 1;
     string alias = 2;
+    string store_type = 3;
 }
 
 message ChildRemove {
     bytes target_id = 1;
+}
+
+message ChildSetStatus {
+    bytes target_id = 1;
+    ChildStatus status = 2;
+}
+
+enum ChildStatus {
+    CS_UNKNOWN = 0;
+    CS_ACTIVE = 1;
+    CS_ARCHIVED = 2;
 }
 
 // Peer Management

@@ -71,10 +71,13 @@ impl<T: StateLogic> PersistentState<T> {
             Some(system_op::Kind::Hierarchy(h_op)) => {
                  match h_op.op {
                      Some(hierarchy_op::Op::AddChild(add)) => {
-                         table.add_child(&add.target_id, add.alias, op)?;
+                         table.add_child(&add.target_id, add.alias, add.store_type, op)?;
                      },
                      Some(hierarchy_op::Op::RemoveChild(rem)) => {
                          table.remove_child(&rem.target_id, op)?;
+                     },
+                     Some(hierarchy_op::Op::SetStatus(status)) => {
+                         table.set_child_status(&status.target_id, status.status, op)?;
                      },
                      None => {},
                  }

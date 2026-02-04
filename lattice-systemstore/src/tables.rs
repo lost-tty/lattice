@@ -48,10 +48,39 @@ impl<'a> SystemTable<'a> {
 
     // ==================== Hierarchy Operations ====================
 
-    pub fn add_child(&mut self, id: &[u8], alias: String, op: &Op) -> Result<(), StateDbError> {
-        let key = [b"child/", id, b"/name"].concat();
-        let head = Head {
+    pub fn add_child(&mut self, id_bytes: &[u8], alias: String, store_type: String, op: &Op) -> Result<(), StateDbError> {
+        let id = uuid::Uuid::from_slice(id_bytes).map_err(|_| StateDbError::StoreIdMismatch { expected: Default::default(), got: Default::default() })?; // Simplified error mapping
+        
+        // 1. Write Name
+        let name_key = format!("child/{}/name", id).into_bytes();
+        let name_head = Head {
             value: alias.into_bytes(), 
+            hlc: op.timestamp,
+            author: op.author,
+            hash: op.id,
+            tombstone: false,
+        };
+        self.apply_head(&name_key, name_head, op.causal_deps)?;
+
+        // 2. Write Type
+        let type_key = format!("child/{}/type", id).into_bytes();
+        let type_head = Head {
+            value: store_type.into_bytes(),
+            hlc: op.timestamp,
+            author: op.author,
+            hash: op.id,
+            tombstone: false,
+        };
+        self.apply_head(&type_key, type_head, op.causal_deps)?;
+        
+        Ok(())
+    }
+
+    pub fn set_child_status(&mut self, id_bytes: &[u8], status: i32, op: &Op) -> Result<(), StateDbError> {
+        let id = uuid::Uuid::from_slice(id_bytes).map_err(|_| StateDbError::StoreIdMismatch { expected: Default::default(), got: Default::default() })?;
+        let key = format!("child/{}/status", id).into_bytes();
+        let head = Head {
+            value: status.to_le_bytes().to_vec(),
             hlc: op.timestamp,
             author: op.author,
             hash: op.id,
@@ -60,8 +89,11 @@ impl<'a> SystemTable<'a> {
         self.apply_head(&key, head, op.causal_deps)
     }
 
-    pub fn remove_child(&mut self, id: &[u8], op: &Op) -> Result<(), StateDbError> {
-        let key = [b"child/", id, b"/name"].concat();
+    pub fn remove_child(&mut self, id_bytes: &[u8], op: &Op) -> Result<(), StateDbError> {
+        let id = uuid::Uuid::from_slice(id_bytes).map_err(|_| StateDbError::StoreIdMismatch { expected: Default::default(), got: Default::default() })?;
+        
+        // Remove name
+        let name_key = format!("child/{}/name", id).into_bytes();
         let head = Head {
             value: vec![],
             hlc: op.timestamp,
@@ -69,7 +101,31 @@ impl<'a> SystemTable<'a> {
             hash: op.id,
             tombstone: true,
         };
-        self.apply_head(&key, head, op.causal_deps)
+        self.apply_head(&name_key, head, op.causal_deps)?;
+        
+        // Remove status
+        let status_key = format!("child/{}/status", id).into_bytes();
+        let status_head = Head {
+            value: vec![],
+            hlc: op.timestamp,
+            author: op.author,
+            hash: op.id,
+            tombstone: true,
+        };
+        self.apply_head(&status_key, status_head, op.causal_deps)?;
+
+        // Remove type
+        let type_key = format!("child/{}/type", id).into_bytes();
+        let type_head = Head {
+            value: vec![],
+            hlc: op.timestamp,
+            author: op.author,
+            hash: op.id,
+            tombstone: true,
+        };
+        self.apply_head(&type_key, type_head, op.causal_deps)?;
+
+        Ok(())
     }
 
     // ==================== Strategy Operations ====================
@@ -245,17 +301,61 @@ impl<'a> ReadOnlySystemTable<'a> {
             let (key, val) = result.map_err(|e| e.to_string())?;
             let key_bytes = key.value();
             
-            // Parse key: "child/" + uuid(16 bytes) + "/name"
-            if key_bytes.len() < prefix.len() + 16 + 5 { continue; } // 6 + 16 + 5 = 27 min
+            // Expected format: "child/" + uuid-string(36) + "/name"
             if !key_bytes.ends_with(b"/name") { continue; }
             
+            // basic length check: prefix(6) + uuid(36) + suffix(5) = 47
+            if key_bytes.len() != 47 { continue; }
+
             let uuid_start = prefix.len();
             let uuid_end = key_bytes.len() - 5; // strip "/name"
-            let id = uuid::Uuid::from_slice(&key_bytes[uuid_start..uuid_end]).map_err(|_| "Invalid UUID")?;
+            let uuid_bytes = &key_bytes[uuid_start..uuid_end];
+            
+            let s = match std::str::from_utf8(uuid_bytes) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let id = match uuid::Uuid::parse_str(s) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
             
             if let Some(value) = Self::decode_heads(val.value())?.lww() {
                 let alias = if value.is_empty() { None } else { String::from_utf8(value).ok() };
-                links.push(lattice_model::StoreLink { id, alias });
+                
+                // Fetch status
+                let status_key = format!("child/{}/status", id).into_bytes();
+                let mut status = lattice_model::store_info::ChildStatus::Active;
+                
+                if let Some(val) = self.table.get(status_key.as_slice()).map_err(|e| e.to_string())? {
+                    fn get_status_int(bytes: &[u8]) -> Result<i32, StateDbError> {
+                        if bytes.len() < 4 {
+                            return Err(StateDbError::Conversion("Invalid child status length".to_string()));
+                        }
+                        Ok(i32::from_le_bytes(bytes[0..4].try_into().unwrap_or([0; 4])))
+                    }
+                    
+                    if let Some(v_bytes) = Self::decode_heads(val.value())?.lww() {
+                        let s_int = get_status_int(&v_bytes).map_err(|e| e.to_string())?;
+                        let proto = lattice_proto::storage::ChildStatus::try_from(s_int)
+                            .unwrap_or(lattice_proto::storage::ChildStatus::CsUnknown);
+                         status = crate::helpers::map_to_model_status(proto);
+                    }
+                }
+
+                // Fetch type
+                let type_key = format!("child/{}/type", id).into_bytes();
+                let mut store_type = None;
+                if let Some(val) = self.table.get(type_key.as_slice()).map_err(|e| e.to_string())? {
+                    if let Some(v_bytes) = Self::decode_heads(val.value())?.lww() {
+                         if !v_bytes.is_empty() {
+                             store_type = String::from_utf8(v_bytes).ok();
+                         }
+                    }
+                }
+
+                links.push(lattice_model::StoreLink { id, alias, store_type, status });
             }
         }
         Ok(links)

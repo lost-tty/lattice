@@ -347,7 +347,13 @@ impl Node {
             let mesh = Mesh::open(mesh_id, self.store_manager.clone()).await
                 .map_err(|e| NodeError::Actor(e.to_string()))?;
             
-            self.activate_mesh(mesh)?;
+            self.activate_mesh(mesh.clone())?;
+            
+            // Run migration for legacy store data
+            if let Err(e) = mesh.migrate_legacy_data().await {
+                 tracing::warn!(mesh_id = %mesh_id, error = %e, "Failed to migrate legacy data");
+            }
+
             self.emit_net(NetEvent::SyncStore { store_id: mesh_id });
         }
         Ok(())

@@ -5,7 +5,7 @@ use lattice_proto::storage::{
     SystemOp, system_op, peer_op, hierarchy_op, peer_strategy_op, peer_strategy,
     store_op, SetStoreName,
     SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, UniversalOp, universal_op, PeerOp, SignedEntry, Entry,
-    PeerStatus as ProtoStatus,
+    PeerStatus as ProtoStatus, ChildStatus as ProtoChildStatus,
 };
 use lattice_store_base::StateProvider;
 use futures_util::{Stream, StreamExt};
@@ -50,8 +50,15 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
                      let id = lattice_model::Uuid::from_slice(&a.target_id).ok()?;
                      Some(Ok(SystemEvent::ChildLinkUpdated(StoreLink { 
                          id, 
-                         alias: if a.alias.is_empty() { None } else { Some(a.alias) }
+                         alias: if a.alias.is_empty() { None } else { Some(a.alias) },
+                         store_type: if a.store_type.is_empty() { None } else { Some(a.store_type) },
+                         status: lattice_model::store_info::ChildStatus::Active, // Default for add
                      })))
+                 },
+                 Some(hierarchy_op::Op::SetStatus(s)) => {
+                     let id = lattice_model::Uuid::from_slice(&s.target_id).ok()?;
+                     let status = map_to_model_status(ProtoChildStatus::try_from(s.status).unwrap_or(ProtoChildStatus::CsUnknown));
+                     Some(Ok(SystemEvent::ChildStatusUpdated(id, status)))
                  },
                  Some(hierarchy_op::Op::RemoveChild(r)) => {
                      let id = lattice_model::Uuid::from_slice(&r.target_id).ok()?;
@@ -146,6 +153,48 @@ pub fn create_set_store_name_payload(name: String) -> Vec<u8> {
     envelope.encode_to_vec()
 }
 
+pub fn map_to_model_status(proto: ProtoChildStatus) -> lattice_model::store_info::ChildStatus {
+    match proto {
+        ProtoChildStatus::CsActive => lattice_model::store_info::ChildStatus::Active,
+        ProtoChildStatus::CsArchived => lattice_model::store_info::ChildStatus::Archived,
+        _ => lattice_model::store_info::ChildStatus::Unknown,
+    }
+}
+
+pub fn map_to_proto_status(model: lattice_model::store_info::ChildStatus) -> ProtoChildStatus {
+    match model {
+        lattice_model::store_info::ChildStatus::Active => ProtoChildStatus::CsActive,
+        lattice_model::store_info::ChildStatus::Archived => ProtoChildStatus::CsArchived,
+        lattice_model::store_info::ChildStatus::Unknown => ProtoChildStatus::CsUnknown,
+    }
+}
+
+/// Helper to wrap a hierarchy operation in the full envelope
+fn wrap_hierarchy_op(op: hierarchy_op::Op) -> Vec<u8> {
+    let envelope = UniversalOp {
+        op: Some(universal_op::Op::System(SystemOp {
+            kind: Some(system_op::Kind::Hierarchy(lattice_proto::storage::HierarchyOp {
+                op: Some(op)
+            }))
+        }))
+    };
+    envelope.encode_to_vec()
+}
+
+pub fn create_add_child_payload(target_id: lattice_model::Uuid, alias: String, store_type: String) -> Vec<u8> {
+    wrap_hierarchy_op(hierarchy_op::Op::AddChild(lattice_proto::storage::ChildAdd {
+        target_id: target_id.as_bytes().to_vec(),
+        alias,
+        store_type,
+    }))
+}
+
+pub fn create_remove_child_payload(target_id: lattice_model::Uuid) -> Vec<u8> {
+    wrap_hierarchy_op(hierarchy_op::Op::RemoveChild(lattice_proto::storage::ChildRemove {
+        target_id: target_id.as_bytes().to_vec(),
+    }))
+}
+
 // ==================== Batch Builder ====================
 
 /// A pending write operation (key + payload)
@@ -194,6 +243,37 @@ impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
     pub fn set_name(mut self, name: &str) -> Self {
         let key = b"name".to_vec();
         let payload = create_set_store_name_payload(name.to_string());
+        self.ops.push(PendingOp { key, payload });
+        self
+    }
+
+    /// Add child store
+    pub fn add_child(mut self, child_id: lattice_model::Uuid, alias: String, store_type: &str) -> Self {
+        let key = format!("child/{}/name", child_id).into_bytes();
+        let payload = create_add_child_payload(child_id, alias, store_type.to_string());
+        self.ops.push(PendingOp { key, payload });
+        self
+    }
+
+    /// Remove child store
+    pub fn remove_child(mut self, child_id: lattice_model::Uuid) -> Self {
+        let key = format!("child/{}/name", child_id).into_bytes();
+        let payload = create_remove_child_payload(child_id);
+        self.ops.push(PendingOp { key, payload });
+        self
+    }
+
+    /// Set child store status
+    pub fn set_child_status(mut self, child_id: lattice_model::Uuid, status: lattice_model::store_info::ChildStatus) -> Self {
+        let key = format!("child/{}/status", child_id).into_bytes();
+        
+        let proto_status = map_to_proto_status(status);
+        
+        let payload = wrap_hierarchy_op(hierarchy_op::Op::SetStatus(lattice_proto::storage::ChildSetStatus {
+            target_id: child_id.as_bytes().to_vec(),
+            status: proto_status as i32,
+        }));
+        
         self.ops.push(PendingOp { key, payload });
         self
     }

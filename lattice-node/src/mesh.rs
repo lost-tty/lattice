@@ -226,8 +226,13 @@ impl Mesh {
         };
         
         tokio::spawn(async move {
-            // Watch for changes to /stores/ prefix using trait method
-            let mut stream = match KvStoreExt::watch(root_store.as_ref(), "^/stores/").await {
+            // 1. Backfill types if missing (repair System Table)
+            if let Err(e) = Self::backfill_child_types(&store_manager, &root_store).await {
+                warn!(error = %e, "Failed to backfill child types");
+            }
+
+            // Watch for changes to child/ prefix (System Table hierarchy)
+            let mut stream = match KvStoreExt::watch(root_store.as_ref(), "^child/").await {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(error = %e, "Failed to start store watcher");
@@ -267,6 +272,44 @@ impl Mesh {
                 }
             }
         });
+    }
+    
+    /// Backfill store types for children that are "unknown" in System Table but exist locally.
+    async fn backfill_child_types(
+        store_manager: &Arc<StoreManager>,
+        root: &Arc<dyn StoreHandle>,
+    ) -> Result<(), MeshError> {
+        let declarations = Self::list_declarations(root).await?;
+        
+        // Find children with unknown type
+        let unknown: Vec<_> = declarations.into_iter()
+            .filter(|d| d.store_type == "unknown" && !d.archived)
+            .collect();
+            
+        if unknown.is_empty() { return Ok(()); }
+        
+        let system = root.clone().as_system()
+             .ok_or_else(|| MeshError::Other("Root store must support SystemStore".to_string()))?;
+        let mut batch = lattice_systemstore::SystemBatch::new(system.as_ref());
+        let mut count = 0;
+
+        for decl in unknown {
+            // Check if we have it locally
+            if let Ok((_, t, _)) = store_manager.registry().peek_store_info(decl.id) {
+                // Found type locally! Backfill it.
+                // We use add_child which is idempotent (LWW on fields)
+                let alias = decl.name.unwrap_or_default();
+                batch = batch.add_child(decl.id, alias, &t);
+                count += 1;
+            }
+        }
+        
+        if count > 0 {
+            info!(count = count, "Backfilling missing store types to System Table");
+            batch.commit().await.map_err(|e| MeshError::Other(e.to_string()))?;
+        }
+        
+        Ok(())
     }
     
     /// Reconcile stores with declarations in root store.
@@ -310,17 +353,25 @@ impl Mesh {
             } else {
                 // Should be open - open if not open
                 if !current_ids.contains(&decl.id) {
-                    match store_manager.open(decl.id, &decl.store_type) {
+                    // If type is "unknown" (from SystemTable), try to resolve from disk registry
+                    let mut store_type = decl.store_type.clone();
+                    if store_type == "unknown" {
+                        if let Ok((_, t, _)) = store_manager.registry().peek_store_info(decl.id) {
+                            store_type = t;
+                        }
+                    }
+
+                    match store_manager.open(decl.id, &store_type) {
                         Ok(opened) => {
                             // Register with same peer_manager as root store
-                            if let Err(e) = store_manager.register(root_store_id, decl.id, opened, &decl.store_type, peer_manager.clone()) {
+                            if let Err(e) = store_manager.register(root_store_id, decl.id, opened, &store_type, peer_manager.clone()) {
                                 warn!(store_id = %decl.id, error = ?e, "Failed to register store");
                             } else {
                                 // Track that we opened this store
                                 if let Ok(mut guard) = opened_stores.write() {
                                     guard.insert(decl.id);
                                 }
-                                info!(store_id = %decl.id, store_type = %decl.store_type, "Opened store");
+                                info!(store_id = %decl.id, store_type = %store_type, "Opened store");
                             }
                         }
                         Err(e) => {
@@ -345,55 +396,36 @@ impl Mesh {
         Ok(())
     }
     
-    /// List store declarations from root store.
+    /// List all store declarations from System Table.
     async fn list_declarations(root: &Arc<dyn StoreHandle>) -> Result<Vec<StoreDeclaration>, MeshError> {
-        let entries = root.list().await
-            .map_err(|e| MeshError::Other(e.to_string()))?;
+        let system = root.clone().as_system()
+             .ok_or_else(|| MeshError::Other("Root store must support SystemStore".to_string()))?;
         
-        // entries is Vec<KeyValuePair>
+        let children = system.get_children()
+            .map_err(|e| MeshError::Other(e.to_string()))?;
+            
         let mut declarations = Vec::new();
-        for kv in entries {
-             if kv.key.starts_with(b"/stores/") && kv.key.ends_with(b"/type") {
-                 if let Some(decl) = Self::parse_declaration(root, &kv.key).await {
-                     declarations.push(decl);
-                 }
-             }
+        // Since list_declarations is static, we can't easily access store_manager registry here 
+        // without passing it in. But typically this is called where we CAN access it.
+        // However, for pure declaration listing independent of local registry, we might return "unknown" type if not in registry?
+        // Actually, list_declarations is used by list_stores which DOES access registry.
+        
+        // Let's change list_declarations to NOT try to resolve type from disk yet?
+        // Or better, let's keep it simple: SystemTable is the authority on existence.
+        
+        for child in children {
+            declarations.push(StoreDeclaration {
+                id: child.id,
+                store_type: child.store_type.unwrap_or_else(|| "unknown".to_string()),
+                name: child.alias,
+                archived: match child.status {
+                    lattice_model::store_info::ChildStatus::Archived => true,
+                    _ => false,
+                },
+            });
         }
         
         Ok(declarations)
-    }
-    
-    /// Parse a store declaration from a `/stores/{uuid}/type` key.
-    async fn parse_declaration(root: &Arc<dyn StoreHandle>, type_key: &[u8]) -> Option<StoreDeclaration> {
-        let key_str = String::from_utf8_lossy(type_key);
-        let uuid_str = key_str.split('/').nth(2)?;
-        let id = Uuid::parse_str(uuid_str).ok()?;
-        // We use explicit calls to avoid lifetime issues with closures taking references
-        // Or just inline it since it's simple
-        let type_key = format!("/stores/{}/type", uuid_str);
-        let type_str = match root.get(type_key.into_bytes()).await {
-             Ok(Some(v)) => String::from_utf8_lossy(&v).to_string(),
-             _ => return None, // Type is mandatory
-        };
-        
-        let name_key = format!("/stores/{}/name", uuid_str);
-        let name = match root.get(name_key.into_bytes()).await {
-             Ok(Some(v)) => Some(String::from_utf8_lossy(&v).to_string()),
-             _ => None,
-        };
-
-        let archived_key = format!("/stores/{}/archived", uuid_str);
-        let archived = match root.get(archived_key.into_bytes()).await {
-             Ok(Some(_)) => true,
-             _ => false,
-        };
-        
-        Some(StoreDeclaration {
-            id,
-            store_type: type_str,
-            name,
-            archived,
-        })
     }
     
     // ==================== Store Management ====================
@@ -402,7 +434,37 @@ impl Mesh {
     /// Returns all stores declared in /stores/* (excludes root store).
     pub async fn list_stores(&self) -> Result<Vec<StoreDeclaration>, MeshError> {
         let root = self.root_store();
-        Self::list_declarations(&root).await
+        
+        let system = root.clone().as_system()
+            .ok_or_else(|| MeshError::Other("Root store must support SystemStore".to_string()))?;
+        
+        // Propagate errors from get_children - do not fail silently
+        let children = system.get_children()
+            .map_err(|e| MeshError::Other(e.to_string()))?;
+            
+        let mut declarations = Vec::new();
+        for child in children {
+            // Use type from SystemTable, or fallback to disk if unknown (migration/backfill case)
+            let mut store_type = child.store_type.clone().unwrap_or_else(|| "unknown".to_string());
+            
+            if store_type == "unknown" {
+                if let Ok((_, t, _)) = self.store_manager.registry().peek_store_info(child.id) {
+                    store_type = t;
+                }
+            }
+
+            declarations.push(StoreDeclaration {
+                id: child.id,
+                store_type,
+                name: child.alias,
+                archived: match child.status {
+                    lattice_model::store_info::ChildStatus::Archived => true,
+                    _ => false,
+                },
+            });
+        }
+        
+        Ok(declarations)
     }
     
     /// Create a new store declaration in root store.
@@ -421,32 +483,91 @@ impl Mesh {
             self.peer_manager.clone()
         ).map_err(|e| MeshError::Other(e.to_string()))?;
 
-        // 4. Write declaration to root store (so it persists/syncs to other nodes)
+        // 4. Write declaration to root store' SystemTable
         let root = self.root_store();
-        
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        
-        // Atomically write all store declaration keys using Batch
-        let type_key = format!("/stores/{}/type", store_id);
-        let created_key = format!("/stores/{}/created_at", store_id);
-        
-        // Using BatchBuilder explicitly for generic handle
-        let mut batch = BatchBuilder::new(root.as_ref())
-            .put(type_key.into_bytes(), store_type.as_bytes().to_vec())
-            .put(created_key.into_bytes(), now_secs.to_string().as_bytes().to_vec());
+        let system = root.clone().as_system()
+             .ok_or_else(|| MeshError::Other("Root store must support SystemStore".to_string()))?;
 
-        if let Some(ref name) = name {
-            let name_key = format!("/stores/{}/name", store_id);
-            batch = batch.put(name_key.into_bytes(), name.as_bytes().to_vec());
+        let mut batch = lattice_systemstore::SystemBatch::new(system.as_ref());
+        if let Some(n) = name {
+            batch = batch.add_child(store_id, n, store_type);
+        } else {
+            // Even without alias, we must add the child record to establish type
+             batch = batch.add_child(store_id, "".to_string(), store_type);
         }
+        batch = batch.set_child_status(store_id, lattice_model::store_info::ChildStatus::Active);
         
         batch.commit().await.map_err(|e| MeshError::Other(e.to_string()))?;
         
         info!(store_id = %store_id, "Created store");
         Ok(store_id)
+    }
+
+    /// Migrate legacy root store data to System Table.
+    pub async fn migrate_legacy_data(&self) -> Result<(), MeshError> {
+        let root = self.root_store();
+        
+        // Only run if we can access system store
+        if let Some(system) = root.clone().as_system() {
+             let decls = match Self::list_declarations(&root).await {
+                 Ok(d) => d,
+                 Err(e) => {
+                     warn!("Failed to list legacy declarations for migration: {}", e);
+                     return Err(e);
+                 }
+             };
+
+             let mut batch = lattice_systemstore::SystemBatch::new(system.as_ref());
+             let mut count = 0;
+             
+             for decl in decls.iter() {
+                 // 1. Add child (sets name)
+                 if let Some(ref n) = decl.name {
+                    batch = batch.add_child(decl.id, n.clone(), &decl.store_type);
+                 }
+                 
+                 // 2. Set status
+                 let status = if decl.archived {
+                     lattice_model::store_info::ChildStatus::Archived
+                 } else {
+                     lattice_model::store_info::ChildStatus::Active
+                 };
+                 batch = batch.set_child_status(decl.id, status);
+                 count += 1;
+             }
+             
+             if count > 0 {
+                 if let Err(e) = batch.commit().await {
+                     warn!("Failed to commit migration batch: {}", e);
+                     return Err(MeshError::Other(e));
+                 }
+                 
+                 // 3. Remove legacy keys after successful commit
+                 let mut root_batch = BatchBuilder::new(root.as_ref());
+                 for decl in decls {
+                     let store_id = decl.id;
+                     let type_key = format!("/stores/{}/type", store_id);
+                     let name_key = format!("/stores/{}/name", store_id);
+                     let archived_key = format!("/stores/{}/archived", store_id);
+                     let created_key = format!("/stores/{}/created_at", store_id);
+                     
+                     // We delete all legacy keys including type
+                     root_batch = root_batch
+                        .delete(type_key.into_bytes())
+                        .delete(name_key.into_bytes())
+                        .delete(archived_key.into_bytes())
+                        .delete(created_key.into_bytes());
+                 }
+                 
+                 if let Err(e) = root_batch.commit().await {
+                      warn!("Failed to delete legacy keys after migration: {}", e);
+                      // Don't fail the whole operation, migration succeeded but cleanup failed
+                 } else {
+                      info!("Migrated and cleaned up {} legacy store declarations", count);
+                 }
+             }
+        }
+        Ok(())
     }
     
     pub async fn delete_store(&self, store_id: Uuid) -> Result<(), MeshError> {

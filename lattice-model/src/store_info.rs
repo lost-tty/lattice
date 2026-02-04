@@ -8,6 +8,21 @@ use serde::{Serialize, Deserialize};
 pub struct StoreLink {
     pub id: Uuid,
     pub alias: Option<String>,
+    pub store_type: Option<String>,
+    pub status: ChildStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChildStatus {
+    Unknown,
+    Active,
+    Archived,
+}
+
+impl Default for ChildStatus {
+    fn default() -> Self {
+        Self::Active
+    }
 }
 
 /// Strategy for discovering and validating peers.
@@ -43,6 +58,7 @@ pub enum SystemEvent {
     PeerRemoved(crate::PubKey),
     ChildLinkUpdated(StoreLink),
     ChildLinkRemoved(Uuid),
+    ChildStatusUpdated(Uuid, ChildStatus),
     StrategyUpdated(PeerStrategy),
     StoreNameUpdated(String),
 }

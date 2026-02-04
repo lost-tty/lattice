@@ -214,6 +214,32 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 ---
 
+## Active Migrations & Backfills
+
+- [ ] **System Table Type Backfill** (`backfill_child_types` in `mesh.rs`)
+  - **Purpose**: Populates `store_type` in System Table for legacy stores that have `type="unknown"`.
+  - **Mechanism**: On startup, checks local disk headers for unknown stores and issues `ChildAdd` op.
+  - **Completion Condition**: Can be removed once all nodes have cycled and updated the System Table.
+
+- [ ] **Legacy Root Store Data Migration** (`migrate_legacy_data` in `mesh.rs`)
+  - **Purpose**: Moves root store declarations from `/stores/` keys to System Table.
+  - **Mechanism**: One-time migration on startup.
+  - **Destructive**: Deletes legacy keys after successful migration.
+
+- [ ] **Legacy Peer Data Migration** (`migrate_legacy_peer_data` in `mesh.rs`)
+  - **Purpose**: Moves peer status/metadata from raw keys to System Table.
+  - **Mechanism**: One-time migration on startup.
+
+- [ ] **StateDB Table Renaming** (`state_db.rs`)
+  - **Purpose**: Renames legacy "kv" or "log" redb tables to standard "data" table.
+  - **Mechanism**: Checked on every `StateBackend` open.
+
+- [ ] **Legacy Store Type Aliases** (`lattice-model`, `lattice-runtime`)
+  - **Purpose**: Supports opening stores with legacy type strings ("kvstore", "logstore").
+  - **Mechanism**: `StoreRegistry` maps these to modern equivalents.
+
+---
+
 ## Future
 
 - TTL expiry for long-lived orphans (received_at timestamp now tracked)
