@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
-lattice-storage = { path = "../lattice-storage" }
+lattice-storage = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true }
 blake3 = { workspace = true }

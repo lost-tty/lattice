@@ -439,7 +439,19 @@ mod payload_summary {
 }
 
 // Implement StreamProvider for KvState - enables blanket StreamReflectable on handles
-use lattice_store_base::{StreamProvider, StreamHandler, StreamDescriptor, StreamError, BoxByteStream};
+use lattice_store_base::{StreamProvider, StreamHandler, StreamDescriptor, StreamError, BoxByteStream, Subscriber};
+
+struct KvSubscriber;
+
+impl Subscriber<KvState> for KvSubscriber {
+    fn subscribe<'a>(
+        &'a self, 
+        state: &'a KvState, 
+        params: &'a [u8]
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+        state.subscribe_watch(params)
+    }
+}
 
 impl StreamProvider for KvState {
     fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
@@ -451,7 +463,7 @@ impl StreamProvider for KvState {
                     param_schema: Some("lattice.kv.WatchParams".to_string()),
                     event_schema: Some("lattice.kv.WatchEventProto".to_string()),
                 },
-                subscribe: Self::subscribe_watch,
+                subscriber: Box::new(KvSubscriber),
             }
         ]
     }
@@ -662,7 +674,7 @@ mod tests {
     #[test]
     fn test_state_machine_apply_put() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
 
         // Create an Op with a Put payload
         let key = b"test/key";
@@ -689,7 +701,7 @@ mod tests {
         };
 
         // Apply via StateMachine trait
-        store.apply(&op).unwrap();
+        StateMachine::apply(&store, &op).unwrap();
 
         // Verify the value is stored
         let heads = store.get(key).unwrap();
@@ -703,7 +715,7 @@ mod tests {
     #[test]
     fn test_state_machine_concurrent_puts() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
 
         let key = b"shared/key";
         
@@ -711,13 +723,13 @@ mod tests {
         let author_a = PubKey::from([10u8; 32]);
         let hash_a = Hash::from([11u8; 32]);
         let op_a = make_put_op(key, b"value_a", hash_a, author_a, &[], Hash::ZERO);
-        store.apply(&op_a).unwrap();
+        StateMachine::apply(&store, &op_a).unwrap();
 
         // Second put from author B (concurrent - no deps)
         let author_b = PubKey::from([20u8; 32]);
         let hash_b = Hash::from([21u8; 32]);
         let op_b = make_put_op(key, b"value_b", hash_b, author_b, &[], Hash::ZERO);
-        store.apply(&op_b).unwrap();
+        StateMachine::apply(&store, &op_b).unwrap();
 
         // Should have 2 concurrent heads
         let heads = store.get(key).unwrap();
@@ -728,7 +740,7 @@ mod tests {
         let hash_c = Hash::from([31u8; 32]);
         let deps = vec![hash_a, hash_b];
         let op_c = make_put_op(key, b"merged", hash_c, author_c, &deps, Hash::ZERO);
-        store.apply(&op_c).unwrap();
+        StateMachine::apply(&store, &op_c).unwrap();
 
         // Should now have only 1 head (the merge)
         let heads = store.get(key).unwrap();
@@ -740,7 +752,7 @@ mod tests {
     #[test]
     fn test_state_machine_apply_delete() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
 
         let key = b"to/delete";
         
@@ -748,7 +760,7 @@ mod tests {
         let author = PubKey::from([5u8; 32]);
         let put_hash = Hash::from([6u8; 32]);
         let put_op = make_put_op(key, b"exists", put_hash, author, &[], Hash::ZERO);
-        store.apply(&put_op).unwrap();
+        StateMachine::apply(&store, &put_op).unwrap();
 
         // Verify it exists
         let heads = store.get(key).unwrap();
@@ -758,7 +770,7 @@ mod tests {
         // Now delete it
         let del_hash = Hash::from([7u8; 32]);
         let del_op = make_delete_op(key, del_hash, author, &[put_hash], put_hash);
-        store.apply(&del_op).unwrap();
+        StateMachine::apply(&store, &del_op).unwrap();
 
         // Should have tombstone head
         let heads = store.get(key).unwrap();
@@ -832,7 +844,7 @@ mod tests {
     #[test]
     fn test_apply_op_duplicate_keys_last_wins() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
         
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -845,7 +857,7 @@ mod tests {
             Operation::put(key.as_slice(), b"second"),
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
-        store.apply(&op).unwrap();
+        StateMachine::apply(&store, &op).unwrap();
         
         // Second put should win
         let heads = store.get(key).unwrap();
@@ -857,7 +869,7 @@ mod tests {
     #[test]
     fn test_apply_op_put_then_delete_same_key() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
         
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -869,7 +881,7 @@ mod tests {
             Operation::delete(key.as_slice()),
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
-        store.apply(&op).unwrap();
+        StateMachine::apply(&store, &op).unwrap();
         
         // Delete should win (last op)
         let heads = store.get(key).unwrap();
@@ -881,7 +893,7 @@ mod tests {
     #[test]
     fn test_apply_op_delete_then_put_same_key() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
         
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -893,7 +905,7 @@ mod tests {
             Operation::put(key.as_slice(), b"resurrected"),
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
-        store.apply(&op).unwrap();
+        StateMachine::apply(&store, &op).unwrap();
         
         // Put should win (last op)
         let heads = store.get(key).unwrap();
@@ -907,7 +919,7 @@ mod tests {
     #[test]
     fn test_apply_op_empty_key_allowed() {
         let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
+        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
         
         let author = PubKey::from([1u8; 32]);
         let hash = Hash::from([2u8; 32]);
@@ -916,7 +928,7 @@ mod tests {
         let ops = vec![Operation::put(b"".as_slice(), b"value")];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
         
-        store.apply(&op).expect("Empty key should be applied at apply_op level");
+        StateMachine::apply(&store, &op).expect("Empty key should be applied at apply_op level");
         
         // Verify it was stored
         let heads = store.get(b"").unwrap();

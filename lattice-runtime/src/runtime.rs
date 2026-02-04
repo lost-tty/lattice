@@ -3,7 +3,8 @@
 use crate::backend_inprocess::InProcessBackend;
 use crate::{LatticeBackend, MeshService, Node, NodeBuilder, RpcServer};
 use lattice_node::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, STORE_TYPE_KVSTORE_LEGACY, STORE_TYPE_LOGSTORE_LEGACY, direct_opener};
-use lattice_systemstore::PersistentState;
+use lattice_storage::PersistentState;
+use lattice_systemstore::SystemLayer;
 use lattice_kvstore::KvState;
 use lattice_logstore::LogState;
 use std::path::PathBuf;
@@ -104,17 +105,17 @@ impl RuntimeBuilder {
         let mut builder = NodeBuilder::new(data_dir)
             .with_net_tx(net_tx)
             .with_opener(STORE_TYPE_KVSTORE, |registry| {
-                direct_opener::<PersistentState<KvState>>(registry)
+                direct_opener::<SystemLayer<PersistentState<KvState>>>(registry)
             })
             .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-                direct_opener::<PersistentState<LogState>>(registry)
+                direct_opener::<SystemLayer<PersistentState<LogState>>>(registry)
             })
             // Legacy aliases for existing stores on disk
             .with_opener(STORE_TYPE_KVSTORE_LEGACY, |registry| {
-                direct_opener::<PersistentState<KvState>>(registry)
+                direct_opener::<SystemLayer<PersistentState<KvState>>>(registry)
             })
             .with_opener(STORE_TYPE_LOGSTORE_LEGACY, |registry| {
-                direct_opener::<PersistentState<LogState>>(registry)
+                direct_opener::<SystemLayer<PersistentState<LogState>>>(registry)
             });
         if let Some(name) = self.name {
             builder = builder.with_name(name);

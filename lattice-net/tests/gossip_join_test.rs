@@ -6,6 +6,7 @@
 use lattice_node::{NodeBuilder, NodeEvent, Node, token::Invite, Uuid, direct_opener, StoreHandle, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
 use lattice_kvstore::PersistentKvState;
 use lattice_logstore::PersistentLogState;
+use lattice_systemstore::system_state::SystemLayer;
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
 use lattice_kvstore_client::KvStoreExt;
@@ -23,8 +24,8 @@ fn temp_data_dir(name: &str) -> lattice_node::DataDir {
 /// Helper to create node builder with openers registered (using handle-less pattern)
 fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
-        .with_opener(STORE_TYPE_KVSTORE, |registry| direct_opener::<PersistentKvState>(registry))
-        .with_opener(STORE_TYPE_LOGSTORE, |registry| direct_opener::<PersistentLogState>(registry))
+        .with_opener(STORE_TYPE_KVSTORE, |registry| direct_opener::<SystemLayer<PersistentKvState>>(registry))
+        .with_opener(STORE_TYPE_LOGSTORE, |registry| direct_opener::<SystemLayer<PersistentLogState>>(registry))
 }
 
 /// Test helper: Create MeshService from Node (replaces removed new_from_node)

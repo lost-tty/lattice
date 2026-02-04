@@ -116,7 +116,7 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
                 prev_hash,
             };
 
-            state.apply(&op)
+            StateMachine::apply(&*state, &op)
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
 
             // Emit entry for watch subscribers

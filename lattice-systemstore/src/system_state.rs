@@ -1,23 +1,24 @@
-use lattice_model::{Hash, PubKey, Op, StateMachine};
-use lattice_storage::{StateBackend, StateDbError, StateLogic};
+use lattice_model::{Hash, PubKey, Op, StateMachine, StoreMeta};
+use lattice_storage::{StateDbError, StateLogic};
 use lattice_proto::storage::{
     UniversalOp, SystemOp,
-    hierarchy_op, system_op, universal_op, peer_op, peer_strategy_op, store_op,
+    hierarchy_op, system_op, universal_op, peer_op, peer_strategy_op, store_op, invite_op,
 };
 use prost::Message;
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::pin::Pin;
 use std::future::Future;
-use lattice_model::{PeerInfo, StoreLink};
-use crate::SystemStore;
 use lattice_store_base::{
-    StreamProvider, StreamHandler, 
-    StreamError, BoxByteStream
+    StreamProvider, StreamHandler, BoxByteStream, StreamError, Subscriber,
 };
+use lattice_model::{StoreTypeProvider, Openable};
+use lattice_model::store_info::PeerStrategy;
+use uuid::Uuid;
+use std::path::Path;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum PersistentStateError {
+pub enum SystemLayerError {
     #[error(transparent)]
     Inner(Box<dyn std::error::Error + Send + Sync>),
     
@@ -25,32 +26,50 @@ pub enum PersistentStateError {
     Db(#[from] StateDbError),
 }
 
-/// A composite StateMachine wrapper that intercepts SystemOps.
-pub struct PersistentState<T: StateLogic> {
-    inner: T,
+/// A wrapper layer that adds SystemStore capabilities to any StateMachine.
+///
+/// This implements the "Y-Adapter" pattern:
+/// - Intercepts `SystemOp`s and applies them to the local System Table.
+/// - Delegates `AppData` ops to the inner state machine.
+/// - Implements `SystemReader` locally, avoiding orphan rules.
+#[derive(Clone)]
+pub struct SystemLayer<S> {
+    inner: S,
 }
 
-impl<T: StateLogic> PersistentState<T> {
-    pub fn new(inner: T) -> Self {
+impl<S> SystemLayer<S> {
+    pub fn new(inner: S) -> Self {
         Self { inner }
     }
     
-    pub fn inner(&self) -> &T {
+    pub fn inner(&self) -> &S {
         &self.inner
     }
+}
 
+// Deref to inner to expose inner methods
+impl<S> std::ops::Deref for SystemLayer<S> {
+    type Target = S;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+// ==================== System Logic ====================
+
+impl<S: StateLogic> SystemLayer<S> {
     /// Orchestrate the transaction for a SystemOp
-    fn apply_system_transaction(&self, op: &Op, sys_op: SystemOp) -> Result<(), PersistentStateError> {
+    fn apply_system_transaction(&self, op: &Op, sys_op: SystemOp) -> Result<(), StateDbError> {
         let mut write_txn = self.inner.backend().db().begin_write().map_err(StateDbError::Transaction)?;
         
-        // 0. Verify Tip
+        // 1. Verify Tip (using backend from inner)
         let should_apply = self.inner.backend()
             .verify_and_update_tip(&write_txn, &op.author, op.id, op.prev_hash)
             .map_err(StateDbError::from)?;
             
         if !should_apply { return Ok(()); }
         
-        // 1. Apply System Op
+        // 2. Apply System Op
         self.apply_system_op(&mut write_txn, sys_op, op).map_err(StateDbError::from)?;
         
         write_txn.commit().map_err(StateDbError::Commit)?;
@@ -117,6 +136,20 @@ impl<T: StateLogic> PersistentState<T> {
                       None => {},
                  }
             },
+            Some(system_op::Kind::Invite(i_op)) => {
+                 match i_op.op {
+                      Some(invite_op::Op::SetStatus(status)) => {
+                          table.set_invite_status(&i_op.token_hash, status, op)?;
+                      },
+                      Some(invite_op::Op::SetInvitedBy(invited_by)) => {
+                          table.set_invite_invited_by(&i_op.token_hash, invited_by, op)?;
+                      },
+                      Some(invite_op::Op::SetClaimedBy(claimed_by)) => {
+                          table.set_invite_claimed_by(&i_op.token_hash, claimed_by, op)?;
+                      },
+                      None => {},
+                 }
+            },
             None => {},
         }
         
@@ -124,8 +157,129 @@ impl<T: StateLogic> PersistentState<T> {
     }
 }
 
-impl<T: StateLogic> SystemStore for PersistentState<T> {
-    fn get_peer(&self, pubkey: &lattice_model::PubKey) -> Result<Option<PeerInfo>, String> {
+// ==================== StateMachine Implementation ====================
+
+impl<S> StateMachine for SystemLayer<S> 
+where 
+    S: StateMachine + StateLogic,
+    S::Error: std::error::Error + Send + Sync + 'static
+{
+    type Error = SystemLayerError;
+    
+    fn apply(&self, op: &Op) -> Result<(), Self::Error> {
+        // M10A: Universal Envelope Interception
+        if let Ok(universal) = UniversalOp::decode(op.payload) {
+             match universal.op {
+                 Some(universal_op::Op::System(sys_op)) => {
+                      return self.apply_system_transaction(op, sys_op).map_err(SystemLayerError::Db);
+                 },
+                 Some(universal_op::Op::AppData(data)) => {
+                     // Pass unwrapped data to inner
+                     let new_op = Op {
+                         id: op.id,
+                         causal_deps: op.causal_deps,
+                         payload: &data, 
+                         author: op.author,
+                         timestamp: op.timestamp,
+                         prev_hash: op.prev_hash,
+                     };
+                     return StateMachine::apply(&self.inner, &new_op).map_err(|e| SystemLayerError::Inner(Box::new(e)));
+                 },
+                 None => {} // Unknown universal op
+             }
+        }
+        
+        StateMachine::apply(&self.inner, op).map_err(|e| SystemLayerError::Inner(Box::new(e)))
+    }
+
+    fn snapshot(&self) -> Result<Box<dyn Read + Send>, Self::Error> {
+        self.inner.snapshot().map_err(|e| SystemLayerError::Inner(Box::new(e)))
+    }
+
+    fn restore(&self, snapshot: Box<dyn Read + Send>) -> Result<(), Self::Error> {
+        self.inner.restore(snapshot).map_err(|e| SystemLayerError::Inner(Box::new(e)))
+    }
+    
+    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
+        self.inner.applied_chaintips().map_err(|e| SystemLayerError::Inner(Box::new(e)))
+    }
+    
+    fn store_meta(&self) -> StoreMeta {
+        self.inner.store_meta()
+    }
+}
+
+// ==================== Trait Delegations ====================
+
+impl<S: StoreTypeProvider> StoreTypeProvider for SystemLayer<S> {
+    fn store_type() -> &'static str {
+        S::store_type()
+    }
+}
+
+impl<S: Openable + StateLogic> Openable for SystemLayer<S> {
+    fn open(id: Uuid, path: &Path) -> Result<Self, String> {
+        let inner = S::open(id, path)?;
+        Ok(Self::new(inner))
+    }
+}
+
+// NOTE: Introspectable and Dispatcher are implemented via blanket impls in store-base
+// because SystemLayer implements Deref<Target=S> and StateProvider (below).
+
+impl<S: StreamProvider + 'static + Sync> StreamProvider for SystemLayer<S> {
+    fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
+         // Create wrappers for inner handlers that downcast specific logic
+         self.inner.stream_handlers().into_iter().map(|h| {
+             StreamHandler {
+                 descriptor: h.descriptor.clone(),
+                 subscriber: Box::new(SystemLayerSubscriber {
+                     inner_descriptor_name: h.descriptor.name,
+                 }), 
+             }
+         }).collect()
+    }
+}
+
+struct SystemLayerSubscriber {
+    inner_descriptor_name: String,
+}
+
+impl<S: StreamProvider + 'static + Sync> Subscriber<SystemLayer<S>> for SystemLayerSubscriber {
+    fn subscribe<'a>(
+        &'a self, 
+        state: &'a SystemLayer<S>, 
+        params: &'a [u8]
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+        let name = self.inner_descriptor_name.clone();
+        
+        Box::pin(async move {
+            let handler = state.inner.stream_handlers()
+                .into_iter()
+                .find(|h| h.descriptor.name == name)
+                .ok_or_else(|| StreamError::NotFound(name))?;
+                
+            handler.subscriber.subscribe(&state.inner, params).await
+        })
+    }
+}
+
+// Implement StateProvider to opt-in to blanket implementations
+impl<S: StateLogic> lattice_store_base::StateProvider for SystemLayer<S> {
+    type State = S;
+
+    fn state(&self) -> &Self::State {
+        &self.inner
+    }
+}
+
+// ==================== SystemReader Implementation ====================
+
+use crate::SystemReader;
+use lattice_model::{PeerInfo, StoreLink};
+
+impl<S: StateLogic + Send + Sync> SystemReader for SystemLayer<S> {
+    fn get_peer(&self, pubkey: &PubKey) -> Result<Option<PeerInfo>, String> {
         let read_txn = self.inner.backend().db().begin_read().map_err(|e| e.to_string())?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
              Ok(t) => t,
@@ -155,25 +309,24 @@ impl<T: StateLogic> SystemStore for PersistentState<T> {
         crate::tables::ReadOnlySystemTable::new(table).get_children()
     }
 
-    fn get_peer_strategy(&self) -> Result<Option<lattice_model::store_info::PeerStrategy>, String> {
+    fn get_peer_strategy(&self) -> Result<Option<PeerStrategy>, String> {
         let read_txn = self.inner.backend().db().begin_read().map_err(|e| e.to_string())?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
             Ok(t) => t,
-            // If system table doesn't exist, we return None (missing)
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
             Err(e) => return Err(e.to_string()),
         };
         crate::tables::ReadOnlySystemTable::new(table).get_peer_strategy()
     }
-    fn _get_deps(&self, key: &[u8]) -> Result<Vec<lattice_model::Hash>, String> {
+
+    fn get_invite(&self, token_hash: &[u8]) -> Result<Option<lattice_model::InviteInfo>, String> {
         let read_txn = self.inner.backend().db().begin_read().map_err(|e| e.to_string())?;
-        
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.to_string()),
+             Ok(t) => t,
+             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+             Err(e) => return Err(e.to_string()),
         };
-        crate::tables::ReadOnlySystemTable::new(table).get_deps(key)
+        crate::tables::ReadOnlySystemTable::new(table).get_invite(token_hash)
     }
 
     fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
@@ -195,145 +348,14 @@ impl<T: StateLogic> SystemStore for PersistentState<T> {
         };
         crate::tables::ReadOnlySystemTable::new(table).get_name()
     }
-}
 
-impl<T: StateLogic> StateMachine for PersistentState<T> {
-    type Error = PersistentStateError;
-    
-    fn apply(&self, op: &Op) -> Result<(), Self::Error> {
-        // M10A: Universal Envelope Interception
-        if let Ok(universal) = UniversalOp::decode(op.payload) {
-             match universal.op {
-                 Some(universal_op::Op::System(sys_op)) => {
-                      return self.apply_system_transaction(op, sys_op);
-                 },
-                 Some(universal_op::Op::AppData(data)) => {
-                     // Pass unwrapped data to inner
-                     let new_op = Op {
-                         id: op.id,
-                         causal_deps: op.causal_deps,
-                         payload: &data, 
-                         author: op.author,
-                         timestamp: op.timestamp,
-                         prev_hash: op.prev_hash,
-                     };
-                     // Map error to PersistentStateError::Inner
-                     return self.inner.apply(&new_op).map_err(|e| PersistentStateError::Inner(e.into()));
-                 },
-                 None => {} // Unknown universal op
-             }
-        }
-        
-        self.inner.apply(op).map_err(|e| PersistentStateError::Inner(e.into()))
-    }
-
-    fn snapshot(&self) -> Result<Box<dyn Read + Send>, Self::Error> {
-        let mut buffer = Vec::new();
-        self.inner.backend().snapshot(&mut buffer)?;
-        Ok(Box::new(Cursor::new(buffer)))
-    }
-
-    fn restore(&self, snapshot: Box<dyn Read + Send>) -> Result<(), Self::Error> {
-        let mut reader = snapshot;
-        self.inner.backend().restore(&mut reader).map_err(Into::into)
-    }
-    
-    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
-        self.inner.backend().get_applied_chaintips().map_err(Into::into)
-    }
-    
-    fn store_meta(&self) -> lattice_model::StoreMeta {
-        self.inner.backend().get_meta()
-    }
-}
-
-// Deref to inner logic to expose store-specific methods (e.g. get())
-impl<T: StateLogic> std::ops::Deref for PersistentState<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-// ==================== Setup Helpers ====================
-
-use lattice_model::{StoreTypeProvider, Openable};
-use lattice_storage::StateFactory;
-use uuid::Uuid;
-use std::path::Path;
-
-/// Helper to standardize the "Open" ceremony for PersistentState.
-/// 
-/// Handles opening the StateBackend using lattice-storage, creating the inner logic, 
-/// and wrapping it in lattice-systemstore::PersistentState (with system interception).
-pub fn setup_persistent_state<L: StateLogic + StoreTypeProvider>(
-    id: Uuid, 
-    path: &Path,
-    constructor: impl FnOnce(StateBackend) -> L
-) -> Result<PersistentState<L>, StateDbError> {
-    let store_type = L::store_type();
-    let backend = StateBackend::open(id, path, Some(store_type), 1)?;
-    Ok(PersistentState::new(constructor(backend)))
-}
-
-// Generic implementation of Openable for any PersistentState<T> where T implements StateFactory + StoreTypeProvider.
-// This solves the Orphan Rule violation by implementing it in the crate where PersistentState is defined.
-impl<T: StateFactory + StoreTypeProvider + 'static> Openable for PersistentState<T> {
-    fn open(id: Uuid, path: &Path) -> Result<Self, String> {
-        setup_persistent_state(id, path, T::create)
-            .map_err(|e| e.to_string())
-    }
-}
-
-// Implement StoreTypeProvider for PersistentState delegating to inner
-impl<T: StateLogic + StoreTypeProvider> StoreTypeProvider for PersistentState<T> {
-    fn store_type() -> &'static str {
-        T::store_type()
-    }
-}
-
-// ==================== Trait Delegations ====================
-
-// Implement StateProvider to opt-in to blanket implementations (Introspectable, etc.)
-impl<T: StateLogic> lattice_store_base::StateProvider for PersistentState<T> {
-    type State = T;
-
-    fn state(&self) -> &Self::State {
-        &self.inner
-    }
-}
-
-// PersistentState<T> implements StreamProvider by forwarding to inner type's handlers.
-impl<T: StateLogic + StreamProvider + Send + Sync> StreamProvider for PersistentState<T> {
-    fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
-        self.inner
-            .stream_handlers()
-            .into_iter()
-            .map(|h| {
-                StreamHandler {
-                    descriptor: h.descriptor,
-                    subscribe: Self::forward_stream_subscribe,
-                }
-            })
-            .collect()
-    }
-}
-
-impl<T: StateLogic + StreamProvider + Send + Sync> PersistentState<T> {
-    fn forward_stream_subscribe<'a>(
-        this: &'a Self,
-        params: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
-        let handlers = this.inner.stream_handlers();
-        
-        Box::pin(async move {
-            let handler = handlers
-                .into_iter()
-                .next()
-                .ok_or_else(|| StreamError::NotFound("No stream handlers".to_string()))?;
-            
-            (handler.subscribe)(&*this, params).await
-        })
+    fn _get_deps(&self, key: &[u8]) -> Result<Vec<Hash>, String> {
+         let read_txn = self.inner.backend().db().begin_read().map_err(|e| e.to_string())?;
+        let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.to_string()),
+        };
+        crate::tables::ReadOnlySystemTable::new(table).get_deps(key)
     }
 }

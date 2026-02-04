@@ -42,3 +42,20 @@ pub async fn cmd_set_name(backend: &dyn LatticeBackend, name: &str, writer: Writ
     
     Ok(Continue)
 }
+
+/// Join an existing mesh using an invite token
+pub async fn cmd_join(backend: &dyn LatticeBackend, token: &str, writer: Writer) -> CmdResult {
+    let mut w = writer.clone();
+    
+    match backend.mesh_join(token).await {
+        Ok(mesh_id) => {
+            let _ = writeln!(w, "Joining mesh {}...", mesh_id);
+            let _ = writeln!(w, "Join request sent. You will be notified when connection is established.");
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Join failed: {}", e);
+        }
+    }
+    
+    Ok(Continue)
+}

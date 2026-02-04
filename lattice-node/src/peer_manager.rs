@@ -141,7 +141,7 @@ impl PeerManager {
 
     /// Start watching the system event stream for peer changes
     async fn start_watching(self: &Arc<Self>) -> Result<(), PeerManagerError> {
-        let mut event_stream = self.store.subscribe_events();
+        let mut event_stream = self.store.subscribe_events().map_err(PeerManagerError::Store)?;
         let notify = self.peer_event_tx.clone();
         
         let task = tokio::spawn(async move {

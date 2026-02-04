@@ -62,7 +62,7 @@ use lattice_model::StoreTypeProvider;
 
 impl<S> StoreHandle for Store<S>
 where
-    S: StateMachine + Introspectable + Dispatcher + StreamProvider + StoreTypeProvider + SystemStore + Send + Sync + 'static,
+    S: StateMachine + Introspectable + Dispatcher + StreamProvider + StoreTypeProvider + lattice_systemstore::SystemReader + Send + Sync + 'static,
 {
     fn id(&self) -> Uuid {
         SyncProvider::id(self)

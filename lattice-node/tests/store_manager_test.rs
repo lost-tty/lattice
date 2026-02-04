@@ -1,13 +1,12 @@
 use lattice_node::{NodeBuilder, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, direct_opener};
 use lattice_node::data_dir::DataDir;
-use lattice_kvstore_client::{KvStoreExt, Operation};
 use std::time::Duration;
 
 /// Helper to create a node with openers registered (using handle-less pattern)
 fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
     // Use lattice-systemstore wrappers for system capabilities
-    type PersistentKvState = lattice_systemstore::PersistentState<lattice_kvstore::KvState>;
-    type PersistentLogState = lattice_systemstore::PersistentState<lattice_logstore::LogState>;
+    type PersistentKvState = lattice_systemstore::SystemLayer<lattice_storage::PersistentState<lattice_kvstore::KvState>>;
+    type PersistentLogState = lattice_systemstore::SystemLayer<lattice_storage::PersistentState<lattice_logstore::LogState>>;
 
     NodeBuilder::new(data_dir)
         .with_opener(STORE_TYPE_KVSTORE, |registry| direct_opener::<PersistentKvState>(registry))
@@ -235,14 +234,12 @@ async fn test_synced_store_declaration_auto_opened() {
     // Write store declaration directly to root store (simulating sync from peer)
     // This bypasses Mesh::create_store() which is what would happen when syncing
     let root = mesh.root_store();
-    let type_key = format!("/stores/{}/type", foreign_store_id);
-    let created_key = format!("/stores/{}/created_at", foreign_store_id);
+    let system = root.clone().as_system().expect("Root store must support SystemStore");
     
-    let ops = vec![
-        Operation::put(type_key.into_bytes(), b"core:kvstore".to_vec()),
-        Operation::put(created_key.into_bytes(), b"1234567890".to_vec()),
-    ];
-    root.batch_commit(ops).await.expect("Failed to write store declaration");
+    lattice_systemstore::SystemBatch::new(system.as_ref())
+        .add_child(foreign_store_id, "foreign-store".to_string(), STORE_TYPE_KVSTORE)
+        .set_child_status(foreign_store_id, lattice_model::store_info::ChildStatus::Active)
+        .commit().await.expect("Failed to write store declaration");
     
     // Create the store files manually (simulating that they were synced too)
     data_dir.ensure_store_dirs(foreign_store_id).unwrap();

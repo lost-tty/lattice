@@ -1,4 +1,4 @@
-use lattice_model::{Hash, PubKey, Op};
+use lattice_model::{Hash, PubKey, Op, InviteInfo, InviteStatus as ModelInviteStatus};
 use lattice_model::head::Head;
 use lattice_model::merge::Merge;
 use lattice_storage::StateDbError;
@@ -6,6 +6,7 @@ use lattice_proto::storage::{
     HeadList, HeadInfo as ProtoHeadInfo, 
     SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, PeerStrategy,
     SetStoreName,
+    SetInviteStatus, SetInviteInvitedBy, SetInviteClaimedBy, InviteStatus as ProtoInviteStatus,
 };
 use prost::Message;
 use redb::{Table, ReadableTable};
@@ -96,6 +97,26 @@ impl<'a> SystemTable<'a> {
         let key = b"strategy";
         let head = Head::from_op(op, strategy.encode_to_vec());
         self.apply_head(key, head, op.causal_deps)
+    }
+
+    // ==================== Invite Operations ====================
+
+    fn set_invite_field(&mut self, token_hash: &[u8], field: &str, value: Vec<u8>, op: &Op) -> Result<(), StateDbError> {
+        let key = format!("invite/{}/{}", hex::encode(token_hash), field).into_bytes();
+        let head = Head::from_op(op, value);
+        self.apply_head(&key, head, op.causal_deps)
+    }
+
+    pub fn set_invite_status(&mut self, token_hash: &[u8], set_status: SetInviteStatus, op: &Op) -> Result<(), StateDbError> {
+        self.set_invite_field(token_hash, "status", set_status.encode_to_vec(), op)
+    }
+
+    pub fn set_invite_invited_by(&mut self, token_hash: &[u8], set_invited_by: SetInviteInvitedBy, op: &Op) -> Result<(), StateDbError> {
+        self.set_invite_field(token_hash, "invited_by", set_invited_by.encode_to_vec(), op)
+    }
+
+    pub fn set_invite_claimed_by(&mut self, token_hash: &[u8], set_claimed_by: SetInviteClaimedBy, op: &Op) -> Result<(), StateDbError> {
+        self.set_invite_field(token_hash, "claimed_by", set_claimed_by.encode_to_vec(), op)
     }
 
     // ==================== Store Operations ====================
@@ -360,6 +381,50 @@ impl<'a> ReadOnlySystemTable<'a> {
         }
     }
 
+    pub fn get_invite(&self, token_hash: &[u8]) -> Result<Option<InviteInfo>, String> {
+        let key = format!("invite/{}/status", hex::encode(token_hash)).into_bytes();
+        let heads = self.get_heads(&key)?;
+        
+        if let Some(value) = heads.lww() {
+            let mut info = InviteInfo {
+                token_hash: token_hash.to_vec(),
+                status: ModelInviteStatus::Valid,
+                invited_by: None,
+                claimed_by: None,
+            };
+
+            if let Ok(set_status) = SetInviteStatus::decode(value.as_slice()) {
+                if let Ok(s) = ProtoInviteStatus::try_from(set_status.status) {
+                     info.status = map_invite_status(s);
+                }
+            }
+
+            // Fetch invited_by
+            let invited_by_key = format!("invite/{}/invited_by", hex::encode(token_hash)).into_bytes();
+             if let Some(v_bytes) = self.get_heads(&invited_by_key)?.lww() {
+                 if let Ok(set) = SetInviteInvitedBy::decode(v_bytes.as_slice()) {
+                     if let Ok(pk) = PubKey::try_from(set.inviter_pubkey.as_slice()) {
+                         info.invited_by = Some(pk);
+                     }
+                 }
+            }
+
+            // Fetch claimed_by
+            let claimed_by_key = format!("invite/{}/claimed_by", hex::encode(token_hash)).into_bytes();
+             if let Some(v_bytes) = self.get_heads(&claimed_by_key)?.lww() {
+                 if let Ok(set) = SetInviteClaimedBy::decode(v_bytes.as_slice()) {
+                     if let Ok(pk) = PubKey::try_from(set.claimer_pubkey.as_slice()) {
+                         info.claimed_by = Some(pk);
+                     }
+                 }
+            }
+
+            Ok(Some(info))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// List all entries in the system table as key-value pairs (for debugging)
     pub fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
         let mut entries = Vec::new();
@@ -403,5 +468,16 @@ fn map_peer_strategy(s: PeerStrategy) -> Result<lattice_model::store_info::PeerS
             Ok(ModelStrategy::Snapshot(id))
         },
         _ => Ok(ModelStrategy::Independent),
+    }
+}
+
+fn map_invite_status(s: ProtoInviteStatus) -> ModelInviteStatus {
+    use ProtoInviteStatus as P;
+    use ModelInviteStatus as M;
+    match s {
+        P::Unknown => M::Unknown,
+        P::Valid => M::Valid,
+        P::Revoked => M::Revoked,
+        P::Claimed => M::Claimed,
     }
 }

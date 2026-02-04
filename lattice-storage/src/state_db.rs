@@ -592,6 +592,7 @@ pub trait StateLogic: Send + Sync {
 ///     - `apply` -> `logic.apply(op)`
 ///     - `snapshot`, `restore`, etc. -> `logic.backend().snapshot()`
 /// - Derefs to T so consumers can call `store.get()` directly.
+#[derive(Clone)]
 pub struct PersistentState<T: StateLogic> {
     inner: T,
 }
@@ -611,6 +612,24 @@ impl<T: StateLogic> std::ops::Deref for PersistentState<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+// PersistentState<T> must implement StateLogic for SystemLayer<PersistentState<T>> to work.
+// It simplifies delegates to the inner logic.
+impl<T: StateLogic> StateLogic for PersistentState<T> {
+    type Updates = T::Updates;
+    
+    fn backend(&self) -> &StateBackend {
+        self.inner.backend()
+    }
+    
+    fn mutate(&self, table: &mut redb::Table<&[u8], &[u8]>, op: &Op) -> Result<Self::Updates, StateDbError> {
+        self.inner.mutate(table, op)
+    }
+    
+    fn notify(&self, updates: Self::Updates) {
+        self.inner.notify(updates)
     }
 }
 
@@ -684,60 +703,51 @@ impl<T: StateLogic + Introspectable> Introspectable for PersistentState<T> {
 
 use std::pin::Pin;
 use std::future::Future;
-use lattice_store_base::{BoxByteStream, StreamError, StreamProvider, StreamHandler};
+use lattice_store_base::{BoxByteStream, StreamError, StreamProvider, StreamHandler, Subscriber};
 use lattice_model::StoreTypeProvider;
 
 // PersistentState<T> implements StreamProvider by forwarding to inner type's handlers.
 // Each handler uses the same forwarding function that looks up the inner handler by name.
-impl<T: StateLogic + StreamProvider + Send + Sync> StreamProvider for PersistentState<T> {
+impl<T: StateLogic + StreamProvider + Send + Sync + 'static> StreamProvider for PersistentState<T> {
     fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
         // Get descriptors from inner type and create handlers for each.
-        // All handlers use the same forwarding function - it looks upByeName at call time.
         self.inner
             .stream_handlers()
             .into_iter()
             .map(|h| {
                 StreamHandler {
-                    descriptor: h.descriptor,
-                    // All handlers use the same forwarding function
-                    subscribe: Self::forward_stream_subscribe,
+                    descriptor: h.descriptor.clone(),
+                    subscriber: Box::new(ForwardSubscriber {
+                        stream_name: h.descriptor.name,
+                    }),
                 }
             })
             .collect()
     }
 }
 
-impl<T: StateLogic + StreamProvider + Send + Sync> PersistentState<T> {
-    /// Forward stream subscription to inner type's handler.
-    /// 
-    /// This is called by the blanket StreamReflectable impl via StreamHandler.
-    /// Since we can't capture the stream name in function pointers, we receive it
-    /// via the handler lookup that already happened - we just need to forward to inner.
-    /// 
-    /// Note: The blanket impl finds our handler by name, then calls handler.subscribe.
-    /// At that point, we need to find the inner handler by the SAME name and call it.
-    /// But we don't have access to the name here! The workaround: look it up by params.
-    /// 
-    /// Actually: The blanket impl passes the descriptor name when finding our handler,
-    /// but handler.subscribe only gets &self and params. We can't know which stream.
-    /// 
-    /// REAL FIX: We need the blanket in handle.rs to pass stream_name to subscribe.
-    /// For now, we assume single-stream types and just call the first handler.
-    fn forward_stream_subscribe<'a>(
-        this: &'a Self,
+/// Subscriber that forwards subscriptions to the inner state by name lookup.
+struct ForwardSubscriber {
+    stream_name: String,
+}
+
+impl<T: StateLogic + StreamProvider + Send + Sync> Subscriber<PersistentState<T>> for ForwardSubscriber {
+    fn subscribe<'a>(
+        &'a self,
+        state: &'a PersistentState<T>,
         params: &'a [u8],
     ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
-        // Get the first handler from inner type (works for single-stream types like KvState)
-        let handlers = this.inner.stream_handlers();
+        let stream_name = self.stream_name.clone();
         
         Box::pin(async move {
-            let handler = handlers
+            // Find the inner handler by name
+            let handler = state.inner.stream_handlers()
                 .into_iter()
-                .next()
-                .ok_or_else(|| StreamError::NotFound("No stream handlers".to_string()))?;
-            
-            // Call inner type's handler with &T (via Deref)
-            (handler.subscribe)(&*this, params).await
+                .find(|h| h.descriptor.name == stream_name)
+                .ok_or_else(|| StreamError::NotFound(format!("Inner handler for {} not found", stream_name)))?;
+
+            // Delegate subscription to the inner handler's subscriber
+            handler.subscriber.subscribe(&state.inner, params).await
         })
     }
 }

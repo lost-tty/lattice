@@ -92,6 +92,7 @@ message SystemOp {
         PeerOp peer = 2;
         PeerStrategyOp strategy = 3;
         StoreOp store = 4;
+        InviteOp invite = 5;
     }
 }
 
@@ -187,6 +188,35 @@ message PeerStrategy {
          bool inherited = 2;
          bytes snapshot = 3; // UUID bytes
     }
+}
+
+// Invite Management
+message InviteOp {
+    bytes token_hash = 1;
+    oneof op {
+        SetInviteStatus set_status = 2;
+        SetInviteInvitedBy set_invited_by = 3;
+        SetInviteClaimedBy set_claimed_by = 4;
+    }
+}
+
+message SetInviteStatus {
+    InviteStatus status = 1;
+}
+
+message SetInviteInvitedBy {
+    bytes inviter_pubkey = 1;
+}
+
+message SetInviteClaimedBy {
+    bytes claimer_pubkey = 1;
+}
+
+enum InviteStatus {
+    INVITE_STATUS_UNKNOWN = 0;
+    INVITE_STATUS_VALID = 1;
+    INVITE_STATUS_REVOKED = 2;
+    INVITE_STATUS_CLAIMED = 3;
 }
 
 // --- HeadList CRDT (Shared) ---

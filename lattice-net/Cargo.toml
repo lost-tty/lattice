@@ -31,6 +31,7 @@ lattice-kvstore = { workspace = true }
 lattice-kvstore-client = { workspace = true }
 lattice-logstore = { workspace = true }
 lattice-storage = { workspace = true }
+lattice-systemstore = { workspace = true }
 lattice-node = { workspace = true }
 rand = { workspace = true }
 async-trait = "0.1"

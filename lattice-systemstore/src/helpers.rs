@@ -4,11 +4,13 @@ use lattice_model::replication::EntryStreamProvider;
 use lattice_proto::storage::{
     SystemOp, system_op, peer_op, hierarchy_op, peer_strategy_op, peer_strategy,
     store_op, SetStoreName,
+    invite_op, InviteOp, SetInviteStatus, SetInviteInvitedBy, SetInviteClaimedBy,
     SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, SetPeerName, UniversalOp, universal_op, PeerOp, SignedEntry, Entry,
-    PeerStatus as ProtoStatus, ChildStatus as ProtoChildStatus,
+    PeerStatus as ProtoStatus, ChildStatus as ProtoChildStatus, InviteStatus as ProtoInviteStatus,
     PeerStrategyOp, SetPeerStrategy,
 };
 use lattice_store_base::StateProvider;
+use lattice_model::InviteStatus;
 use futures_util::{Stream, StreamExt};
 use prost::Message;
 use std::pin::Pin;
@@ -100,6 +102,7 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
                  None => None,
              }
          },
+         Some(system_op::Kind::Invite(_)) => None,
          None => None,
      }
 }
@@ -107,7 +110,7 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
 pub fn put_system_key<T>(writer: T, key: Vec<u8>, payload: Vec<u8>) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
 where
     T: StateProvider + StateWriter + Clone + Send + Sync + 'static,
-    T::State: crate::SystemStore,
+    T::State: crate::SystemReader,
 {
     Box::pin(async move {
         let deps = writer.state()._get_deps(&key)?;
@@ -236,6 +239,38 @@ pub fn create_set_strategy_payload(strategy: PeerStrategy) -> Vec<u8> {
     }))
 }
 
+// ==================== Invite Helpers ====================
+
+fn wrap_invite_op(token_hash: Vec<u8>, op: invite_op::Op) -> Vec<u8> {
+    let envelope = UniversalOp {
+        op: Some(universal_op::Op::System(SystemOp {
+            kind: Some(system_op::Kind::Invite(InviteOp {
+                token_hash,
+                op: Some(op)
+            }))
+        }))
+    };
+    envelope.encode_to_vec()
+}
+
+pub fn create_set_invite_status_payload(token_hash: &[u8], status: lattice_model::InviteStatus) -> Vec<u8> {
+    let proto_status = match status {
+        InviteStatus::Unknown => ProtoInviteStatus::Unknown,
+        InviteStatus::Valid => ProtoInviteStatus::Valid,
+        InviteStatus::Revoked => ProtoInviteStatus::Revoked,
+        InviteStatus::Claimed => ProtoInviteStatus::Claimed,
+    };
+    wrap_invite_op(token_hash.to_vec(), invite_op::Op::SetStatus(SetInviteStatus { status: proto_status as i32 }))
+}
+
+pub fn create_set_invited_by_payload(token_hash: &[u8], inviter: lattice_model::PubKey) -> Vec<u8> {
+    wrap_invite_op(token_hash.to_vec(), invite_op::Op::SetInvitedBy(SetInviteInvitedBy { inviter_pubkey: inviter.to_vec() }))
+}
+
+pub fn create_set_claimed_by_payload(token_hash: &[u8], claimer: lattice_model::PubKey) -> Vec<u8> {
+    wrap_invite_op(token_hash.to_vec(), invite_op::Op::SetClaimedBy(SetInviteClaimedBy { claimer_pubkey: claimer.to_vec() }))
+}
+
 // ==================== Batch Builder ====================
 
 /// A pending write operation (key + payload)
@@ -322,7 +357,6 @@ impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
             target_id: child_id.as_bytes().to_vec(),
             status: proto_status as i32,
         }));
-        
         self.ops.push(PendingOp { key, payload });
         self
     }
@@ -331,6 +365,28 @@ impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
     pub fn set_strategy(mut self, strategy: PeerStrategy) -> Self {
         let key = b"strategy".to_vec();
         let payload = create_set_strategy_payload(strategy);
+        self.ops.push(PendingOp { key, payload });
+        self
+    }
+
+    /// Create/Update invite
+    pub fn set_invite_status(mut self, token_hash: &[u8], status: lattice_model::InviteStatus) -> Self {
+        let key = format!("invite/{}/status", hex::encode(token_hash)).into_bytes();
+        let payload = create_set_invite_status_payload(token_hash, status);
+        self.ops.push(PendingOp { key, payload });
+        self
+    }
+
+    pub fn set_invite_invited_by(mut self, token_hash: &[u8], inviter: lattice_model::PubKey) -> Self {
+        let key = format!("invite/{}/invited_by", hex::encode(token_hash)).into_bytes();
+        let payload = create_set_invited_by_payload(token_hash, inviter);
+        self.ops.push(PendingOp { key, payload });
+        self
+    }
+
+    pub fn set_invite_claimed_by(mut self, token_hash: &[u8], claimer: lattice_model::PubKey) -> Self {
+        let key = format!("invite/{}/claimed_by", hex::encode(token_hash)).into_bytes();
+        let payload = create_set_claimed_by_payload(token_hash, claimer);
         self.ops.push(PendingOp { key, payload });
         self
     }
@@ -374,7 +430,7 @@ where
     }))
 }
 
-use crate::SystemStore;
+use crate::{SystemStore, SystemReader};
 
 /// Migration hook for root stores.
 /// 

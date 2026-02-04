@@ -35,7 +35,7 @@ pub use replication::{
     ChainTip, OrphanInfo, LogFileInfo, LogStats,
     GapInfo, SyncNeeded, PeerSyncInfo, EntryStream,
 };
-pub use node_identity::{NodeIdentity, NodeError, PeerStatus, PeerInfo};
+pub use node_identity::{NodeIdentity, NodeError, PeerStatus, PeerInfo, InviteStatus, InviteInfo};
 pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream, GossipPeer};
 pub use net_event::NetEvent;
 pub use node_provider::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};

@@ -293,6 +293,33 @@ pub async fn cmd_store_peer_revoke(backend: &dyn LatticeBackend, store_id: Optio
     Ok(Continue)
 }
 
+/// Generate a one-time invite token for a store
+pub async fn cmd_store_peer_invite(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
+    use owo_colors::OwoColorize;
+    let mut w = writer.clone();
+    
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "Error: No active store.");
+            return Ok(Continue);
+        }
+    };
+    
+    match backend.mesh_invite(store_id).await { // Reusing mesh_invite which takes a generic ID
+        Ok(token) => {
+            let _ = writeln!(w, "Generated one-time join token:");
+            let _ = writeln!(w, "{}", token.green().bold());
+            let _ = writeln!(w, "Share this token securely. It can be used once to join this store/mesh.");
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error creating token: {}", e);
+        }
+    }
+    
+    Ok(Continue)
+}
+
 // ==================== Store Status/Debug Commands ====================
 
 pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {

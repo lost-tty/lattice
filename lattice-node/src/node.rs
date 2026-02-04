@@ -602,8 +602,8 @@ mod tests {
     /// Helper to create node builder with openers registered for tests that use mesh/store manager
     fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
         // Use lattice-systemstore wrappers for system capabilities
-        type PersistentKvState = lattice_systemstore::PersistentState<lattice_kvstore::KvState>;
-        type PersistentLogState = lattice_systemstore::PersistentState<lattice_logstore::LogState>;
+        type PersistentKvState = lattice_systemstore::SystemLayer<lattice_storage::PersistentState<lattice_kvstore::KvState>>;
+        type PersistentLogState = lattice_systemstore::SystemLayer<lattice_storage::PersistentState<lattice_logstore::LogState>>;
 
         NodeBuilder::new(data_dir)
             .with_opener(STORE_TYPE_KVSTORE, |registry| direct_opener::<PersistentKvState>(registry))
@@ -735,10 +735,11 @@ mod tests {
         let initial_name = node.name().unwrap();
         
         // create_mesh creates mesh
-        let mesh_id = node.create_mesh().await.expect("create_mesh");
+        node.create_mesh().await.expect("create_mesh");
         
         // Change name
         let new_name = "my-custom-name";
+        assert_ne!(initial_name, new_name, "New name should differ from initial");
         node.set_name(new_name).await.expect("set_name");
         
         // Verify meta.db updated

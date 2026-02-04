@@ -22,7 +22,7 @@ impl TestStore {
     pub fn new() -> Self {
         let dir = TempDir::new().unwrap();
         let store_id = Uuid::new_v4();
-        let state = KvState::open(store_id, dir.path(), None).expect("failed to open state");
+        let state = KvState::open(store_id, dir.path()).expect("failed to open state");
         let state = Arc::new(state);
         let writer = MockWriter::new(state.clone());
         

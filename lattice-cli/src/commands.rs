@@ -131,6 +131,8 @@ pub enum NodeSubcommand {
     Status,
     /// Set display name for this node
     SetName { name: String },
+    /// Join a store/mesh using an invite token
+    Join { token: String },
 }
 
 #[derive(Subcommand, Clone)]
@@ -143,10 +145,6 @@ pub enum MeshSubcommand {
     Use { mesh_id: String },
     /// Show mesh status
     Status,
-    /// Join a mesh using an invite token
-    Join { token: String },
-    /// Generate a one-time invite token
-    Invite,
 }
 
 #[derive(Subcommand, Clone)]
@@ -227,6 +225,8 @@ pub enum PeerSubcommand {
         /// Public key of peer to revoke
         pubkey: String,
     },
+    /// Generate a one-time invite token for this store
+    Invite,
 }
 
 async fn format_help(backend: &dyn LatticeBackend, ctx: &CommandContext, topic: Option<&str>) -> String {
@@ -271,6 +271,7 @@ pub async fn handle_command(
         LatticeCommand::Node { subcommand } => match subcommand {
             NodeSubcommand::Status => node_commands::cmd_status(backend, writer).await,
             NodeSubcommand::SetName { name } => node_commands::cmd_set_name(backend, &name, writer).await,
+            NodeSubcommand::Join { token } => node_commands::cmd_join(backend, &token, writer).await,
         },
         
         LatticeCommand::Mesh { subcommand } => {
@@ -304,6 +305,9 @@ pub async fn handle_command(
                 }
                 PeerSubcommand::Revoke { pubkey } => {
                     store_commands::cmd_store_peer_revoke(backend, ctx.store_id, &pubkey, writer).await
+                }
+                PeerSubcommand::Invite => {
+                     store_commands::cmd_store_peer_invite(backend, ctx.store_id, writer).await
                 }
             }
             StoreSubcommand::Debug => {

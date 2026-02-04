@@ -220,11 +220,19 @@ macro_rules! impl_dispatchable {
 
 use crate::{StreamReflectable, StreamDescriptor, StreamError, BoxByteStream};
 
-/// A stream handler definition - pairs a descriptor with a subscribe function.
+/// Trait for handling stream subscriptions.
+pub trait Subscriber<S: ?Sized>: Send + Sync {
+    fn subscribe<'a>(
+        &'a self, 
+        state: &'a S, 
+        params: &'a [u8]
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>>;
+}
+
+/// A stream handler definition - pairs a descriptor with a subscriber.
 pub struct StreamHandler<S: ?Sized> {
     pub descriptor: StreamDescriptor,
-    // Subscribe function returns a Future with HRTB for lifetime safety
-    pub subscribe: for<'a> fn(&'a S, params: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>>,
+    pub subscriber: Box<dyn Subscriber<S>>,
 }
 
 /// Trait for state types that provide stream handlers.
@@ -279,7 +287,7 @@ where
              let handler = found_handler
                 .ok_or_else(|| StreamError::NotFound(stream_name.to_string()))?;
             
-             (handler.subscribe)(self.state(), params).await
+             handler.subscriber.subscribe(self.state(), params).await
         })
     }
 }

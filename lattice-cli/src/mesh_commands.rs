@@ -3,7 +3,6 @@
 use lattice_runtime::LatticeBackend;
 use crate::commands::{CmdResult, CommandOutput::*, Writer, MeshSubcommand};
 use crate::display_helpers::{format_id, parse_uuid};
-use owo_colors::OwoColorize;
 use std::io::Write;
 use uuid::Uuid;
 
@@ -23,8 +22,6 @@ pub async fn handle_command(
         MeshSubcommand::List => cmd_list(backend, writer).await,
         MeshSubcommand::Use { mesh_id } => cmd_use(backend, &mesh_id, writer).await,
         MeshSubcommand::Status => cmd_status(backend, ctx.mesh_id, writer).await,
-        MeshSubcommand::Join { token } => cmd_join(backend, &token, writer).await,
-        MeshSubcommand::Invite => cmd_invite(backend, ctx.mesh_id, writer).await,
     }
 }
 
@@ -64,7 +61,7 @@ pub async fn cmd_list(backend: &dyn LatticeBackend, writer: Writer) -> CmdResult
     match backend.mesh_list().await {
         Ok(meshes) => {
             if meshes.is_empty() {
-                let _ = writeln!(w, "No meshes. Use 'mesh create' or 'mesh join <token>' to get started.");
+                let _ = writeln!(w, "No meshes. Use 'mesh create' or 'node join <token>' to get started.");
             } else {
                 let _ = writeln!(w, "Meshes ({}):", meshes.len());
                 for mesh in meshes {
@@ -148,51 +145,6 @@ pub async fn cmd_status(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, wri
         }
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
-        }
-    }
-    
-    Ok(Continue)
-}
-
-/// Join an existing mesh using an invite token
-pub async fn cmd_join(backend: &dyn LatticeBackend, token: &str, writer: Writer) -> CmdResult {
-    let mut w = writer.clone();
-    
-    match backend.mesh_join(token).await {
-        Ok(mesh_id) => {
-            let _ = writeln!(w, "Joining mesh {}...", mesh_id);
-            let _ = writeln!(w, "Join request sent. You will be notified when connection is established.");
-        }
-        Err(e) => {
-            let _ = writeln!(w, "Join failed: {}", e);
-        }
-    }
-    
-    Ok(Continue)
-}
-
-
-
-/// Generate an invite token
-pub async fn cmd_invite(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, writer: Writer) -> CmdResult {
-    let mut w = writer.clone();
-    
-    let mesh_id = match mesh_id {
-        Some(id) => id,
-        None => {
-            let _ = writeln!(w, "Error: No active mesh.");
-            return Ok(Continue);
-        }
-    };
-    
-    match backend.mesh_invite(mesh_id).await {
-        Ok(token) => {
-            let _ = writeln!(w, "Generated one-time join token:");
-            let _ = writeln!(w, "{}", token.green().bold());
-            let _ = writeln!(w, "Share this token securely. It can be used once to join this mesh.");
-        }
-        Err(e) => {
-            let _ = writeln!(w, "Error creating token: {}", e);
         }
     }
     

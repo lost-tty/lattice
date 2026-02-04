@@ -271,7 +271,19 @@ impl lattice_store_base::Introspectable for LogState {
 }
 
 // Implement StreamProvider for LogState - enables blanket StreamReflectable on handles
-use lattice_store_base::{StreamProvider, StreamHandler, StreamDescriptor, StreamError, BoxByteStream};
+use lattice_store_base::{StreamProvider, StreamHandler, StreamDescriptor, StreamError, BoxByteStream, Subscriber};
+
+struct LogSubscriber;
+
+impl Subscriber<LogState> for LogSubscriber {
+    fn subscribe<'a>(
+        &'a self, 
+        state: &'a LogState, 
+        params: &'a [u8]
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+        state.subscribe_follow(params)
+    }
+}
 
 impl StreamProvider for LogState {
     fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
@@ -283,7 +295,7 @@ impl StreamProvider for LogState {
                     param_schema: Some("lattice.log.FollowParams".to_string()),
                     event_schema: Some("lattice.log.LogEvent".to_string()),
                 },
-                subscribe: Self::subscribe_follow,
+                subscriber: Box::new(LogSubscriber),
             }
         ]
     }
@@ -380,7 +392,7 @@ mod tests {
         // Create initial state
         let author = PubKey::from([1u8; 32]);
         let id = Uuid::new_v4();
-        let state = LogState::open(id, dir.path(), None).unwrap();
+        let state = LogState::open(id, dir.path()).unwrap();
         
         let op = Op {
             id: Hash::from([42u8; 32]),
@@ -391,13 +403,13 @@ mod tests {
             payload: b"hello world",
         };
         
-        state.apply(&op).unwrap();
+        StateMachine::apply(&state, &op).unwrap();
         assert_eq!(state.read(None).len(), 1);
         
         drop(state);
         
         // Re-open with SAME ID
-        let state2 = LogState::open(id, dir.path(), None).unwrap();
+        let state2 = LogState::open(id, dir.path()).unwrap();
         assert_eq!(state2.read(None).len(), 1);
         assert_eq!(state2.read(None)[0].content, b"hello world");
     }
@@ -405,7 +417,7 @@ mod tests {
     #[test]
     fn test_ordering() {
         let dir = tempdir().unwrap();
-        let state = LogState::open(Uuid::new_v4(), dir.path(), None).unwrap();
+        let state = LogState::open(Uuid::new_v4(), dir.path()).unwrap();
         
         let author1 = PubKey::from([1u8; 32]);
         let author2 = PubKey::from([2u8; 32]);
@@ -420,7 +432,7 @@ mod tests {
             timestamp: HLC { wall_time: 3000, counter: 0 },
             payload: b"third",
         };
-        state.apply(&op3).unwrap();
+        StateMachine::apply(&state, &op3).unwrap();
         
         let op1 = Op {
             id: Hash::from([1u8; 32]),
@@ -430,7 +442,7 @@ mod tests {
             timestamp: HLC { wall_time: 1000, counter: 0 },
             payload: b"first",
         };
-        state.apply(&op1).unwrap();
+        StateMachine::apply(&state, &op1).unwrap();
         
         let op2 = Op {
             id: Hash::from([2u8; 32]),
@@ -440,7 +452,7 @@ mod tests {
             timestamp: HLC { wall_time: 2000, counter: 0 },
             payload: b"second",
         };
-        state.apply(&op2).unwrap();
+        StateMachine::apply(&state, &op2).unwrap();
         
         // read(None) should return in HLC order
         let entries = state.read(None);
@@ -462,7 +474,7 @@ mod tests {
         let store_id = Uuid::new_v4();
         
         let dir1 = tempdir().unwrap();
-        let state1 = LogState::open(store_id, dir1.path(), None).unwrap();
+        let state1 = LogState::open(store_id, dir1.path()).unwrap();
         
         let author = PubKey::from([1u8; 32]);
         let start_hlc = HLC::now();
@@ -474,14 +486,14 @@ mod tests {
             timestamp: start_hlc,
             payload: b"log_entry_1",
         };
-        state1.apply(&op).unwrap();
+        StateMachine::apply(&state1, &op).unwrap();
         
         // Take snapshot
         let snapshot = state1.snapshot().unwrap();
         
         // Restore to fresh state with SAME store ID (restore validates ID)
         let dir2 = tempdir().unwrap();
-        let state2 = LogState::open(store_id, dir2.path(), None).unwrap();
+        let state2 = LogState::open(store_id, dir2.path()).unwrap();
         state2.restore(snapshot).unwrap();
         
         // Verify

@@ -40,10 +40,10 @@ This document outlines the development plan for Lattice.
 - [x] Migrate CLI: `mesh peers` -> `store peers` (peers are part of the store system data)
 - [x] Add `strategy` key for persisted `PeerStrategy` (Independent/Inherited)
 - [x] `store status` should show PeerStrategy
-- [ ] Add invite handling (`invite/{token_hash}/status`, `invited_by`, `claimed_by`)
+- [x] Add invite handling (`invite/{token_hash}/status`, `invited_by`, `claimed_by`)
 
 ### 10B: Root Store & Identity (The "New Mesh")
-- [ ] Define "Root Store" concept: `PeerStrategy::Independent` + `StoreMeta`
+- [x] Define "Root Store" concept: `PeerStrategy::Independent` + `StoreMeta`
 - [x] **Migrate Peer Names**: Move names from Data Table (`/nodes/*/name`) to System Table (`peer/*/name`)
 - [x] `Node::set_name()` should propagate name to all locally managed Root Stores (System Table)
 - [ ] Update `lattice-node` bootstrapping:

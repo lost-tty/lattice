@@ -176,6 +176,39 @@ pub struct PeerInfo {
     pub added_by: Option<PubKey>,
 }
 
+/// Invite status values
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum InviteStatus {
+    /// Token status is unknown (e.g. not found)
+    Unknown,
+    /// Token is valid and can be claimed
+    Valid,
+    /// Token has been manually revoked
+    Revoked,
+    /// Token has been claimed by a user
+    Claimed,
+}
+
+impl InviteStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InviteStatus::Unknown => "unknown",
+            InviteStatus::Valid => "valid",
+            InviteStatus::Revoked => "revoked",
+            InviteStatus::Claimed => "claimed",
+        }
+    }
+}
+
+/// Information about an invite token
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InviteInfo {
+    pub token_hash: Vec<u8>,
+    pub status: InviteStatus,
+    pub invited_by: Option<PubKey>,
+    pub claimed_by: Option<PubKey>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

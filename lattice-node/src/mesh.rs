@@ -20,7 +20,7 @@ use crate::{
     StoreHandle,
 };
 use lattice_model::types::PubKey;
-use lattice_model::{PeerProvider, STORE_TYPE_KVSTORE};
+use lattice_model::{PeerProvider, STORE_TYPE_KVSTORE, InviteStatus};
 use lattice_model::store_info::PeerStrategy;
 use lattice_systemstore::SystemBatch;
 use futures_util::StreamExt;
@@ -222,6 +222,7 @@ impl Mesh {
     // ==================== Store Watcher ====================
     
     /// Start the watcher task that monitors `/stores/` prefix in root and reconciles.
+    /// Start the watcher task that monitors `/stores/` prefix in root and reconciles.
     fn start_watcher(&self) {
         let store_manager = self.store_manager.clone();
         let root_store_id = self.root_store_id;
@@ -240,8 +241,14 @@ impl Mesh {
                 warn!(error = %e, "Failed to backfill child types");
             }
 
-            // Watch for changes to child/ prefix (System Table hierarchy)
-            let mut stream = match KvStoreExt::watch(root_store.as_ref(), "^child/").await {
+            // Get SystemStore capability
+            let Some(system) = root_store.clone().as_system() else {
+                 warn!("Root store does not support SystemStore - watcher disabled");
+                 return;
+            };
+
+            // Watch for System Op events
+            let mut stream = match system.subscribe_events() {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(error = %e, "Failed to start store watcher");
@@ -265,10 +272,19 @@ impl Mesh {
                     }
                     next = stream.next() => {
                         match next {
-                            Some(Ok(_evt)) => {
-                                // Reconcile on any change
-                                if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores).await {
-                                    warn!(error = %e, "Reconcile failed");
+                            Some(Ok(evt)) => {
+                                // Reconcile on child/hierarchy changes
+                                let should_reconcile = match evt {
+                                    lattice_model::SystemEvent::ChildLinkUpdated(_) | 
+                                    lattice_model::SystemEvent::ChildStatusUpdated(_, _) | 
+                                    lattice_model::SystemEvent::ChildLinkRemoved(_) => true,
+                                    _ => false, 
+                                };
+                                
+                                if should_reconcile {
+                                    if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores).await {
+                                        warn!(error = %e, "Reconcile failed");
+                                    }
                                 }
                             }
                             Some(Err(e)) => {
@@ -518,6 +534,11 @@ impl Mesh {
         
         batch.commit().await.map_err(|e| MeshError::Other(e.to_string()))?;
         
+        // 5. Track that we opened this store (so we can close it later)
+        if let Ok(mut guard) = self.opened_stores.write() {
+            guard.insert(store_id);
+        }
+
         info!(store_id = %store_id, "Created store");
         Ok(store_id)
     }
@@ -591,21 +612,22 @@ impl Mesh {
     
     pub async fn delete_store(&self, store_id: Uuid) -> Result<(), MeshError> {
         let root = self.root_store();
+        let system = root.clone().as_system()
+             .ok_or_else(|| MeshError::Other("Root store must support SystemStore".to_string()))?;
         
-        // Verify store exists
-        let type_key = format!("/stores/{}/type", store_id);
-        let exists = root.get(type_key.as_bytes().to_vec()).await
-            .map_err(|e| MeshError::Other(e.to_string()))?
-            .is_some();
-
-        if !exists {
+        // Verify store exists via SystemReader
+        let children = system.get_children()
+            .map_err(|e| MeshError::Other(e.to_string()))?;
+            
+        if !children.iter().any(|c| c.id == store_id) {
              return Err(MeshError::Other(format!("Store {} not found", store_id)));
         }
         
-        // Write archived flag
-        let archived_key = format!("/stores/{}/archived", store_id);
-        root.put(archived_key.into_bytes(), b"true".to_vec()).await
-             .map_err(|e| MeshError::Other(e.to_string()))?;
+        // Archive via SystemBatch
+        lattice_systemstore::SystemBatch::new(system.as_ref())
+            .set_child_status(store_id, lattice_model::store_info::ChildStatus::Archived)
+            .commit().await
+            .map_err(|e| MeshError::Other(e.to_string()))?;
         
         info!(store_id = %store_id, "Archived store");
         Ok(())
@@ -629,31 +651,46 @@ impl Mesh {
         rand::thread_rng().fill_bytes(&mut secret);
         
         let hash = blake3::hash(&secret);
-        let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
         let root = self.root_store();
-        root.put(key.into_bytes(), b"valid".to_vec()).await
-             .map_err(|e| MeshError::Other(e.to_string()))?;
+        
+        let system = root.clone().as_system()
+             .ok_or_else(|| MeshError::Other("Root store must support SystemStore".to_string()))?;
+
+        SystemBatch::new(system.as_ref())
+            .set_invite_status(hash.as_bytes(), InviteStatus::Valid)
+            .set_invite_invited_by(hash.as_bytes(), inviter)
+            .commit().await
+            .map_err(|e| MeshError::Other(e.to_string()))?;
         
         let invite = Invite::new(inviter, self.id(), secret.to_vec());
         Ok(invite.to_string())
     }
     
     /// Validate and consume an invite secret.
-    pub async fn consume_invite_secret(&self, secret: &[u8]) -> Result<bool, MeshError> {
+    pub async fn consume_invite_secret(&self, secret: &[u8], claimer: PubKey) -> Result<bool, MeshError> {
         let hash = blake3::hash(secret);
-        let key = format!("/invites/{}", hex::encode(hash.as_bytes()));
-        
         let root = self.root_store();
         
-        // Check if exists
-        let exists = root.get(key.as_bytes().to_vec()).await
-             .map_err(|e| MeshError::Other(e.to_string()))?
-             .is_some();
-
-        if exists {
-            root.delete(key.into_bytes()).await
-                 .map_err(|e| MeshError::Other(e.to_string()))?;
-            Ok(true)
+        let system = root.clone().as_system()
+             .ok_or_else(|| MeshError::Other("Root store must support SystemStore".to_string()))?;
+             
+        // Check if exists and is valid
+        let info = system.get_invite(hash.as_bytes())
+             .map_err(|e| MeshError::Other(e.to_string()))?;
+             
+        if let Some(invite) = info {
+            if invite.status == InviteStatus::Valid {
+                // Mark as claimed
+                SystemBatch::new(system.as_ref())
+                    .set_invite_status(hash.as_bytes(), InviteStatus::Claimed)
+                    .set_invite_claimed_by(hash.as_bytes(), claimer)
+                    .commit().await
+                    .map_err(|e| MeshError::Other(e.to_string()))?;
+                Ok(true)
+            } else {
+                warn!("Invite {} is not valid (status: {:?})", hex::encode(hash.as_bytes()), invite.status);
+                Ok(false)
+            }
         } else {
             Ok(false)
         }
@@ -668,7 +705,7 @@ impl Mesh {
     /// Encapsulates all join logic that was previously in Node::accept_join.
     pub async fn handle_peer_join(&self, pubkey: PubKey, secret: &[u8]) -> Result<Vec<PubKey>, MeshError> {
         // Check invite token
-        let valid_token = match self.consume_invite_secret(secret).await {
+        let valid_token = match self.consume_invite_secret(secret, pubkey).await {
             Ok(v) => v,
             Err(_) => false,
         };
