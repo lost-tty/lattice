@@ -36,24 +36,31 @@ This document outlines the development plan for Lattice.
 - [x] System table interception layer in `PersistentState::apply()`
 - [x] Removed dead code: `HandleBase`, `PeerManager`/`SubstoreManager` traits, `as_writer`
 - [x] Added `list_all()` API and `store system show` CLI command for debugging
-- [x] CLI `mesh peers` does not yet show peer names. Is it wired up?
-- [ ] Add child store hierarchy (`child/{uuid}/status`, `child/{uuid}/name`)
+- [x] Add child store hierarchy (`child/{uuid}/status`, `child/{uuid}/name`)
+- [ ] Migrate CLI: `mesh peers` -> `store peers` (peers are part of the store system data)
 - [ ] Add `strategy` key for persisted `PeerStrategy` (Independent/Inherited)
 - [ ] Add invite handling (`invite/{token_hash}/status`, `invited_by`, `claimed_by`)
-- [ ] `Node::set_name()` should propagate name to all stores that manage their own peer list
 
-### 10B: Migration (Op-Based)
+### 10B: Root Store & Identity (The "New Mesh")
+- [ ] Define "Root Store" concept: `PeerStrategy::Independent` + `StoreMeta`
+- [ ] **Migrate Peer Names**: Move names from Data Table (`/nodes/*/name`) to System Table (`peer/*/name`)
+- [ ] `Node::set_name()` should propagate name to all locally managed Root Stores (System Table)
+- [ ] Update `lattice-node` bootstrapping:
+    - Deprecate `Node::new(mesh_id)`
+    - Add `Node::load(root_store_id)`
+    - `StoreManager` should load all locally available Root Stores at startup
+
+### 10C: Migration (Peer Strategy)
+- [ ] **Strategy Backfill**: Since stores are already migrated to System Table, we just need to populate `strategy`:
+    - Root Stores -> `Independent` (default)
+    - Child Stores -> `Inherited` (future default)
 - [ ] Test migration with existing data directories
-
-### 10C: Root Store & Identity
-- [ ] Define "Root Store" as `PeerStrategy::Independent`
-- [ ] Implement **Peer Name Cache** in the Root Store's Data table (`/nodes/{pubkey}/name`)
-- [ ] Update `lattice-node` to bootstrap from a list of Root Stores (instead of meshes)
 
 ### 10D: Legacy Cleanup
 - [ ] Convert existing `Mesh` structs to Root Stores
 - [ ] Remove `Mesh` and `ControlPlane` code
-- [ ] What is `StoreManagers` role? Should it get a `StoreFactory`?
+- [ ] CLI: Remove `mesh` subcommand entirely (replace with `store create`, `store join`, `store peers`)
+- [ ] Refactor `StoreManager`: Remove "mesh" concept, just manage a flat list of loaded stores (some are roots)
 
 ---
 
@@ -216,7 +223,7 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 
 ## Active Migrations & Backfills
 
-- [ ] **System Table Type Backfill** (`backfill_child_types` in `mesh.rs`)
+- [x] **System Table Type Backfill** (`backfill_child_types` in `mesh.rs`)
   - **Purpose**: Populates `store_type` in System Table for legacy stores that have `type="unknown"`.
   - **Mechanism**: On startup, checks local disk headers for unknown stores and issues `ChildAdd` op.
   - **Completion Condition**: Can be removed once all nodes have cycled and updated the System Table.

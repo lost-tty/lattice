@@ -91,7 +91,7 @@ impl Mesh {
         let system_store = root_store.clone().as_system()
             .ok_or_else(|| MeshError::Other("Root store does not support SystemStore trait".into()))?;
         
-        let peer_manager = PeerManager::new(system_store, root_store.clone()).await
+        let peer_manager = PeerManager::new(system_store).await
             .map_err(|e| MeshError::Other(e.to_string()))?;
         
         // Register root store immediately
@@ -135,7 +135,7 @@ impl Mesh {
         // Run legacy migrations (DATA table → SystemStore)
         migrate_legacy_peer_data(root_store.as_ref(), &*system_store).await?;
 
-        let peer_manager = PeerManager::new(system_store, root_store.clone()).await
+        let peer_manager = PeerManager::new(system_store).await
             .map_err(|e| MeshError::Other(e.to_string()))?;
         
         // Register root store immediately
@@ -795,8 +795,12 @@ where
     }
     
     // Check if any work needs to be done
-    let needs_work = peers_to_migrate.values().any(|(status, added_at, _, has_legacy_name)| {
-        (!skip_system_migration && (status.is_some() || added_at.is_some())) || *has_legacy_name
+    // Work needed if:
+    // 1. Not skipping system migration AND has status/added_at
+    // 2. Has legacy name (from /nodes/ prefix)
+    // 3. Has ANY name (we want to move all names to System Table)
+    let needs_work = peers_to_migrate.values().any(|(status, added_at, name, has_legacy_name)| {
+        (!skip_system_migration && (status.is_some() || added_at.is_some())) || *has_legacy_name || name.is_some()
     });
     
     if !needs_work {
@@ -816,37 +820,55 @@ where
             }
         };
         
-        // Migrate status/added_at to SystemStore (if not already done)
-        if !skip_system_migration && (status_opt.is_some() || added_at_opt.is_some()) {
+        // Migrate status/added_at if needed
+        let should_migrate_system = !skip_system_migration && (status_opt.is_some() || added_at_opt.is_some());
+        // Migrate name if available
+        let should_migrate_name = name_opt.is_some();
+        
+        if should_migrate_system || should_migrate_name {
             let mut batch = SystemBatch::new(system_store);
             
-            if let Some(ref status_str) = status_opt {
-                let status = match status_str.to_lowercase().as_str() {
-                    "active" => PeerStatus::Active,
-                    "revoked" => PeerStatus::Revoked,
-                    "dormant" => PeerStatus::Dormant,
-                    "pending" | "invited" => PeerStatus::Invited,
-                    _ => {
-                        warn!("Unknown status '{}' for peer {}, defaulting to Invited", status_str, pk_hex);
-                        PeerStatus::Invited
-                    }
-                };
-                batch = batch.set_status(pubkey, status);
+            if should_migrate_system {
+                if let Some(ref status_str) = status_opt {
+                    let status = match status_str.to_lowercase().as_str() {
+                        "active" => PeerStatus::Active,
+                        "revoked" => PeerStatus::Revoked,
+                        "dormant" => PeerStatus::Dormant,
+                        "pending" | "invited" => PeerStatus::Invited,
+                        _ => {
+                            warn!("Unknown status '{}' for peer {}, defaulting to Invited", status_str, pk_hex);
+                            PeerStatus::Invited
+                        }
+                    };
+                    batch = batch.set_status(pubkey, status);
+                }
+                
+                if let Some(ts) = added_at_opt {
+                    batch = batch.set_added_at(pubkey, ts);
+                }
             }
             
-            if let Some(ts) = added_at_opt {
-                batch = batch.set_added_at(pubkey, ts);
+            if let Some(ref name) = name_opt {
+                 batch = batch.set_peer_name(pubkey, name.to_string());
             }
-            
+
             batch.commit().await
                 .map_err(|e| MeshError::Other(format!("Failed to write peer {}: {}", pk_hex, e)))?;
             
-            // Delete migrated legacy entries from DATA table
-            if status_opt.is_some() {
-                let _ = data_store.delete(format!("/nodes/{}/status", pk_hex).into_bytes()).await;
+            if should_migrate_system {
+                // Delete migrated legacy entries from DATA table
+                if status_opt.is_some() {
+                    let _ = data_store.delete(format!("/nodes/{}/status", pk_hex).into_bytes()).await;
+                }
+                if added_at_opt.is_some() {
+                    let _ = data_store.delete(format!("/nodes/{}/added_at", pk_hex).into_bytes()).await;
+                }
             }
-            if added_at_opt.is_some() {
-                let _ = data_store.delete(format!("/nodes/{}/added_at", pk_hex).into_bytes()).await;
+            
+            // Delete legacy name keys if we migrated a name
+            if name_opt.is_some() {
+                 let _ = data_store.delete(format!("/nodes/{}/name", pk_hex).into_bytes()).await;
+                 let _ = data_store.delete(format!("nodes/{}/name", pk_hex).into_bytes()).await;
             }
         }
         

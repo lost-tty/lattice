@@ -4,7 +4,7 @@ use lattice_model::replication::EntryStreamProvider;
 use lattice_proto::storage::{
     SystemOp, system_op, peer_op, hierarchy_op, peer_strategy_op, peer_strategy,
     store_op, SetStoreName,
-    SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, UniversalOp, universal_op, PeerOp, SignedEntry, Entry,
+    SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, SetPeerName, UniversalOp, universal_op, PeerOp, SignedEntry, Entry,
     PeerStatus as ProtoStatus, ChildStatus as ProtoChildStatus,
 };
 use lattice_store_base::StateProvider;
@@ -38,6 +38,9 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
                         added_by: None,
                     };
                     Some(Ok(SystemEvent::PeerUpdated(info)))
+                },
+                Some(peer_op::Op::SetName(n)) => {
+                    Some(Ok(SystemEvent::PeerNameUpdated(pubkey, n.name)))
                 },
                 // These are metadata operations - no separate events for now
                 Some(peer_op::Op::SetAddedAt(_)) | Some(peer_op::Op::SetAddedBy(_)) => None,
@@ -142,6 +145,10 @@ pub fn create_set_added_by_payload(pubkey: lattice_model::PubKey, adder: lattice
     wrap_peer_op(pubkey.as_slice(), peer_op::Op::SetAddedBy(SetPeerAddedBy { adder_pubkey: adder.to_vec() }))
 }
 
+pub fn create_set_peer_name_payload(pubkey: lattice_model::PubKey, name: String) -> Vec<u8> {
+    wrap_peer_op(pubkey.as_slice(), peer_op::Op::SetName(SetPeerName { name }))
+}
+
 pub fn create_set_store_name_payload(name: String) -> Vec<u8> {
     let envelope = UniversalOp {
         op: Some(universal_op::Op::System(SystemOp {
@@ -235,6 +242,14 @@ impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
     pub fn set_added_by(mut self, pubkey: lattice_model::PubKey, adder: lattice_model::PubKey) -> Self {
         let key = format!("peer/{}/added_by", hex::encode(pubkey.as_slice())).into_bytes();
         let payload = create_set_added_by_payload(pubkey, adder);
+        self.ops.push(PendingOp { key, payload });
+        self
+    }
+
+    /// Set peer name (in System Table)
+    pub fn set_peer_name(mut self, pubkey: lattice_model::PubKey, name: String) -> Self {
+        let key = format!("peer/{}/name", hex::encode(pubkey.as_slice())).into_bytes();
+        let payload = create_set_peer_name_payload(pubkey, name);
         self.ops.push(PendingOp { key, payload });
         self
     }

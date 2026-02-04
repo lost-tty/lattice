@@ -61,6 +61,7 @@ pub enum SystemEvent {
     ChildStatusUpdated(Uuid, ChildStatus),
     StrategyUpdated(PeerStrategy),
     StoreNameUpdated(String),
+    PeerNameUpdated(crate::types::PubKey, String),
 }
 
 /// Trait for store handles to provide basic store information.

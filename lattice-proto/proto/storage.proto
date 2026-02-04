@@ -142,6 +142,7 @@ message PeerOp {
         SetPeerStatus set_status = 3;
         SetPeerAddedAt set_added_at = 4;
         SetPeerAddedBy set_added_by = 5;
+        SetPeerName set_name = 6;
     }
 }
 
@@ -155,6 +156,10 @@ message SetPeerAddedAt {
 
 message SetPeerAddedBy {
     bytes adder_pubkey = 1;
+}
+
+message SetPeerName {
+    string name = 1;
 }
 
 enum PeerStatus {

@@ -17,6 +17,8 @@ pub enum PeerEvent {
     Added { pubkey: PubKey, status: PeerStatus },
     /// Peer status changed (e.g., Active → Revoked)
     StatusChanged { pubkey: PubKey, old: PeerStatus, new: PeerStatus },
+    /// Peer name changed/updated
+    NameUpdated { pubkey: PubKey, name: String },
     /// Peer removed from mesh
     Removed { pubkey: PubKey },
 }

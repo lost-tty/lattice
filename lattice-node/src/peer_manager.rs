@@ -8,7 +8,6 @@
 
 use crate::auth::{PeerEvent, PeerProvider};
 use lattice_kernel::PeerStatus;
-use lattice_kvstore_client::KvStoreExt;
 use lattice_model::{PeerInfo, PubKey, SystemEvent};
 use lattice_systemstore::{SystemStore, SystemBatch};
 
@@ -110,8 +109,6 @@ impl Peer {
 pub struct PeerManager {
     /// System store for authorization (peer status)
     store: Arc<dyn SystemStore + Send + Sync>,
-    /// Root store for name lookups (via KvStoreExt)
-    root_store: Arc<dyn crate::store_handle::StoreHandle>,
     /// Broadcast channel for peer events
     peer_event_tx: broadcast::Sender<PeerEvent>,
     /// Bootstrap authors trusted during initial sync
@@ -127,13 +124,11 @@ impl PeerManager {
     /// - `root_store`: Root store for name lookups
     pub async fn new(
         store: Arc<dyn SystemStore + Send + Sync>,
-        root_store: Arc<dyn crate::store_handle::StoreHandle>,
     ) -> Result<Arc<Self>, PeerManagerError> {
         let (peer_event_tx, _) = broadcast::channel(64);
         
         let manager = Arc::new(Self {
             store,
-            root_store,
             peer_event_tx,
             bootstrap_authors: Arc::new(RwLock::new(HashSet::new())),
             watcher_task: Mutex::new(None),
@@ -164,6 +159,9 @@ impl PeerManager {
                                     new: PeerStatus::Revoked 
                                 })
                             }
+                            SystemEvent::PeerNameUpdated(pubkey, name) => {
+                                Some(PeerEvent::NameUpdated { pubkey, name })
+                            }
                             _ => None,
                         };
                         if let Some(ev) = peer_event {
@@ -186,16 +184,9 @@ impl PeerManager {
 
     // ==================== Read Operations (from SystemStore) ====================
     
-    /// List all peers (async, fetches names from root store)
+    /// List all peers (async, names are now fetched directly from SystemStore)
     pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
-        let mut peers = self.store.get_peers().map_err(PeerManagerError::Store)?;
-        
-        for peer in &mut peers {
-            if let Some(name) = self.get_peer_name(&peer.pubkey).await {
-                peer.name = Some(name);
-            }
-        }
-        
+        let peers = self.store.get_peers().map_err(PeerManagerError::Store)?;
         Ok(peers)
     }
     
@@ -226,19 +217,17 @@ impl PeerManager {
             .map_err(PeerManagerError::StateWriter)
     }
 
-    /// Set a peer's display name (stored in root store DATA table at /nodes/{pubkey}/name)
+    /// Set a peer's display name (stored in SystemStore at peer/{pubkey}/name)
     pub async fn set_peer_name(&self, pubkey: PubKey, name: &str) -> Result<(), PeerManagerError> {
-        let key = format!("nodes/{}/name", hex::encode(pubkey.as_slice())).into_bytes();
-        self.root_store.put(key, name.as_bytes().to_vec()).await
-            .map_err(|e| PeerManagerError::Store(e.to_string()))?;
-        Ok(())
+        SystemBatch::new(&*self.store)
+            .set_peer_name(pubkey, name.to_string())
+            .commit().await
+            .map_err(PeerManagerError::StateWriter)
     }
     
-    /// Get a peer's display name (from root store DATA table)
+    /// Get a peer's display name (from SystemStore)
     pub async fn get_peer_name(&self, pubkey: &PubKey) -> Option<String> {
-        let key = format!("nodes/{}/name", hex::encode(pubkey.as_slice())).into_bytes();
-        self.root_store.get(key).await.ok().flatten()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
+        self.store.get_peer(pubkey).ok().flatten().and_then(|p| p.name)
     }
 
     pub async fn activate_peer(&self, pubkey: PubKey) -> Result<(), PeerManagerError> {

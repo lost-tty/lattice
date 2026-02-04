@@ -40,6 +40,10 @@ impl<'a> SystemTable<'a> {
         self.set_peer_field(pubkey, "added_by", set_added_by.encode_to_vec(), op)
     }
 
+    pub fn set_peer_name(&mut self, pubkey: &[u8], name: String, op: &Op) -> Result<(), StateDbError> {
+        self.set_peer_field(pubkey, "name", name.into_bytes(), op)
+    }
+
     // ==================== Hierarchy Operations ====================
 
     pub fn add_child(&mut self, id_bytes: &[u8], alias: String, store_type: String, op: &Op) -> Result<(), StateDbError> {
@@ -182,6 +186,9 @@ impl<'a> ReadOnlySystemTable<'a> {
         let key = format!("peer/{}/status", hex::encode(pubkey.as_slice())).into_bytes();
         let heads = self.get_heads(&key)?;
         
+        let name_key = format!("peer/{}/name", hex::encode(pubkey.as_slice())).into_bytes();
+        let name_heads = self.get_heads(&name_key)?;
+        
         if let Some(value) = heads.lww() {
             let mut info = lattice_model::PeerInfo {
                 pubkey: *pubkey,
@@ -194,6 +201,12 @@ impl<'a> ReadOnlySystemTable<'a> {
             if let Ok(set_status) = SetPeerStatus::decode(value.as_slice()) {
                 if let Ok(s) = lattice_proto::storage::PeerStatus::try_from(set_status.status) {
                     info.status = map_peer_status(s);
+                }
+            }
+
+            if let Some(name_bytes) = name_heads.lww() {
+                if !name_bytes.is_empty() {
+                    info.name = String::from_utf8(name_bytes).ok();
                 }
             }
             Ok(Some(info))
@@ -233,6 +246,18 @@ impl<'a> ReadOnlySystemTable<'a> {
                 }
                 peers.push(info);
             }
+        }
+        
+        // Enrich with names (separate pass because we iterate keys, could optimize to single pass but range keys are status)
+        for peer in &mut peers {
+             let name_key = format!("peer/{}/name", hex::encode(peer.pubkey.as_slice())).into_bytes();
+             if let Ok(heads) = self.get_heads(&name_key) {
+                 if let Some(name_bytes) = heads.lww() {
+                     if !name_bytes.is_empty() {
+                         peer.name = String::from_utf8(name_bytes).ok();
+                     }
+                 }
+             }
         }
         Ok(peers)
     }

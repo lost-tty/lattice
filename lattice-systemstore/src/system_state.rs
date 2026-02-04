@@ -93,6 +93,9 @@ impl<T: StateLogic> PersistentState<T> {
                     Some(peer_op::Op::SetAddedBy(set_added_by)) => {
                         table.set_peer_added_by(&p_op.pubkey, set_added_by, op)?;
                     },
+                    Some(peer_op::Op::SetName(set_name)) => {
+                        table.set_peer_name(&p_op.pubkey, set_name.name, op)?;
+                    },
                     None => {},
                 }
             },
