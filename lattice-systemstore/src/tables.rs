@@ -24,13 +24,7 @@ impl<'a> SystemTable<'a> {
 
     fn set_peer_field(&mut self, pubkey: &[u8], field: &str, value: Vec<u8>, op: &Op) -> Result<(), StateDbError> {
         let key = format!("peer/{}/{}", hex::encode(pubkey), field).into_bytes();
-        let head = Head {
-            value,
-            hlc: op.timestamp,
-            author: op.author,
-            hash: op.id,
-            tombstone: false,
-        };
+        let head = Head::from_op(op, value);
         self.apply_head(&key, head, op.causal_deps)
     }
 
@@ -53,24 +47,12 @@ impl<'a> SystemTable<'a> {
         
         // 1. Write Name
         let name_key = format!("child/{}/name", id).into_bytes();
-        let name_head = Head {
-            value: alias.into_bytes(), 
-            hlc: op.timestamp,
-            author: op.author,
-            hash: op.id,
-            tombstone: false,
-        };
+        let name_head = Head::from_op(op, alias.into_bytes());
         self.apply_head(&name_key, name_head, op.causal_deps)?;
 
         // 2. Write Type
         let type_key = format!("child/{}/type", id).into_bytes();
-        let type_head = Head {
-            value: store_type.into_bytes(),
-            hlc: op.timestamp,
-            author: op.author,
-            hash: op.id,
-            tombstone: false,
-        };
+        let type_head = Head::from_op(op, store_type.into_bytes());
         self.apply_head(&type_key, type_head, op.causal_deps)?;
         
         Ok(())
@@ -79,13 +61,7 @@ impl<'a> SystemTable<'a> {
     pub fn set_child_status(&mut self, id_bytes: &[u8], status: i32, op: &Op) -> Result<(), StateDbError> {
         let id = uuid::Uuid::from_slice(id_bytes).map_err(|_| StateDbError::StoreIdMismatch { expected: Default::default(), got: Default::default() })?;
         let key = format!("child/{}/status", id).into_bytes();
-        let head = Head {
-            value: status.to_le_bytes().to_vec(),
-            hlc: op.timestamp,
-            author: op.author,
-            hash: op.id,
-            tombstone: false,
-        };
+        let head = Head::from_op(op, status.to_le_bytes().to_vec());
         self.apply_head(&key, head, op.causal_deps)
     }
 
@@ -94,35 +70,17 @@ impl<'a> SystemTable<'a> {
         
         // Remove name
         let name_key = format!("child/{}/name", id).into_bytes();
-        let head = Head {
-            value: vec![],
-            hlc: op.timestamp,
-            author: op.author,
-            hash: op.id,
-            tombstone: true,
-        };
+        let head = Head::tombstone(op);
         self.apply_head(&name_key, head, op.causal_deps)?;
         
         // Remove status
         let status_key = format!("child/{}/status", id).into_bytes();
-        let status_head = Head {
-            value: vec![],
-            hlc: op.timestamp,
-            author: op.author,
-            hash: op.id,
-            tombstone: true,
-        };
+        let status_head = Head::tombstone(op);
         self.apply_head(&status_key, status_head, op.causal_deps)?;
 
         // Remove type
         let type_key = format!("child/{}/type", id).into_bytes();
-        let type_head = Head {
-            value: vec![],
-            hlc: op.timestamp,
-            author: op.author,
-            hash: op.id,
-            tombstone: true,
-        };
+        let type_head = Head::tombstone(op);
         self.apply_head(&type_key, type_head, op.causal_deps)?;
 
         Ok(())
@@ -132,13 +90,7 @@ impl<'a> SystemTable<'a> {
 
     pub fn set_strategy(&mut self, strategy: PeerStrategy, op: &Op) -> Result<(), StateDbError> {
         let key = b"strategy";
-        let head = Head {
-            value: strategy.encode_to_vec(),
-            hlc: op.timestamp,
-            author: op.author,
-            hash: op.id,
-            tombstone: false,
-        };
+        let head = Head::from_op(op, strategy.encode_to_vec());
         self.apply_head(key, head, op.causal_deps)
     }
 
@@ -146,13 +98,7 @@ impl<'a> SystemTable<'a> {
 
     pub fn set_name(&mut self, name: String, op: &Op) -> Result<(), StateDbError> {
         let key = b"name";
-        let head = Head {
-            value: SetStoreName { name }.encode_to_vec(),
-            hlc: op.timestamp,
-            author: op.author,
-            hash: op.id,
-            tombstone: false,
-        };
+        let head = Head::from_op(op, SetStoreName { name }.encode_to_vec());
         self.apply_head(key, head, op.causal_deps)
     }
 

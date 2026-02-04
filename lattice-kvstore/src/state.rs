@@ -240,25 +240,13 @@ impl StateLogic for KvState {
             if let Some(op_type) = &kv_op.op_type {
                 match op_type {
                     operation::OpType::Put(put) => {
-                        let new_head = Head {
-                            value: put.value.clone(),
-                            hlc: op.timestamp,
-                            author: op.author,
-                            hash: op.id,
-                            tombstone: false,
-                        };
+                        let new_head = Head::from_op(op, put.value.clone());
                         if let Some(change) = self.apply_head(table, &put.key, new_head, &op.causal_deps)? {
                             updates.push((put.key.clone(), change.new_heads));
                         }
                     }
                     operation::OpType::Delete(del) => {
-                        let tombstone = Head {
-                            value: vec![],
-                            hlc: op.timestamp,
-                            author: op.author,
-                            hash: op.id,
-                            tombstone: true,
-                        };
+                        let tombstone = Head::tombstone(op);
                         if let Some(change) = self.apply_head(table, &del.key, tombstone, &op.causal_deps)? {
                             updates.push((del.key.clone(), change.new_heads));
                         }

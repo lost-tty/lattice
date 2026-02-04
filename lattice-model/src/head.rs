@@ -27,4 +27,28 @@ pub struct Head {
     pub tombstone: bool,
 }
 
+impl Head {
+    /// Create a Head from an Operation and a value
+    pub fn from_op(op: &crate::state_machine::Op, value: Vec<u8>) -> Self {
+        Self {
+            value,
+            hlc: op.timestamp,
+            author: op.author,
+            hash: op.id,
+            tombstone: false,
+        }
+    }
+
+    /// Create a Tombstone Head from an Operation
+    pub fn tombstone(op: &crate::state_machine::Op) -> Self {
+        Self {
+            value: Vec::new(),
+            hlc: op.timestamp,
+            author: op.author,
+            hash: op.id,
+            tombstone: true,
+        }
+    }
+}
+
 
