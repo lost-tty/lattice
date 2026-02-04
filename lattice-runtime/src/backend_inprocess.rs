@@ -9,6 +9,7 @@ use lattice_model::types::PubKey;
 use lattice_net::MeshService;
 use lattice_node::{mesh::Mesh, Node};
 use lattice_systemstore::SystemBatch;
+use lattice_model::store_info::PeerStrategy;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -394,6 +395,23 @@ impl LatticeBackend for InProcessBackend {
                 .ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Store does not support system table")) as Box<dyn std::error::Error + Send + Sync>)?;
             system.list_all()
                 .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error + Send + Sync>)
+        })
+    }
+
+    fn store_peer_strategy(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            let system = store.as_system()
+                .ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Store does not support system table")) as Box<dyn std::error::Error + Send + Sync>)?;
+            
+            let strategy = system.get_peer_strategy()
+                .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error + Send + Sync>)?;
+            
+            Ok(strategy.map(|s| match s {
+                PeerStrategy::Independent => "Independent".to_string(),
+                PeerStrategy::Inherited => "Inherited".to_string(),
+                PeerStrategy::Snapshot(id) => format!("Snapshot({})", id),
+            }))
         })
     }
     

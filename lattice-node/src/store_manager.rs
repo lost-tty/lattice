@@ -101,19 +101,29 @@ impl StoreManager {
     
     /// Create a new store with a fresh UUID.
     /// Does NOT register the store - call register() after.
-    pub async fn create(&self, name: Option<String>, store_type: &str) -> Result<(Uuid, Arc<dyn StoreHandle>), StoreManagerError> {
+    pub async fn create(&self, name: Option<String>, store_type: &str, peer_strategy: Option<lattice_model::store_info::PeerStrategy>) -> Result<(Uuid, Arc<dyn StoreHandle>), StoreManagerError> {
         let store_id = Uuid::new_v4();
         let opened = self.open(store_id, store_type)?;
         
-        // Persist name to SystemTable if provided
-        if let Some(name_str) = name {
-            let system = opened.clone().as_system()
-                .ok_or_else(|| StoreManagerError::Store(format!("Store type '{}' does not support SystemStore, cannot set name", store_type)))?;
-                
-             SystemBatch::new(system.as_ref())
-                .set_name(&name_str)
-                .commit().await
-                .map_err(|e| StoreManagerError::Store(format!("Failed to set store name: {}", e)))?;
+        let system = opened.clone().as_system();
+        
+        // Batch updates to System Table if needed
+        if system.is_some() && (name.is_some() || peer_strategy.is_some()) {
+             let system = system.unwrap();
+             let mut batch = SystemBatch::new(system.as_ref());
+             
+             if let Some(name_str) = name {
+                 batch = batch.set_name(&name_str);
+             }
+             
+             if let Some(strategy) = peer_strategy {
+                 batch = batch.set_strategy(strategy);
+             }
+             
+             batch.commit().await
+                .map_err(|e| StoreManagerError::Store(format!("Failed to configure initial store state: {}", e)))?;
+        } else if (name.is_some() || peer_strategy.is_some()) && system.is_none() {
+             return Err(StoreManagerError::Store(format!("Store type '{}' does not support SystemStore, cannot set configured properties", store_type)));
         }
         
         Ok((store_id, opened))

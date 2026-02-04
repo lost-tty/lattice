@@ -65,16 +65,14 @@ pub trait LatticeBackend: Send + Sync {
     fn store_details(&self, store_id: Uuid) -> AsyncResult<'_, StoreDetails>;
     fn store_delete(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
     fn store_set_name(&self, store_id: Uuid, name: &str) -> AsyncResult<'_, ()>;
-    
     fn store_get_name(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>>;
     fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
     fn store_debug(&self, store_id: Uuid) -> AsyncResult<'_, Vec<AuthorState>>;
     fn store_history(&self, store_id: Uuid) -> AsyncResult<'_, Vec<HistoryEntry>>;
     fn store_author_state(&self, store_id: Uuid, author: Option<&[u8]>) -> AsyncResult<'_, Vec<AuthorState>>;
     fn store_orphan_cleanup(&self, store_id: Uuid) -> AsyncResult<'_, u32>;
-    
-    /// List all entries in the store's system table (for debugging)
     fn store_system_list(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, Vec<u8>)>>;
+    fn store_peer_strategy(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>>;
     
     // ---- Dynamic store operations ----
     fn store_exec(&self, store_id: Uuid, method: &str, payload: &[u8]) -> AsyncResult<'_, Vec<u8>>;

@@ -16,12 +16,12 @@ use lattice_store_base::StateProvider;
 
 /// Trait for accessing system-level data (peers, hierarchy).
 /// For writes, use `store.batch().set_status(...).commit().await`.
-pub trait SystemStore {
+pub trait SystemStore: Send + Sync {
     // === GET operations ===
     fn get_peer(&self, _pubkey: &lattice_model::PubKey) -> Result<Option<PeerInfo>, String> { Err("Not implemented".to_string()) }
     fn get_peers(&self) -> Result<Vec<PeerInfo>, String> { Err("Not implemented".to_string()) }
     fn get_children(&self) -> Result<Vec<StoreLink>, String> { Err("Not implemented".to_string()) }
-    fn get_peer_strategy(&self) -> Result<PeerStrategy, String> { Err("Not implemented".to_string()) }
+    fn get_peer_strategy(&self) -> Result<Option<PeerStrategy>, String> { Err("Not implemented".to_string()) }
     
     /// List all key-value entries in the system table (for debugging/CLI)
     fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, String> { Err("Not implemented".to_string()) }
@@ -64,7 +64,7 @@ where
         self.state().get_children()
     }
 
-    fn get_peer_strategy(&self) -> Result<PeerStrategy, String> {
+    fn get_peer_strategy(&self) -> Result<Option<PeerStrategy>, String> {
         self.state().get_peer_strategy()
     }
 

@@ -332,13 +332,13 @@ impl<'a> ReadOnlySystemTable<'a> {
         Ok(links)
     }
 
-    pub fn get_peer_strategy(&self) -> Result<lattice_model::store_info::PeerStrategy, String> {
+    pub fn get_peer_strategy(&self) -> Result<Option<lattice_model::store_info::PeerStrategy>, String> {
         if let Some(value) = self.get_heads(b"strategy")?.lww() {
             if let Ok(proto_strat) = PeerStrategy::decode(value.as_slice()) {
-                return map_peer_strategy(proto_strat);
+                return map_peer_strategy(proto_strat).map(Some);
             }
         }
-        Ok(lattice_model::store_info::PeerStrategy::default())
+        Ok(None)
     }
 
     pub fn get_name(&self) -> Result<Option<String>, String> {

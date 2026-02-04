@@ -38,23 +38,24 @@ This document outlines the development plan for Lattice.
 - [x] Added `list_all()` API and `store system show` CLI command for debugging
 - [x] Add child store hierarchy (`child/{uuid}/status`, `child/{uuid}/name`)
 - [x] Migrate CLI: `mesh peers` -> `store peers` (peers are part of the store system data)
-- [ ] Add `strategy` key for persisted `PeerStrategy` (Independent/Inherited)
+- [x] Add `strategy` key for persisted `PeerStrategy` (Independent/Inherited)
+- [x] `store status` should show PeerStrategy
 - [ ] Add invite handling (`invite/{token_hash}/status`, `invited_by`, `claimed_by`)
 
 ### 10B: Root Store & Identity (The "New Mesh")
 - [ ] Define "Root Store" concept: `PeerStrategy::Independent` + `StoreMeta`
-- [ ] **Migrate Peer Names**: Move names from Data Table (`/nodes/*/name`) to System Table (`peer/*/name`)
-- [ ] `Node::set_name()` should propagate name to all locally managed Root Stores (System Table)
+- [x] **Migrate Peer Names**: Move names from Data Table (`/nodes/*/name`) to System Table (`peer/*/name`)
+- [x] `Node::set_name()` should propagate name to all locally managed Root Stores (System Table)
 - [ ] Update `lattice-node` bootstrapping:
     - Deprecate `Node::new(mesh_id)`
     - Add `Node::load(root_store_id)`
     - `StoreManager` should load all locally available Root Stores at startup
 
 ### 10C: Migration (Peer Strategy)
-- [ ] **Strategy Backfill**: Since stores are already migrated to System Table, we just need to populate `strategy`:
+- [x] **Strategy Backfill**: Since stores are already migrated to System Table, we just need to populate `strategy`:
     - Root Stores -> `Independent` (default)
     - Child Stores -> `Inherited` (future default)
-- [ ] Test migration with existing data directories
+- [x] Test migration with existing data directories
 
 ### 10D: Legacy Cleanup
 - [ ] Convert existing `Mesh` structs to Root Stores
@@ -233,7 +234,7 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
   - **Mechanism**: One-time migration on startup.
   - **Destructive**: Deletes legacy keys after successful migration.
 
-- [ ] **Legacy Peer Data Migration** (`migrate_legacy_peer_data` in `mesh.rs`)
+- [x] **Legacy Peer Data Migration** (`migrate_legacy_peer_data` in `mesh.rs`)
   - **Purpose**: Moves peer status/metadata from raw keys to System Table.
   - **Mechanism**: One-time migration on startup.
 

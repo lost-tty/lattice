@@ -315,10 +315,14 @@ pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uui
     };
 
     let name = backend.store_get_name(store_id).await.unwrap_or(None);
+    let strategy = backend.store_peer_strategy(store_id).await.unwrap_or(None);
     
     let _ = writeln!(w, "Store ID:  {}", format_id(&meta.id));
     if let Some(n) = name {
         let _ = writeln!(w, "Name:      {}", n);
+    }
+    if let Some(s) = strategy {
+        let _ = writeln!(w, "Strategy:  {}", s);
     }
     let _ = writeln!(w, "Type:      {}", meta.store_type);
     if meta.schema_version > 0 {
@@ -678,6 +682,34 @@ fn decode_value(key: &str, value: &[u8]) -> Option<String> {
     if key.starts_with("child/") || key.ends_with("/name") {
         return std::str::from_utf8(value).ok().map(|s| s.to_string());
     }
+    if key == "strategy" {
+        #[derive(prost::Message)]
+        struct PeerStrategy {
+            #[prost(oneof="StrategyType", tags="1, 2, 3")]
+            r#type: Option<StrategyType>,
+        }
+        #[derive(prost::Oneof, Clone, PartialEq)]
+        pub enum StrategyType {
+             #[prost(bool, tag="1")]
+             Independent(bool),
+             #[prost(bool, tag="2")]
+             Inherited(bool),
+             #[prost(bytes, tag="3")]
+             Snapshot(Vec<u8>),
+        }
+        
+        let s = PeerStrategy::decode(value).ok()?;
+        return Some(match s.r#type {
+            Some(StrategyType::Independent(_)) => "Independent".to_string(),
+            Some(StrategyType::Inherited(_)) => "Inherited".to_string(),
+            Some(StrategyType::Snapshot(id)) => {
+                 let uuid_str = uuid::Uuid::from_slice(&id).map(|u| u.to_string()).unwrap_or_else(|_| hex::encode(&id));
+                 format!("Snapshot({})", uuid_str)
+            },
+            None => "Unknown".to_string(),
+        });
+    }
+
     None
 }
 

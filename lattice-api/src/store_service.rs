@@ -5,7 +5,7 @@ use crate::proto::{
     store_service_server::StoreService, AuthorStateRequest, AuthorStateResponse,
     CleanupResult, CreateStoreRequest, DebugInfo, Empty, SetStoreNameRequest,
     HistoryRequest, HistoryResponse, MeshId, StoreId, StoreRef, StoreMeta, StoreList, StoreDetails,
-    SystemListResponse, SystemEntry, StoreNameResponse,
+    SystemListResponse, SystemEntry, StoreNameResponse, PeerStrategyResponse,
 };
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -137,6 +137,13 @@ impl StoreService for StoreServiceImpl {
         let store_id = Self::parse_uuid(&req.store_id)?;
         self.backend.store_revoke_peer(store_id, &req.peer_key).await
             .map(|_| Response::new(Empty {}))
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    async fn get_peer_strategy(&self, request: Request<StoreId>) -> Result<Response<PeerStrategyResponse>, Status> {
+        let store_id = Self::parse_uuid(&request.into_inner().id)?;
+        self.backend.store_peer_strategy(store_id).await
+            .map(|strategy| Response::new(PeerStrategyResponse { strategy }))
             .map_err(|e| Status::internal(e.to_string()))
     }
 }

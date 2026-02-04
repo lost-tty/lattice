@@ -6,6 +6,7 @@ use lattice_proto::storage::{
     store_op, SetStoreName,
     SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, SetPeerName, UniversalOp, universal_op, PeerOp, SignedEntry, Entry,
     PeerStatus as ProtoStatus, ChildStatus as ProtoChildStatus,
+    PeerStrategyOp, SetPeerStrategy,
 };
 use lattice_store_base::StateProvider;
 use futures_util::{Stream, StreamExt};
@@ -202,6 +203,39 @@ pub fn create_remove_child_payload(target_id: lattice_model::Uuid) -> Vec<u8> {
     }))
 }
 
+// ==================== Strategy Helpers ====================
+
+/// Helper to wrap a strategy operation in the full envelope
+fn wrap_strategy_op(op: peer_strategy_op::Op) -> Vec<u8> {
+    let envelope = UniversalOp {
+        op: Some(universal_op::Op::System(SystemOp {
+            kind: Some(system_op::Kind::Strategy(PeerStrategyOp {
+                op: Some(op)
+            }))
+        }))
+    };
+    envelope.encode_to_vec()
+}
+
+pub fn map_to_proto_strategy(model: PeerStrategy) -> lattice_proto::storage::PeerStrategy {
+    use lattice_proto::storage::peer_strategy::Type;
+    let type_enum = match model {
+        PeerStrategy::Independent => Type::Independent(true),
+        PeerStrategy::Inherited => Type::Inherited(true),
+        PeerStrategy::Snapshot(id) => Type::Snapshot(id.as_bytes().to_vec()),
+    };
+    lattice_proto::storage::PeerStrategy {
+        r#type: Some(type_enum),
+    }
+}
+
+pub fn create_set_strategy_payload(strategy: PeerStrategy) -> Vec<u8> {
+    let proto = map_to_proto_strategy(strategy);
+    wrap_strategy_op(peer_strategy_op::Op::Set(SetPeerStrategy {
+        strategy: Some(proto),
+    }))
+}
+
 // ==================== Batch Builder ====================
 
 /// A pending write operation (key + payload)
@@ -289,6 +323,14 @@ impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
             status: proto_status as i32,
         }));
         
+        self.ops.push(PendingOp { key, payload });
+        self
+    }
+
+    /// Set peer strategy
+    pub fn set_strategy(mut self, strategy: PeerStrategy) -> Self {
+        let key = b"strategy".to_vec();
+        let payload = create_set_strategy_payload(strategy);
         self.ops.push(PendingOp { key, payload });
         self
     }

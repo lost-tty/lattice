@@ -155,12 +155,12 @@ impl<T: StateLogic> SystemStore for PersistentState<T> {
         crate::tables::ReadOnlySystemTable::new(table).get_children()
     }
 
-    fn get_peer_strategy(&self) -> Result<lattice_model::store_info::PeerStrategy, String> {
+    fn get_peer_strategy(&self) -> Result<Option<lattice_model::store_info::PeerStrategy>, String> {
         let read_txn = self.inner.backend().db().begin_read().map_err(|e| e.to_string())?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
             Ok(t) => t,
-            // If system table doesn't exist, we return default strategy (Independent)
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(lattice_model::store_info::PeerStrategy::default()),
+            // If system table doesn't exist, we return None (missing)
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
             Err(e) => return Err(e.to_string()),
         };
         crate::tables::ReadOnlySystemTable::new(table).get_peer_strategy()

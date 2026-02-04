@@ -21,6 +21,8 @@ use crate::{
 };
 use lattice_model::types::PubKey;
 use lattice_model::{PeerProvider, STORE_TYPE_KVSTORE};
+use lattice_model::store_info::PeerStrategy;
+use lattice_systemstore::SystemBatch;
 use futures_util::StreamExt;
 use crate::Uuid;
 use lattice_kvstore_client::{KvStoreExt, BatchBuilder};
@@ -84,13 +86,17 @@ impl Mesh {
         store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
         // Create a fresh store via store_manager
-        let (root_store_id, root_store) = store_manager.create(None, STORE_TYPE_KVSTORE).await?;
+        let (root_store_id, root_store) = store_manager.create(
+            None, 
+            STORE_TYPE_KVSTORE,
+            Some(PeerStrategy::Independent)
+        ).await?;
         
         // PeerManager needs a reference to the store handle
         // Create peer manager (cast root_store to SystemStore)
         let system_store = root_store.clone().as_system()
             .ok_or_else(|| MeshError::Other("Root store does not support SystemStore trait".into()))?;
-        
+            
         let peer_manager = PeerManager::new(system_store).await
             .map_err(|e| MeshError::Other(e.to_string()))?;
         
@@ -134,6 +140,9 @@ impl Mesh {
 
         // Run legacy migrations (DATA table → SystemStore)
         migrate_legacy_peer_data(root_store.as_ref(), &*system_store).await?;
+        
+        // Backfill Peer Strategy (Independent for Root, Inherited for others)
+        backfill_peer_strategy(root_store.as_ref(), &*system_store, true).await?;
 
         let peer_manager = PeerManager::new(system_store).await
             .map_err(|e| MeshError::Other(e.to_string()))?;
@@ -363,6 +372,13 @@ impl Mesh {
 
                     match store_manager.open(decl.id, &store_type) {
                         Ok(opened) => {
+                            // Backfill Peer Strategy if missing (Inherited for children)
+                            if let Some(system) = opened.clone().as_system() {
+                                if let Err(e) = backfill_peer_strategy(opened.as_ref(), &*system, false).await {
+                                     warn!(store_id = %decl.id, error = ?e, "Failed to backfill peer strategy");
+                                }
+                            }
+
                             // Register with same peer_manager as root store
                             if let Err(e) = store_manager.register(root_store_id, decl.id, opened, &store_type, peer_manager.clone()) {
                                 warn!(store_id = %decl.id, error = ?e, "Failed to register store");
@@ -471,8 +487,11 @@ impl Mesh {
     /// Returns the new store's UUID.
     pub async fn create_store(&self, name: Option<String>, store_type: &str) -> Result<Uuid, MeshError> {
         // 1. Create actual store instance (DB)
-        let (store_id, handle) = self.store_manager.create(name.clone(), store_type).await
-            .map_err(|e| MeshError::Other(e.to_string()))?;
+        let (store_id, handle) = self.store_manager.create(
+            name.clone(), 
+            store_type,
+            Some(PeerStrategy::Inherited)
+        ).await.map_err(|e| MeshError::Other(e.to_string()))?;
 
         // 2. Register locally (so it's tracked and available immediately)
         self.store_manager.register(
@@ -707,7 +726,6 @@ impl std::fmt::Debug for Mesh {
 
 // ==================== Legacy Migration ====================
 
-use lattice_systemstore::SystemBatch;
 use lattice_model::PeerStatus;
 
 /// Migrate legacy peer data from DATA table to SystemStore.
@@ -885,5 +903,44 @@ where
     }
     
     info!("Legacy peer migration complete");
+    Ok(())
+}
+
+/// Backfill Peer Strategy if missing.
+/// Root stores -> Independent
+/// Child stores -> Inherited
+async fn backfill_peer_strategy(
+    _store: &dyn StoreHandle, // Unused for now, but good for future checks
+    system: &dyn lattice_systemstore::SystemStore,
+    is_root: bool
+) -> Result<(), MeshError> {    
+    // Check if strategy is already set
+    // get_peer_strategy returns default if missing. 
+    // We force-overwrite for now as this is a one-time migration hook or startup check.
+    
+    // Simplification: Always enforce the correct strategy for the role.
+    let target_strategy = if is_root {
+        PeerStrategy::Independent
+    } else {
+        PeerStrategy::Inherited
+    };
+    
+    // Optimistic check: if current matches target (even if default), we might skip?
+    // transform get_peer_strategy error to MeshError
+    let current_opt = system.get_peer_strategy().map_err(MeshError::Other)?;
+    
+    let needs_update = match current_opt {
+        Some(current) => current != target_strategy,
+        None => true, // Force write if missing
+    };
+    
+    if needs_update {
+        info!("Backfilling peer strategy to {:?}", target_strategy);
+        lattice_systemstore::SystemBatch::new(system)
+            .set_strategy(target_strategy)
+            .commit().await
+            .map_err(MeshError::Other)?;
+    }
+    
     Ok(())
 }

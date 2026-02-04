@@ -127,6 +127,10 @@ message StoreNameResponse {
   optional string name = 1;
 }
 
+message PeerStrategyResponse {
+  optional string strategy = 1;
+}
+
 // Store reference
 message StoreRef {
   bytes id = 1;

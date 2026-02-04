@@ -47,6 +47,7 @@ service StoreService {
   rpc SystemList(StoreId) returns (SystemListResponse);
   rpc ListPeers(StoreId) returns (PeerList);
   rpc RevokePeer(RevokePeerRequest) returns (Empty);
+  rpc GetPeerStrategy(StoreId) returns (PeerStrategyResponse);
 }
 
 // ============================================================================
