@@ -55,13 +55,13 @@ pub trait LatticeBackend: Send + Sync {
     fn mesh_status(&self, mesh_id: Uuid) -> AsyncResult<'_, MeshInfo>;
     fn mesh_join(&self, token: &str) -> AsyncResult<'_, Uuid>;
     fn mesh_invite(&self, mesh_id: Uuid) -> AsyncResult<'_, String>;
-    fn mesh_peers(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>>;
-    fn mesh_revoke(&self, mesh_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()>;
     
     // ---- Store operations ----
     fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef>;
     fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreRef>>;
     fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreMeta>;
+    fn store_peers(&self, store_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>>;
+    fn store_revoke_peer(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()>;
     fn store_details(&self, store_id: Uuid) -> AsyncResult<'_, StoreDetails>;
     fn store_delete(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
     fn store_set_name(&self, store_id: Uuid, name: &str) -> AsyncResult<'_, ()>;

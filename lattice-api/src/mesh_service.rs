@@ -5,7 +5,7 @@
 use crate::backend::Backend;
 use crate::proto::{
     mesh_service_server::MeshService, Empty, InviteToken, JoinRequest, JoinResponse, MeshId,
-    MeshInfo, MeshList, PeerList, RevokeRequest,
+    MeshInfo, MeshList,
 };
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -57,21 +57,6 @@ impl MeshService for MeshServiceImpl {
         let mesh_id = Self::parse_uuid(&request.into_inner().id)?;
         self.backend.mesh_invite(mesh_id).await
             .map(|token| Response::new(InviteToken { token }))
-            .map_err(|e| Status::internal(e.to_string()))
-    }
-
-    async fn list_peers(&self, request: Request<MeshId>) -> Result<Response<PeerList>, Status> {
-        let mesh_id = Self::parse_uuid(&request.into_inner().id)?;
-        self.backend.mesh_peers(mesh_id).await
-            .map(|peers| Response::new(PeerList { peers }))
-            .map_err(|e| Status::internal(e.to_string()))
-    }
-
-    async fn revoke(&self, request: Request<RevokeRequest>) -> Result<Response<Empty>, Status> {
-        let req = request.into_inner();
-        let mesh_id = Self::parse_uuid(&req.mesh_id)?;
-        self.backend.mesh_revoke(mesh_id, &req.peer_key).await
-            .map(|_| Response::new(Empty {}))
             .map_err(|e| Status::internal(e.to_string()))
     }
 }

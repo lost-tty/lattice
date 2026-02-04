@@ -4,7 +4,7 @@
 
 use crate::backend::*;
 use lattice_api::proto::{
-    Empty, MeshId, StoreId, JoinRequest, CreateStoreRequest, RevokeRequest, SetNameRequest,
+    Empty, MeshId, StoreId, JoinRequest, CreateStoreRequest, RevokePeerRequest, SetNameRequest,
     SetStoreNameRequest, HistoryRequest, ExecRequest,
 };
 use lattice_api::RpcClient;
@@ -123,23 +123,6 @@ impl LatticeBackend for RpcBackend {
         })
     }
     
-    fn mesh_peers(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>> {
-        Box::pin(async move {
-            let mut client = self.client.clone();
-            let resp = client.mesh.list_peers(MeshId { id: mesh_id.as_bytes().to_vec() }).await?;
-            Ok(resp.into_inner().peers)
-        })
-    }
-    
-    fn mesh_revoke(&self, mesh_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()> {
-        let peer_key = peer_key.to_vec();
-        Box::pin(async move {
-            let mut client = self.client.clone();
-            client.mesh.revoke(RevokeRequest { mesh_id: mesh_id.as_bytes().to_vec(), peer_key }).await?;
-            Ok(())
-        })
-    }
-    
     fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef> {
         let store_type = store_type.to_string();
         Box::pin(async move {
@@ -166,6 +149,23 @@ impl LatticeBackend for RpcBackend {
             let mut client = self.client.clone();
             let resp = client.store.get_status(StoreId { id: store_id.as_bytes().to_vec() }).await?;
             Ok(resp.into_inner())
+        })
+    }
+    
+    fn store_peers(&self, store_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>> {
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client.store.list_peers(StoreId { id: store_id.as_bytes().to_vec() }).await?;
+            Ok(resp.into_inner().peers)
+        })
+    }
+
+    fn store_revoke_peer(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()> {
+        let peer_key = peer_key.to_vec();
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            client.store.revoke_peer(RevokePeerRequest { store_id: store_id.as_bytes().to_vec(), peer_key }).await?;
+            Ok(())
         })
     }
     

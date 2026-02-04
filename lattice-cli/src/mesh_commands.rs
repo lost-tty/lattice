@@ -2,10 +2,9 @@
 
 use lattice_runtime::LatticeBackend;
 use crate::commands::{CmdResult, CommandOutput::*, Writer, MeshSubcommand};
-use crate::display_helpers::{format_elapsed, format_id, parse_uuid};
+use crate::display_helpers::{format_id, parse_uuid};
 use owo_colors::OwoColorize;
 use std::io::Write;
-use std::time::Duration;
 use uuid::Uuid;
 
 /// Context for mesh commands
@@ -25,9 +24,7 @@ pub async fn handle_command(
         MeshSubcommand::Use { mesh_id } => cmd_use(backend, &mesh_id, writer).await,
         MeshSubcommand::Status => cmd_status(backend, ctx.mesh_id, writer).await,
         MeshSubcommand::Join { token } => cmd_join(backend, &token, writer).await,
-        MeshSubcommand::Peers => cmd_peers(backend, ctx.mesh_id, writer).await,
         MeshSubcommand::Invite => cmd_invite(backend, ctx.mesh_id, writer).await,
-        MeshSubcommand::Revoke { pubkey } => cmd_revoke(backend, ctx.mesh_id, &pubkey, writer).await,
     }
 }
 
@@ -174,66 +171,7 @@ pub async fn cmd_join(backend: &dyn LatticeBackend, token: &str, writer: Writer)
     Ok(Continue)
 }
 
-/// List all peers with authorization status + online state
-pub async fn cmd_peers(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, writer: Writer) -> CmdResult {
-    let mut w = writer.clone();
-    
-    let mesh_id = match mesh_id {
-        Some(id) => id,
-        None => {
-            let _ = writeln!(w, "Error: No active mesh.");
-            return Ok(Continue);
-        }
-    };
-    
-    let mut peers = match backend.mesh_peers(mesh_id).await {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = writeln!(w, "Error: {}", e);
-            return Ok(Continue);
-        }
-    };
-    
-    if peers.is_empty() {
-        let _ = writeln!(w, "No peers found.");
-        return Ok(Continue);
-    }
-    
-    // Sort by status then name
-    peers.sort_by(|a, b| a.status.cmp(&b.status).then(a.name.cmp(&b.name)));
-    
-    let my_pubkey = backend.node_id();
-    let mut current_status: Option<&str> = None;
-    
-    for peer in &peers {
-        // Print status header if changed
-        if current_status != Some(&peer.status) {
-            current_status = Some(&peer.status);
-            let count = peers.iter().filter(|p| p.status == peer.status).count();
-            let _ = writeln!(w, "\n[{}] ({}):", peer.status, count);
-        }
-        
-        // Blue ● for self, green ● for online, grey ○ for offline
-        let is_self = peer.public_key == my_pubkey;
-        let bullet = if is_self {
-            format!("{}", "●".blue())
-        } else if peer.online {
-            format!("{}", "●".green())
-        } else {
-            format!("{}", "○".bright_black())
-        };
-        
-        let name_str = if peer.name.is_empty() { String::new() } else { format!(" {}", peer.name) };
-        let last_seen_str = if peer.last_seen_ms > 0 { 
-            format!(" ({})", format_elapsed(Duration::from_millis(peer.last_seen_ms)))
-        } else { 
-            String::new() 
-        };
-        let _ = writeln!(w, "  {} {}{}{}", bullet, hex::encode(&peer.public_key), name_str, last_seen_str);
-    }
-    
-    Ok(Continue)
-}
+
 
 /// Generate an invite token
 pub async fn cmd_invite(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, writer: Writer) -> CmdResult {
@@ -255,38 +193,6 @@ pub async fn cmd_invite(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, wri
         }
         Err(e) => {
             let _ = writeln!(w, "Error creating token: {}", e);
-        }
-    }
-    
-    Ok(Continue)
-}
-
-/// Revoke a peer from the mesh
-pub async fn cmd_revoke(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, pubkey: &str, writer: Writer) -> CmdResult {
-    let mut w = writer.clone();
-    
-    let mesh_id = match mesh_id {
-        Some(id) => id,
-        None => {
-            let _ = writeln!(w, "Error: No active mesh.");
-            return Ok(Continue);
-        }
-    };
-    
-    let pk = match hex::decode(pubkey) {
-        Ok(k) => k,
-        Err(e) => {
-            let _ = writeln!(w, "Invalid pubkey: {}", e);
-            return Ok(Continue);
-        }
-    };
-    
-    match backend.mesh_revoke(mesh_id, &pk).await {
-        Ok(()) => {
-            let _ = writeln!(w, "Revoked peer: {}", pubkey);
-        }
-        Err(e) => {
-            let _ = writeln!(w, "Error: {}", e);
         }
     }
     

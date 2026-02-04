@@ -37,7 +37,7 @@ This document outlines the development plan for Lattice.
 - [x] Removed dead code: `HandleBase`, `PeerManager`/`SubstoreManager` traits, `as_writer`
 - [x] Added `list_all()` API and `store system show` CLI command for debugging
 - [x] Add child store hierarchy (`child/{uuid}/status`, `child/{uuid}/name`)
-- [ ] Migrate CLI: `mesh peers` -> `store peers` (peers are part of the store system data)
+- [x] Migrate CLI: `mesh peers` -> `store peers` (peers are part of the store system data)
 - [ ] Add `strategy` key for persisted `PeerStrategy` (Independent/Inherited)
 - [ ] Add invite handling (`invite/{token_hash}/status`, `invited_by`, `claimed_by`)
 

@@ -8,6 +8,7 @@ use lattice_api::proto::{StoreMeta, StoreRef};
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
 use lattice_node::{mesh::Mesh, Node};
+use lattice_systemstore::SystemBatch;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -160,41 +161,23 @@ impl LatticeBackend for InProcessBackend {
         })
     }
     
-    fn mesh_peers(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>> {
-        Box::pin(async move {
-            let mesh = self.get_mesh(mesh_id)?;
-            let peers = mesh.list_peers().await?;
-            
-            // Get online status from network layer
-            let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = self.mesh_network
-                .as_ref()
-                .and_then(|m| m.connected_peers().ok())
-                .unwrap_or_default();
-            
-            Ok(peers.into_iter().map(|p| {
-                let is_self = p.pubkey == self.node.node_id();
-                let online = is_self || online_peers.contains_key(&p.pubkey);
-                let last_seen_ms = online_peers.get(&p.pubkey)
-                    .map(|i| i.elapsed().as_millis() as u64)
-                    .unwrap_or(0);
-                PeerInfo {
-                    public_key: p.pubkey.to_vec(),
-                    name: p.name.unwrap_or_default(),
-                    status: p.status.as_str().to_string(),
-                    online,
-                    added_at: p.added_at.unwrap_or(0),
-                    last_seen_ms,
-                }
-            }).collect())
-        })
-    }
-    
-    fn mesh_revoke(&self, mesh_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()> {
+    fn store_revoke_peer(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()> {
         let peer_key = peer_key.to_vec();
         Box::pin(async move {
-            let mesh = self.get_mesh(mesh_id)?;
+            let store = self.get_store(store_id)?;
+            let system = store.as_system()
+                .ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::Unsupported, "Store does not support system operations")) as Box<dyn std::error::Error + Send + Sync>)?;
+            
             let pk = PubKey::try_from(peer_key.as_slice())?;
-            mesh.revoke_peer(pk).await?;
+            
+            // TODO: In the future, check if get_peer_strategy() == Independent before modifying.
+            // For now, we allow writing to the system table directly as requested.
+            
+            SystemBatch::new(system.as_ref())
+                .set_status(pk, lattice_model::PeerStatus::Revoked)
+                .commit().await
+                .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error + Send + Sync>)?;
+                
             Ok(())
         })
     }
@@ -236,6 +219,42 @@ impl LatticeBackend for InProcessBackend {
             let store_meta = inspector.store_meta().await;
             
             Ok(store_meta.into())
+        })
+    }
+    
+    fn store_peers(&self, store_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            
+            let system = store.clone().as_system()
+                .ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Store does not support system table")) as Box<dyn std::error::Error + Send + Sync>)?;
+            
+            let peers = system.get_peers()
+                .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error + Send + Sync>)?;
+            
+            // Get online status from network layer
+            // Note: Currently online status is global (by PubKey), but we filter by peers known to this store
+            let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = self.mesh_network
+                .as_ref()
+                .and_then(|m| m.connected_peers().ok())
+                .unwrap_or_default();
+            
+            Ok(peers.into_iter().map(|p| {
+                let is_self = p.pubkey == self.node.node_id();
+                let online = is_self || online_peers.contains_key(&p.pubkey);
+                let last_seen_ms = online_peers.get(&p.pubkey)
+                    .map(|i| i.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                
+                PeerInfo {
+                    public_key: p.pubkey.to_vec(),
+                    name: p.name.unwrap_or_default(),
+                    status: p.status.as_str().to_string(),
+                    online,
+                    added_at: p.added_at.unwrap_or(0),
+                    last_seen_ms,
+                }
+            }).collect())
         })
     }
     

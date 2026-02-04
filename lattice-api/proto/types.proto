@@ -99,8 +99,8 @@ message PeerList {
   repeated PeerInfo peers = 1;
 }
 
-message RevokeRequest {
-  bytes mesh_id = 1;
+message RevokePeerRequest {
+  bytes store_id = 1;
   bytes peer_key = 2;
 }
 

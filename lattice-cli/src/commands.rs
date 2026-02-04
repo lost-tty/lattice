@@ -145,12 +145,8 @@ pub enum MeshSubcommand {
     Status,
     /// Join a mesh using an invite token
     Join { token: String },
-    /// List all peers
-    Peers,
     /// Generate a one-time invite token
     Invite,
-    /// Revoke a peer from the mesh
-    Revoke { pubkey: String },
 }
 
 #[derive(Subcommand, Clone)]
@@ -175,6 +171,11 @@ pub enum StoreSubcommand {
     Status {
         #[arg(short, long)]
         verbose: bool,
+    },
+    /// Peer management
+    Peer {
+        #[command(subcommand)]
+        subcommand: PeerSubcommand,
     },
     /// Debug graph output
     Debug,
@@ -215,6 +216,17 @@ pub enum StoreSubcommand {
 pub enum SystemSubcommand {
     /// Show system table contents
     Show,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum PeerSubcommand {
+    /// List all peers for this store
+    List,
+    /// Revoke a peer from the store
+    Revoke {
+        /// Public key of peer to revoke
+        pubkey: String,
+    },
 }
 
 async fn format_help(backend: &dyn LatticeBackend, ctx: &CommandContext, topic: Option<&str>) -> String {
@@ -285,6 +297,14 @@ pub async fn handle_command(
             }
             StoreSubcommand::Status { verbose: _ } => {
                 store_commands::cmd_store_status(backend, ctx.store_id, writer).await
+            }
+            StoreSubcommand::Peer { subcommand } => match subcommand {
+                PeerSubcommand::List => {
+                    store_commands::cmd_store_peer_list(backend, ctx.store_id, writer).await
+                }
+                PeerSubcommand::Revoke { pubkey } => {
+                    store_commands::cmd_store_peer_revoke(backend, ctx.store_id, &pubkey, writer).await
+                }
             }
             StoreSubcommand::Debug => {
                 store_commands::cmd_store_debug(backend, ctx.store_id, writer).await

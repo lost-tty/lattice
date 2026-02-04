@@ -24,8 +24,7 @@ service MeshService {
   rpc GetStatus(MeshId) returns (MeshInfo);
   rpc Join(JoinRequest) returns (JoinResponse);
   rpc Invite(MeshId) returns (InviteToken);
-  rpc ListPeers(MeshId) returns (PeerList);
-  rpc Revoke(RevokeRequest) returns (Empty);
+
 }
 
 // ============================================================================
@@ -46,6 +45,8 @@ service StoreService {
   rpc AuthorState(AuthorStateRequest) returns (AuthorStateResponse);
   rpc OrphanCleanup(StoreId) returns (CleanupResult);
   rpc SystemList(StoreId) returns (SystemListResponse);
+  rpc ListPeers(StoreId) returns (PeerList);
+  rpc RevokePeer(RevokePeerRequest) returns (Empty);
 }
 
 // ============================================================================

@@ -124,4 +124,19 @@ impl StoreService for StoreServiceImpl {
             }))
             .map_err(|e| Status::internal(e.to_string()))
     }
+
+    async fn list_peers(&self, request: Request<StoreId>) -> Result<Response<crate::proto::PeerList>, Status> {
+        let store_id = Self::parse_uuid(&request.into_inner().id)?;
+        self.backend.store_peers(store_id).await
+            .map(|peers| Response::new(crate::proto::PeerList { peers }))
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    async fn revoke_peer(&self, request: Request<crate::proto::RevokePeerRequest>) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let store_id = Self::parse_uuid(&req.store_id)?;
+        self.backend.store_revoke_peer(store_id, &req.peer_key).await
+            .map(|_| Response::new(Empty {}))
+            .map_err(|e| Status::internal(e.to_string()))
+    }
 }

@@ -284,22 +284,6 @@ impl Lattice {
             .map_err(|e| LatticeError::from_backend(e))
     }
 
-    pub fn mesh_peers(&self, mesh_id: String) -> Result<Vec<PeerInfo>, LatticeError> {
-        let r_guard = self.rt.block_on(self.runtime.read());
-        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&mesh_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().mesh_peers(id))
-            .map_err(|e| LatticeError::from_backend(e))
-    }
-
-    pub fn mesh_revoke(&self, mesh_id: String, peer_key: Vec<u8>) -> Result<(), LatticeError> {
-        let r_guard = self.rt.block_on(self.runtime.read());
-        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&mesh_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().mesh_revoke(id, &peer_key))
-             .map_err(|e| LatticeError::from_backend(e))
-    }
-
     // Store
     pub fn store_create(&self, mesh_id: String, name: Option<String>, store_type: String) -> Result<StoreRef, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
@@ -365,6 +349,22 @@ impl Lattice {
         self.rt.block_on(r.backend().store_orphan_cleanup(id))
             .map(|orphans_removed| CleanupResult { orphans_removed })
             .map_err(|e| LatticeError::from_backend(e))
+    }
+
+    pub fn store_peers(&self, store_id: String) -> Result<Vec<PeerInfo>, LatticeError> {
+        let r_guard = self.rt.block_on(self.runtime.read());
+        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
+        self.rt.block_on(r.backend().store_peers(id))
+            .map_err(|e| LatticeError::from_backend(e))
+    }
+
+    pub fn store_revoke_peer(&self, store_id: String, peer_key: Vec<u8>) -> Result<(), LatticeError> {
+        let r_guard = self.rt.block_on(self.runtime.read());
+        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
+        self.rt.block_on(r.backend().store_revoke_peer(id, &peer_key))
+             .map_err(|e| LatticeError::from_backend(e))
     }
 
     // Dynamic Reflection
