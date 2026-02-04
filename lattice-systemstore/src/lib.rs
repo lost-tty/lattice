@@ -26,6 +26,9 @@ pub trait SystemStore {
     /// List all key-value entries in the system table (for debugging/CLI)
     fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, String> { Err("Not implemented".to_string()) }
 
+    /// Get the store's display name
+    fn get_name(&self) -> Result<Option<String>, String> { Err("Not implemented".to_string()) }
+
     /// Subscribe to high-level system events.
     fn subscribe_events(&self) -> Pin<Box<dyn Stream<Item = Result<SystemEvent, String>> + Send>> {
         Box::pin(futures_util::stream::empty())
@@ -67,6 +70,10 @@ where
 
     fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
         self.state().list_all()
+    }
+
+    fn get_name(&self) -> Result<Option<String>, String> {
+        self.state().get_name()
     }
 
     fn subscribe_events(&self) -> Pin<Box<dyn Stream<Item = Result<SystemEvent, String>> + Send>> {

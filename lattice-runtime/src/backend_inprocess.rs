@@ -52,21 +52,6 @@ impl InProcessBackend {
         self.node.store_manager().get_handle(&store_id)
             .ok_or_else(|| "Store not found".into())
     }
-    
-    async fn find_store_name(&self, store_id: Uuid) -> Option<String> {
-        if let Ok(meshes) = self.node.meta().list_meshes() {
-            for (mesh_id, _) in meshes {
-                if let Some(mesh) = self.node.mesh_by_id(mesh_id) {
-                    if let Ok(stores) = mesh.list_stores().await {
-                        if let Some(s) = stores.into_iter().find(|s| s.id == store_id) {
-                            return s.name;
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
 }
 
 impl LatticeBackend for InProcessBackend {
@@ -263,11 +248,7 @@ impl LatticeBackend for InProcessBackend {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
             
-            let mut store_meta = inspector.store_meta().await;
-            // Prefer name from store's own meta table, fall back to declaration for legacy stores
-            if store_meta.name.is_none() {
-                store_meta.name = self.find_store_name(store_id).await;
-            }
+            let store_meta = inspector.store_meta().await;
             
             Ok(store_meta.into())
         })
@@ -302,6 +283,34 @@ impl LatticeBackend for InProcessBackend {
                 }
             }
             Err("Store not found".into())
+        })
+    }
+    
+    fn store_set_name(&self, store_id: Uuid, name: &str) -> AsyncResult<'_, ()> {
+        let name = name.to_string();
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            use lattice_systemstore::SystemBatch;
+            
+            let system = store.clone().as_system()
+                .ok_or("Store does not support SystemStore trait")?;
+            
+            SystemBatch::new(system.as_ref()).set_name(&name).commit().await
+                .map_err(|e| e.into())
+        })
+    }
+    
+    fn store_get_name(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+
+            if let Some(system) = store.as_system() {
+                if let Ok(name) = system.get_name() {
+                    return Ok(name);
+                }
+            }
+            
+            Ok(None)
         })
     }
     

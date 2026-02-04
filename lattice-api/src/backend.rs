@@ -64,6 +64,9 @@ pub trait LatticeBackend: Send + Sync {
     fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreMeta>;
     fn store_details(&self, store_id: Uuid) -> AsyncResult<'_, StoreDetails>;
     fn store_delete(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
+    fn store_set_name(&self, store_id: Uuid, name: &str) -> AsyncResult<'_, ()>;
+    
+    fn store_get_name(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>>;
     fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
     fn store_debug(&self, store_id: Uuid) -> AsyncResult<'_, Vec<AuthorState>>;
     fn store_history(&self, store_id: Uuid) -> AsyncResult<'_, Vec<HistoryEntry>>;

@@ -33,7 +33,6 @@ impl Default for PeerStrategy {
 pub struct StoreMeta {
     pub store_id: Uuid,
     pub store_type: String,
-    pub name: Option<String>,
     pub schema_version: u64,
 }
 
@@ -45,6 +44,7 @@ pub enum SystemEvent {
     ChildLinkUpdated(StoreLink),
     ChildLinkRemoved(Uuid),
     StrategyUpdated(PeerStrategy),
+    StoreNameUpdated(String),
 }
 
 /// Trait for store handles to provide basic store information.

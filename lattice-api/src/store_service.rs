@@ -3,9 +3,9 @@
 use crate::backend::Backend;
 use crate::proto::{
     store_service_server::StoreService, AuthorStateRequest, AuthorStateResponse,
-    CleanupResult, CreateStoreRequest, DebugInfo, Empty,
+    CleanupResult, CreateStoreRequest, DebugInfo, Empty, SetStoreNameRequest,
     HistoryRequest, HistoryResponse, MeshId, StoreId, StoreRef, StoreMeta, StoreList, StoreDetails,
-    SystemListResponse, SystemEntry,
+    SystemListResponse, SystemEntry, StoreNameResponse,
 };
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -60,6 +60,21 @@ impl StoreService for StoreServiceImpl {
         let store_id = Self::parse_uuid(&request.into_inner().id)?;
         self.backend.store_delete(store_id).await
             .map(|_| Response::new(Empty {}))
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    async fn set_name(&self, request: Request<SetStoreNameRequest>) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let store_id = Self::parse_uuid(&req.store_id)?;
+        self.backend.store_set_name(store_id, &req.name).await
+            .map(|_| Response::new(Empty {}))
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    async fn get_name(&self, request: Request<StoreId>) -> Result<Response<StoreNameResponse>, Status> {
+        let store_id = Self::parse_uuid(&request.into_inner().id)?;
+        self.backend.store_get_name(store_id).await
+            .map(|name| Response::new(StoreNameResponse { name }))
             .map_err(|e| Status::internal(e.to_string()))
     }
 

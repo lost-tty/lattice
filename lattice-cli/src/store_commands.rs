@@ -172,6 +172,30 @@ pub async fn cmd_store_delete(backend: &dyn LatticeBackend, store_id: Option<Uui
     Ok(Continue)
 }
 
+/// Set the name of a store
+pub async fn cmd_store_set_name(backend: &dyn LatticeBackend, store_id: Option<Uuid>, name: &str, writer: Writer) -> CmdResult {
+    let mut w = writer.clone();
+    
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "Error: No store selected. Use 'store use <id>'");
+            return Ok(Continue);
+        }
+    };
+    
+    match backend.store_set_name(store_id, name).await {
+        Ok(()) => {
+            let _ = writeln!(w, "Set name to '{}' for store {}", name, store_id);
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+        }
+    }
+    
+    Ok(Continue)
+}
+
 // ==================== Store Status/Debug Commands ====================
 
 pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
@@ -185,32 +209,35 @@ pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uui
         }
     };
     
-    match backend.store_status(store_id).await {
-        Ok(meta) => {
-            let _ = writeln!(w, "Store ID:  {}", format_id(&meta.id));
-            if !meta.name.is_empty() {
-                let _ = writeln!(w, "Name:      {}", meta.name);
-            }
-            let _ = writeln!(w, "Type:      {}", meta.store_type);
-            if meta.schema_version > 0 {
-                let _ = writeln!(w, "Schema:    v{}", meta.schema_version);
-            }
-            
-            // Fetch runtime statistics
-            if let Ok(details) = backend.store_details(store_id).await {
-                if details.author_count > 0 {
-                    let _ = writeln!(w, "Authors:   {}", details.author_count);
-                }
-                if details.log_file_count > 0 {
-                    let _ = writeln!(w, "Logs:      {} files, {} bytes", details.log_file_count, details.log_bytes);
-                }
-                if details.orphan_count > 0 {
-                    let _ = writeln!(w, "Orphans:   {} (pending parent entries)", details.orphan_count);
-                }
-            }
-        }
+    let meta = match backend.store_status(store_id).await {
+        Ok(m) => m,
         Err(e) => {
-            let _ = writeln!(w, "Error: {}", e);
+            let _ = writeln!(w, "Error fetching status: {}", e);
+            return Ok(Continue);
+        }
+    };
+
+    let name = backend.store_get_name(store_id).await.unwrap_or(None);
+    
+    let _ = writeln!(w, "Store ID:  {}", format_id(&meta.id));
+    if let Some(n) = name {
+        let _ = writeln!(w, "Name:      {}", n);
+    }
+    let _ = writeln!(w, "Type:      {}", meta.store_type);
+    if meta.schema_version > 0 {
+        let _ = writeln!(w, "Schema:    v{}", meta.schema_version);
+    }
+            
+    // Fetch runtime statistics
+    if let Ok(details) = backend.store_details(store_id).await {
+        if details.author_count > 0 {
+            let _ = writeln!(w, "Authors:   {}", details.author_count);
+        }
+        if details.log_file_count > 0 {
+            let _ = writeln!(w, "Logs:      {} files, {} bytes", details.log_file_count, details.log_bytes);
+        }
+        if details.orphan_count > 0 {
+            let _ = writeln!(w, "Orphans:   {} (pending parent entries)", details.orphan_count);
         }
     }
     
@@ -528,6 +555,12 @@ fn format_system_value(key: &str, value: &[u8]) -> String {
 
 fn decode_value(key: &str, value: &[u8]) -> Option<String> {
     use prost::Message;
+    
+    if key == "name" {
+        #[derive(prost::Message)]
+        struct M { #[prost(string, tag = "1")] v: String }
+        return M::decode(value).ok().map(|m| m.v);
+    }
     
     if key.ends_with("/status") {
         #[derive(prost::Message)]

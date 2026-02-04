@@ -84,7 +84,7 @@ impl Mesh {
         store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
         // Create a fresh store via store_manager
-        let (root_store_id, root_store) = store_manager.create(STORE_TYPE_KVSTORE)?;
+        let (root_store_id, root_store) = store_manager.create(None, STORE_TYPE_KVSTORE).await?;
         
         // PeerManager needs a reference to the store handle
         // Create peer manager (cast root_store to SystemStore)
@@ -408,8 +408,21 @@ impl Mesh {
     /// Create a new store declaration in root store.
     /// Returns the new store's UUID.
     pub async fn create_store(&self, name: Option<String>, store_type: &str) -> Result<Uuid, MeshError> {
+        // 1. Create actual store instance (DB)
+        let (store_id, handle) = self.store_manager.create(name.clone(), store_type).await
+            .map_err(|e| MeshError::Other(e.to_string()))?;
+
+        // 2. Register locally (so it's tracked and available immediately)
+        self.store_manager.register(
+            self.root_store_id,
+            store_id,
+            handle.clone(),
+            store_type.to_string(),
+            self.peer_manager.clone()
+        ).map_err(|e| MeshError::Other(e.to_string()))?;
+
+        // 4. Write declaration to root store (so it persists/syncs to other nodes)
         let root = self.root_store();
-        let store_id = Uuid::new_v4();
         
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -432,7 +445,7 @@ impl Mesh {
         
         batch.commit().await.map_err(|e| MeshError::Other(e.to_string()))?;
         
-        info!(store_id = %store_id, "Created store declaration");
+        info!(store_id = %store_id, "Created store");
         Ok(store_id)
     }
     

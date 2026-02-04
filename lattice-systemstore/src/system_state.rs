@@ -2,7 +2,7 @@ use lattice_model::{Hash, PubKey, Op, StateMachine};
 use lattice_storage::{StateBackend, StateDbError, StateLogic};
 use lattice_proto::storage::{
     UniversalOp, SystemOp,
-    hierarchy_op, system_op, universal_op, peer_op, peer_strategy_op,
+    hierarchy_op, system_op, universal_op, peer_op, peer_strategy_op, store_op,
 };
 use prost::Message;
 use std::io::{Cursor, Read};
@@ -103,6 +103,14 @@ impl<T: StateLogic> PersistentState<T> {
                      None => {},
                  }
             },
+            Some(system_op::Kind::Store(s_op)) => {
+                 match s_op.op {
+                      Some(store_op::Op::SetName(set_name)) => {
+                          table.set_name(set_name.name, op)?;
+                      },
+                      None => {},
+                 }
+            },
             None => {},
         }
         
@@ -170,6 +178,16 @@ impl<T: StateLogic> SystemStore for PersistentState<T> {
             Err(e) => return Err(e.to_string()),
         };
         crate::tables::ReadOnlySystemTable::new(table).list_all()
+    }
+
+    fn get_name(&self) -> Result<Option<String>, String> {
+        let read_txn = self.inner.backend().db().begin_read().map_err(|e| e.to_string())?;
+        let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
+             Ok(t) => t,
+             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+             Err(e) => return Err(e.to_string()),
+        };
+        crate::tables::ReadOnlySystemTable::new(table).get_name()
     }
 }
 
@@ -246,11 +264,10 @@ use std::path::Path;
 pub fn setup_persistent_state<L: StateLogic + StoreTypeProvider>(
     id: Uuid, 
     path: &Path,
-    name: Option<&str>,
     constructor: impl FnOnce(StateBackend) -> L
 ) -> Result<PersistentState<L>, StateDbError> {
     let store_type = L::store_type();
-    let backend = StateBackend::open(id, path, Some(store_type), name, 1)?;
+    let backend = StateBackend::open(id, path, Some(store_type), 1)?;
     Ok(PersistentState::new(constructor(backend)))
 }
 
@@ -258,7 +275,7 @@ pub fn setup_persistent_state<L: StateLogic + StoreTypeProvider>(
 // This solves the Orphan Rule violation by implementing it in the crate where PersistentState is defined.
 impl<T: StateFactory + StoreTypeProvider + 'static> Openable for PersistentState<T> {
     fn open(id: Uuid, path: &Path) -> Result<Self, String> {
-        setup_persistent_state(id, path, None, T::create)
+        setup_persistent_state(id, path, T::create)
             .map_err(|e| e.to_string())
     }
 }

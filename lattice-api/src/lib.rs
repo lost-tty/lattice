@@ -18,7 +18,6 @@ impl From<lattice_model::StoreMeta> for proto::StoreMeta {
         proto::StoreMeta {
             id: m.store_id.as_bytes().to_vec(),
             store_type: m.store_type,
-            name: m.name.unwrap_or_default(),
             schema_version: m.schema_version,
         }
     }

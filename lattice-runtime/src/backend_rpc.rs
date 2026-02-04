@@ -5,7 +5,7 @@
 use crate::backend::*;
 use lattice_api::proto::{
     Empty, MeshId, StoreId, JoinRequest, CreateStoreRequest, RevokeRequest, SetNameRequest,
-    HistoryRequest, ExecRequest,
+    SetStoreNameRequest, HistoryRequest, ExecRequest,
 };
 use lattice_api::RpcClient;
 use uuid::Uuid;
@@ -182,6 +182,26 @@ impl LatticeBackend for RpcBackend {
             let mut client = self.client.clone();
             client.store.delete(StoreId { id: store_id.as_bytes().to_vec() }).await?;
             Ok(())
+        })
+    }
+    
+    fn store_set_name(&self, store_id: Uuid, name: &str) -> AsyncResult<'_, ()> {
+        let name = name.to_string();
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            client.store.set_name(SetStoreNameRequest { 
+                store_id: store_id.as_bytes().to_vec(), 
+                name 
+            }).await?;
+            Ok(())
+        })
+    }
+
+    fn store_get_name(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>> {
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client.store.get_name(StoreId { id: store_id.as_bytes().to_vec() }).await?;
+            Ok(resp.into_inner().name)
         })
     }
     

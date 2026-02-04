@@ -48,8 +48,8 @@ impl std::fmt::Debug for LogState {
 
 impl LogState {
     /// Open or create a log state in the given directory.
-    pub fn open(id: Uuid, path: &Path, name: Option<&str>) -> Result<PersistentState<Self>, StateDbError> {
-        setup_persistent_state(id, path, name, |backend| {
+    pub fn open(id: Uuid, path: &Path) -> Result<PersistentState<Self>, StateDbError> {
+        setup_persistent_state(id, path, |backend| {
             let (event_tx, _) = broadcast::channel(256);
             Self { backend, event_tx }
         })

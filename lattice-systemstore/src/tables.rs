@@ -2,7 +2,11 @@ use lattice_model::{Hash, PubKey, Op};
 use lattice_model::head::Head;
 use lattice_model::merge::Merge;
 use lattice_storage::StateDbError;
-use lattice_proto::storage::{HeadList, HeadInfo as ProtoHeadInfo, SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, PeerStrategy};
+use lattice_proto::storage::{
+    HeadList, HeadInfo as ProtoHeadInfo, 
+    SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, PeerStrategy,
+    SetStoreName,
+};
 use prost::Message;
 use redb::{Table, ReadableTable};
 
@@ -74,6 +78,20 @@ impl<'a> SystemTable<'a> {
         let key = b"strategy";
         let head = Head {
             value: strategy.encode_to_vec(),
+            hlc: op.timestamp,
+            author: op.author,
+            hash: op.id,
+            tombstone: false,
+        };
+        self.apply_head(key, head, op.causal_deps)
+    }
+
+    // ==================== Store Operations ====================
+
+    pub fn set_name(&mut self, name: String, op: &Op) -> Result<(), StateDbError> {
+        let key = b"name";
+        let head = Head {
+            value: SetStoreName { name }.encode_to_vec(),
             hlc: op.timestamp,
             author: op.author,
             hash: op.id,
@@ -250,6 +268,15 @@ impl<'a> ReadOnlySystemTable<'a> {
             }
         }
         Ok(lattice_model::store_info::PeerStrategy::default())
+    }
+
+    pub fn get_name(&self) -> Result<Option<String>, String> {
+        if let Some(value) = self.get_heads(b"name")?.lww() {
+            if let Ok(set_name) = SetStoreName::decode(value.as_slice()) {
+                return Ok(Some(set_name.name));
+            }
+        }
+        Ok(None)
     }
 
     pub(crate) fn get_deps(&self, key: &[u8]) -> Result<Vec<Hash>, String> {

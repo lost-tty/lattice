@@ -7,6 +7,7 @@ use crate::{StoreRegistry, peer_manager::PeerManager, NodeEvent};
 use crate::StoreHandle;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore};
 use lattice_model::{NetEvent, Uuid};
+use lattice_systemstore::SystemBatch;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
@@ -100,9 +101,21 @@ impl StoreManager {
     
     /// Create a new store with a fresh UUID.
     /// Does NOT register the store - call register() after.
-    pub fn create(&self, store_type: &str) -> Result<(Uuid, Arc<dyn StoreHandle>), StoreManagerError> {
+    pub async fn create(&self, name: Option<String>, store_type: &str) -> Result<(Uuid, Arc<dyn StoreHandle>), StoreManagerError> {
         let store_id = Uuid::new_v4();
         let opened = self.open(store_id, store_type)?;
+        
+        // Persist name to SystemTable if provided
+        if let Some(name_str) = name {
+            let system = opened.clone().as_system()
+                .ok_or_else(|| StoreManagerError::Store(format!("Store type '{}' does not support SystemStore, cannot set name", store_type)))?;
+                
+             SystemBatch::new(system.as_ref())
+                .set_name(&name_str)
+                .commit().await
+                .map_err(|e| StoreManagerError::Store(format!("Failed to set store name: {}", e)))?;
+        }
+        
         Ok((store_id, opened))
     }
 

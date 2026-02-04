@@ -169,6 +169,8 @@ pub enum StoreSubcommand {
     Use { uuid: String },
     /// Delete (archive) a store
     Delete { uuid: String },
+    /// Set the display name for a store
+    SetName { name: String },
     /// Show store status
     Status {
         #[arg(short, long)]
@@ -277,6 +279,9 @@ pub async fn handle_command(
             StoreSubcommand::Delete { uuid } => {
                 let id = Uuid::parse_str(&uuid).ok();
                 store_commands::cmd_store_delete(backend, id, writer).await
+            }
+            StoreSubcommand::SetName { name } => {
+                store_commands::cmd_store_set_name(backend, ctx.store_id, &name, writer).await
             }
             StoreSubcommand::Status { verbose: _ } => {
                 store_commands::cmd_store_status(backend, ctx.store_id, writer).await

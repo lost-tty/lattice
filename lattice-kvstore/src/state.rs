@@ -53,8 +53,8 @@ struct HeadChange {
 // KvState is the logic. PersistentState<KvState> is the StateMachine.
 impl KvState {
     /// Open or create a KvState in the given directory.
-    pub fn open(id: Uuid, state_dir: impl AsRef<Path>, name: Option<&str>) -> Result<PersistentState<Self>, StateDbError> {
-        setup_persistent_state(id, state_dir.as_ref(), name, |backend| {
+    pub fn open(id: Uuid, state_dir: impl AsRef<Path>) -> Result<PersistentState<Self>, StateDbError> {
+        setup_persistent_state(id, state_dir.as_ref(), |backend| {
             let (watcher_tx, _) = broadcast::channel(1024);
             Self { backend, watcher_tx }
         })

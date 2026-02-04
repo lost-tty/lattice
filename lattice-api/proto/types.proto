@@ -120,6 +120,15 @@ message CreateStoreRequest {
   string store_type = 3;
 }
 
+message SetStoreNameRequest {
+  bytes store_id = 1;
+  string name = 2;
+}
+
+message StoreNameResponse {
+  optional string name = 1;
+}
+
 // Store reference
 message StoreRef {
   bytes id = 1;
@@ -132,7 +141,6 @@ message StoreRef {
 message StoreMeta {
   bytes id = 1;
   string store_type = 2;
-  string name = 3;
   uint64 schema_version = 4;
 }
 

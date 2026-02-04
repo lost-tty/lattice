@@ -3,6 +3,7 @@ use lattice_model::store_info::PeerStrategy;
 use lattice_model::replication::EntryStreamProvider;
 use lattice_proto::storage::{
     SystemOp, system_op, peer_op, hierarchy_op, peer_strategy_op, peer_strategy,
+    store_op, SetStoreName,
     SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, UniversalOp, universal_op, PeerOp, SignedEntry, Entry,
     PeerStatus as ProtoStatus,
 };
@@ -77,11 +78,19 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
                          None
                      }
                  },
+                  None => None,
+              }
+         },
+         Some(system_op::Kind::Store(s)) => {
+             match s.op {
+                 Some(store_op::Op::SetName(sn)) => {
+                     Some(Ok(SystemEvent::StoreNameUpdated(sn.name)))
+                 },
                  None => None,
              }
-        },
-        None => None,
-    }
+         },
+         None => None,
+     }
 }
 
 pub fn put_system_key<T>(writer: T, key: Vec<u8>, payload: Vec<u8>) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
@@ -126,6 +135,17 @@ pub fn create_set_added_by_payload(pubkey: lattice_model::PubKey, adder: lattice
     wrap_peer_op(pubkey.as_slice(), peer_op::Op::SetAddedBy(SetPeerAddedBy { adder_pubkey: adder.to_vec() }))
 }
 
+pub fn create_set_store_name_payload(name: String) -> Vec<u8> {
+    let envelope = UniversalOp {
+        op: Some(universal_op::Op::System(SystemOp {
+            kind: Some(system_op::Kind::Store(lattice_proto::storage::StoreOp {
+                op: Some(store_op::Op::SetName(SetStoreName { name }))
+            }))
+        }))
+    };
+    envelope.encode_to_vec()
+}
+
 // ==================== Batch Builder ====================
 
 /// A pending write operation (key + payload)
@@ -166,6 +186,14 @@ impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
     pub fn set_added_by(mut self, pubkey: lattice_model::PubKey, adder: lattice_model::PubKey) -> Self {
         let key = format!("peer/{}/added_by", hex::encode(pubkey.as_slice())).into_bytes();
         let payload = create_set_added_by_payload(pubkey, adder);
+        self.ops.push(PendingOp { key, payload });
+        self
+    }
+
+    /// Set store name
+    pub fn set_name(mut self, name: &str) -> Self {
+        let key = b"name".to_vec();
+        let payload = create_set_store_name_payload(name.to_string());
         self.ops.push(PendingOp { key, payload });
         self
     }

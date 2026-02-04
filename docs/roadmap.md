@@ -36,14 +36,13 @@ This document outlines the development plan for Lattice.
 - [x] System table interception layer in `PersistentState::apply()`
 - [x] Removed dead code: `HandleBase`, `PeerManager`/`SubstoreManager` traits, `as_writer`
 - [x] Added `list_all()` API and `store system show` CLI command for debugging
+- [ ] CLI `mesh peers` does not yet show peer names. Is it wired up?
 - [ ] Add child store hierarchy (`child/{uuid}/status`, `child/{uuid}/name`)
 - [ ] Add `strategy` key for persisted `PeerStrategy` (Independent/Inherited)
 - [ ] Add invite handling (`invite/{token_hash}/status`, `invited_by`, `claimed_by`)
 - [ ] `Node::set_name()` should propagate name to all stores that manage their own peer list
 
 ### 10B: Migration (Op-Based)
-- [ ] Recognize legacy peer ops in `apply()` and write to `TABLE_SYSTEM` instead of `TABLE_DATA`
-- [ ] Recognize legacy invite ops in `apply()` and redirect to `TABLE_SYSTEM`
 - [ ] Test migration with existing data directories
 
 ### 10C: Root Store & Identity

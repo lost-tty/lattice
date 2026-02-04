@@ -13,7 +13,6 @@ pub const TABLE_SYSTEM: TableDefinition<&[u8], &[u8]> = TableDefinition::new("sy
 
 pub const KEY_STORE_ID: &[u8] = b"store_id";
 pub const KEY_STORE_TYPE: &[u8] = b"store_type";
-pub const KEY_STORE_NAME: &[u8] = b"store_name";
 pub const KEY_SCHEMA_VERSION: &[u8] = b"schema_version";
 pub const PREFIX_TIP: &[u8] = b"tip/";
 
@@ -100,14 +99,11 @@ impl StateBackend {
             .map(|v| String::from_utf8_lossy(v.value()).to_string())
             .unwrap_or_default();
         
-        let name = table.get(KEY_STORE_NAME).ok().flatten()
-            .map(|v| String::from_utf8_lossy(v.value()).to_string());
-        
         let schema_version = table.get(KEY_SCHEMA_VERSION).ok().flatten()
             .map(|v| u64::from_le_bytes(v.value().try_into().unwrap_or_default()))
             .unwrap_or(0);
         
-        StoreMeta { store_id: self.id, store_type, name, schema_version }
+        StoreMeta { store_id: self.id, store_type, schema_version }
     }
 
     /// Open or create a store at the given path.
@@ -117,7 +113,6 @@ impl StateBackend {
         id: Uuid, 
         state_dir: impl AsRef<Path>, 
         expected_type: Option<&str>,
-        name: Option<&str>,
         expected_version: u64
     ) -> Result<Self, StateDbError> {
         let dir = state_dir.as_ref();
@@ -201,22 +196,12 @@ impl StateBackend {
                         table_meta.insert(KEY_SCHEMA_VERSION, expected_version.to_le_bytes().as_slice())?;
                     }
                 }
-                
-                // Update name if provided and not already set
-                if let Some(name_str) = name {
-                    if table_meta.get(KEY_STORE_NAME)?.is_none() {
-                        table_meta.insert(KEY_STORE_NAME, name_str.as_bytes())?;
-                    }
-                }
             } else {
                 // New Store or Missing ID
                 table_meta.insert(KEY_STORE_ID, id.as_bytes().as_slice())?;
                 if let Some(type_str) = expected_type {
                      table_meta.insert(KEY_STORE_TYPE, type_str.as_bytes())?;
                      table_meta.insert(KEY_SCHEMA_VERSION, expected_version.to_le_bytes().as_slice())?;
-                }
-                if let Some(name_str) = name {
-                     table_meta.insert(KEY_STORE_NAME, name_str.as_bytes())?;
                 }
             }
         }
@@ -770,11 +755,10 @@ impl<T: StateLogic + StoreTypeProvider> StoreTypeProvider for PersistentState<T>
 pub fn setup_persistent_state<L: StateLogic + StoreTypeProvider>(
     id: Uuid, 
     path: &Path,
-    name: Option<&str>,
     constructor: impl FnOnce(StateBackend) -> L
 ) -> Result<PersistentState<L>, StateDbError> {
     let store_type = L::store_type();
-    let backend = StateBackend::open(id, path, Some(store_type), name, 1)?;
+    let backend = StateBackend::open(id, path, Some(store_type), 1)?;
     Ok(PersistentState::new(constructor(backend)))
 }
 
@@ -789,7 +773,7 @@ pub trait StateFactory: StateLogic {
 // This solves the Orphan Rule violation by implementing it in the crate where PersistentState is defined.
 impl<T: StateFactory + StoreTypeProvider + 'static> lattice_model::Openable for PersistentState<T> {
     fn open(id: Uuid, path: &Path) -> Result<Self, String> {
-        setup_persistent_state(id, path, None, T::create)
+        setup_persistent_state(id, path, T::create)
             .map_err(|e| e.to_string())
     }
 }
