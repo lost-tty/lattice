@@ -134,7 +134,6 @@ message StoreMeta {
   string store_type = 2;
   string name = 3;
   uint64 schema_version = 4;
-  bytes state_hash = 5;
 }
 
 // List of store references
@@ -198,6 +197,15 @@ message AuthorStateResponse {
 
 message CleanupResult {
   uint32 orphans_removed = 1;
+}
+
+message SystemEntry {
+  string key = 1;
+  bytes value = 2;
+}
+
+message SystemListResponse {
+  repeated SystemEntry entries = 1;
 }
 
 // ============================================================================

@@ -1,8 +1,9 @@
 //! Handle infrastructure for Lattice stores
 //!
 //! Provides:
-//! - `HandleBase<Wrapper, W>` - shared handle boilerplate (struct, new, writer, Clone)
 //! - `StateProvider` trait with blanket `Introspectable` impl
+//! - `Dispatcher` trait for command routing
+//! - `StreamProvider` trait for stream handlers
 //!
 //! Note: `StreamReflectable` and `CommandDispatcher` require custom logic
 //! per store type (subscribe handling, command routing) so they cannot
@@ -10,78 +11,6 @@
 
 use crate::{Introspectable, FieldFormat};
 use std::collections::HashMap;
-use std::marker::PhantomData;
-use std::ops::Deref;
-
-// =============================================================================
-// HandleBase - Shared Handle Boilerplate
-// =============================================================================
-
-/// Base handle struct providing common boilerplate for store handles.
-///
-/// Wraps a writer `W` and provides:
-/// - `new(writer)` constructor
-/// - `writer()` accessor  
-/// - `Clone` implementation (when `W: Clone`)
-/// - `state()` accessor (when `W: AsRef<Wrapper>` and `Wrapper: Deref<Target = S>`)
-///
-/// # Type Parameters
-/// - `Wrapper`: The wrapper type around state (e.g., `PersistentState<KvState>`)
-/// - `W`: The writer type that provides access to wrapper (e.g., `Replica`)
-///
-/// # Example
-/// ```ignore
-/// use lattice_storage::PersistentState;
-/// 
-/// pub struct KvHandle<W>(HandleBase<PersistentState<KvState>, W>);
-///
-/// impl<W: AsRef<PersistentState<KvState>>> KvHandle<W> {
-///     pub fn new(writer: W) -> Self { Self(HandleBase::new(writer)) }
-///     pub fn state(&self) -> &KvState { self.0.state() }
-/// }
-/// ```
-#[derive(Debug)]
-pub struct HandleBase<Wrapper, W> {
-    writer: W,
-    _wrapper: PhantomData<Wrapper>,
-}
-
-impl<Wrapper, W> HandleBase<Wrapper, W> {
-    /// Create a new handle wrapping the given writer
-    pub fn new(writer: W) -> Self {
-        Self { writer, _wrapper: PhantomData }
-    }
-    
-    /// Get a reference to the underlying writer
-    pub fn writer(&self) -> &W {
-        &self.writer
-    }
-}
-
-impl<Wrapper, W: Clone> Clone for HandleBase<Wrapper, W> {
-    fn clone(&self) -> Self {
-        Self { writer: self.writer.clone(), _wrapper: PhantomData }
-    }
-}
-
-// HandleBase-based types get the marker, allowing blanket StoreHandle to match them
-impl<Wrapper, W> HandleWithWriter for HandleBase<Wrapper, W> {}
-
-/// Access the inner state via wrapper.
-/// 
-/// Works when:
-/// - `W: AsRef<Wrapper>` (writer provides wrapper)
-/// - `Wrapper: Deref<Target = S>` (wrapper derefs to state)
-impl<Wrapper, W, S> HandleBase<Wrapper, W>
-where
-    W: AsRef<Wrapper>,
-    Wrapper: Deref<Target = S>,
-{
-    /// Get a reference to the inner state
-    pub fn state(&self) -> &S {
-        &*self.writer.as_ref()
-    }
-}
 
 // =============================================================================
 // HandleWithWriter Marker Trait
@@ -104,19 +33,6 @@ pub trait HandleWithWriter {}
 /// 
 /// Implementing this trait enables automatic delegation of `Introspectable`
 /// to the inner state type via a blanket impl.
-/// 
-/// # Example
-/// ```ignore
-/// struct KvHandle<W> { writer: W }
-/// 
-/// impl<W: AsRef<PersistentState<KvState>>> StateProvider for KvHandle<W> {
-///     type State = KvState;
-///     fn state(&self) -> &KvState {
-///         &*self.writer.as_ref()
-///     }
-/// }
-/// // KvHandle now automatically implements Introspectable via blanket impl
-/// ```
 pub trait StateProvider {
     /// The inner state type
     type State;
@@ -125,21 +41,8 @@ pub trait StateProvider {
     fn state(&self) -> &Self::State;
 }
 
-/// Implement StateProvider for HandleBase when wrapper derefs to state
-impl<Wrapper, W, S> StateProvider for HandleBase<Wrapper, W>
-where
-    W: AsRef<Wrapper>,
-    Wrapper: Deref<Target = S>,
-{
-    type State = S;
-    
-    fn state(&self) -> &S {
-        &*self.writer.as_ref()
-    }
-}
-
 // =============================================================================
-// Blanket Implementations
+// Blanket Implementations (Introspectable)
 // =============================================================================
 
 /// Blanket impl: Any `StateProvider` where `State: Introspectable` is itself `Introspectable`.

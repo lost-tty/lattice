@@ -2,7 +2,6 @@
 //!
 //! This crate provides:
 //! - `Introspectable`, `CommandDispatcher`, `StreamReflectable` - reflection traits
-//! - `HandleBase<S, W>` - shared handle struct with common boilerplate
 //! - `StateProvider` - trait for handles to provide access to inner state
 //! - Blanket impls that delegate reflection traits through `StateProvider`
 
@@ -16,5 +15,5 @@ pub use introspection::{
     StreamError, StreamReflectable,
 };
 
-pub use handle::{HandleBase, StateProvider, Dispatchable, Dispatcher, StreamHandler, StreamProvider, HandleWithWriter};
+pub use handle::{StateProvider, Dispatchable, Dispatcher, StreamHandler, StreamProvider, HandleWithWriter};
 pub use invoke::invoke_command;

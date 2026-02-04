@@ -86,20 +86,6 @@ message KvPayload {
     repeated Operation ops = 1;
 }
 
-// --- Storage Types (state.db format) ---
-
-message HeadInfo {
-    bytes value = 1;
-    lattice.storage.HLC hlc = 2;
-    bytes author = 3;
-    bytes hash = 4;
-    bool tombstone = 5;
-}
-
-message HeadList {
-    repeated HeadInfo heads = 1;
-}
-
 // --- Stream Types (watch subscription) ---
 
 // Parameters for the Watch stream

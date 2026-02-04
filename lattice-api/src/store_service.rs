@@ -5,6 +5,7 @@ use crate::proto::{
     store_service_server::StoreService, AuthorStateRequest, AuthorStateResponse,
     CleanupResult, CreateStoreRequest, DebugInfo, Empty,
     HistoryRequest, HistoryResponse, MeshId, StoreId, StoreRef, StoreMeta, StoreList, StoreDetails,
+    SystemListResponse, SystemEntry,
 };
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -97,6 +98,15 @@ impl StoreService for StoreServiceImpl {
         let store_id = Self::parse_uuid(&request.into_inner().id)?;
         self.backend.store_orphan_cleanup(store_id).await
             .map(|orphans_removed| Response::new(CleanupResult { orphans_removed }))
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    async fn system_list(&self, request: Request<StoreId>) -> Result<Response<SystemListResponse>, Status> {
+        let store_id = Self::parse_uuid(&request.into_inner().id)?;
+        self.backend.store_system_list(store_id).await
+            .map(|entries| Response::new(SystemListResponse {
+                entries: entries.into_iter().map(|(key, value)| SystemEntry { key, value }).collect()
+            }))
             .map_err(|e| Status::internal(e.to_string()))
     }
 }

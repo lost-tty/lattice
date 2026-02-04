@@ -24,7 +24,6 @@ mod tests {
             Ok(Box::new(std::io::Cursor::new(Vec::new())))
         }
         fn restore(&self, _snapshot: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> { Ok(()) }
-        fn state_identity(&self) -> Hash { Hash::ZERO }
 
         fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
             Ok(Vec::new())

@@ -195,9 +195,6 @@ pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uui
             if meta.schema_version > 0 {
                 let _ = writeln!(w, "Schema:    v{}", meta.schema_version);
             }
-            if !meta.state_hash.is_empty() {
-                let _ = writeln!(w, "StateHash: {}", hex::encode(&meta.state_hash[..8.min(meta.state_hash.len())]));
-            }
             
             // Fetch runtime statistics
             if let Ok(details) = backend.store_details(store_id).await {
@@ -483,6 +480,75 @@ pub async fn cmd_orphan_cleanup(backend: &dyn LatticeBackend, store_id: Option<U
     }
     
     Ok(Continue)
+}
+
+/// Show the system table contents (debugging)
+pub async fn cmd_store_system_show(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
+    let mut w = writer.clone();
+    
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "No store selected.");
+            return Ok(Continue);
+        }
+    };
+    
+    match backend.store_system_list(store_id).await {
+        Ok(entries) => {
+            if entries.is_empty() {
+                let _ = writeln!(w, "(system table empty)");
+            } else {
+                let _ = writeln!(w, "System table ({} entries):\n", entries.len());
+                for (key, value) in entries {
+                    let value_str = format_system_value(&key, &value);
+                    let _ = writeln!(w, "{} = {}", key, value_str);
+                }
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+        }
+    }
+    
+    Ok(Continue)
+}
+
+/// Format a system table value for display
+fn format_system_value(key: &str, value: &[u8]) -> String {
+    let decoded = decode_value(key, value);
+    let hex = hex::encode(value);
+    
+    if let Some(d) = decoded {
+        format!("{} (0x{})", d, hex)
+    } else {
+        format!("0x{}", hex)
+    }
+}
+
+fn decode_value(key: &str, value: &[u8]) -> Option<String> {
+    use prost::Message;
+    
+    if key.ends_with("/status") {
+        #[derive(prost::Message)]
+        struct M { #[prost(int32, tag = "1")] v: i32 }
+        let m = M::decode(value).ok()?;
+        return Some(match m.v { 0 => "Unknown", 1 => "Invited", 2 => "Active", 3 => "Dormant", 4 => "Revoked", _ => return None }.to_string());
+    }
+    if key.ends_with("/added_at") {
+        #[derive(prost::Message)]
+        struct M { #[prost(uint64, tag = "1")] v: u64 }
+        return Some(M::decode(value).ok()?.v.to_string());
+    }
+    if key.ends_with("/added_by") {
+        #[derive(prost::Message)]
+        struct M { #[prost(bytes = "vec", tag = "1")] v: Vec<u8> }
+        return Some(hex::encode(&M::decode(value).ok()?.v));
+    }
+    if key.starts_with("child/") || key.ends_with("/name") {
+        return std::str::from_utf8(value).ok().map(|s| s.to_string());
+    }
+    None
 }
 
 // ==================== Dynamic Command Execution ====================

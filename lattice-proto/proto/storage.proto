@@ -76,3 +76,100 @@ message StoreMetadata {
   uint64 created_at = 2;   // Unix timestamp (ms) when created
   // Future fields: is_root, alias, etc.
 }
+
+// --- System Operations (M10A) ---
+
+message UniversalOp {
+    oneof op {
+        bytes app_data = 10;
+        SystemOp system = 11;
+    }
+}
+
+message SystemOp {
+    oneof kind {
+        HierarchyOp hierarchy = 1;
+        PeerOp peer = 2;
+        PeerStrategyOp strategy = 3;
+    }
+}
+
+// Hierarchy Management
+message HierarchyOp {
+    oneof op {
+        ChildAdd add_child = 1;
+        ChildRemove remove_child = 2;
+    }
+}
+
+message ChildAdd {
+    bytes target_id = 1;
+    string alias = 2;
+}
+
+message ChildRemove {
+    bytes target_id = 1;
+}
+
+// Peer Management
+message PeerOp {
+    bytes pubkey = 1;
+    oneof op {
+        SetPeerStatus set_status = 3;
+        SetPeerAddedAt set_added_at = 4;
+        SetPeerAddedBy set_added_by = 5;
+    }
+}
+
+message SetPeerStatus {
+    PeerStatus status = 1;
+}
+
+message SetPeerAddedAt {
+    uint64 timestamp = 1;
+}
+
+message SetPeerAddedBy {
+    bytes adder_pubkey = 1;
+}
+
+enum PeerStatus {
+    UNKNOWN = 0;
+    INVITED = 1;
+    ACTIVE = 2;
+    DORMANT = 3;
+    REVOKED = 4;
+}
+
+// Peer Strategy Management
+message PeerStrategyOp {
+    oneof op {
+        SetPeerStrategy set = 1;
+    }
+}
+
+message SetPeerStrategy {
+    PeerStrategy strategy = 1;
+}
+
+message PeerStrategy {
+    oneof type {
+         bool independent = 1;
+         bool inherited = 2;
+         bytes snapshot = 3; // UUID bytes
+    }
+}
+
+// --- HeadList CRDT (Shared) ---
+
+message HeadInfo {
+    bytes value = 1;
+    lattice.storage.HLC hlc = 2;
+    bytes author = 3;
+    bytes hash = 4;
+    bool tombstone = 5;
+}
+
+message HeadList {
+    repeated HeadInfo heads = 1;
+}

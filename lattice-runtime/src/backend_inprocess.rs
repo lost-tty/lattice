@@ -76,7 +76,7 @@ impl LatticeBackend for InProcessBackend {
             if let Ok(meshes) = self.node.meta().list_meshes() {
                 for (mesh_id, _) in &meshes {
                     if let Some(mesh) = self.node.mesh_by_id(*mesh_id) {
-                        if let Ok(peers) = mesh.list_peers().await {
+                        if let Ok(peers) = mesh.list_peers() {
                             peer_count += peers.len() as u32;
                         }
                     }
@@ -123,7 +123,7 @@ impl LatticeBackend for InProcessBackend {
         Box::pin(async move {
             let mesh_id = self.node.create_mesh().await?;
             let mesh = self.get_mesh(mesh_id)?;
-            let peer_count = mesh.list_peers().await.map(|p| p.len() as u32).unwrap_or(0);
+            let peer_count = mesh.list_peers().map(|p| p.len() as u32).unwrap_or(0);
             let store_count = mesh.list_stores().await.map(|s| s.len() as u32).unwrap_or(0);
             
             Ok(MeshInfo {
@@ -141,7 +141,7 @@ impl LatticeBackend for InProcessBackend {
             
             for (id, _info) in meshes {
                 let (peer_count, store_count) = if let Some(mesh) = self.node.mesh_by_id(id) {
-                    let peers = mesh.list_peers().await.map(|p| p.len() as u32).unwrap_or(0);
+                    let peers = mesh.list_peers().map(|p| p.len() as u32).unwrap_or(0);
                     let stores = mesh.list_stores().await.map(|s| s.len() as u32).unwrap_or(0);
                     (peers, stores)
                 } else {
@@ -162,7 +162,7 @@ impl LatticeBackend for InProcessBackend {
     fn mesh_status(&self, mesh_id: Uuid) -> AsyncResult<'_, MeshInfo> {
         Box::pin(async move {
             let mesh = self.get_mesh(mesh_id)?;
-            let peer_count = mesh.list_peers().await.map(|p| p.len() as u32).unwrap_or(0);
+            let peer_count = mesh.list_peers().map(|p| p.len() as u32).unwrap_or(0);
             let store_count = mesh.list_stores().await.map(|s| s.len() as u32).unwrap_or(0);
             
             Ok(MeshInfo {
@@ -193,7 +193,7 @@ impl LatticeBackend for InProcessBackend {
     fn mesh_peers(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>> {
         Box::pin(async move {
             let mesh = self.get_mesh(mesh_id)?;
-            let peers = mesh.list_peers().await?;
+            let peers = mesh.list_peers()?;
             
             // Get online status from network layer
             let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = self.mesh_network
@@ -371,6 +371,16 @@ impl LatticeBackend for InProcessBackend {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
             Ok(inspector.orphan_cleanup().await as u32)
+        })
+    }
+
+    fn store_system_list(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, Vec<u8>)>> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            let system = store.clone().as_system()
+                .ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Store does not support system table")) as Box<dyn std::error::Error + Send + Sync>)?;
+            system.list_all()
+                .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error + Send + Sync>)
         })
     }
     

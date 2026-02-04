@@ -9,13 +9,12 @@ use blake3::Hasher;
 // Standard Table Definitions
 pub const TABLE_DATA: TableDefinition<&[u8], &[u8]> = TableDefinition::new("data");
 pub const TABLE_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
+pub const TABLE_SYSTEM: TableDefinition<&[u8], &[u8]> = TableDefinition::new("system");
 
-// Meta Keys
 pub const KEY_STORE_ID: &[u8] = b"store_id";
 pub const KEY_STORE_TYPE: &[u8] = b"store_type";
 pub const KEY_STORE_NAME: &[u8] = b"store_name";
 pub const KEY_SCHEMA_VERSION: &[u8] = b"schema_version";
-pub const KEY_STATE_HASH: &[u8] = b"state_hash";
 pub const PREFIX_TIP: &[u8] = b"tip/";
 
 #[derive(Debug, Error)]
@@ -108,11 +107,7 @@ impl StateBackend {
             .map(|v| u64::from_le_bytes(v.value().try_into().unwrap_or_default()))
             .unwrap_or(0);
         
-        let state_hash = table.get(KEY_STATE_HASH).ok().flatten()
-            .map(|v| v.value().to_vec())
-            .unwrap_or_default();
-        
-        StoreMeta { store_id: self.id, store_type, name, schema_version, state_hash }
+        StoreMeta { store_id: self.id, store_type, name, schema_version }
     }
 
     /// Open or create a store at the given path.
@@ -287,47 +282,6 @@ impl StateBackend {
         Ok(true)
     }
 
-    /// Update global state identity using XOR rolling hash.
-    pub fn update_state_identity(
-        &self,
-        txn: &redb::WriteTransaction,
-        identity_diff: Hash
-    ) -> Result<Hash, StateDbError> {
-        let mut table_meta = txn.open_table(TABLE_META)?;
-        
-        // 1. Fetch current hash or default to zero
-        let current_hash = table_meta.get(KEY_STATE_HASH)?
-            .and_then(|v| <[u8; 32]>::try_from(v.value()).ok())
-            .map(Hash::from)
-            .unwrap_or(Hash::ZERO);
-            
-        // 2. XOR current with diff
-        let new_hash = Hash::from(std::array::from_fn(|i| current_hash[i] ^ identity_diff[i]));
-        
-        // 3. Persist
-        table_meta.insert(KEY_STATE_HASH, new_hash.as_slice())?;
-        
-        Ok(new_hash)
-    }
-
-    /// Retrieve the current state identity hash.
-    pub fn get_state_identity(&self) -> Hash {
-        let txn = match self.db.begin_read() {
-            Ok(t) => t,
-            Err(_) => return Hash::ZERO,
-        };
-        
-        let table = match txn.open_table(TABLE_META) {
-            Ok(t) => t,
-            Err(_) => return Hash::ZERO,
-        };
-        
-        match table.get(KEY_STATE_HASH) {
-            Ok(Some(v)) => Hash::try_from(v.value()).unwrap_or(Hash::ZERO),
-            _ => Hash::ZERO,
-        }
-    }
-
     /// Retrieve all applied chain tips (Author -> Last Hash).
     pub fn get_applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, StateDbError> {
         let txn = self.db.begin_read()?;
@@ -364,7 +318,8 @@ impl StateBackend {
     pub fn snapshot(&self, writer: &mut impl Write) -> Result<(), StateDbError> {
         let tables: TableMap = &[
             (SNAPSHOT_RECORD_DATA, TABLE_DATA.name()),
-            (SNAPSHOT_RECORD_META, TABLE_META.name())
+            (SNAPSHOT_RECORD_META, TABLE_META.name()),
+            (SNAPSHOT_RECORD_SYSTEM, TABLE_SYSTEM.name())
         ];
         self.snapshot_internal(tables, writer)
     }
@@ -373,7 +328,9 @@ impl StateBackend {
     pub fn restore(&self, reader: &mut impl Read) -> Result<(), StateDbError> {
         let tables: TableMap = &[
             (SNAPSHOT_RECORD_DATA, TABLE_DATA.name()),
-            (SNAPSHOT_RECORD_META, TABLE_META.name())
+            (SNAPSHOT_RECORD_DATA, TABLE_DATA.name()),
+            (SNAPSHOT_RECORD_META, TABLE_META.name()),
+            (SNAPSHOT_RECORD_SYSTEM, TABLE_SYSTEM.name())
         ];
         self.restore_internal(tables, reader)
     }
@@ -529,6 +486,7 @@ pub const SNAPSHOT_VERSION: u32 = 1;
 pub const SNAPSHOT_EOF: u8 = 0;
 pub const SNAPSHOT_RECORD_DATA: u8 = 1; // Standard data table ID
 pub const SNAPSHOT_RECORD_META: u8 = 2; // Standard meta table ID
+pub const SNAPSHOT_RECORD_SYSTEM: u8 = 3; // Standard system table ID
 
 /// Map a snapshot record type (u8) to a table name (str)
 pub type TableMap<'a> = &'a [(u8, &'a str)];
@@ -583,14 +541,6 @@ impl<'a, R: Read> Read for HashingReader<'a, R> {
     }
 }
 
-/// Helper to XOR two 32-byte arrays
-pub fn xor_hash(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = a[i] ^ b[i];
-    }
-    out
-}
 // ==================== Composition Pattern ====================
 
 use lattice_store_base::{Introspectable, FieldFormat};
@@ -613,41 +563,37 @@ pub trait StateLogic: Send + Sync {
     fn backend(&self) -> &StateBackend;
     
     /// Decode payload and apply mutations to the table.
-    /// Returns (notification data, identity diff).
+    /// Returns notification data for watchers.
     fn mutate(
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
-    ) -> Result<(Self::Updates, Hash), StateDbError>;
+    ) -> Result<Self::Updates, StateDbError>;
     
     /// Notify watchers of changes.
     fn notify(&self, updates: Self::Updates);
     
     /// Apply an operation to the state.
     /// 
-    /// Default implementation: begin txn → verify chain → mutate → update identity → commit → notify
+    /// Default implementation: begin txn → verify chain → mutate → commit → notify
     fn apply(&self, op: &Op) -> Result<(), StateDbError> {
         let write_txn = self.backend().db().begin_write()?;
-        let updates = {
-            let mut table = write_txn.open_table(TABLE_DATA)?;
-            
-            // 0. Validate Chain Integrity
-            let should_apply = self.backend().verify_and_update_tip(&write_txn, &op.author, op.id, op.prev_hash)?;
-            if !should_apply {
-                return Ok(()); // Idempotent duplicate
-            }
-
-            // 1. Apply mutations
-            let (updates, identity_diff) = self.mutate(&mut table, op)?;
-            
-            // 2. Update State Identity
-            self.backend().update_state_identity(&write_txn, identity_diff)?;
-            
-            updates
-        };
-        write_txn.commit()?;
         
-        // 3. Notify watchers
+        // 0. Validate Chain Integrity (and idempotence)
+        let should_apply = self.backend().verify_and_update_tip(&write_txn, &op.author, op.id, op.prev_hash)?;
+        if !should_apply { 
+            // Idempotent duplicate, just return success
+            return Ok(()); 
+        }
+
+        // 1. Delegate to logic
+        let mut table = write_txn.open_table(TABLE_DATA)?;
+        let updates = self.mutate(&mut table, op)?;
+        drop(table); // Release borrow
+
+        write_txn.commit()?;
+
+        // 2. Notify watchers (only if applied)
         self.notify(updates);
         
         Ok(())
@@ -701,60 +647,12 @@ impl<T: StateLogic> StateMachine for PersistentState<T> {
         self.inner.backend().restore(&mut reader)
     }
 
-    fn state_identity(&self) -> Hash {
-        self.inner.backend().get_state_identity()
-    }
-
     fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
         self.inner.backend().get_applied_chaintips()
     }
     
     fn store_meta(&self) -> StoreMeta {
         self.inner.backend().get_meta()
-    }
-}
-
-// ==================== StateHasher Strategy ====================
-
-/// Helper for calculating Rolling Hashes (XOR-based Merkle-like root replacement).
-/// 
-/// This unifies the identity calculation across KvStore (key-value hash) and LogStore (OpID).
-pub struct StateHasher {
-    accumulator: [u8; 32],
-}
-
-impl Default for StateHasher {
-    fn default() -> Self {
-        Self { accumulator: [0u8; 32] }
-    }
-}
-
-impl StateHasher {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// XORs the accumulator with a hash.
-    /// Order-independent: update(A) then update(B) == update(B) then update(A).
-    pub fn update(&mut self, hash: impl AsRef<[u8]>) {
-        for (a, h) in self.accumulator.iter_mut().zip(hash.as_ref()) {
-            *a ^= h;
-        }
-    }
-
-    /// Update using a raw byte slice (hashed first).
-    pub fn update_with_bytes(&mut self, data: &[u8]) {
-        self.update(Self::hash_bytes(data));
-    }
-
-    /// Return the final rolling hash.
-    pub fn finish(self) -> Hash {
-        Hash::from(self.accumulator)
-    }
-
-    /// Utility: Hash arbitrary bytes using Blake3.
-    pub fn hash_bytes(data: &[u8]) -> Hash {
-        Hash::from(*blake3::hash(data).as_bytes())
     }
 }
 

@@ -92,16 +92,6 @@ impl<S: StateMachine + Dispatcher + Send + Sync + 'static> Dispatchable for Stor
     }
 }
 
-// StoreInfo enables blanket StoreHandle impl
-// Delegates to S::StoreTypeProvider to get store type
-use lattice_model::{StoreInfo as ModelStoreInfo, StoreTypeProvider};
-
-impl<S: StateMachine + StoreTypeProvider + Send + Sync + 'static> ModelStoreInfo for Store<S> {
-    fn store_type(&self) -> &str {
-        S::store_type()
-    }
-}
-
 /// A handle to a replicated state machine
 ///
 /// Generic over state machine type `S`. Provides:

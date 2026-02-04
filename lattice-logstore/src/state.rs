@@ -3,7 +3,7 @@
 //! Uses redb for efficient embedded storage.
 //! Key: (HLC, Author) for globally consistent causal ordering.
 
-use lattice_model::{Op, PubKey, Uuid, Hash};
+use lattice_model::{Op, PubKey, Uuid};
 
 use std::path::Path;
 use redb::{ReadableTable, ReadableTableMetadata};
@@ -29,7 +29,7 @@ pub struct LogEntry {
     pub content: Vec<u8>,
 }
 
-use lattice_storage::{StateBackend, StateDbError, TABLE_DATA, PersistentState, StateLogic, StateFactory, StateHasher, setup_persistent_state};
+use lattice_storage::{StateBackend, StateDbError, TABLE_DATA, PersistentState, StateLogic, StateFactory, setup_persistent_state};
 
 /// LogState - append-only log with redb persistence
 pub struct LogState {
@@ -166,7 +166,7 @@ impl StateLogic for LogState {
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
-    ) -> Result<(Self::Updates, Hash), StateDbError> {
+    ) -> Result<Self::Updates, StateDbError> {
         // Validate payload
         if op.payload.is_empty() {
             return Err(StateDbError::Conversion("Empty payload".into()));
@@ -187,10 +187,7 @@ impl StateLogic for LogState {
         }
         table.insert(key.as_slice(), value.as_slice())?;
         
-        // LogStore identity: StateHash = StateHash ^ OpID
-        let mut hasher = StateHasher::new();
-        hasher.update(op.id);
-        Ok((op.payload.to_vec(), hasher.finish()))
+        Ok(op.payload.to_vec())
     }
 
     /// Notify watchers of new entry.

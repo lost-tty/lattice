@@ -1,0 +1,25 @@
+[package]
+name = "lattice-systemstore"
+description = "System layer for Lattice Stores: Handles Universal Envelope, Hierarchy, and Peer Ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-model = { workspace = true }
+lattice-kernel = { workspace = true }
+lattice-storage = { workspace = true }
+lattice-store-base = { workspace = true }
+lattice-proto = { workspace = true }
+prost = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+redb = { workspace = true }
+blake3 = { workspace = true }
+prost-reflect = { workspace = true }
+futures-util = { workspace = true }
+tokio-stream = { workspace = true }
+hex.workspace = true
+[dev-dependencies]
+tempfile = "3"

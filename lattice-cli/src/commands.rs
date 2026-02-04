@@ -202,6 +202,17 @@ pub enum StoreSubcommand {
         /// Subscription ID or "all"
         target: String,
     },
+    /// System table operations (debugging)
+    System {
+        #[command(subcommand)]
+        subcommand: SystemSubcommand,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum SystemSubcommand {
+    /// Show system table contents
+    Show,
 }
 
 async fn format_help(backend: &dyn LatticeBackend, ctx: &CommandContext, topic: Option<&str>) -> String {
@@ -293,6 +304,11 @@ pub async fn handle_command(
             }
             StoreSubcommand::Unsub { target } => {
                 store_commands::cmd_unsub(&ctx.registry, &target, writer).await
+            }
+            StoreSubcommand::System { subcommand } => match subcommand {
+                SystemSubcommand::Show => {
+                    store_commands::cmd_store_system_show(backend, ctx.store_id, writer).await
+                }
             }
         },
         

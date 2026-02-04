@@ -38,14 +38,14 @@ pub trait StoreOpener: Send + Sync {
 pub struct StoreInfo {
     pub id: Uuid,
     pub store_type: String,
-    pub peer_manager: Arc<PeerManager<dyn StoreHandle>>,
+    pub peer_manager: Arc<PeerManager>,
 }
 
 /// A stored entry with type-erased handle
 struct StoredEntry {
     store_handle: Arc<dyn StoreHandle>,
     store_type: String,
-    peer_manager: Arc<PeerManager<dyn StoreHandle>>,
+    peer_manager: Arc<PeerManager>,
 }
 
 /// A store registry that holds open stores.
@@ -125,7 +125,7 @@ impl StoreManager {
         store_id: Uuid,
         store_handle: Arc<dyn StoreHandle>,
         store_type: impl Into<String>,
-        peer_manager: Arc<PeerManager<dyn StoreHandle>>,
+        peer_manager: Arc<PeerManager>,
     ) -> Result<(), StoreManagerError> {
         let store_type = store_type.into();
         {
@@ -171,7 +171,7 @@ impl StoreManager {
     }
     
     /// Get the peer_manager for a store.
-    pub fn get_peer_manager(&self, store_id: &Uuid) -> Option<Arc<PeerManager<dyn StoreHandle>>> {
+    pub fn get_peer_manager(&self, store_id: &Uuid) -> Option<Arc<PeerManager>> {
         self.get_info(store_id).map(|info| info.peer_manager)
     }
     

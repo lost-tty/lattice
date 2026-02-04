@@ -1,391 +1,248 @@
 //! PeerManager - Manages peers in the mesh network
 //!
-//! This module extracts peer management from Node into a standalone component that:
-//! 1. Watches `/nodes/{pubkey}/status` keys in a store for peer status changes
-//! 2. Maintains a cache of peer statuses for fast authorization checks  
-//! 3. Emits PeerEvent notifications on status changes
-//! 4. Implements PeerProvider trait for use by AuthorizedStore
-//! 5. Provides peer operations: invite, join, set_status, revoke
+//! This module provides peer management by:
+//! 1. Querying `SystemStore` directly for peer state
+//! 2. Watching system events for change notifications
+//! 3. Managing bootstrap authors for initial sync trust
+//! 4. Providing peer operations via `SystemStore`
 
-use crate::{
-    auth::{PeerEvent, PeerProvider},
-    node::parse_peer_status_key,
-    PeerInfo,
-};
-use tracing::error;
-use lattice_kernel::{NodeIdentity, PeerStatus};
-use lattice_kvstore_client::{KvStoreExt, BatchBuilder};
-use lattice_model::types::PubKey;
-use std::collections::{HashMap, HashSet};
+use crate::auth::{PeerEvent, PeerProvider};
+use lattice_kernel::PeerStatus;
+use lattice_kvstore_client::KvStoreExt;
+use lattice_model::{PeerInfo, PubKey, SystemEvent};
+use lattice_systemstore::{SystemStore, SystemBatch};
+
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock, Mutex};
 use tokio::sync::broadcast;
+use tracing::warn;
+use futures_util::StreamExt;
 
 /// Error type for PeerManager operations
 #[derive(Debug, thiserror::Error)]
 pub enum PeerManagerError {
     #[error("Store error: {0}")]
-    Store(#[from] lattice_kvstore_client::DispatchError),
+    Store(String),
     #[error("State writer error: {0}")]
-    StateWriter(#[from] lattice_model::StateWriterError),
-    #[error("State error: {0}")]
-    State(#[from] lattice_kernel::store::StateError),
-    #[error("Storage error: {0}")]
-    Storage(#[from] lattice_storage::StateDbError),
-    #[error("Watch error: {0}")]
-    Watch(#[from] lattice_kvstore_client::WatchError),
+    StateWriter(String),
     #[error("Lock poisoned")]
     LockPoisoned,
-    #[error("Peer not found: {0}")]
-    PeerNotFound(String),
-    #[error("Unauthorized: {0}")]
-    Unauthorized(String),
 }
 
-/// A type-safe in-memory cache of peers.
+impl From<lattice_model::StateWriterError> for PeerManagerError {
+    fn from(e: lattice_model::StateWriterError) -> Self {
+        Self::StateWriter(e.to_string())
+    }
+}
+
+// ==================== Peer Struct ====================
+
+/// A peer in the mesh network with per-field storage.
 /// 
-/// Encapsulates the RwLock to ensure safe access patterns.
-/// Crucially, this struct does NOT have access to KvStore, preventing deadlocks.
-#[derive(Debug, Default)]
-struct PeerCache {
-    inner: RwLock<HashMap<PubKey, Peer>>,
-}
-
-impl PeerCache {
-    fn new() -> Self {
-        Self { inner: RwLock::new(HashMap::new()) }
-    }
-    
-    fn get_status(&self, pubkey: &PubKey) -> Option<PeerStatus> {
-        self.inner.read().ok()?.get(pubkey).map(|p| p.status.clone())
-    }
-    
-    fn can_join(&self, peer: &PubKey) -> bool {
-        let Ok(cache) = self.inner.read() else { return false };
-        cache.get(peer).map(|p| p.status == PeerStatus::Active).unwrap_or(false)
-    }
-    
-    fn can_accept_entry(&self, author: &PubKey) -> bool {
-        let Ok(cache) = self.inner.read() else { return false };
-        cache.get(author)
-            .map(|p| matches!(p.status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
-            .unwrap_or(false)
-    }
-    
-    fn list_acceptable_authors(&self) -> Vec<PubKey> {
-        let Ok(cache) = self.inner.read() else { return Vec::new() };
-        cache.iter()
-            .filter(|(_, p)| matches!(p.status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
-            .map(|(pubkey, _)| *pubkey)
-            .collect()
-    }
-    
-    fn list_all(&self) -> Vec<(PubKey, PeerStatus)> {
-        let Ok(cache) = self.inner.read() else { return Vec::new() };
-        cache.iter()
-            .map(|(pubkey, peer)| (*pubkey, peer.status.clone()))
-            .collect()
-    }
-    
-    /// Update the cache and return an event if state changed.
-    fn update(&self, pubkey: PubKey, status: Option<PeerStatus>) -> Option<PeerEvent> {
-        let Ok(mut cache) = self.inner.write() else { return None };
-        
-        match cache.get_mut(&pubkey) {
-            Some(peer) => {
-                let old = peer.status.clone();
-                let new = status.unwrap_or(PeerStatus::Revoked);
-                
-                if old != new {
-                    peer.status = new.clone();
-                    Some(PeerEvent::StatusChanged { pubkey, old, new })
-                } else {
-                    None
-                }
-            }
-            None => {
-                if let Some(new) = status {
-                    cache.insert(pubkey, Peer::minimal(pubkey, new.clone()));
-                    Some(PeerEvent::Added { pubkey, status: new })
-                } else {
-                    None
-                }
-            }
-        }
-    }
-    
-    fn insert(&self, pubkey: PubKey, peer: Peer) {
-        if let Ok(mut cache) = self.inner.write() {
-            cache.insert(pubkey, peer);
-        }
-    }
-}
-
-/// A peer in the mesh network with multi-key serialization.
+/// Peer data is stored across multiple keys in SystemStore (TABLE_SYSTEM):
+/// - `peer/{pubkey_hex}/status` - PeerStatus
+/// - `peer/{pubkey_hex}/added_at` - Unix timestamp when added
+/// - `peer/{pubkey_hex}/added_by` - Hex pubkey of the adder
 /// 
-/// Peer data is stored across multiple keys:
-/// - `/nodes/{pubkey}/status` - PeerStatus (invited, active, dormant, revoked)
-/// - `/nodes/{pubkey}/name` - Display name
-/// - `/nodes/{pubkey}/added_at` - Unix timestamp when invited
-/// - `/nodes/{pubkey}/added_by` - Hex pubkey of the inviter
+/// Display name is stored separately in DATA table at `/nodes/{pubkey_hex}/name`.
 #[derive(Clone, Debug)]
 pub struct Peer {
     pub pubkey: PubKey,
     pub status: PeerStatus,
-    pub name: Option<String>,
     pub added_at: Option<u64>,
     pub added_by: Option<PubKey>,
 }
 
 impl Peer {
-    /// Create a minimal Peer with just pubkey and status.
-    fn minimal(pubkey: PubKey, status: PeerStatus) -> Self {
+    /// Create a new peer with minimal info
+    pub fn new(pubkey: PubKey, status: PeerStatus) -> Self {
         Self {
             pubkey,
             status,
-            name: None,
             added_at: None,
             added_by: None,
         }
     }
-
-    /// Construct a Peer from a collection of attributes (key-value pairs)
-    pub fn from_attributes<'a>(pubkey: PubKey, attrs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<Self> {
-        // Default to Active if status logic allows, but better to require status.
-        // For now, we use minimal with placeholder, then overwrite.
-        // Actually, we should probably start with Active or parse status first.
-        // Let's stick to minimal() helper which takes status.
-        
-        // We'll scan attrs twice or restructure. 
-        // Simpler: Use a builder or temp vars.
-        
-        let mut p_status = PeerStatus::Active; // Default
-        let mut p_name = None;
-        let mut p_added_at = None;
-        let mut p_added_by = None;
-        let mut has_status = false;
-
-        for (k, v) in attrs {
-            match k {
-                "status" => { 
-                    if let Some(s) = PeerStatus::from_str(v) {
-                        p_status = s; 
-                        has_status = true;
-                    }
-                },
-                "name" => p_name = Some(v.into()),
-                "added_at" => p_added_at = v.parse().ok(),
-                "added_by" => p_added_by = hex::decode(v).ok().and_then(|b| PubKey::try_from(b).ok()),
-                _ => {}
-            }
-        }
-        
-        // If no status found, we might reject or default. 
-        // Since we are loading from DB, existing Invited peers (legacy) might exist.
-        // We restore legacy support by defaulting to Invited if it existed previously.
-        
-        if !has_status {
-             // Fallback for legacy peers written before strict status
-             p_status = PeerStatus::Invited;
-        }
-
-        Some(Self {
+    
+    /// Create a peer with full provenance
+    pub fn with_provenance(pubkey: PubKey, status: PeerStatus, added_by: PubKey) -> Self {
+        Self {
             pubkey,
-            status: p_status,
-            name: p_name,
-            added_at: p_added_at,
-            added_by: p_added_by,
-        })
-    }
-    
-    /// Load a Peer from the store (atomic read via list_by_prefix).
-    pub async fn load<S: KvStoreExt + ?Sized>(kv: &S, pubkey: PubKey) -> Result<Option<Self>, PeerManagerError> {
-        let pubkey_hex = hex::encode(pubkey);
-        let prefix = format!("/nodes/{}/", pubkey_hex);
-        
-        // Single atomic query for all peer attributes
-        // Client API returns resolved values, so we don't need to merge heads manually
-        let entries = kv.list_by_prefix(prefix.as_bytes().to_vec()).await.map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
-        
-        if entries.is_empty() {
-            return Ok(None);
-        }
-        
-        let mut attrs = Vec::new();
-        for kv_pair in entries {
-            let key_str = String::from_utf8_lossy(&kv_pair.key);
-            if let Some(attr) = key_str.strip_prefix(&prefix) {
-                let value_str = String::from_utf8_lossy(&kv_pair.value);
-                attrs.push((attr.to_string(), value_str.to_string()));
-            }
-        }
-        
-        Ok(Self::from_attributes(pubkey, attrs.iter().map(|(k, v)| (k.as_str(), v.as_str()))))
-    }
-    
-    /// Save a Peer to the store
-    pub async fn save<S: KvStoreExt + ?Sized>(&self, kv: &S) -> Result<(), PeerManagerError> {
-        // Build batch with all peer attributes using fluent API
-        let mut batch = BatchBuilder::new(kv)
-            .put(Self::key_status(self.pubkey), self.status.as_str().as_bytes());
-        
-        if let Some(ref name) = self.name {
-            batch = batch.put(Self::key_name(self.pubkey), name.as_bytes());
-        }
-        
-        if let Some(added_at) = self.added_at {
-            batch = batch.put(Self::key_added_at(self.pubkey), added_at.to_string().as_bytes());
-        }
-        
-        if let Some(added_by) = self.added_by {
-            batch = batch.put(Self::key_added_by(self.pubkey), hex::encode(added_by).as_bytes());
-        }
-        
-        batch.commit().await.map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
-        Ok(())
-    }
-    
-    /// Convert to PeerInfo for backward compatibility.
-    pub fn to_info(&self) -> crate::PeerInfo {
-        crate::PeerInfo {
-            pubkey: self.pubkey,
-            status: self.status.clone(),
-            name: self.name.clone(),
-            added_at: self.added_at,
-            added_by: self.added_by.map(|p| hex::encode(p)),
+            status,
+            added_at: Some(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)),
+            added_by: Some(added_by),
         }
     }
 
     // ==================== Schema Key Helpers ====================
-    // Centralized schema definitions to avoid "stringly typed" scattering.
 
-    /// Key for peer status: `/nodes/{pubkey_hex}/status`
+    /// Key for peer status: `peer/{pubkey_hex}/status`
     pub fn key_status(pubkey: PubKey) -> Vec<u8> {
-        format!("/nodes/{}/status", hex::encode(pubkey)).into_bytes()
+        format!("peer/{}/status", hex::encode(pubkey.as_slice())).into_bytes()
     }
 
-    /// Key for peer name: `/nodes/{pubkey_hex}/name`
-    pub fn key_name(pubkey: PubKey) -> Vec<u8> {
-        format!("/nodes/{}/name", hex::encode(pubkey)).into_bytes()
-    }
-
-    /// Key for added_at timestamp: `/nodes/{pubkey_hex}/added_at`
+    /// Key for added_at timestamp: `peer/{pubkey_hex}/added_at`
     pub fn key_added_at(pubkey: PubKey) -> Vec<u8> {
-        format!("/nodes/{}/added_at", hex::encode(pubkey)).into_bytes()
+        format!("peer/{}/added_at", hex::encode(pubkey.as_slice())).into_bytes()
     }
 
-    /// Key for added_by inviter: `/nodes/{pubkey_hex}/added_by`
+    /// Key for added_by inviter: `peer/{pubkey_hex}/added_by`
     pub fn key_added_by(pubkey: PubKey) -> Vec<u8> {
-        format!("/nodes/{}/added_by", hex::encode(pubkey)).into_bytes()
+        format!("peer/{}/added_by", hex::encode(pubkey.as_slice())).into_bytes()
+    }
+    
+    /// Save the peer status via SystemStore (batch API)
+    pub async fn save(&self, store: &dyn SystemStore) -> Result<(), PeerManagerError> {
+        SystemBatch::new(store)
+            .set_status(self.pubkey, self.status.clone())
+            .commit().await
+            .map_err(PeerManagerError::StateWriter)
     }
 }
-
 
 /// Manages peers in the mesh network.
 /// 
-/// PeerManager monitors `/nodes/{pubkey}/status` keys in the root store and maintains
-/// a cache for fast authorization checks. It also provides methods for peer operations
-/// like invite, join, set_status, and revoke.
-pub struct PeerManager<S: KvStoreExt + Send + Sync + ?Sized + 'static> {
-    /// Encapsulated peer cache (no direct lock access)
-    peers: Arc<PeerCache>,
-    /// Broadcast channel for peer status change events
+/// - Authorization (status): from SystemStore (TABLE_SYSTEM)
+/// - Display names: from root store DATA table (/nodes/{pubkey}/name)
+pub struct PeerManager {
+    /// System store for authorization (peer status)
+    store: Arc<dyn SystemStore + Send + Sync>,
+    /// Root store for name lookups (via KvStoreExt)
+    root_store: Arc<dyn crate::store_handle::StoreHandle>,
+    /// Broadcast channel for peer events
     peer_event_tx: broadcast::Sender<PeerEvent>,
-    /// Bootstrap authors trusted during initial sync (cleared after first sync)
+    /// Bootstrap authors trusted during initial sync
     bootstrap_authors: Arc<RwLock<HashSet<PubKey>>>,
-    /// KV handle for reads and writes (uses StateWriter for writes)
-    kv: Arc<S>,
-    /// Our own identity
-    identity: NodeIdentity,
-    /// Handle to the background watcher task (abort on drop)
+    /// Handle to the background watcher task
     watcher_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-// LOCK SAFETY INVARIANT:
-// The `peers` lock (RWLock) MUST NOT be held while performing blocking operations on `kv` (KvStore).
-// `KvStore` operations (put, list, etc.) send synchronous commands to the Actor, which might
-// concurrently be trying to acquire a read lock on `peers` (via PeerProvider::can_accept_entry).
-//
-// Safe:
-// - Holding `peers` lock -> simple map operations
-// - Calling `kv` -> NO `peers` lock held
-//
-// This prevents the classical recursive deadlock:
-// Thread A (PeerManager): Holds peers lock -> Waiting on Actor (KV op)
-// Thread B (ActorRunner): Processing validation -> Waiting on peers lock (PeerProvider)
-
-impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> std::fmt::Debug for PeerManager<S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PeerManager")
-            .field("my_pubkey", &self.identity.public_key())
-            .finish()
-    }
-}
-
-impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> PeerManager<S> {
-    /// Create a new PeerManager that manages peers via the given store.
+impl PeerManager {
+    /// Create a new PeerManager.
     /// 
-    /// This initializes the peer cache from the current store state and spawns a
-    /// background task to keep it updated.
-    pub async fn new(store: Arc<S>, identity: &NodeIdentity) -> Result<Arc<Self>, PeerManagerError> {
+    /// - `store`: SystemStore for peer authorization
+    /// - `root_store`: Root store for name lookups
+    pub async fn new(
+        store: Arc<dyn SystemStore + Send + Sync>,
+        root_store: Arc<dyn crate::store_handle::StoreHandle>,
+    ) -> Result<Arc<Self>, PeerManagerError> {
         let (peer_event_tx, _) = broadcast::channel(64);
         
         let manager = Arc::new(Self {
-            peers: Arc::new(PeerCache::new()),
+            store,
+            root_store,
             peer_event_tx,
             bootstrap_authors: Arc::new(RwLock::new(HashSet::new())),
-            kv: store,
-            identity: identity.clone(),
             watcher_task: Mutex::new(None),
         });
         
-        // Start watching peer status changes
         manager.start_watching().await?;
         
         Ok(manager)
     }
-    
-    // ==================== Peer Operations ====================
-    
-    // invite_peer removed - use token-based invites instead
-    
-    /// Set a peer's name.
-    pub async fn set_peer_name(&self, pubkey: PubKey, name: &str) -> Result<(), PeerManagerError> {
-        self.kv.put(Peer::key_name(pubkey), name.as_bytes().to_vec())
-            .await.map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
+
+    /// Start watching the system event stream for peer changes
+    async fn start_watching(self: &Arc<Self>) -> Result<(), PeerManagerError> {
+        let mut event_stream = self.store.subscribe_events();
+        let notify = self.peer_event_tx.clone();
+        
+        let task = tokio::spawn(async move {
+            while let Some(result) = event_stream.next().await {
+                match result {
+                    Ok(event) => {
+                        let peer_event = match event {
+                            SystemEvent::PeerUpdated(info) => {
+                                Some(PeerEvent::Added { pubkey: info.pubkey, status: info.status })
+                            }
+                            SystemEvent::PeerRemoved(pubkey) => {
+                                Some(PeerEvent::StatusChanged { 
+                                    pubkey, 
+                                    old: PeerStatus::Active, 
+                                    new: PeerStatus::Revoked 
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let Some(ev) = peer_event {
+                            let _ = notify.send(ev);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("PeerManager watcher error: {}", e);
+                    }
+                }
+            }
+        });
+        
+        if let Ok(mut guard) = self.watcher_task.lock() {
+            *guard = Some(task);
+        }
+        
         Ok(())
     }
+
+    // ==================== Read Operations (from SystemStore) ====================
     
-    /// Set a peer's status.
-    pub async fn set_peer_status(&self, pubkey: PubKey, status: PeerStatus) -> Result<(), PeerManagerError> {
-        self.kv.put(Peer::key_status(pubkey), status.as_str().as_bytes().to_vec())
-            .await.map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
-        Ok(())
+    /// List all peers
+    pub fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
+        self.store.get_peers().map_err(PeerManagerError::Store)
     }
     
-    /// Get a peer's status from cache (fast lookup).
+    /// Get a specific peer's status (O(1) lookup)
     pub fn get_peer_status(&self, pubkey: &PubKey) -> Option<PeerStatus> {
-        self.peers.get_status(pubkey)
+        self.store.get_peer(pubkey).ok()?.map(|p| p.status)
+    }
+
+    /// Check if peer can join (is Active)
+    fn can_join_peer(&self, peer: &PubKey) -> bool {
+        self.get_peer_status(peer) == Some(PeerStatus::Active)
+    }
+
+    /// Check if author's entries are acceptable
+    fn can_accept_author(&self, author: &PubKey) -> bool {
+        matches!(
+            self.get_peer_status(author),
+            Some(PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked)
+        )
+    }
+
+    // ==================== Write Operations ====================
+    /// Set a peer's status via SystemStore (batch API)
+    pub async fn set_peer_status(&self, pubkey: PubKey, status: PeerStatus) -> Result<(), PeerManagerError> {
+        SystemBatch::new(&*self.store)
+            .set_status(pubkey, status)
+            .commit().await
+            .map_err(PeerManagerError::StateWriter)
+    }
+
+    /// Set a peer's display name (stored in root store DATA table at /nodes/{pubkey}/name)
+    pub async fn set_peer_name(&self, pubkey: PubKey, name: &str) -> Result<(), PeerManagerError> {
+        let key = format!("nodes/{}/name", hex::encode(pubkey.as_slice())).into_bytes();
+        self.root_store.put(key, name.as_bytes().to_vec()).await
+            .map_err(|e| PeerManagerError::Store(e.to_string()))?;
+        Ok(())
     }
     
-    /// Activate a peer (set status to Active).
+    /// Get a peer's display name (from root store DATA table)
+    pub async fn get_peer_name(&self, pubkey: &PubKey) -> Option<String> {
+        let key = format!("nodes/{}/name", hex::encode(pubkey.as_slice())).into_bytes();
+        self.root_store.get(key).await.ok().flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    }
+
     pub async fn activate_peer(&self, pubkey: PubKey) -> Result<(), PeerManagerError> {
         self.set_peer_status(pubkey, PeerStatus::Active).await
     }
     
-    /// Revoke a peer (set status to Revoked).
     pub async fn revoke_peer(&self, pubkey: PubKey) -> Result<(), PeerManagerError> {
         self.set_peer_status(pubkey, PeerStatus::Revoked).await
     }
-    
-    /// Get a peer's full info from the store.
-    pub async fn get_peer(&self, pubkey: PubKey) -> Result<Option<Peer>, PeerManagerError> {
-        Peer::load(self.kv.as_ref(), pubkey).await
-    }
-    
+
     // ==================== Bootstrap Authors ====================
     
-    /// Set bootstrap authors trusted during initial sync.
-    /// These authors are accepted even if not in the peer cache.
     pub fn set_bootstrap_authors(&self, authors: Vec<PubKey>) -> Result<(), PeerManagerError> {
         let mut bootstrap = self.bootstrap_authors.write()
             .map_err(|_| PeerManagerError::LockPoisoned)?;
@@ -393,7 +250,6 @@ impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> PeerManager<S> {
         Ok(())
     }
     
-    /// Clear bootstrap authors (called after first sync completes).
     pub fn clear_bootstrap_authors(&self) -> Result<(), PeerManagerError> {
         let mut bootstrap = self.bootstrap_authors.write()
             .map_err(|_| PeerManagerError::LockPoisoned)?;
@@ -401,220 +257,55 @@ impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> PeerManager<S> {
         Ok(())
     }
     
-    // ==================== Peer Listing ====================
-    
-    /// List all peers with their full info (name, added_at, etc.)
-    pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
-        let nodes = self.kv.list_by_prefix(b"/nodes/".to_vec()).await
-            .map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
-        
-        // Group attributes by pubkey hex
-        let mut peers_attrs: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        
-        for kv_pair in nodes {
-            let key_str = String::from_utf8_lossy(&kv_pair.key);
-            
-            // Parse key: /nodes/{pubkey}/{attr}
-            let Some(rest) = key_str.strip_prefix("/nodes/") else { continue };
-            let Some((pubkey_hex, attr)) = rest.split_once('/') else { continue };
-            
-            let value_str = String::from_utf8_lossy(&kv_pair.value);
-            
-            peers_attrs.entry(pubkey_hex.to_string())
-                .or_default()
-                .push((attr.to_string(), value_str.to_string()));
-        }
-        
-        // Convert to PeerInfo list using Peer::from_attributes logic
-        let peers: Vec<PeerInfo> = peers_attrs.into_iter()
-            .filter_map(|(pubkey_hex, attrs)| {
-                let pubkey_bytes = hex::decode(&pubkey_hex).ok()?;
-                let pubkey = PubKey::try_from(pubkey_bytes).ok()?;
-                
-                let peer = Peer::from_attributes(pubkey, attrs.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
-                Some(peer.to_info())
-            })
-            .collect();
-        
-        Ok(peers)
+    fn is_bootstrap_author(&self, author: &PubKey) -> bool {
+        self.bootstrap_authors.read()
+            .map(|b| b.contains(author))
+            .unwrap_or(false)
     }
     
-    // ==================== Internal: Cache Watching ====================
+    // ==================== Shutdown ====================
 
-    /// Start watching peer status changes and keep cache updated.
-    /// 
-    /// Subscribes to `/nodes/.*/status` and updates the cache reactively.
-    /// This ensures read-your-writes consistency (local writes trigger events)
-    /// as well as consistency with external changes (e.g. from gossip).
-    async fn start_watching(self: &Arc<Self>) -> Result<(), PeerManagerError> {
-        use futures_util::StreamExt;
-        // Watch pattern for all peer statuses
-        let pattern = r"^/nodes/.*/status$";
-        
-        // 1. Start watch stream first (to buffer updates during scan)
-        let mut stream = self.kv.watch(pattern).await
-           .map_err(|e| PeerManagerError::Watch(lattice_kvstore_client::WatchError::Storage(e.to_string())))?;
-        
-        // 2. Perform initial scan
-        let initial = self.kv.list_by_prefix(b"/nodes/".to_vec()).await
-             .map_err(|e| PeerManagerError::Store(lattice_kvstore_client::DispatchError(e.to_string())))?;
-
-        for kv_pair in initial {
-            // Filter for status keys purely by parsing
-             if let Some((pubkey, status)) = Self::parse_peer_state(&kv_pair.key, &kv_pair.value) {
-                self.peers.insert(pubkey, Peer::minimal(pubkey, status));
-             }
-        }
-        
-        // 2. Spawn watcher task for ongoing updates
-        let peers = self.peers.clone();
-        let notify = self.peer_event_tx.clone();
-        let _kv = self.kv.clone(); // Clone KV for re-syncing on lag
-        
-        let task = tokio::spawn(async move {
-            loop {
-                match stream.next().await {
-                    Some(Ok(event)) => {
-                        Self::handle_watch_event(event, &peers, &notify);
-                    }
-                    Some(Err(e)) => {
-                         // Ideally we should re-connect, but for now we break/log
-                         // The client stream might implement reconnect internally?
-                         // If we break, we lose updates. -> this needs to be in roadmap M9 (implemented, carefully tested)
-                         error!("Peer watch stream error: {}", e);
-                         break;
-                    }
-                    None => break, // Stream closed
-                }
-            }
-        });
-        
-        // Store handle for cleanup
-        if let Ok(mut guard) = self.watcher_task.lock() {
-            *guard = Some(task);
-        }
-        
-        Ok(())
-    }
-    
-    /// Stop the background watcher and wait for it to finish.
-    /// This releases any held lock or handle on the store, allowing clean shutdown.
     pub async fn shutdown(&self) {
-        let task = {
-            if let Ok(mut guard) = self.watcher_task.lock() {
-                guard.take()
-            } else {
-                None
-            }
-        };
-        
+        let task = self.watcher_task.lock().ok().and_then(|mut g| g.take());
         if let Some(task) = task {
             task.abort();
-            let _ = task.await; // Wait for task to finish
-        }
-    }
-
-    /// Parse peer state from KV entry (helper for initial load and updates)
-    /// Parse peer state from KV entry (helper for initial load and updates)
-    fn parse_peer_state(key: &[u8], value: &[u8]) -> Option<(PubKey, PeerStatus)> {
-        let pubkey_hex = parse_peer_status_key(key)?;
-        let pubkey_bytes = hex::decode(&pubkey_hex).ok()?;
-        let pubkey = PubKey::try_from(pubkey_bytes).ok()?;
-
-        let status_str = String::from_utf8_lossy(value);
-        let status = PeerStatus::from_str(&status_str)?;
-        
-        Some((pubkey, status))
-    }
-
-    /// Handle a single watch event to update cache and notify listeners
-    /// Handle a single watch event to update cache and notify listeners
-    fn handle_watch_event(
-        event: lattice_kvstore_client::WatchEvent,
-        peers: &Arc<PeerCache>,
-        notify: &broadcast::Sender<PeerEvent>
-    ) {
-        let lattice_kvstore_client::WatchEvent { key, kind } = event;
-
-        let (pubkey, new_status) = match kind {
-            lattice_kvstore_client::WatchEventKind::Update { value } => {
-                match Self::parse_peer_state(&key, &value) {
-                    Some((pk, status)) => (pk, Some(status)),
-                    None => return, // Malformed or irrelevant update
-                }
-            }
-            lattice_kvstore_client::WatchEventKind::Delete => {
-                 // Try to recover pubkey from key even without value
-                 if let Some(pubkey_hex) = parse_peer_status_key(&key) {
-                    if let Ok(pubkey_bytes) = hex::decode(&pubkey_hex) {
-                        if let Ok(pubkey) = PubKey::try_from(pubkey_bytes) {
-                             (pubkey, None) // None means deleted/revoked
-                        } else { return; }
-                    } else { return; }
-                 } else { return; }
-            }
-        };
-
-        Self::update_peer_cache(peers, pubkey, new_status, notify);
-    }
-
-    /// Update peer cache and emit events
-    fn update_peer_cache(
-        peers: &Arc<PeerCache>, 
-        pubkey: PubKey, 
-        status: Option<PeerStatus>, 
-        notify: &broadcast::Sender<PeerEvent>
-    ) {
-        // PeerCache handles locking internally.
-        // It returns an event if a change occurred, which we broadcast.
-        // Crucially, we do NOT hold any lock when calling notify.send().
-        if let Some(event) = peers.update(pubkey, status) {
-            let _ = notify.send(event);
+            let _ = task.await;
         }
     }
 }
 
-impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> Drop for PeerManager<S> {
-    fn drop(&mut self) {
-        if let Ok(mut guard) = self.watcher_task.lock() {
-            if let Some(task) = guard.take() {
-                task.abort();
-            }
-        }
-    }
-}
+// ==================== PeerProvider Trait ====================
 
-// ==================== PeerProvider Implementation ====================
-
-impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> PeerProvider for PeerManager<S> {
+impl PeerProvider for PeerManager {
     fn can_join(&self, peer: &PubKey) -> bool {
-        self.peers.can_join(peer)
+        self.can_join_peer(peer)
     }
     
     fn can_connect(&self, peer: &PubKey) -> bool {
-        // Check bootstrap authors first (trusted during initial sync)
-        if self.bootstrap_authors.read().map(|b| b.contains(peer)).unwrap_or(false) {
+        if self.is_bootstrap_author(peer) {
             return true;
         }
-        // Then check cache safely
-        if let Some(status) = self.peers.get_status(peer) {
-            matches!(status, PeerStatus::Active | PeerStatus::Dormant)
-        } else {
-            false
-        }
+        matches!(
+            self.get_peer_status(peer),
+            Some(PeerStatus::Active | PeerStatus::Dormant)
+        )
     }
     
     fn can_accept_entry(&self, author: &PubKey) -> bool {
-        // Check bootstrap authors first (trusted during initial sync)
-        if self.bootstrap_authors.read().map(|b| b.contains(author)).unwrap_or(false) {
+        if self.is_bootstrap_author(author) {
             return true;
         }
-        self.peers.can_accept_entry(author)
+        self.can_accept_author(author)
     }
     
     fn list_acceptable_authors(&self) -> Vec<PubKey> {
-        let mut authors = self.peers.list_acceptable_authors();
-        // Also include bootstrap authors (trusted during initial sync)
+        let mut authors: Vec<PubKey> = self.store.get_peers()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| matches!(p.status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
+            .map(|p| p.pubkey)
+            .collect();
+        
         if let Ok(bootstrap) = self.bootstrap_authors.read() {
             for pk in bootstrap.iter() {
                 if !authors.contains(pk) {
@@ -626,17 +317,16 @@ impl<S: KvStoreExt + Send + Sync + ?Sized + 'static> PeerProvider for PeerManage
     }
     
     fn subscribe_peer_events(&self) -> lattice_model::PeerEventStream {
-        use futures_util::StreamExt;
         let rx = self.peer_event_tx.subscribe();
         Box::pin(tokio_stream::wrappers::BroadcastStream::new(rx)
             .filter_map(|r| async move { r.ok() }))
     }
     
     fn list_peers(&self) -> Vec<lattice_model::GossipPeer> {
-        // Return cached peers for gossip bootstrap (sync method using cache)
-        self.peers.list_all()
+        self.store.get_peers()
+            .unwrap_or_default()
             .into_iter()
-            .map(|(pubkey, status)| lattice_model::GossipPeer { pubkey, status })
+            .map(|p| lattice_model::GossipPeer { pubkey: p.pubkey, status: p.status })
             .collect()
     }
 }

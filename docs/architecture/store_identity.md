@@ -18,7 +18,6 @@ Every Lattice store (regardless of type) MUST maintain a `meta` table in its `st
 | `store_id`         | `[u8; 16]` (UUID) | Unique Instance ID. Validates we opened the right store.     |
 | `store_type`       | `String` (UTF-8)  | **Logical Type Identity**. Determines which Opener to use.   |
 | `schema_version`   | `u64` (LE)        | Data layout version. Managed by store logic for migrations.  |
-| `state_hash`       | `[u8; 32]`        | Current rolling Merkle-ish hash of the state.                |
 | `tip/<pubkey>`     | `[u8; 32]`        | Last applied Op Hash per author (Causal Checkpoint).         |
 
 ### Store Type Semantics

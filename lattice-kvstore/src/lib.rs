@@ -15,13 +15,10 @@ pub mod proto {
 }
 
 // Internal modules
-pub mod head;
-pub mod merge;
-mod state;
-
+pub mod state;
 pub use state::KvState;
-pub use head::{Head, HeadError};
-pub use merge::{Merge, MergeList};
+pub use lattice_storage::head::{Head, HeadError};
+pub use lattice_storage::merge::Merge;
 pub use proto::KvPayload;
 
 /// Type alias for KV store state wrapped in PersistentState for use with direct_opener()  

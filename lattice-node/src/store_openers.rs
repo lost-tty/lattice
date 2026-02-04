@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use lattice_store_base::{Introspectable, Dispatcher, StreamProvider};
 use lattice_model::StoreTypeProvider;
+use lattice_systemstore::SystemStore;
 
 /// Create a store opener that returns `Store<S>` directly without a wrapper handle.
 /// 
@@ -20,7 +21,7 @@ use lattice_model::StoreTypeProvider;
 /// Note: Clone bound is NOT required on S because Store<S> wraps state in Arc.
 pub fn direct_opener<S>(registry: Arc<StoreRegistry>) -> Box<dyn StoreOpener>
 where
-    S: Openable + Introspectable + Dispatcher + StreamProvider + StoreTypeProvider + Send + Sync + 'static,
+    S: Openable + Introspectable + Dispatcher + StreamProvider + StoreTypeProvider + Send + Sync + 'static + SystemStore,
 {
     Box::new(DirectOpenerImpl::<S> { registry, _marker: std::marker::PhantomData })
 }
@@ -32,7 +33,7 @@ struct DirectOpenerImpl<S> {
 
 impl<S> StoreOpener for DirectOpenerImpl<S>
 where
-    S: Openable + Introspectable + Dispatcher + StreamProvider + StoreTypeProvider + Send + Sync + 'static,
+    S: Openable + Introspectable + Dispatcher + StreamProvider + StoreTypeProvider + Send + Sync + 'static + SystemStore,
 {
     fn open(&self, store_id: Uuid) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
         let (store, _) = self.registry.get_or_open(store_id, |path| {

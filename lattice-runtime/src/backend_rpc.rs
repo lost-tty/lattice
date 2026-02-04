@@ -224,6 +224,14 @@ impl LatticeBackend for RpcBackend {
             Ok(resp.into_inner().orphans_removed)
         })
     }
+
+    fn store_system_list(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, Vec<u8>)>> {
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client.store.system_list(StoreId { id: store_id.as_bytes().to_vec() }).await?;
+            Ok(resp.into_inner().entries.into_iter().map(|e| (e.key, e.value)).collect())
+        })
+    }
     
     fn store_exec(&self, store_id: Uuid, method: &str, payload: &[u8]) -> AsyncResult<'_, Vec<u8>> {
         let method = method.to_string();

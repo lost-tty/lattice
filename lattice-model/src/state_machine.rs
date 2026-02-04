@@ -36,14 +36,11 @@ pub trait StateMachine: Send + Sync {
     
     /// Restore the state from a snapshot.
     fn restore(&self, snapshot: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error>;
-    
-    /// Returns a hash representing the current state's history.
-    fn state_identity(&self) -> Hash;
 
     /// Returns all author public keys and their last applied operation hash.
     fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error>;
     
-    /// Returns store metadata (id, type, name, schema_version, state_hash).
+    /// Returns store metadata (id, type, name, schema_version).
     /// Default implementation returns default/empty values.
     fn store_meta(&self) -> crate::StoreMeta {
         crate::StoreMeta::default()

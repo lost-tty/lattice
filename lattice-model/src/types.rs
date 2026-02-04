@@ -16,9 +16,9 @@ use std::fmt;
 macro_rules! define_bytes {
     ($name:ident, $len:expr, $doc:expr, [$($derives:ident),*]) => {
         #[doc = $doc]
-        #[derive(Clone, Copy, $($derives),*)]
+        #[derive(Clone, Copy, serde::Serialize, serde::Deserialize, $($derives),*)]
         #[repr(transparent)] 
-        pub struct $name(pub [u8; $len]);
+        pub struct $name(#[serde(with = "serde_bytes")] pub [u8; $len]);
 
         impl $name {
             /// Returns the inner bytes as a slice.
@@ -27,8 +27,6 @@ macro_rules! define_bytes {
             }
 
             /// Parse from a hex string.
-            /// 
-            /// Returns an error if the string is not valid hex or has the wrong length.
             pub fn from_hex(hex_str: &str) -> Result<Self, String> {
                 let bytes = hex::decode(hex_str)
                     .map_err(|e| format!("invalid hex: {}", e))?;
@@ -39,7 +37,6 @@ macro_rules! define_bytes {
                         hex_str.len()
                     ));
                 }
-                // SAFETY: length checked above
                 Ok(Self(bytes.try_into().map_err(|_| "internal error: length mismatch".to_string())?))
             }
         }

@@ -29,20 +29,30 @@ This document outlines the development plan for Lattice.
 
 > **Why:** The distinction between `Mesh` and `Store` is artificial. By treating everything as a store, we simplify the codebase, enable infinite nesting, and unify peer management.
 
-### 10A: Common Store API (Meta Table)
-- [ ] Implement `StoreMeta` schema update: `children: Vec<StoreLink>`, `parents: Vec<StoreLink>`
-- [ ] Implement generic `PeerManager` trait on `StoreMeta` (Independent/Inherited/Snapshot)
-- [ ] Implement `SubstoreManager` trait on `StoreMeta`
-- [ ] Migrate `StoreManager` to use recursive discovery (graph walker)
+### 10A: System Store (TABLE_SYSTEM)
+- [x] Created `lattice-systemstore` crate with `TABLE_SYSTEM` using HeadList CRDTs
+- [x] Moved `PeerStrategy` to `lattice-systemstore` (clean dependency)
+- [x] Implemented `SystemStore` trait with `get_peer`/`update_peer`/`get_peers` API
+- [x] System table interception layer in `PersistentState::apply()`
+- [x] Removed dead code: `HandleBase`, `PeerManager`/`SubstoreManager` traits, `as_writer`
+- [x] Added `list_all()` API and `store system show` CLI command for debugging
+- [ ] Add child store hierarchy (`child/{uuid}/status`, `child/{uuid}/name`)
+- [ ] Add `strategy` key for persisted `PeerStrategy` (Independent/Inherited)
+- [ ] Add invite handling (`invite/{token_hash}/status`, `invited_by`, `claimed_by`)
+- [ ] `Node::set_name()` should propagate name to all stores that manage their own peer list
 
-### 10B: Root Store & Identity
+### 10B: Migration (Op-Based)
+- [ ] Recognize legacy peer ops in `apply()` and write to `TABLE_SYSTEM` instead of `TABLE_DATA`
+- [ ] Recognize legacy invite ops in `apply()` and redirect to `TABLE_SYSTEM`
+- [ ] Test migration with existing data directories
+
+### 10C: Root Store & Identity
 - [ ] Define "Root Store" as `PeerStrategy::Independent`
 - [ ] Implement **Peer Name Cache** in the Root Store's Data table (`/nodes/{pubkey}/name`)
 - [ ] Update `lattice-node` to bootstrap from a list of Root Stores (instead of meshes)
 
-### 10C: Legacy Migration
+### 10D: Legacy Cleanup
 - [ ] Convert existing `Mesh` structs to Root Stores
-- [ ] Provide migration tool for existing data directories
 - [ ] Remove `Mesh` and `ControlPlane` code
 
 ---

@@ -113,7 +113,7 @@ Both `lattice-kvstore` and `lattice-kernel` use a generic storage interface inst
 | Collection | ID | Purpose | Who writes |
 |------------|----|---------|------------|
 | `Data`     | 0  | User key-value space | State machine |
-| `Meta`     | 1  | Frontiers, tips, state hash | Kernel |
+| `Meta`     | 1  | Frontiers, tips | Kernel |
 | `Index`    | 2  | Sidecar indexes (Negentropy) | Kernel |
 
 **Traits:**
@@ -490,14 +490,26 @@ Each node stores logs as one file per author:
 ```
 Table              Key                     Value                      Purpose
 ─────────────────────────────────────────────────────────────────────────────
-kv                 Vec<u8> (key)           Vec<HeadInfo>              Current tips for each key
-AUTHOR_TABLE      [u8; 32] (author_id)    (u64 seq, [u8; 32] hash)   Per-author frontier tracking
-meta               Vec<u8>                 Vec<u8>                    Store metadata (incl. merkle_root)
+TABLE_DATA         Vec<u8> (key)           Vec<HeadInfo>              Current tips for each user key
+TABLE_SYSTEM       Vec<u8> (key)           Vec<HeadInfo>              System metadata (peers, children)
+TABLE_AUTHOR       [u8; 32] (author_id)    (u64 seq, [u8; 32] hash)   Per-author frontier tracking
+TABLE_META         Vec<u8>                 Vec<u8>                    Store identity (store_type, schema)
 ```
 
 `HeadInfo: { value: Vec<u8>, hlc: u64, author: [u8;32], hash: [u8;32] }`
 
-Note: KV stores multiple heads per key to support DAG conflict resolution. Reads pick winner deterministically.
+**TABLE_SYSTEM Keys**:
+- `peer/{pubkey}/status` → SetPeerStatus proto (Invited/Active/Dormant/Revoked)
+- `peer/{pubkey}/added_at` → SetPeerAddedAt proto (uint64 timestamp)
+- `peer/{pubkey}/added_by` → SetPeerAddedBy proto (adder pubkey)
+- `child/{uuid}/status` → SetChildStatus proto (Active/Inactive)
+- `child/{uuid}/name` → Alias string (UTF-8, optional)
+- `invite/{token_hash}/status` → InviteStatus proto (Pending/Accepted/Expired/Revoked)
+- `invite/{token_hash}/invited_by` → Inviter pubkey bytes
+- `invite/{token_hash}/claimed_by` → Pubkey of who claimed it (set when accepted)
+- `strategy` → PeerStrategy proto (Independent/Inherited)
+
+Note: Both DATA and SYSTEM tables store multiple heads per key to support DAG conflict resolution. Reads pick winner deterministically.
 
 #### meta.db Tables (global, redb)
 
@@ -863,7 +875,6 @@ To ensure the `StateMachine` is truly independent of the replication log (enabli
       ```rust
       trait StateMachine {
           fn apply(&self, op_id: &Hash, deps: &[Hash], payload: &[u8], author: &PubKey, ts: &HLC);
-          fn state_identity(&self) -> Hash;
           fn applied_chaintips(&self) -> Vec<(PubKey, Hash)>;
       }
       ```

@@ -15,6 +15,7 @@ members = [
     "lattice-runtime",
     "lattice-bindings",
     "lattice-storage",
+    "lattice-systemstore",
     "lattice-store-base",
     "lattice-mockkernel",
 ]
@@ -34,6 +35,7 @@ default-members = [
     "lattice-logstore",
     "lattice-runtime",
     "lattice-storage",
+    "lattice-systemstore",
     "lattice-store-base",
 ]
 
@@ -52,6 +54,7 @@ lattice-kvstore = { path = "lattice-kvstore" }
 lattice-kvstore-client = { path = "lattice-kvstore-client" }
 lattice-logstore = { path = "lattice-logstore" }
 lattice-storage = { path = "lattice-storage" }
+lattice-systemstore = { path = "lattice-systemstore" }
 lattice-store-base = { path = "lattice-store-base" }
 lattice-mockkernel = { path = "lattice-mockkernel" }
 lattice-net-types = { path = "lattice-net-types" }
@@ -73,6 +76,8 @@ prost = "0.14"
 prost-types = "0.14"
 prost-build = "0.14"
 prost-reflect = "0.16"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 
 # Async runtime
 tokio = { version = "1", features = [] }
@@ -90,7 +95,7 @@ blake3 = "1"
 hex = "0.4"
 uniffi = "0.31.0"
 redb = "2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 chrono = "0.4"
 once_cell = "1"
 

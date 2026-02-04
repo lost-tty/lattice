@@ -437,10 +437,6 @@ mod tests {
             Ok(())
         }
 
-        fn state_identity(&self) -> Hash {
-            Hash::from([0u8; 32])
-        }
-
         fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
             Ok(self.tips.read().unwrap().clone().into_iter().collect())
         }
@@ -754,7 +750,6 @@ mod tests {
         type Error = std::io::Error;
         fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> { Ok(Box::new(std::io::Cursor::new(Vec::new()))) }
         fn restore(&self, _: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> { Ok(()) }
-        fn state_identity(&self) -> Hash { Hash::ZERO }
         fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> { Ok(Vec::new()) }
         fn apply(&self, _: &lattice_model::Op) -> Result<(), std::io::Error> {
             Err(std::io::Error::new(std::io::ErrorKind::Other, "Simulated Failure"))

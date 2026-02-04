@@ -10,6 +10,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use thiserror::Error;
+use crate::types::PubKey;
+use serde::{Serialize, Deserialize};
 
 /// Errors that can occur during node operations
 #[derive(Error, Debug)]
@@ -97,8 +99,8 @@ impl NodeIdentity {
     }
 
     /// Get the node's public key (identity) as a strong type.
-    pub fn public_key(&self) -> crate::types::PubKey {
-        crate::types::PubKey::from(self.signing_key.verifying_key().to_bytes())
+    pub fn public_key(&self) -> PubKey {
+        PubKey::from(self.signing_key.verifying_key().to_bytes())
     }
 
     /// Get the signing key for creating signatures and Iroh integration.
@@ -132,7 +134,7 @@ impl NodeIdentity {
 }
 
 /// Peer status values used across the system
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PeerStatus {
     /// Peer is active and can sync
     Active,
@@ -153,7 +155,6 @@ impl PeerStatus {
             PeerStatus::Revoked => "revoked",
         }
     }
-    
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "invited" => Some(PeerStatus::Invited),
@@ -163,6 +164,16 @@ impl PeerStatus {
             _ => None,
         }
     }
+}
+
+/// Information about a peer in the mesh
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub pubkey: PubKey,
+    pub status: PeerStatus,
+    pub name: Option<String>,
+    pub added_at: Option<u64>,
+    pub added_by: Option<PubKey>,
 }
 
 #[cfg(test)]

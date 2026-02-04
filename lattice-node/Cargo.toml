@@ -11,7 +11,9 @@ lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
 lattice-kvstore-client = { workspace = true }
 lattice-net-types = { workspace = true }
+lattice-proto = { workspace = true }
 lattice-storage = { workspace = true }
+lattice-systemstore = { workspace = true }
 ed25519-dalek = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true }

@@ -13,10 +13,10 @@ use std::pin::Pin;
 use std::future::Future;
 
 use crate::{WatchEvent, WatchEventKind};
-use crate::head::Head;
-use crate::merge::Merge;
+use lattice_storage::head::Head;
+use lattice_storage::merge::Merge;
 use crate::proto::{operation, KvPayload};
-use crate::proto::{HeadInfo as ProtoHeadInfo, HeadList};
+use lattice_proto::storage::{HeadInfo as ProtoHeadInfo, HeadList};
 use lattice_model::{Op, Uuid, Hash};
 use lattice_store_base::{Introspectable, FieldFormat};
 use prost::Message;
@@ -46,8 +46,6 @@ impl std::fmt::Debug for KvState {
 
 struct HeadChange {
     new_heads: Vec<Head>,
-    old_bytes: Option<Vec<u8>>,
-    new_bytes: Vec<u8>,
 }
 
 // ==================== Openable Implementation ====================
@@ -72,22 +70,6 @@ impl KvState {
     pub fn subscribe(&self) -> broadcast::Receiver<WatchEvent> {
         self.watcher_tx.subscribe()
     }
-  
-    // Helper to XOR two Hashes
-    fn xor_hash(a: Hash, b: Hash) -> Hash {
-        Hash::from(std::array::from_fn(|i| a[i] ^ b[i]))
-    }
-
-    /// Compute stable hash of a Key + HeadList
-    fn hash_kv_entry(key: &[u8], head_list_bytes: &[u8]) -> Hash {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"kv_leaf"); // Domain separator
-        hasher.update(&(key.len() as u64).to_le_bytes());
-        hasher.update(key);
-        hasher.update(&(head_list_bytes.len() as u64).to_le_bytes());
-        hasher.update(head_list_bytes);
-        Hash::from(*hasher.finalize().as_bytes())
-    }
 
     /// Apply a new head to a key, removing ancestor heads (idempotent)
     fn apply_head(
@@ -99,17 +81,16 @@ impl KvState {
     ) -> Result<Option<HeadChange>, StateDbError> {
         // Read current heads direct from table (includes logic of overlay)
         // Redb tables in a write transaction see their own updates.
-        let (mut heads, old_bytes) = match table.get(key)? {
+        let mut heads = match table.get(key)? {
             Some(v) => {
                 let bytes = v.value().to_vec();
                 let list = HeadList::decode(bytes.as_slice())
                     .map_err(|e| StateDbError::Conversion(e.to_string()))?;
-                let h = list.heads.into_iter()
+                list.heads.into_iter()
                     .map(|h| Head::try_from(h).map_err(|e| StateDbError::Conversion(e.to_string())))
-                    .collect::<Result<Vec<_>, StateDbError>>()?;
-                (h, Some(bytes))
+                    .collect::<Result<Vec<_>, StateDbError>>()?
             }
-            None => (Vec::new(), None),
+            None => Vec::new(),
         };
         
         // Idempotency: skip if this entry was already applied
@@ -135,8 +116,6 @@ impl KvState {
         table.insert(key, encoded.as_slice())?;
         Ok(Some(HeadChange {
             new_heads: heads,
-            old_bytes,
-            new_bytes: encoded,
         }))
     }
     
@@ -249,13 +228,12 @@ impl StateLogic for KvState {
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
-    ) -> Result<(Self::Updates, Hash), StateDbError> {
+    ) -> Result<Self::Updates, StateDbError> {
         // Decode payload
         let kv_payload = KvPayload::decode(op.payload.as_ref())
             .map_err(|e| StateDbError::Conversion(e.to_string()))?;
         
         let mut updates: Vec<(Vec<u8>, Vec<Head>)> = Vec::new();
-        let mut identity_diff = Hash::ZERO;
 
         // Apply KV operations (in reverse order for "last op wins" within batch)
         for kv_op in kv_payload.ops.iter().rev() {
@@ -271,10 +249,6 @@ impl StateLogic for KvState {
                         };
                         if let Some(change) = self.apply_head(table, &put.key, new_head, &op.causal_deps)? {
                             updates.push((put.key.clone(), change.new_heads));
-                            if let Some(old) = change.old_bytes {
-                                identity_diff = Self::xor_hash(identity_diff, Self::hash_kv_entry(&put.key, &old));
-                            }
-                            identity_diff = Self::xor_hash(identity_diff, Self::hash_kv_entry(&put.key, &change.new_bytes));
                         }
                     }
                     operation::OpType::Delete(del) => {
@@ -287,17 +261,13 @@ impl StateLogic for KvState {
                         };
                         if let Some(change) = self.apply_head(table, &del.key, tombstone, &op.causal_deps)? {
                             updates.push((del.key.clone(), change.new_heads));
-                            if let Some(old) = change.old_bytes {
-                                identity_diff = Self::xor_hash(identity_diff, Self::hash_kv_entry(&del.key, &old));
-                            }
-                            identity_diff = Self::xor_hash(identity_diff, Self::hash_kv_entry(&del.key, &change.new_bytes));
                         }
                     }
                 }
             }
         }
 
-        Ok((updates, identity_diff))
+        Ok(updates)
     }
 
     /// Notify watchers of changes.

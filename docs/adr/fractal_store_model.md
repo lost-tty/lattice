@@ -34,27 +34,58 @@ We will adopt the **Fractal Store Model**:
 
 We replace the flat `Mesh` -> `RootStore` -> `Map<StoreId, StoreType>` structure with a graph-based model.
 
-The `StoreMeta` table (present in *every* store) gains:
-- `children: Vec<StoreLink { id, name, mode }>`
-- `parents: Vec<StoreLink { id }>` (for back-references/traversal)
+### Data Model Changes
+
+We replace the flat `Mesh` -> `RootStore` -> `Map<StoreId, StoreType>` structure with a graph-based model.
+
+#### 1. Universal Envelope
+
+All operations in the system are wrapped in a `UniversalOp` to safeguard the distinction between Application Data and System Operations.
+
+```protobuf
+message UniversalOp {
+    oneof op {
+        bytes app_data = 1;      // Forwarded to inner logic (e.g. KvState)
+        SystemOp system = 2;     // Handled by shared StateBackend
+    }
+}
+
+message SystemOp {
+    oneof kind {
+        HierarchyOp hierarchy = 1; // Manage children/parents
+        PeerOp peer = 2;           // Manage authorized peers
+    }
+}
+```
+
+#### 2. System Table (CRDT)
+
+The `StateBackend` maintains a dedicated `system` table using `HeadList` CRDTs to manage infrastructure state.
+- **Hierarchy:** `child/{id}`, `parent/{id}`
+- **Peers:** `peer/{pubkey}`
+- **Invites:** `invite/{hash}` (one-time tokens for peer authorization)
+- **Config:** `config/strategy` (PeerStrategy persistence)
+
+This ensures that concurrent modifications to the hierarchy OR peer list are preserved. For example, if two admins concurrently authorize different peers, both remain authorized (set union).
 
 ### Peer Inheritance
 
-A store can have a `PeerStrategy`:
+A store can have a `PeerStrategy` (stored in `StoreMeta` as configuration):
 - **Independent:** Manages its own peer list (like a Mesh today).
 - **Inherited:** Uses the parent's peer list (live reference).
 - **Snapshot:** Copies parent's peers at creation but diverges thereafter.
 
 ### Common Store API (Meta Table)
 
-Every store exposes a common API for managing peers and substores using its local `StoreMeta` table. This moves the current `Mesh` logic into `Store` itself.
+Every store exposes a common API for managing peers and substores.
 
 | Table | Managed By | Contents |
 |-------|------------|----------|
-| **Meta** (all stores) | `lattice-node` | Peer **Authorization** (status), Substore list (`children`), Config |
+| **Hierarchy** (all stores) | `StateBackend` | Substore list (`children`), Parent links (`parents`) - via `SystemOp` |
+| **Meta** (all stores) | `lattice-node` | Peer **Authorization** (status), Peer Strategy, Config |
 | **Data** (root store) | `State Machine` | Peer **Display Name Cache** (`/nodes/{pubkey}/name`) - replicated |
 
-A "Root Store" is simply a store with `PeerStrategy::Independent` that acts as the trust anchor for a hierarchy. Its *Data* section provides a specialized cache for display names, while its *Meta* section handles the actual list of authorized peers.
+A "Root Store" is simply a store with `PeerStrategy::Independent` that acts as the trust anchor for a hierarchy.
 
 **Note:** The root store is implicitly discoverable by walking up the `parents` links. All stores in the hierarchy—even those with `Independent` peer strategy—resolve peer display names from the root's cache to ensure consistent identity.
 
@@ -62,44 +93,15 @@ A "Root Store" is simply a store with `PeerStrategy::Independent` that acts as t
 ```rust
 /// Substore management (replaces Mesh::create_store)
 trait SubstoreManager {
-    /// Declare a substore reference in this store's children list (Meta table).
+    /// Declare a substore reference in this store's hierarchy.
+    /// Emits a SystemOp::Hierarchy(AddRelation).
     async fn declare_substore(&self, id: Uuid, name: &str, store_type: &str, peer_strategy: PeerStrategy) -> Result<()>;
     
-    /// List all declared substores.
+    /// List all declared substores (resolved from HeadList).
     async fn list_substores(&self) -> Result<Vec<StoreRef>>;
     
     /// Remove a substore reference.
     async fn remove_substore(&self, id: &Uuid) -> Result<()>;
-}
-
-/// Peer management (replaces Mesh::invite_peer, etc.)
-trait PeerManager {
-    /// Add or update a peer in this store's peer list (Meta table).
-    async fn set_peer(&self, pubkey: PubKey, status: PeerStatus) -> Result<()>;
-    
-    /// Get the effective peer list (may be inherited from parent).
-    async fn list_peers(&self) -> Result<Vec<PeerInfo>>;
-    
-    /// Get this store's peer strategy.
-    fn peer_strategy(&self) -> PeerStrategy;
-}
-
-enum PeerStrategy {
-    /// Owns its own peer list (/nodes/* keys in this store).
-    Independent,
-    /// Delegates to parent's peer list (live lookup).
-    Inherited,
-    /// Copied parent's peers at creation, now independent.
-    Snapshot,
-}
-
-// Extend existing StoreRef with peer_strategy for substore relationships
-struct StoreRef {
-    id: Uuid,
-    store_type: String,
-    name: String,
-    archived: bool,
-    peer_strategy: PeerStrategy,  // NEW: how this store resolves peers
 }
 ```
 
@@ -111,6 +113,8 @@ struct StoreRef {
 ## Consequences
 
 ### Positive
+- **Future Proof:** `SystemOp` allows adding ACLs, Quotas, and Policy without breaking store implementations.
+- **Robustness:** Hierarchy changes are safe under concurrency (no lost children).
 - **Service Composition:** A service (e.g., "Notes") can own substores for text, attachments, sync metadata.
 - **Unified API:** No more `mesh.create_store()`. Just `parent_store.declare_substore()`.
 - **Simplification:** Removes the entire `Mesh` struct and its management overhead.
@@ -122,7 +126,20 @@ struct StoreRef {
 
 ## Implementation Plan
 
-1.  **Schema Update:** Add `children` column to `StoreMeta`.
-2.  **Migration:** Convert existing `Mesh` root stores and their subordinates to the new graph model.
-3.  **Refactor Node:** Remove `Mesh` struct. `Node` holds a list of root stores.
+1.  **Proto Refactor:** Move `HeadList` to `storage.proto` and define `UniversalOp`. ✅ Done
+2.  **System Store Crate:** Created `lattice-systemstore` with `TABLE_SYSTEM` and `SystemStore` trait. ✅ Done
+3.  **Migration:** Legacy peer/invite ops must be recognized in `apply()` and redirected to `TABLE_SYSTEM`. ⏳ In Progress
+4.  **Hierarchy:** Add child/parent links to system table.
+5.  **Refactor Node:** Remove `Mesh` struct. `Node` holds a list of root stores.
 
+## Current Status
+
+The `lattice-systemstore` crate now provides:
+- `SystemStore` trait with `get_peer`, `update_peer`, `get_peers` methods
+- `PersistentState<T>` wrapper that intercepts `SystemOp::Peer` during `apply()`
+- HeadList CRDT storage in `TABLE_SYSTEM` with `peer/{pubkey}` keys
+
+Remaining work:
+- Invite handling (move from `TABLE_DATA` to `TABLE_SYSTEM`)
+- Hierarchy links (child/parent)
+- Op-based migration for existing stores

@@ -16,6 +16,8 @@ pub mod node_provider;
 pub mod store_type;
 pub mod openable;
 pub mod store_info;
+pub mod head;
+pub mod merge;
 
 // Re-exports from dependencies
 pub use uuid::Uuid;
@@ -33,10 +35,12 @@ pub use replication::{
     ChainTip, OrphanInfo, LogFileInfo, LogStats,
     GapInfo, SyncNeeded, PeerSyncInfo, EntryStream,
 };
-pub use node_identity::{NodeIdentity, NodeError, PeerStatus};
+pub use node_identity::{NodeIdentity, NodeError, PeerStatus, PeerInfo};
 pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream, GossipPeer};
 pub use net_event::NetEvent;
 pub use node_provider::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
 pub use store_type::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, STORE_TYPE_KVSTORE_LEGACY, STORE_TYPE_LOGSTORE_LEGACY, CORE_STORE_TYPES, StoreTypeProvider};
 pub use openable::{Openable, OpenError};
-pub use store_info::{StoreInfo, StoreMeta};
+pub use store_info::{StoreInfo, StoreMeta, StoreLink, SystemEvent};
+pub use head::{Head, HeadError};
+pub use merge::Merge;

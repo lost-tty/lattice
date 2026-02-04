@@ -46,9 +46,9 @@ pub use lattice_model::{Uuid, SigningKey};
 pub use lattice_model::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
 
 // Node-level exports
-pub use node::{Node, NodeBuilder, NodeInfo, NodeError, NodeEvent, PeerInfo, JoinAcceptance, parse_peer_status_key, PEER_STATUS_PATTERN};
+pub use node::{Node, NodeBuilder, NodeInfo, NodeError, NodeEvent, JoinAcceptance, PeerInfo};
 pub use auth::{PeerProvider, PeerEvent};
-pub use peer_manager::{PeerManager, PeerManagerError, Peer};
+pub use peer_manager::{PeerManager, PeerManagerError};
 pub use mesh::{Mesh, MeshError, StoreDeclaration};
 
 // Other exports

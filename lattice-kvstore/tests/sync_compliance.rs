@@ -5,9 +5,10 @@ use lattice_model::hlc::HLC;
 use lattice_model::Uuid;
 use tempfile::tempdir;
 use prost::Message;
+use std::io::Read;
 
 // Access generated proto structs via public module
-use lattice_kvstore::proto::{HeadList, HeadInfo};
+use lattice_proto::storage::{HeadList, HeadInfo};
 
 fn create_test_op(key: &[u8], value: &[u8], author: PubKey, id: Hash, timestamp: HLC, prev_hash: Hash) -> Op<'static> {
     let kv_op = Operation::put(key, value);
@@ -23,96 +24,17 @@ fn create_test_op(key: &[u8], value: &[u8], author: PubKey, id: Hash, timestamp:
     }
 }
 
-// Replicate logic from kv.rs
-fn hash_kv_entry(key: &[u8], head_list_bytes: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"kv_leaf"); 
-    hasher.update(&(key.len() as u64).to_le_bytes());
-    hasher.update(key);
-    hasher.update(&(head_list_bytes.len() as u64).to_le_bytes());
-    hasher.update(head_list_bytes);
-    *hasher.finalize().as_bytes()
-}
-
-fn xor_hash(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = a[i] ^ b[i];
-    }
-    out
-}
-
 fn encode_heads(heads: &[Head]) -> Vec<u8> {
     let proto_heads: Vec<HeadInfo> = heads.iter().map(|h| h.clone().into()).collect();
     HeadList { heads: proto_heads }.encode_to_vec()
 }
 
-#[test]
-fn test_sync_metadata_tracking() {
-    let dir = tempdir().unwrap();
-    let state = KvState::open(Uuid::new_v4(), dir.path(), None).unwrap();
-    
-    let author1 = PubKey::from([1u8; 32]);
-    let hash1 = Hash::from([0xAA; 32]);
-    let start_hlc = HLC::now();
-    
-    let op1 = create_test_op(b"key1", b"val1", author1, hash1, start_hlc, Hash::ZERO);
-    
-    // 1. Initial State
-    assert_eq!(state.state_identity(), Hash::ZERO);
-    assert!(state.applied_chaintips().unwrap().is_empty());
-    
-    // 2. Apply Op
-    state.apply(&op1).unwrap();
-    
-    // Calculate expected Identity
-    // Key "key1" has 1 head.
-    let heads = state.get(b"key1").unwrap();
-    let encoded = encode_heads(&heads);
-    let expected_hash = hash_kv_entry(b"key1", &encoded);
-    
-    // Check Identity
-    assert_eq!(state.state_identity().as_slice(), &expected_hash);
-    
-    // Check Chaintips
-    let tips = state.applied_chaintips().unwrap();
-    assert_eq!(tips.len(), 1);
-    assert_eq!(tips[0].1, hash1); // Tip should still track OpID, not content hash
-    
-    // 3. Apply another op from same author on DIFFERENT key
-    let hash2 = Hash::from([0xBB; 32]);
-    let op2 = create_test_op(b"key2", b"val2", author1, hash2, start_hlc, hash1);
-    state.apply(&op2).unwrap();
-    
-    // Calculate expected Identity: hash(key1) ^ hash(key2)
-    let heads2 = state.get(b"key2").unwrap();
-    let encoded2 = encode_heads(&heads2);
-    let h2 = hash_kv_entry(b"key2", &encoded2);
-    let expected_combined = xor_hash(expected_hash, h2);
-    
-    assert_eq!(state.state_identity().as_slice(), &expected_combined);
-    
-    // Check Chaintips update
-    let tips = state.applied_chaintips().unwrap();
-    assert_eq!(tips.len(), 1);
-    assert_eq!(tips[0].1, hash2); 
-    
-    // 4. Update key1
-    // This should REMOVE old key1 hash and ADD new key1 hash.
-    let hash3 = Hash::from([0xCC; 32]);
-    let op3 = create_test_op(b"key1", b"val1_updated", author1, hash3, start_hlc, hash2);
-    state.apply(&op3).unwrap();
-    
-    let heads_updated = state.get(b"key1").unwrap();
-    let encoded_updated = encode_heads(&heads_updated);
-    let h_updated = hash_kv_entry(b"key1", &encoded_updated);
-    
-    // Expected: (old_combined ^ old_h1) ^ new_h1
-    // = (h1 ^ h2 ^ h1) ^ new_h1 = h2 ^ new_h1
-    let expected_final = xor_hash(expected_combined, expected_hash); // Remove old h1
-    let expected_final = xor_hash(expected_final, h_updated); // Add new h1
-    
-    assert_eq!(state.state_identity().as_slice(), &expected_final);
+/// Helper: take snapshot and return bytes
+fn snapshot_bytes(state: &impl StateMachine) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut stream = state.snapshot().unwrap();
+    stream.read_to_end(&mut buf).unwrap();
+    buf
 }
 
 #[test]
@@ -126,27 +48,27 @@ fn test_snapshot_restore() {
     let op = create_test_op(b"snap_key", b"snap_val", author, hash, HLC::now(), Hash::ZERO);
     
     state1.apply(&op).unwrap();
-    let id_before = state1.state_identity();
     
     // Take Snapshot
-    let snapshot = state1.snapshot().unwrap();
+    let snapshot1_bytes = snapshot_bytes(&state1);
     
     // Create fresh state
     let dir2 = tempdir().unwrap();
     let state2 = KvState::open(store_id, dir2.path(), None).unwrap();
     
     // Restore
-    state2.restore(snapshot).unwrap();
+    state2.restore(Box::new(std::io::Cursor::new(snapshot1_bytes.clone()))).unwrap();
     
     // Verify Data
     let heads = state2.get(b"snap_key").unwrap();
     assert_eq!(heads.len(), 1);
     assert_eq!(heads[0].value, b"snap_val");
     
-    // Verify Metadata
-    assert_eq!(state2.state_identity(), id_before);
-    assert_ne!(state2.state_identity(), Hash::ZERO); // Ensure it's not trivial zero
+    // Take another snapshot - should be byte-identical to original
+    let snapshot2_bytes = snapshot_bytes(&state2);
+    assert_eq!(snapshot1_bytes, snapshot2_bytes, "Snapshot after restore should be byte-identical");
     
+    // Verify Chaintips preserved
     let tips = state2.applied_chaintips().unwrap();
     assert_eq!(tips.len(), 1);
     assert_eq!(tips[0].1, hash);
@@ -179,11 +101,7 @@ fn test_convergence_concurrent_operations() {
     state2.apply(&op2).unwrap();
     state2.apply(&op1).unwrap();
     
-    // Convergence Check
-    assert_ne!(state1.state_identity(), Hash::ZERO);
-    assert_eq!(state1.state_identity(), state2.state_identity());
-    
-    // Detailed check: verify list of heads is identical
+    // Convergence Check: HeadLists should be identical regardless of apply order
     let heads1 = state1.get(b"key1").unwrap();
     let heads2 = state2.get(b"key1").unwrap();
     
@@ -194,7 +112,10 @@ fn test_convergence_concurrent_operations() {
     assert_eq!(heads1[0].hash, heads2[0].hash);
     assert_eq!(heads1[1].hash, heads2[1].hash);
     
-    // IMPROVEMENT: Verify the Tie-Breaker Policy (Descending sort)
+    // Check encoded heads are byte-identical (proves deterministic serialization)
+    assert_eq!(encode_heads(&heads1), encode_heads(&heads2));
+    
+    // Verify the Tie-Breaker Policy (Descending sort)
     // Author 2 ([2, 2...]) > Author 1 ([1, 1...]). 
     // Since HLCs are equal, Author 2 should be first (index 0).
     assert_eq!(heads1[0].hash, hash2, "Expected Author2 (higher ID) to be sorted first");
@@ -218,7 +139,6 @@ fn test_restore_overwrites_existing_data() {
     assert!(state.get(b"key_old").unwrap().len() > 0);
     
     // 2. Prepare a Snapshot that ONLY has "key_new"
-    // We do this by creating a separate state/db, adding key_new, taking snapshot.
     let dir_snap = tempdir().unwrap();
     // MUST use same store_id for restore to work
     let state_snap = KvState::open(store_id, dir_snap.path(), None).unwrap();
@@ -226,41 +146,25 @@ fn test_restore_overwrites_existing_data() {
     let op2 = create_test_op(b"key_new", b"val_new", author, hash2, start_hlc, Hash::ZERO);
     state_snap.apply(&op2).unwrap();
     
-    let snapshot_id = state_snap.state_identity();
-    let snapshot_stream = state_snap.snapshot().unwrap();
+    let snapshot_bytes_orig = snapshot_bytes(&state_snap);
     
     // 3. Restore snapshot onto the FIRST state (which has key_old)
-    state.restore(snapshot_stream).unwrap();
+    state.restore(Box::new(std::io::Cursor::new(snapshot_bytes_orig.clone()))).unwrap();
     
     // 4. Verify:
     // - key_old should be GONE
     // - key_new should represent the state
-    // - state_identity should match snapshot_id exactly (no corruption)
     
     assert!(state.get(b"key_old").unwrap().is_empty(), "Ghost key_old remained after restore!");
     let heads_new = state.get(b"key_new").unwrap();
     assert_eq!(heads_new.len(), 1);
     assert_eq!(heads_new[0].value, b"val_new");
     
-    // Corruption Check:
-    // If we didn't clear tables, ID would be H(key_old) ^ H(key_new).
-    // Correct ID is just H(key_new).
-    assert_eq!(state.state_identity(), snapshot_id, "State identity mismatch after restore");
+    // Snapshot after restore should match original
+    let snapshot_bytes_after = snapshot_bytes(&state);
+    assert_eq!(snapshot_bytes_orig, snapshot_bytes_after, "Snapshot mismatch after restore");
 }
 
-fn create_delete_op(key: &[u8], author: PubKey, id: Hash, timestamp: HLC, prev_hash: Hash) -> Op<'static> {
-    let kv_op = Operation::delete(key);
-    let payload = KvPayload { ops: vec![kv_op] }.encode_to_vec();
-    
-    Op {
-        id,
-        causal_deps: &[],
-        payload: Box::leak(payload.into_boxed_slice()),
-        author,
-        timestamp,
-        prev_hash,
-    }
-}
 
 #[test]
 fn test_delete_correctness() {
@@ -276,28 +180,27 @@ fn test_delete_correctness() {
     state.apply(&op1).unwrap();
     
     let heads1 = state.get(b"del_key").unwrap();
-    let encoded1 = encode_heads(&heads1);
-    let h1 = hash_kv_entry(b"del_key", &encoded1);
+    assert_eq!(heads1.len(), 1);
+    assert!(!heads1[0].tombstone);
     
-    assert_eq!(state.state_identity().as_slice(), &h1);
-    
-    // 2. Delete (Add Tombstone)
+    // 2. Delete (Add Tombstone) - must have causal_dep on hash1 to supersede it
     let hash2 = Hash::from([0xB2; 32]);
-    let op2 = create_delete_op(b"del_key", author, hash2, start_hlc, hash1);
+    let later_hlc = HLC { wall_time: start_hlc.wall_time + 1, counter: 0 };
+    let kv_op = Operation::delete(b"del_key");
+    let payload = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    let op2 = Op {
+        id: hash2,
+        causal_deps: &[hash1], // Causally supersedes hash1
+        payload: Box::leak(payload.into_boxed_slice()),
+        author,
+        timestamp: later_hlc,
+        prev_hash: hash1,
+    };
     state.apply(&op2).unwrap();
     
     let heads2 = state.get(b"del_key").unwrap();
-    assert!(heads2.iter().any(|h| h.tombstone));
-    let encoded2 = encode_heads(&heads2);
-    let h2 = hash_kv_entry(b"del_key", &encoded2);
-    
-    // Identity should be updated: remove old h1, add new h2
-    // Expected = h1 ^ h1 ^ h2 = h2
-    assert_eq!(state.state_identity().as_slice(), &h2);
-    
-    // Double check it's not simply additive (collision check)
-    // If we forgot to remove h1, it would be h1 ^ h2
-    assert_ne!(state.state_identity().as_slice(), &xor_hash(h1, h2));
+    assert_eq!(heads2.len(), 1, "Tombstone with causal dep should supersede the put");
+    assert!(heads2[0].tombstone);
 }
 
 #[test]
@@ -345,16 +248,11 @@ fn test_snapshot_checksum_failure() {
     let op = create_test_op(b"key", b"val", author, hash, HLC::now(), Hash::ZERO);
     state1.apply(&op).unwrap();
 
-    let snapshot_bytes = {
-        let mut buf = Vec::new();
-        let mut stream = state1.snapshot().unwrap();
-        stream.read_to_end(&mut buf).unwrap();
-        buf
-    };
+    let snap_bytes = snapshot_bytes(&state1);
     
     // Corrupt the LAST byte (part of checksum)
-    let len = snapshot_bytes.len();
-    let mut corrupt_checksum = snapshot_bytes.clone();
+    let len = snap_bytes.len();
+    let mut corrupt_checksum = snap_bytes.clone();
     corrupt_checksum[len - 1] ^= 0xFF; 
     
     let dir2 = tempdir().unwrap();
@@ -364,17 +262,13 @@ fn test_snapshot_checksum_failure() {
     assert!(format!("{}", err).contains("Checksum mismatch"));
     
     // Corrupt a data byte (somewhere in the middle)
-    // The checksum logic calculates running hash, so modifying data also invalidates checksum
-    let mut corrupt_data = snapshot_bytes.clone();
-    corrupt_data[50] ^= 0xFF; // Arbitrary index, assuming snapshot is large enough
+    let mut corrupt_data = snap_bytes.clone();
+    corrupt_data[50] ^= 0xFF;
     
     let err_data = state2.restore(Box::new(std::io::Cursor::new(corrupt_data))).unwrap_err();
-    // Ideally this also fails checksum, but it might fail decoding first depending on what byte we hit.
-    // If we hit a length prefix, it might fail elsewhere. But if we hit value data, it will be checksum.
-    // Let's just assert it fails.
     assert!(
         format!("{}", err_data).contains("Checksum mismatch") || 
-        format!("{}", err_data).contains("IO error") // If we corrupt length to be huge
+        format!("{}", err_data).contains("IO error")
     );
 }
 
@@ -392,4 +286,3 @@ fn test_snapshot_uuid_mismatch() {
     let err = state2.restore(snapshot).unwrap_err();
     assert!(format!("{}", err).contains("Store ID mismatch"), "Error was: {}", err);
 }
-

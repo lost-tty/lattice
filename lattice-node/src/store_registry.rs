@@ -11,6 +11,7 @@ use lattice_kernel::{
     store::{OpenedStore, Store, StoreInfo, StateError, StoreHandle},
 };
 use lattice_model::StateMachine;
+use lattice_systemstore::SystemStore;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::path::Path;
@@ -75,7 +76,7 @@ impl StoreRegistry {
     /// Get a store handle, opening and spawning actor if not already cached
     pub fn get_or_open<S, F>(&self, store_id: Uuid, open_fn: F) -> Result<(Store<S>, StoreInfo), StateError> 
     where
-        S: StateMachine + Send + Sync + 'static,
+        S: StateMachine + Send + Sync + 'static + SystemStore,
         F: FnOnce(&Path) -> Result<S, StateError>
     {
         {

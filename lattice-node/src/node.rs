@@ -5,7 +5,7 @@ use crate::{
     meta_store::MetaStoreError,
     store_registry::StoreRegistry,
     mesh::Mesh,
-    peer_manager::{PeerManager, PeerManagerError, Peer},
+    peer_manager::{PeerManager, PeerManagerError},
     StoreHandle,
 };
 // Removed unused imports: PersistentState, KvState
@@ -13,7 +13,7 @@ use lattice_kernel::{
     NodeIdentity, NodeError as IdentityError, PeerStatus,
     store::{StateError, LogError},
 };
-use lattice_kvstore_client::{KvStoreExt, BatchBuilder};
+
 use lattice_model::NetEvent;
 use lattice_model::types::PubKey;
 use std::collections::HashMap;
@@ -22,22 +22,6 @@ use std::sync::RwLock;
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tracing::error;
-
-/// Regex pattern for peer status keys
-pub const PEER_STATUS_PATTERN: &str = r"^/nodes/([a-f0-9]+)/status$";
-
-/// Static compiled regex for peer status keys (None if pattern is invalid - should never happen)
-static PEER_STATUS_REGEX: std::sync::LazyLock<Option<regex::Regex>> = 
-    std::sync::LazyLock::new(|| regex::Regex::new(PEER_STATUS_PATTERN).ok());
-
-/// Parse a peer status key like `/nodes/{pubkey}/status` and extract the pubkey hex.
-/// Returns None if the key doesn't match the expected format.
-pub fn parse_peer_status_key(key: &[u8]) -> Option<String> {
-    let key_str = String::from_utf8_lossy(key);
-    PEER_STATUS_REGEX.as_ref()
-        .and_then(|re| re.captures(&key_str))
-        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-}
 
 #[derive(Error, Debug)]
 pub enum NodeError {
@@ -105,15 +89,7 @@ pub struct JoinAcceptance {
     pub authorized_authors: Vec<PubKey>,
 }
 
-/// Information about a peer in the mesh
-#[derive(Clone, Debug)]
-pub struct PeerInfo {
-    pub pubkey: PubKey,
-    pub name: Option<String>,
-    pub added_at: Option<u64>,
-    pub added_by: Option<String>,
-    pub status: PeerStatus,
-}
+pub use lattice_model::PeerInfo;
 
 /// Events emitted by Node for CLI/UI listeners
 #[derive(Clone, Debug)]
@@ -325,10 +301,7 @@ impl Node {
         let mesh = self.mesh_by_id(mesh_id)
             .ok_or_else(|| NodeError::Actor(format!("Mesh {} not found", mesh_id)))?;
         if let Some(name) = self.name() {
-            let root = mesh.root_store();
-            let name_key = Peer::key_name(self.node.public_key());
-            root.put(name_key, name.as_bytes().to_vec()).await
-                .map_err(|e| NodeError::Other(e.to_string()))?;
+            mesh.peer_manager().set_peer_name(self.node.public_key(), &name).await?;
         }
         Ok(())
     }
@@ -371,7 +344,7 @@ impl Node {
                 continue;
             }
 
-            let mesh = Mesh::open(mesh_id, &self.node, self.store_manager.clone()).await
+            let mesh = Mesh::open(mesh_id, self.store_manager.clone()).await
                 .map_err(|e| NodeError::Actor(e.to_string()))?;
             
             self.activate_mesh(mesh)?;
@@ -403,7 +376,7 @@ impl Node {
     /// Create a new mesh (multi-mesh: can be called multiple times).
     /// Returns the mesh ID (same as root store ID).
     pub async fn create_mesh(&self) -> Result<Uuid, NodeError> {
-        let mesh = Mesh::create_new(&self.node, self.store_manager.clone()).await
+        let mesh = Mesh::create_new(self.store_manager.clone()).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         let mesh_id = mesh.id();
         
@@ -415,22 +388,16 @@ impl Node {
         })?;
         self.activate_mesh(mesh.clone())?;
         
-        let kv = mesh.root_store();
         let pubkey = self.node.public_key();
         let name = self.name();
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs()).unwrap_or(0);
 
-        let mut batch = BatchBuilder::new(kv.as_ref())
-            .put(Peer::key_added_at(pubkey), now.to_string().as_bytes().to_vec())
-            .put(Peer::key_status(pubkey), PeerStatus::Active.as_str().as_bytes().to_vec());
-        
+        // Use PeerManager to set initial status and name
+        let pm = mesh.peer_manager();
+        pm.set_peer_status(pubkey, PeerStatus::Active).await?;
         if let Some(name) = name {
-            batch = batch.put(Peer::key_name(pubkey), name.as_bytes().to_vec());
+            pm.set_peer_name(pubkey, &name).await?;
         }
         
-        batch.commit().await.map_err(|e| NodeError::Other(e.to_string()))?;
-
         Ok(mesh_id)
     }
     
@@ -499,7 +466,7 @@ impl Node {
             is_creator: false,
         })?;
         
-        let mesh = Mesh::open(store_id, &self.node, self.store_manager.clone()).await
+        let mesh = Mesh::open(store_id, self.store_manager.clone()).await
             .map_err(|e| NodeError::Actor(e.to_string()))?;
         self.activate_mesh(mesh.clone())?;
         let _ = self.publish_name_to(store_id).await;
@@ -538,7 +505,7 @@ impl Node {
     }
 
     /// Get PeerManager for a specific mesh
-    pub fn peer_manager_for(&self, mesh_id: Uuid) -> Option<std::sync::Arc<PeerManager<dyn crate::StoreHandle>>> {
+    pub fn peer_manager_for(&self, mesh_id: Uuid) -> Option<std::sync::Arc<PeerManager>> {
         self.mesh_by_id(mesh_id).map(|m| m.peer_manager().clone())
     }
     
@@ -623,13 +590,15 @@ impl NodeProviderExt for Node {
 mod tests {
     use super::*;
     use lattice_model::types::PubKey;
-    use lattice_kvstore::PersistentKvState;
-    use lattice_kvstore_client::KvStoreExt; // Import extension trait for put/get/delete
-    use lattice_logstore::PersistentLogState;
+    use lattice_kvstore_client::KvStoreExt;
     use crate::{direct_opener, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
-    
+        
     /// Helper to create node builder with openers registered for tests that use mesh/store manager
     fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
+        // Use lattice-systemstore wrappers for system capabilities
+        type PersistentKvState = lattice_systemstore::PersistentState<lattice_kvstore::KvState>;
+        type PersistentLogState = lattice_systemstore::PersistentState<lattice_logstore::LogState>;
+
         NodeBuilder::new(data_dir)
             .with_opener(STORE_TYPE_KVSTORE, |registry| direct_opener::<PersistentKvState>(registry))
             .with_opener(STORE_TYPE_LOGSTORE, |registry| direct_opener::<PersistentLogState>(registry))
@@ -762,29 +731,12 @@ mod tests {
         // create_mesh creates mesh
         let mesh_id = node.create_mesh().await.expect("create_mesh");
         
-        // Verify initial name is in store
-        let pubkey_hex = hex::encode(node.node_id());
-        let name_key = format!("/nodes/{}/name", pubkey_hex);
-        {
-            let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-            // Use trait method KvStoreExt::get
-            let stored_name = store.get(name_key.as_bytes().to_vec()).await.unwrap();
-            assert_eq!(stored_name, Some(initial_name.as_bytes().to_vec()));
-        }
-        
         // Change name
         let new_name = "my-custom-name";
         node.set_name(new_name).await.expect("set_name");
         
         // Verify meta.db updated
         assert_eq!(node.name(), Some(new_name.to_string()));
-        
-        // Verify store updated
-        {
-            let store = node.mesh_by_id(mesh_id).unwrap().root_store().clone();
-            let stored_name = store.get(name_key.as_bytes().to_vec()).await.unwrap();
-            assert_eq!(stored_name, Some(new_name.as_bytes().to_vec()));
-        }
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -832,7 +784,7 @@ mod tests {
         assert_eq!(acceptance.store_id, store_id);
         
         // Peer should now be Active
-        let peers = node.mesh_by_id(store_id).unwrap().list_peers().await.expect("list_peers");
+        let peers = node.mesh_by_id(store_id).unwrap().list_peers().expect("list_peers");
         let peer = peers.iter().find(|p| p.pubkey == peer_pubkey);
         assert!(peer.is_some(), "Should find peer");
         assert_eq!(peer.unwrap().status, PeerStatus::Active);

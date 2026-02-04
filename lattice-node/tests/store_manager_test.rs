@@ -1,12 +1,14 @@
 use lattice_node::{NodeBuilder, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, direct_opener};
 use lattice_node::data_dir::DataDir;
-use lattice_kvstore::PersistentKvState;
 use lattice_kvstore_client::{KvStoreExt, Operation};
-use lattice_logstore::PersistentLogState;
 use std::time::Duration;
 
 /// Helper to create a node with openers registered (using handle-less pattern)
 fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
+    // Use lattice-systemstore wrappers for system capabilities
+    type PersistentKvState = lattice_systemstore::PersistentState<lattice_kvstore::KvState>;
+    type PersistentLogState = lattice_systemstore::PersistentState<lattice_logstore::LogState>;
+
     NodeBuilder::new(data_dir)
         .with_opener(STORE_TYPE_KVSTORE, |registry| direct_opener::<PersistentKvState>(registry))
         .with_opener(STORE_TYPE_LOGSTORE, |registry| direct_opener::<PersistentLogState>(registry))

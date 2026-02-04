@@ -70,7 +70,7 @@ pub trait StoreInspector: Send + Sync {
         limit: Option<u32>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<HistoryEntry>, StoreError>> + Send + '_>>;
     
-    /// Get store metadata (id, type, name, schema_version, state_hash)
+    /// Get store metadata
     fn store_meta(&self) -> Pin<Box<dyn Future<Output = lattice_model::StoreMeta> + Send + '_>>;
 }
 

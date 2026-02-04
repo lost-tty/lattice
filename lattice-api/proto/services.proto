@@ -43,6 +43,7 @@ service StoreService {
   rpc History(HistoryRequest) returns (HistoryResponse);
   rpc AuthorState(AuthorStateRequest) returns (AuthorStateResponse);
   rpc OrphanCleanup(StoreId) returns (CleanupResult);
+  rpc SystemList(StoreId) returns (SystemListResponse);
 }
 
 // ============================================================================

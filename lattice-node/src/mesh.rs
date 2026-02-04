@@ -19,7 +19,6 @@ use crate::{
     PeerInfo,
     StoreHandle,
 };
-use lattice_kernel::NodeIdentity;
 use lattice_model::types::PubKey;
 use lattice_model::{PeerProvider, STORE_TYPE_KVSTORE};
 use futures_util::StreamExt;
@@ -58,7 +57,7 @@ pub enum MeshError {
 /// Use `mesh.peer_manager()` for network layer integration.
 pub struct Mesh {
     root_store_id: Uuid,
-    peer_manager: Arc<PeerManager<dyn StoreHandle>>,
+    peer_manager: Arc<PeerManager>,
     store_manager: Arc<StoreManager>,
     /// Shutdown signal for watcher
     shutdown_tx: broadcast::Sender<()>,
@@ -82,14 +81,18 @@ impl Mesh {
     /// Create a new Mesh with a fresh root store.
     /// Root store is registered immediately - no separate registration step needed.
     pub async fn create_new(
-        node: &Arc<NodeIdentity>, 
         store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
         // Create a fresh store via store_manager
         let (root_store_id, root_store) = store_manager.create(STORE_TYPE_KVSTORE)?;
         
         // PeerManager needs a reference to the store handle
-        let peer_manager = PeerManager::new(root_store.clone(), node).await?;
+        // Create peer manager (cast root_store to SystemStore)
+        let system_store = root_store.clone().as_system()
+            .ok_or_else(|| MeshError::Other("Root store does not support SystemStore trait".into()))?;
+        
+        let peer_manager = PeerManager::new(system_store, root_store.clone()).await
+            .map_err(|e| MeshError::Other(e.to_string()))?;
         
         // Register root store immediately
         store_manager.register(
@@ -120,13 +123,20 @@ impl Mesh {
     /// Root store is registered immediately - no separate registration step needed.
     pub async fn open(
         store_id: Uuid,
-        node: &Arc<NodeIdentity>, 
         store_manager: Arc<StoreManager>
     ) -> Result<Self, MeshError> {
         // Open existing store via store_manager
         let root_store = store_manager.open(store_id, STORE_TYPE_KVSTORE)?;
         
-        let peer_manager = PeerManager::new(root_store.clone(), node).await?;
+        // Create peer manager
+        let system_store = root_store.clone().as_system()
+            .ok_or_else(|| MeshError::Other("Root store does not support SystemStore trait".into()))?;
+
+        // Run legacy migrations (DATA table → SystemStore)
+        migrate_legacy_peer_data(root_store.as_ref(), &*system_store).await?;
+
+        let peer_manager = PeerManager::new(system_store, root_store.clone()).await
+            .map_err(|e| MeshError::Other(e.to_string()))?;
         
         // Register root store immediately
         store_manager.register(
@@ -166,7 +176,7 @@ impl Mesh {
     }
     
     /// Get peer manager for network layer integration.
-    pub fn peer_manager(&self) -> Arc<PeerManager<dyn StoreHandle>> {
+    pub fn peer_manager(&self) -> Arc<PeerManager> {
         self.peer_manager.clone()
     }
     
@@ -265,7 +275,7 @@ impl Mesh {
         store_manager: &Arc<StoreManager>, 
         root: &Arc<dyn StoreHandle>, 
         root_store_id: Uuid,
-        peer_manager: &Arc<PeerManager<dyn StoreHandle>>,
+        peer_manager: &Arc<PeerManager>,
         opened_stores: &Arc<RwLock<std::collections::HashSet<Uuid>>>,
     ) -> Result<(), MeshError> {
         let declarations = Self::list_declarations(root).await?;
@@ -451,8 +461,8 @@ impl Mesh {
     // ==================== Peer Management ====================
     
     /// List all peers in the mesh.
-    pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
-        self.peer_manager.list_peers().await
+    pub fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
+        self.peer_manager.list_peers()
     }
     
     /// Revoke a peer's access.
@@ -559,4 +569,165 @@ impl std::fmt::Debug for Mesh {
             .field("id", &self.id())
             .finish_non_exhaustive()
     }
+}
+
+// ==================== Legacy Migration ====================
+
+use lattice_systemstore::SystemBatch;
+use lattice_model::PeerStatus;
+
+/// Migrate legacy peer data from DATA table to SystemStore.
+/// 
+/// Legacy format (DATA table):
+/// - `/nodes/{pk_hex}/status` → string ("active", etc)
+/// - `/nodes/{pk_hex}/added_at` → timestamp string
+/// - `/nodes/{pk_hex}/name` → kept as-is (correct location)
+/// 
+/// New format (SystemStore):
+/// - `peer/{pk_hex}/status` → PeerStatus proto
+/// - `peer/{pk_hex}/added_at` → u64 timestamp proto
+async fn migrate_legacy_peer_data<S>(
+    data_store: &S,
+    system_store: &(dyn lattice_systemstore::SystemStore + Send + Sync),
+) -> Result<(), MeshError>
+where
+    S: KvStoreExt + ?Sized,
+{
+    // Scan for legacy /nodes/*/status and nodes/*/status keys (both formats)
+    let mut legacy_entries = data_store.list_by_prefix(b"/nodes/".to_vec()).await
+        .map_err(|e| MeshError::Other(format!("Failed to scan legacy keys: {}", e)))?;
+    let new_format_entries = data_store.list_by_prefix(b"nodes/".to_vec()).await
+        .map_err(|e| MeshError::Other(format!("Failed to scan node keys: {}", e)))?;
+    legacy_entries.extend(new_format_entries);
+    
+    // Group by pubkey: (status, added_at, name, has_legacy_name)
+    let mut peers_to_migrate: std::collections::HashMap<String, (Option<String>, Option<u64>, Option<String>, bool)> = 
+        std::collections::HashMap::new();
+    
+    for entry in legacy_entries {
+        let key_str = String::from_utf8_lossy(&entry.key);
+        
+        // Parse key: /nodes/{pk_hex}/{field} or nodes/{pk_hex}/{field}
+        let (is_legacy, rest) = if let Some(r) = key_str.strip_prefix("/nodes/") {
+            (true, Some(r))
+        } else if let Some(r) = key_str.strip_prefix("nodes/") {
+            (false, Some(r))
+        } else {
+            (false, None)
+        };
+        
+        if let Some(rest) = rest {
+            if let Some(slash_pos) = rest.find('/') {
+                let pk_hex = &rest[..slash_pos];
+                let field = &rest[slash_pos + 1..];
+                
+                let entry_data = peers_to_migrate.entry(pk_hex.to_string())
+                    .or_insert((None, None, None, false));
+                
+                match field {
+                    "status" => {
+                        let status_str = String::from_utf8_lossy(&entry.value).to_string();
+                        entry_data.0 = Some(status_str);
+                    },
+                    "added_at" => {
+                        if let Ok(ts) = String::from_utf8_lossy(&entry.value).parse::<u64>() {
+                            entry_data.1 = Some(ts);
+                        }
+                    },
+                    "name" => {
+                        let name = String::from_utf8_lossy(&entry.value).to_string();
+                        entry_data.2 = Some(name);
+                        if is_legacy {
+                            entry_data.3 = true; // has legacy /nodes/ format name
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+    
+    // Check if there's anything to migrate (skip if already migrated)
+    if peers_to_migrate.is_empty() {
+        return Ok(());
+    }
+    
+    // Check if system store already has peer data (skip status/added_at migration)
+    let existing_peers = system_store.get_peers().unwrap_or_default();
+    let skip_system_migration = !existing_peers.is_empty();
+    
+    if skip_system_migration {
+        debug!("System store already has {} peers, skipping status/added_at migration", existing_peers.len());
+    }
+    
+    // Check if any work needs to be done
+    let needs_work = peers_to_migrate.values().any(|(status, added_at, _, has_legacy_name)| {
+        (!skip_system_migration && (status.is_some() || added_at.is_some())) || *has_legacy_name
+    });
+    
+    if !needs_work {
+        return Ok(());
+    }
+    
+    info!("Migrating {} legacy peer entries", peers_to_migrate.len());
+    
+    // Write to SystemStore and rename name keys
+    for (pk_hex, (status_opt, added_at_opt, name_opt, has_legacy_name)) in peers_to_migrate {
+        // Parse pubkey from hex
+        let pubkey = match lattice_model::PubKey::from_hex(&pk_hex) {
+            Ok(pk) => pk,
+            Err(e) => {
+                warn!("Invalid pubkey hex in legacy data {}: {}", pk_hex, e);
+                continue;
+            }
+        };
+        
+        // Migrate status/added_at to SystemStore (if not already done)
+        if !skip_system_migration && (status_opt.is_some() || added_at_opt.is_some()) {
+            let mut batch = SystemBatch::new(system_store);
+            
+            if let Some(ref status_str) = status_opt {
+                let status = match status_str.to_lowercase().as_str() {
+                    "active" => PeerStatus::Active,
+                    "revoked" => PeerStatus::Revoked,
+                    "dormant" => PeerStatus::Dormant,
+                    "pending" | "invited" => PeerStatus::Invited,
+                    _ => {
+                        warn!("Unknown status '{}' for peer {}, defaulting to Invited", status_str, pk_hex);
+                        PeerStatus::Invited
+                    }
+                };
+                batch = batch.set_status(pubkey, status);
+            }
+            
+            if let Some(ts) = added_at_opt {
+                batch = batch.set_added_at(pubkey, ts);
+            }
+            
+            batch.commit().await
+                .map_err(|e| MeshError::Other(format!("Failed to write peer {}: {}", pk_hex, e)))?;
+            
+            // Delete migrated legacy entries from DATA table
+            if status_opt.is_some() {
+                let _ = data_store.delete(format!("/nodes/{}/status", pk_hex).into_bytes()).await;
+            }
+            if added_at_opt.is_some() {
+                let _ = data_store.delete(format!("/nodes/{}/added_at", pk_hex).into_bytes()).await;
+            }
+        }
+        
+        // Rename /nodes/{pk}/name to nodes/{pk}/name
+        if has_legacy_name {
+            if let Some(name) = name_opt {
+                // Write to new path
+                let new_key = format!("nodes/{}/name", pk_hex).into_bytes();
+                let _ = data_store.put(new_key, name.into_bytes()).await;
+                // Delete old path
+                let _ = data_store.delete(format!("/nodes/{}/name", pk_hex).into_bytes()).await;
+            }
+        }
+    }
+    
+    info!("Legacy peer migration complete");
+    Ok(())
 }
