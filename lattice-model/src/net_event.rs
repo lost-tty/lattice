@@ -1,11 +1,11 @@
-//! Network events for communication between Node and MeshService
+//! Network events for communication between Node and NetworkService
 
 use crate::types::PubKey;
 
 /// UUID type alias (re-exported from lattice-kernel in practice)
 pub type Uuid = uuid::Uuid;
 
-/// Events for the network layer (MeshService)
+/// Events for the network layer (NetworkService)
 #[derive(Clone, Debug)]
 pub enum NetEvent {
     /// Store ready for network registration

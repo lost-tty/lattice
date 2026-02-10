@@ -5,12 +5,12 @@
 //! - **Gossip**: Broadcasting changes across the mesh
 //! - **Unicast**: Point-to-point communication for reconciliation
 //! - **Framing**: Length-delimited message framing for QUIC streams
-//! - **Mesh**: Peer-to-peer join and sync operations
+//! - **Network**: Peer-to-peer join and sync operations
 
 pub mod endpoint;
 pub mod error;
 pub mod framing;
-pub mod mesh;
+pub mod network;
 pub mod peer_sync_store;
 
 pub use endpoint::{LatticeEndpoint, PublicKey, LATTICE_ALPN};
@@ -18,7 +18,7 @@ pub use error::LatticeNetError;
 pub use framing::{MessageSink, MessageStream};
 pub use lattice_kernel::proto::storage::SyncState;
 pub use lattice_kernel::proto::network::{StatusRequest, StatusResponse, FetchRequest, FetchResponse, AuthorRange};
-pub use mesh::{MeshService, SyncResult};
+pub use network::{NetworkService, SyncResult};
 pub use lattice_model::types::PubKey;
 
 /// Parse a PublicKey (NodeId) from hex or base32 string

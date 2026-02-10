@@ -23,7 +23,7 @@ pub enum NodeProviderError {
 
 /// User-facing events that the network layer can emit.
 /// 
-/// These are a subset of NodeEvent that MeshService needs to send.
+/// These are a subset of NodeEvent that NetworkService needs to send.
 #[derive(Clone, Debug)]
 pub enum UserEvent {
     /// Join attempt failed

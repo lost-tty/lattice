@@ -1,11 +1,11 @@
-//! Unit tests for MeshService decoupling
+//! Unit tests for NetworkService decoupling
 //!
 //! These tests verify that lattice-net can function with any implementation
 //! of NodeProviderExt, not just the real Node from lattice-node.
 
 #[cfg(test)]
 mod tests {
-    use crate::MeshService;
+    use crate::NetworkService;
     use lattice_model::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo, Uuid, types::PubKey};
     use lattice_net_types::{NodeProviderExt, NetworkStoreRegistry, NetworkStore};
     use lattice_model::PeerProvider;
@@ -71,7 +71,7 @@ mod tests {
         }
     }
 
-    /// Test that MeshService can be instantiated with a mock provider.
+    /// Test that NetworkService can be instantiated with a mock provider.
     /// This proves the decoupling is real - lattice-net depends only on traits,
     /// not on the concrete Node type from lattice-node.
     #[tokio::test]
@@ -85,15 +85,15 @@ mod tests {
             .expect("Failed to create endpoint");
         
         // Create the net channel (network layer owns it)
-        let (_tx, rx) = MeshService::create_net_channel();
+        let (_tx, rx) = NetworkService::create_net_channel();
         
         let provider: Arc<dyn NodeProviderExt> = Arc::new(MockProvider { pubkey });
         
         // Action: Create service with MOCK provider
-        let service = MeshService::new_with_provider(provider.clone(), endpoint, rx).await;
+        let service = NetworkService::new_with_provider(provider.clone(), endpoint, rx).await;
         
         // Assert: It should succeed
-        assert!(service.is_ok(), "MeshService failed to initialize with MockProvider");
+        assert!(service.is_ok(), "NetworkService failed to initialize with MockProvider");
         
         let service = service.unwrap();
         

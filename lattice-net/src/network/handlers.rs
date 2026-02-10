@@ -1,6 +1,6 @@
 //! Protocol handlers for incoming network requests.
 //!
-//! Extracted from MeshService to keep concerns separated.
+//! Extracted from NetworkService to keep concerns separated.
 //! These handlers receive only the context they need (provider trait), not the entire service.
 
 use crate::{MessageSink, MessageStream, LatticeNetError};
@@ -169,7 +169,7 @@ async fn handle_status_request(
         .unwrap_or_default();
     
     // Use SyncSession for symmetric handling
-    let mut session = crate::mesh::sync_session::SyncSession::new(&authorized_store, sink, stream, *remote_pubkey, &peer_store);
+    let mut session = crate::network::sync_session::SyncSession::new(&authorized_store, sink, stream, *remote_pubkey, &peer_store);
     let _ = session.run_as_responder(incoming_state).await?;
     
     Ok(())

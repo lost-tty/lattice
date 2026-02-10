@@ -5,7 +5,7 @@ use lattice_kvstore::PersistentKvState;
 use lattice_logstore::PersistentLogState;
 use lattice_systemstore::system_state::SystemLayer;
 use lattice_model::types::PubKey;
-use lattice_net::MeshService;
+use lattice_net::NetworkService;
 use lattice_kvstore_client::KvStoreExt;
 use std::sync::Arc;
 
@@ -23,11 +23,11 @@ fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
         .with_opener(STORE_TYPE_LOGSTORE, |registry| direct_opener::<SystemLayer<PersistentLogState>>(registry))
 }
 
-/// Test helper: Create MeshService from Node (replaces removed new_from_node)
-async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<MeshService>, Box<dyn std::error::Error>> {
+/// Test helper: Create NetworkService from Node (replaces removed new_from_node)
+async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<NetworkService>, Box<dyn std::error::Error>> {
     let endpoint = lattice_net::LatticeEndpoint::new(node.signing_key().clone()).await?;
     let event_rx = node.subscribe_net_events();
-    Ok(MeshService::new_with_provider(node, endpoint, event_rx).await?)
+    Ok(NetworkService::new_with_provider(node, endpoint, event_rx).await?)
 }
 
 /// Helper: Join store via node.join() and wait for StoreReady event

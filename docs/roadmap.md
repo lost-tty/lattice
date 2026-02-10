@@ -1,11 +1,11 @@
 ## Lattice Roadmap
 
-**Status:** Milestone 10 (Fractal Stores) in progress.
+**Status:** Milestone 10 (Fractal Stores) complete. Current focus: M11 (CAS).
 
 This document outlines the development plan for Lattice.
-- **Completed M1-M9:** Core RSM platform, Handle-Less Architecture, Typed API.
-- **Current Focus (M10):** Unifying Mesh/Store concepts into a recursive graph (Fractal Store Model).
-- **Upcoming:** CAS (M11), Weaver Protocol (M12).
+- **Completed M1-M10:** Core RSM platform, Handle-Less Architecture, Typed API, Fractal Store Model.
+- **Current Focus (M11):** Content-Addressable Store (CAS).
+- **Upcoming:** Lattice Drive (M12), Weaver Protocol (M13).
 
 ## Completed
 
@@ -19,75 +19,7 @@ This document outlines the development plan for Lattice.
 | **Kernel Audit** | Orphan resolution refactor, `MAX_CAUSAL_DEPS` limit, zero `.unwrap()` policy, clean module hierarchy                                          |
 | **M7**           | Client/Daemon split: library extraction, `latticed` daemon with UDS gRPC, `LatticeBackend` trait, RPC event streaming, socket security        |
 | **M8**           | Reflection & introspection: `lattice-api` crate, deep type schemas, `ReflectValue` structured results, store watchers & FFI stream bindings   |
-| **M9**           | Storage abstraction: `StateBackend`/`StateLogic` traits, unified dispatch API, `PersistentState<T>` wrapper, store identity/type registry, generic open |
-
----
-
-## Milestone 10: Fractal Store Implementation
-
-**Goal:** Implement the **Fractal Store Model** (ADR 001), replacing the legacy `Mesh` struct with a recursive store hierarchy.
-
-> **Why:** The distinction between `Mesh` and `Store` is artificial. By treating everything as a store, we simplify the codebase, enable infinite nesting, and unify peer management.
-
-### 10A: System Store (TABLE_SYSTEM)
-- [x] Created `lattice-systemstore` crate with `TABLE_SYSTEM` using HeadList CRDTs
-- [x] Moved `PeerStrategy` to `lattice-systemstore` (clean dependency)
-- [x] Implemented `SystemStore` trait with `get_peer`/`update_peer`/`get_peers` API
-- [x] System table interception layer in `PersistentState::apply()`
-- [x] Removed dead code: `HandleBase`, `PeerManager`/`SubstoreManager` traits, `as_writer`
-- [x] Added `list_all()` API and `store system show` CLI command for debugging
-- [x] Add child store hierarchy (`child/{uuid}/status`, `child/{uuid}/name`)
-- [x] Migrate CLI: `mesh peers` -> `store peers` (peers are part of the store system data)
-- [x] Add `strategy` key for persisted `PeerStrategy` (Independent/Inherited)
-- [x] `store status` should show PeerStrategy
-- [x] Add invite handling (`invite/{token_hash}/status`, `invited_by`, `claimed_by`)
-
-### 10B: Root Store & Identity (The "New Mesh")
-- [x] Define "Root Store" concept: `PeerStrategy::Independent` + `StoreMeta`
-- [x] **Migrate Peer Names**: Move names from Data Table (`/nodes/*/name`) to System Table (`peer/*/name`)
-- [x] `Node::set_name()` should propagate name to all locally managed Root Stores (System Table)
-
-### 10C: Migration (Peer Strategy)
-- [x] **Strategy Backfill**: Since stores are already migrated to System Table, we just need to populate `strategy`:
-    - Root Stores -> `Independent` (default)
-    - Child Stores -> `Inherited` (future default)
-- [x] Test migration with existing data directories
-
-### 10D: Final Polish & Cleanup
-- [x] **Core Refactor (`StoreManager`)**:
-    - Remove "Mesh" concept from `StoreManager`.
-    - Function as a flat registry of loaded stores.
-- [x] **Bootstrap Migration**:
-    - Update `meta.db`: Rename/Repurpose `meshes` table to `rootstores` (List of "Pinned" Root Store UUIDs) 
-    - `StoreManager` startup: Load all stores found in `meta.db` (flat load)
-    - Deprecate `Node::new(mesh_id)` → `Node::load()`
-- [x] **RPC & Logic Refresh**:
-    - **RPC/Bindings**: Update `create_store` to accept `parent_id: Option<Uuid>`.
-      - `None` → Root Store (Independent, recorded in `meta.db`). Replaces `mesh_create`.
-      - `Some(id)` → Child Store (Inherited, recorded in parent's SystemTable). **Replaces hardcoded logic** where parent was always the Mesh Root. Now supports arbitrary nesting.
-    - **Validation**: `store peer invite` is only allowed on stores with `PeerStrategy::Independent`.
-- [x] **CLI Implementation**:
-    - `store create [--root]`: Maps to `parent_id = None` (if root) or `parent_id = current_context` (if child).
-    - `store join <token>`: Joins a store (adds to `meta.db` as a root until it discovers it has a parent? Or just adds to `meta.db`).
-    - **Store List API**: `store list` should return detailed metadata (including `children` list from SystemTable) so CLI/UI can render a tree view.
-    - CLI: Remove `mesh` subcommand entirely (replace with `store create`, `store join`, `store peers`)
-- [x] **Legacy Cleanup**:
-    - Convert existing `Mesh` structs to Root Stores (internal usage)
-    - Remove `Mesh` struct and `ControlPlane` code entirely
-
-### 10E: Mesh Naming Debt
-- [x] Rename `Invite.mesh_id` → `store_id` in `lattice-node/src/token.rs` (and all callers in `backend_inprocess.rs`)
-- [x] Rename `NodeEvent::JoinFailed { mesh_id }` → `{ store_id }` in `node.rs` (internal event field; wire format already uses `root_id`)
-- [x] Rename `InProcessBackend.mesh_network` → `network` (`backend_inprocess.rs`)
-- [x] Fix CLI label: `"Meshes:"` → `"Root stores:"` in `node_commands.rs`
-- [x] Clean up stale comments referencing mesh in `backend_inprocess.rs`, `backend.rs`
-- [ ] Rename `MeshService` → `NetworkService` and `lattice-net/src/mesh/` module → `network` or `p2p`
-
-### 10G: Test Coverage
-- [x] `delete_child_store` + `close_descendants` cascade logic (`store_manager.rs`)
-- [x] `consume_invite_secret` system table tracking (`store_manager.rs`)
-- [x] `revoke_peer` system table update (`store_manager.rs`)
-- [x] `RecursiveWatcher` child store reconciliation (`watcher.rs`)
+| **M10**          | Fractal Store Model: replaced `Mesh` struct with recursive store hierarchy, `TABLE_SYSTEM` with HeadList CRDTs, `RecursiveWatcher` for child discovery, invite/revoke peer management, `PeerStrategy` (Independent/Inherited), flattened `StoreManager`, `NetworkService` (renamed from `MeshService`), proper `Node::shutdown()` |
 
 ---
 
@@ -282,7 +214,7 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 - Secure storage of node key (Keychain, TPM)
 - **Salted Gossip ALPN**: Use `/config/salt` from root store to salt the gossip ALPN per mesh (improves privacy by isolating mesh traffic).
 - **HTTP API**: External access to stores via REST/gRPC-Web (design TBD based on store types)
-- **Hierarchical Store Model**: Tree of stores where any store can spawn child stores with scoped permissions
+- **Inter-Store Messaging** (research): Stores exchange typed messages using an actor model. Parent stores have a store-level identity (keypair derived from UUID + node key). Children trust the parent's store key — not individual parent authors — preserving encapsulation. Parent state machines decide what to relay; child state machines process messages as ops in their own DAG. Key design questions: message format, delivery guarantees (at-least-once via DAG?), bidirectional messaging (child→parent replies), and whether messages are durable (entries) or ephemeral.
 - **Audit Trail Enhancements** (HLC `wall_time` already in Entry):
   - Human-readable timestamps in CLI (`store history` shows ISO 8601)
   - Time-based query filters (`store history --from 2026-01-01 --to 2026-01-31`)

@@ -1,6 +1,6 @@
-//! Mesh networking - peer-to-peer join and sync operations
+//! Network layer - peer-to-peer join and sync operations
 //!
-//! - **service**: MeshService - unified networking (sync, status, join)
+//! - **service**: NetworkService - unified networking (sync, status, join)
 //! - **handlers**: Protocol request handlers  
 //! - **error**: Typed error types
 //! - **gossip_manager**: Gossip subsystem encapsulation
@@ -16,7 +16,7 @@ mod handlers;
 #[cfg(test)]
 mod service_tests;
 
-pub use service::{MeshService, SyncResult, PeerStoreRegistry};
+pub use service::{NetworkService, SyncResult, PeerStoreRegistry};
 pub use error::{ServerError, GossipError};
 pub use sync_session::SyncSession;
 pub use session::SessionTracker;

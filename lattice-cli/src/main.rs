@@ -230,7 +230,7 @@ async fn run_embedded_mode() {
     let _ = writeln!(&mut writer.clone(), "Lattice CLI v{}", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(&mut writer.clone(), "Type 'help' for commands, 'quit' to exit.\n");
     
-    // Start runtime (Node + MeshService + backend)
+    // Start runtime (Node + NetworkService + backend)
     let runtime = match lattice_runtime::Runtime::builder().build().await {
         Ok(r) => r,
         Err(e) => {

@@ -38,7 +38,7 @@ pub type EventReceiver = tokio::sync::mpsc::UnboundedReceiver<NodeEvent>;
 
 /// Backend abstraction - the canonical Lattice SDK interface.
 /// 
-/// Implemented by InProcessBackend (wraps Node/MeshService) and RpcBackend (wraps RpcClient).
+/// Implemented by InProcessBackend (wraps Node/NetworkService) and RpcBackend (wraps RpcClient).
 /// All consumers (CLI, Swift bindings, etc.) should use `Arc<dyn LatticeBackend>`.
 pub trait LatticeBackend: Send + Sync {
     // ---- Node operations ----

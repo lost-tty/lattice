@@ -1,12 +1,12 @@
 //! In-process backend implementation
 //!
-//! Wraps Node and MeshService for embedded mode (running Node in-process).
+//! Wraps Node and NetworkService for embedded mode (running Node in-process).
 
 use crate::backend::*;
 use crate::StoreHandle;
 use lattice_api::proto::{StoreMeta, StoreRef};
 use lattice_model::types::PubKey;
-use lattice_net::MeshService;
+use lattice_net::NetworkService;
 use lattice_node::Node;
 use lattice_systemstore::SystemBatch;
 use lattice_model::store_info::PeerStrategy;
@@ -35,11 +35,11 @@ fn to_node_event(event: lattice_node::NodeEvent) -> NodeEvent {
 
 pub struct InProcessBackend {
     node: Arc<Node>,
-    network: Option<Arc<MeshService>>,
+    network: Option<Arc<NetworkService>>,
 }
 
 impl InProcessBackend {
-    pub fn new(node: Arc<Node>, network: Option<Arc<MeshService>>) -> Self {
+    pub fn new(node: Arc<Node>, network: Option<Arc<NetworkService>>) -> Self {
         Self { node, network }
     }
     

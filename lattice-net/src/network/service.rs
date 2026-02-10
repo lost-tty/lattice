@@ -1,4 +1,4 @@
-//! MeshService - Unified Mesh Networking
+//! NetworkService - Unified Mesh Networking
 //!
 //! Handles both inbound (server) and outbound (client) mesh operations.
 //! Provides sync, status, and join protocol operations.
@@ -29,7 +29,7 @@ pub type PeerStoreRegistry = Arc<RwLock<HashMap<Uuid, Arc<PeerSyncStore>>>>;
 
 /// Central service for mesh networking.
 /// Combines routing, gossip, and sync into a unified API.
-pub struct MeshService {
+pub struct NetworkService {
     provider: Arc<dyn NodeProviderExt>,
     endpoint: LatticeEndpoint,
     gossip_manager: Arc<super::gossip_manager::GossipManager>,
@@ -64,12 +64,12 @@ impl ProtocolHandler for SyncProtocol {
     }
 }
 
-impl MeshService {
+impl NetworkService {
     /// Create the NetEvent channel that the network layer owns.
     /// 
     /// Returns (sender, receiver):
     /// - `sender`: Pass to `NodeBuilder::with_net_tx()` so Node can emit events
-    /// - `receiver`: Pass to `MeshService::new_with_provider()` to handle events
+    /// - `receiver`: Pass to `NetworkService::new_with_provider()` to handle events
     /// 
     /// This pattern ensures the network layer owns the event flow.
     pub fn create_net_channel() -> (broadcast::Sender<NetEvent>, broadcast::Receiver<NetEvent>) {
@@ -77,14 +77,14 @@ impl MeshService {
         (tx, rx)
     }
     
-    /// Create a new MeshService with trait-based provider (decoupled constructor).
+    /// Create a new NetworkService with trait-based provider (decoupled constructor).
     /// 
     /// The recommended pattern is:
     /// ```ignore
-    /// let (net_tx, net_rx) = MeshService::create_net_channel();
+    /// let (net_tx, net_rx) = NetworkService::create_net_channel();
     /// let node = NodeBuilder::new(data_dir).with_net_tx(net_tx).build()?;
     /// let endpoint = LatticeEndpoint::new(node.signing_key().clone()).await?;
-    /// let service = MeshService::new_with_provider(Arc::new(node), endpoint, net_rx).await?;
+    /// let service = NetworkService::new_with_provider(Arc::new(node), endpoint, net_rx).await?;
     /// ```
     #[tracing::instrument(skip(provider, endpoint, event_rx))]
     pub async fn new_with_provider(

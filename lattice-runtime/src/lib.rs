@@ -4,7 +4,7 @@
 //! - `LatticeBackend` trait - the canonical SDK interface
 //! - `InProcessBackend` - wraps Node for embedded mode
 //! - `RpcBackend` - connects to latticed daemon
-//! - `Runtime` - wires Node + MeshService together
+//! - `Runtime` - wires Node + NetworkService together
 //!
 //! All consumers (CLI, Swift bindings, etc.) use `dyn LatticeBackend`.
 
@@ -24,6 +24,6 @@ pub use lattice_store_base::FieldFormat;
 pub use lattice_model::types::{PubKey, Hash};
 
 // Internal re-exports (not public API)
-pub(crate) use lattice_net::MeshService;
+pub(crate) use lattice_net::NetworkService;
 pub(crate) use lattice_node::{Node, NodeBuilder, StoreHandle};
 pub(crate) use lattice_api::RpcServer;

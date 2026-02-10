@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("latticed v{} starting...", env!("CARGO_PKG_VERSION"));
 
-    // Start runtime with Node + MeshService + RPC server
+    // Start runtime with Node + NetworkService + RPC server
     let runtime = Runtime::builder().with_rpc().build().await.map_err(|e| {
         tracing::error!("Failed to start: {}", e);
         anyhow::anyhow!("{}", e)

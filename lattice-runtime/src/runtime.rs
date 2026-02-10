@@ -1,7 +1,7 @@
-//! Runtime - wires together Node, MeshService, RPC server, and provides backend
+//! Runtime - wires together Node, NetworkService, RPC server, and provides backend
 
 use crate::backend_inprocess::InProcessBackend;
-use crate::{LatticeBackend, MeshService, Node, NodeBuilder, RpcServer};
+use crate::{LatticeBackend, NetworkService, Node, NodeBuilder, RpcServer};
 use lattice_node::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, STORE_TYPE_KVSTORE_LEGACY, STORE_TYPE_LOGSTORE_LEGACY, direct_opener};
 use lattice_storage::PersistentState;
 use lattice_systemstore::SystemLayer;
@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 /// A running Lattice runtime with Node, network, and optional RPC server.
 pub struct Runtime {
     node: Arc<Node>,
-    mesh_service: Arc<MeshService>,
+    mesh_service: Arc<NetworkService>,
     backend: Arc<dyn LatticeBackend>,
     rpc_handle: Option<JoinHandle<()>>,
 }
@@ -86,7 +86,7 @@ impl RuntimeBuilder {
     /// Build and start the runtime.
     pub async fn build(self) -> Result<Runtime, RuntimeError> {
         // Create net channel
-        let (net_tx, net_rx) = MeshService::create_net_channel();
+        let (net_tx, net_rx) = NetworkService::create_net_channel();
         
         // Determine data directory
         let data_path = match self.data_dir {
@@ -128,8 +128,8 @@ impl RuntimeBuilder {
             .await
             .map_err(|e| RuntimeError::Network(e.to_string()))?;
         
-        // Create MeshService
-        let mesh_service = MeshService::new_with_provider(node.clone(), endpoint, net_rx)
+        // Create NetworkService
+        let mesh_service = NetworkService::new_with_provider(node.clone(), endpoint, net_rx)
             .await
             .map_err(|e| RuntimeError::Network(e.to_string()))?;
         

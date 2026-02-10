@@ -103,7 +103,7 @@ pub enum NodeEvent {
 pub struct NodeBuilder {
     pub data_dir: DataDir,
     /// Optional net event sender - if not provided, a dummy one is created.
-    /// For production use, the network layer (MeshService) should create this
+    /// For production use, the network layer (NetworkService) should create this
     /// and pass it to ensure proper ownership.
     net_tx: Option<broadcast::Sender<NetEvent>>,
     name: Option<String>,
@@ -202,7 +202,7 @@ pub struct Node {
     store_manager: std::sync::Arc<crate::StoreManager>,
     /// Events for CLI/UI listeners
     event_tx: broadcast::Sender<NodeEvent>,
-    /// Events for network layer (MeshService)
+    /// Events for network layer (NetworkService)
     net_tx: broadcast::Sender<NetEvent>,
     /// Set of mesh IDs currently being joined
     pending_joins: std::sync::Mutex<std::collections::HashSet<Uuid>>,
@@ -242,7 +242,7 @@ impl Node {
         self.event_tx.subscribe()
     }
     
-    /// Subscribe to network events (for MeshService)
+    /// Subscribe to network events (for NetworkService)
     pub fn subscribe_net_events(&self) -> broadcast::Receiver<NetEvent> {
         self.net_tx.subscribe()
     }
@@ -304,12 +304,12 @@ impl Node {
         let _ = self.event_tx.send(event);
     }
     
-    /// Emit a network event (for MeshService)
+    /// Emit a network event (for NetworkService)
     fn emit_net(&self, event: NetEvent) {
         let _ = self.net_tx.send(event);
     }
     
-    /// Trigger a sync for a store. Emits NetEvent::SyncStore which MeshService handles.
+    /// Trigger a sync for a store. Emits NetEvent::SyncStore which NetworkService handles.
     /// Note: This is async - sync happens in background. Use for RPC integration.
     pub fn trigger_store_sync(&self, store_id: Uuid) {
         self.emit_net(NetEvent::SyncStore { store_id });
