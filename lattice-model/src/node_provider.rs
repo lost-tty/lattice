@@ -27,7 +27,7 @@ pub enum NodeProviderError {
 #[derive(Clone, Debug)]
 pub enum UserEvent {
     /// Join attempt failed
-    JoinFailed { mesh_id: Uuid, reason: String },
+    JoinFailed { store_id: Uuid, reason: String },
     /// Sync completed for a store
     SyncResult { store_id: Uuid, peers_synced: u32, entries_sent: u64, entries_received: u64 },
 }
@@ -59,7 +59,7 @@ pub trait NodeProviderAsync: NodeProvider {
     /// Creates store locally, activates mesh, sets up bootstrap authors.
     async fn process_join_response(
         &self, 
-        mesh_id: Uuid, 
+        store_id: Uuid, 
         authorized_authors: Vec<Vec<u8>>, 
         via_peer: PubKey
     ) -> Result<(), NodeProviderError>;
@@ -69,7 +69,7 @@ pub trait NodeProviderAsync: NodeProvider {
     async fn accept_join(
         &self,
         peer_pubkey: PubKey,
-        mesh_id: Uuid,
+        store_id: Uuid,
         invite_secret: &[u8],
     ) -> Result<JoinAcceptanceInfo, NodeProviderError>;
 }

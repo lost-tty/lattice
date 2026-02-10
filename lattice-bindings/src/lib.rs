@@ -8,16 +8,15 @@ use prost_reflect::prost::Message;
 
 // Re-export proto types directly (have UniFFI derives via lattice-api ffi feature)
 pub use lattice_api::proto::{
-    NodeStatus, MeshInfo, StoreRef, StoreMeta, StoreDetails, PeerInfo, 
+    NodeStatus, StoreRef, StoreMeta, StoreDetails, PeerInfo, 
     HistoryEntry, AuthorState, CleanupResult, JoinResponse,
 };
 
 // FFI-compatible event type (uses Vec<u8> for IDs which UniFFI supports)
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum BackendEvent {
-    MeshReady { mesh_id: Vec<u8> },
-    StoreReady { mesh_id: Vec<u8>, store_id: Vec<u8> },
-    JoinFailed { mesh_id: Vec<u8>, reason: String },
+    StoreReady { root_id: Vec<u8>, store_id: Vec<u8> },
+    JoinFailed { root_id: Vec<u8>, reason: String },
     SyncResult { store_id: Vec<u8>, peers_synced: u32, entries_sent: u64, entries_received: u64 },
 }
 
@@ -25,12 +24,10 @@ impl From<lattice_runtime::NodeEvent> for BackendEvent {
     fn from(e: lattice_runtime::NodeEvent) -> Self {
         // lattice_runtime::NodeEvent is proto node_event::NodeEvent
         match e {
-            lattice_runtime::NodeEvent::MeshReady(inner) => 
-                BackendEvent::MeshReady { mesh_id: inner.mesh_id },
             lattice_runtime::NodeEvent::StoreReady(inner) => 
-                BackendEvent::StoreReady { mesh_id: inner.mesh_id, store_id: inner.store_id },
+                BackendEvent::StoreReady { root_id: inner.root_id, store_id: inner.store_id },
             lattice_runtime::NodeEvent::JoinFailed(inner) => 
-                BackendEvent::JoinFailed { mesh_id: inner.mesh_id, reason: inner.reason },
+                BackendEvent::JoinFailed { root_id: inner.root_id, reason: inner.reason },
             lattice_runtime::NodeEvent::SyncResult(inner) => 
                 BackendEvent::SyncResult { 
                     store_id: inner.store_id, 
@@ -245,60 +242,47 @@ impl Lattice {
         self.rt.block_on(r.backend().node_set_name(&name)).map_err(|e| LatticeError::from_backend(e))
     }
 
-    // Mesh
-    pub fn mesh_list(&self) -> Result<Vec<MeshInfo>, LatticeError> {
+    // Store
+    pub fn store_create(&self, parent_id: Option<String>, name: Option<String>, store_type: String) -> Result<StoreRef, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        self.rt.block_on(r.backend().mesh_list())
+        
+        let pid = match parent_id {
+            Some(s) => Some(Uuid::parse_str(&s).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?),
+            None => None,
+        };
+        
+        self.rt.block_on(r.backend().store_create(pid, name, &store_type))
             .map_err(|e| LatticeError::from_backend(e))
     }
 
-    pub fn mesh_create(&self) -> Result<MeshInfo, LatticeError> {
+    pub fn store_list(&self, parent_id: Option<String>) -> Result<Vec<StoreRef>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        self.rt.block_on(r.backend().mesh_create())
+        
+        let pid = match parent_id {
+            Some(s) => Some(Uuid::parse_str(&s).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?),
+            None => None,
+        };
+        
+        self.rt.block_on(r.backend().store_list(pid))
             .map_err(|e| LatticeError::from_backend(e))
     }
 
-    pub fn mesh_status(&self, mesh_id: String) -> Result<MeshInfo, LatticeError> {
+    pub fn store_peer_invite(&self, store_id: String) -> Result<String, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&mesh_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().mesh_status(id))
-            .map_err(|e| LatticeError::from_backend(e))
-    }
-
-    pub fn mesh_join(&self, token: String) -> Result<JoinResponse, LatticeError> {
-        let r_guard = self.rt.block_on(self.runtime.read());
-        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        self.rt.block_on(r.backend().mesh_join(&token))
-            .map(|id| JoinResponse { mesh_id: id.as_bytes().to_vec() })
+        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
+        self.rt.block_on(r.backend().store_peer_invite(id))
             .map_err(|e| LatticeError::from_backend(e))
     }
     
-    pub fn mesh_invite(&self, mesh_id: String) -> Result<String, LatticeError> {
-        let r_guard = self.rt.block_on(self.runtime.read());
-        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&mesh_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().mesh_invite(id))
-            .map_err(|e| LatticeError::from_backend(e))
-    }
-
-    // Store
-    pub fn store_create(&self, mesh_id: String, name: Option<String>, store_type: String) -> Result<StoreRef, LatticeError> {
-        let r_guard = self.rt.block_on(self.runtime.read());
-        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&mesh_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().store_create(id, name, &store_type))
-            .map_err(|e| LatticeError::from_backend(e))
-    }
-
-    pub fn store_list(&self, mesh_id: String) -> Result<Vec<StoreRef>, LatticeError> {
-        let r_guard = self.rt.block_on(self.runtime.read());
-        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&mesh_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().store_list(id))
-            .map_err(|e| LatticeError::from_backend(e))
+    pub fn store_join(&self, token: String) -> Result<JoinResponse, LatticeError> {
+         let r_guard = self.rt.block_on(self.runtime.read());
+         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+         self.rt.block_on(r.backend().store_join(&token))
+             .map(|id| JoinResponse { store_id: id.as_bytes().to_vec() })
+             .map_err(|e| LatticeError::from_backend(e))
     }
 
     pub fn store_status(&self, store_id: String) -> Result<StoreMeta, LatticeError> {
@@ -359,11 +343,11 @@ impl Lattice {
             .map_err(|e| LatticeError::from_backend(e))
     }
 
-    pub fn store_revoke_peer(&self, store_id: String, peer_key: Vec<u8>) -> Result<(), LatticeError> {
+    pub fn store_peer_revoke(&self, store_id: String, peer_key: Vec<u8>) -> Result<(), LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().store_revoke_peer(id, &peer_key))
+        self.rt.block_on(r.backend().store_peer_revoke(id, &peer_key))
              .map_err(|e| LatticeError::from_backend(e))
     }
 

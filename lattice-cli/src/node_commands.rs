@@ -17,7 +17,7 @@ pub async fn cmd_status(backend: &dyn LatticeBackend, writer: Writer) -> CmdResu
             if !status.data_path.is_empty() {
                 let _ = writeln!(w, "Data:     {}", status.data_path);
             }
-            let _ = writeln!(w, "Meshes:   {}", status.mesh_count);
+            let _ = writeln!(w, "Root stores: {}", status.mesh_count);
         }
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
@@ -47,9 +47,9 @@ pub async fn cmd_set_name(backend: &dyn LatticeBackend, name: &str, writer: Writ
 pub async fn cmd_join(backend: &dyn LatticeBackend, token: &str, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
-    match backend.mesh_join(token).await {
-        Ok(mesh_id) => {
-            let _ = writeln!(w, "Joining mesh {}...", mesh_id);
+    match backend.store_join(token).await {
+        Ok(store_id) => {
+            let _ = writeln!(w, "Joining store {}...", store_id);
             let _ = writeln!(w, "Join request sent. You will be notified when connection is established.");
         }
         Err(e) => {

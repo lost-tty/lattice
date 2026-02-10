@@ -2,11 +2,10 @@
 
 use crate::backend::Backend;
 use crate::dynamic_store_service::DynamicStoreServiceImpl;
-use crate::mesh_service::MeshServiceImpl;
 use crate::node_service::NodeServiceImpl;
 use crate::proto::{
     dynamic_store_service_server::DynamicStoreServiceServer,
-    mesh_service_server::MeshServiceServer, node_service_server::NodeServiceServer,
+    node_service_server::NodeServiceServer,
     store_service_server::StoreServiceServer,
 };
 use crate::store_service::StoreServiceImpl;
@@ -65,13 +64,11 @@ impl RpcServer {
 
         // Create all service implementations - all wrap the same backend
         let node_service = NodeServiceImpl::new(self.backend.clone());
-        let mesh_service = MeshServiceImpl::new(self.backend.clone());
         let store_service = StoreServiceImpl::new(self.backend.clone());
         let dynamic_store_service = DynamicStoreServiceImpl::new(self.backend.clone());
 
         Server::builder()
             .add_service(NodeServiceServer::new(node_service))
-            .add_service(MeshServiceServer::new(mesh_service))
             .add_service(StoreServiceServer::new(store_service))
             .add_service(DynamicStoreServiceServer::new(dynamic_store_service))
             .serve_with_incoming(uds_stream)

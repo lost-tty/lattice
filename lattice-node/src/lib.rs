@@ -8,10 +8,11 @@
 //! - **MetaStore**: Node metadata storage
 
 pub mod node;
-pub mod mesh;
+
 pub mod peer_manager;
 pub mod auth;
 pub mod store_registry;
+pub mod watcher;
 pub mod meta_store;
 pub mod data_dir;
 pub mod token;
@@ -49,7 +50,7 @@ pub use lattice_model::{NodeProvider, NodeProviderAsync, NodeProviderError, User
 pub use node::{Node, NodeBuilder, NodeInfo, NodeError, NodeEvent, JoinAcceptance, PeerInfo};
 pub use auth::{PeerProvider, PeerEvent};
 pub use peer_manager::{PeerManager, PeerManagerError};
-pub use mesh::{Mesh, MeshError, StoreDeclaration};
+
 
 // Other exports
 pub use data_dir::DataDir;

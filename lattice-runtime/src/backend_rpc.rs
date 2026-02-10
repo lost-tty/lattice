@@ -4,7 +4,7 @@
 
 use crate::backend::*;
 use lattice_api::proto::{
-    Empty, MeshId, StoreId, JoinRequest, CreateStoreRequest, RevokePeerRequest, SetNameRequest,
+    Empty, StoreId, JoinRequest, CreateStoreRequest, DeleteStoreRequest, RevokePeerRequest, SetNameRequest,
     SetStoreNameRequest, HistoryRequest, ExecRequest,
 };
 use lattice_api::RpcClient;
@@ -82,53 +82,12 @@ impl LatticeBackend for RpcBackend {
         Ok(event_rx)
     }
     
-    fn mesh_create(&self) -> AsyncResult<'_, MeshInfo> {
-        Box::pin(async move {
-            let mut client = self.client.clone();
-            let resp = client.mesh.create(Empty {}).await?;
-            Ok(resp.into_inner())
-        })
-    }
-    
-    fn mesh_list(&self) -> AsyncResult<'_, Vec<MeshInfo>> {
-        Box::pin(async move {
-            let mut client = self.client.clone();
-            let resp = client.mesh.list(Empty {}).await?;
-            Ok(resp.into_inner().meshes)
-        })
-    }
-    
-    fn mesh_status(&self, mesh_id: Uuid) -> AsyncResult<'_, MeshInfo> {
-        Box::pin(async move {
-            let mut client = self.client.clone();
-            let resp = client.mesh.get_status(MeshId { id: mesh_id.as_bytes().to_vec() }).await?;
-            Ok(resp.into_inner())
-        })
-    }
-    
-    fn mesh_join(&self, token: &str) -> AsyncResult<'_, Uuid> {
-        let token = token.to_string();
-        Box::pin(async move {
-            let mut client = self.client.clone();
-            let resp = client.mesh.join(JoinRequest { token }).await?;
-            Ok(Uuid::from_slice(&resp.into_inner().mesh_id)?)
-        })
-    }
-    
-    fn mesh_invite(&self, mesh_id: Uuid) -> AsyncResult<'_, String> {
-        Box::pin(async move {
-            let mut client = self.client.clone();
-            let resp = client.mesh.invite(MeshId { id: mesh_id.as_bytes().to_vec() }).await?;
-            Ok(resp.into_inner().token)
-        })
-    }
-    
-    fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef> {
+    fn store_create(&self, parent_id: Option<Uuid>, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef> {
         let store_type = store_type.to_string();
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.store.create(CreateStoreRequest {
-                mesh_id: mesh_id.as_bytes().to_vec(),
+                parent_id: parent_id.map(|u| u.as_bytes().to_vec()),
                 name: name.unwrap_or_default(),
                 store_type,
             }).await?;
@@ -136,11 +95,31 @@ impl LatticeBackend for RpcBackend {
         })
     }
     
-    fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreRef>> {
+    fn store_list(&self, parent_id: Option<Uuid>) -> AsyncResult<'_, Vec<StoreRef>> {
+         Box::pin(async move {
+            let mut client = self.client.clone();
+            let req = lattice_api::proto::ListStoreRequest {
+                parent_id: parent_id.map(|u| u.as_bytes().to_vec()),
+            };
+            let resp = client.store.list(req).await?;
+            Ok(resp.into_inner().stores)
+        })
+    }
+
+    fn store_join(&self, token: &str) -> AsyncResult<'_, Uuid> {
+        let token = token.to_string();
         Box::pin(async move {
             let mut client = self.client.clone();
-            let resp = client.store.list(MeshId { id: mesh_id.as_bytes().to_vec() }).await?;
-            Ok(resp.into_inner().stores)
+            let resp = client.store.join(JoinRequest { token }).await?;
+            Ok(Uuid::from_slice(&resp.into_inner().store_id)?)
+        })
+    }
+    
+    fn store_peer_invite(&self, store_id: Uuid) -> AsyncResult<'_, String> {
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client.store.invite(StoreId { id: store_id.as_bytes().to_vec() }).await?;
+            Ok(resp.into_inner().token)
         })
     }
     
@@ -160,7 +139,7 @@ impl LatticeBackend for RpcBackend {
         })
     }
 
-    fn store_revoke_peer(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()> {
+    fn store_peer_revoke(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()> {
         let peer_key = peer_key.to_vec();
         Box::pin(async move {
             let mut client = self.client.clone();
@@ -177,10 +156,13 @@ impl LatticeBackend for RpcBackend {
         })
     }
     
-    fn store_delete(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
+    fn store_delete(&self, store_id: Uuid, child_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
             let mut client = self.client.clone();
-            client.store.delete(StoreId { id: store_id.as_bytes().to_vec() }).await?;
+            client.store.delete(DeleteStoreRequest {
+                store_id: store_id.as_bytes().to_vec(),
+                child_id: child_id.as_bytes().to_vec(),
+            }).await?;
             Ok(())
         })
     }

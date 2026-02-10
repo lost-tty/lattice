@@ -8,11 +8,11 @@ pub use lattice_api::backend::{
     LatticeBackend, Backend, NodeEvent, BackendError, BackendResult,
     AsyncResult, EventReceiver, StreamDescriptor, BoxByteStream,
     // Event wrapper types
-    MeshReadyEvent, StoreReadyEvent, JoinFailedEvent, SyncResultEvent,
+    StoreReadyEvent, JoinFailedEvent, SyncResultEvent,
 };
 
 // Re-export proto types for consumers
 pub use lattice_api::proto::{
-    NodeStatus, MeshInfo, PeerInfo, StoreDetails, StoreMeta, StoreRef,
+    NodeStatus, PeerInfo, StoreDetails, StoreMeta, StoreRef,
     AuthorState, HistoryEntry, SyncResult,
 };

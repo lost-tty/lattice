@@ -31,7 +31,7 @@ mod tests {
     impl NodeProviderAsync for MockProvider {
         async fn process_join_response(
             &self, 
-            _mesh_id: Uuid, 
+            _store_id: Uuid, 
             _authorized_authors: Vec<Vec<u8>>, 
             _via_peer: PubKey
         ) -> Result<(), NodeProviderError> { 
@@ -41,7 +41,7 @@ mod tests {
         async fn accept_join(
             &self, 
             _peer: PubKey, 
-            _mesh_id: Uuid, 
+            _store_id: Uuid, 
             _secret: &[u8]
         ) -> Result<JoinAcceptanceInfo, NodeProviderError> { 
             Err(NodeProviderError::Join("Mock provider cannot accept joins".into())) 

@@ -46,10 +46,6 @@ This document outlines the development plan for Lattice.
 - [x] Define "Root Store" concept: `PeerStrategy::Independent` + `StoreMeta`
 - [x] **Migrate Peer Names**: Move names from Data Table (`/nodes/*/name`) to System Table (`peer/*/name`)
 - [x] `Node::set_name()` should propagate name to all locally managed Root Stores (System Table)
-- [ ] Update `lattice-node` bootstrapping:
-    - Deprecate `Node::new(mesh_id)`
-    - Add `Node::load(root_store_id)`
-    - `StoreManager` should load all locally available Root Stores at startup
 
 ### 10C: Migration (Peer Strategy)
 - [x] **Strategy Backfill**: Since stores are already migrated to System Table, we just need to populate `strategy`:
@@ -57,11 +53,41 @@ This document outlines the development plan for Lattice.
     - Child Stores -> `Inherited` (future default)
 - [x] Test migration with existing data directories
 
-### 10D: Legacy Cleanup
-- [ ] Convert existing `Mesh` structs to Root Stores
-- [ ] Remove `Mesh` and `ControlPlane` code
-- [ ] CLI: Remove `mesh` subcommand entirely (replace with `store create`, `store join`, `store peers`)
-- [ ] Refactor `StoreManager`: Remove "mesh" concept, just manage a flat list of loaded stores (some are roots)
+### 10D: Final Polish & Cleanup
+- [x] **Core Refactor (`StoreManager`)**:
+    - Remove "Mesh" concept from `StoreManager`.
+    - Function as a flat registry of loaded stores.
+- [x] **Bootstrap Migration**:
+    - Update `meta.db`: Rename/Repurpose `meshes` table to `rootstores` (List of "Pinned" Root Store UUIDs) 
+    - `StoreManager` startup: Load all stores found in `meta.db` (flat load)
+    - Deprecate `Node::new(mesh_id)` → `Node::load()`
+- [x] **RPC & Logic Refresh**:
+    - **RPC/Bindings**: Update `create_store` to accept `parent_id: Option<Uuid>`.
+      - `None` → Root Store (Independent, recorded in `meta.db`). Replaces `mesh_create`.
+      - `Some(id)` → Child Store (Inherited, recorded in parent's SystemTable). **Replaces hardcoded logic** where parent was always the Mesh Root. Now supports arbitrary nesting.
+    - **Validation**: `store peer invite` is only allowed on stores with `PeerStrategy::Independent`.
+- [x] **CLI Implementation**:
+    - `store create [--root]`: Maps to `parent_id = None` (if root) or `parent_id = current_context` (if child).
+    - `store join <token>`: Joins a store (adds to `meta.db` as a root until it discovers it has a parent? Or just adds to `meta.db`).
+    - **Store List API**: `store list` should return detailed metadata (including `children` list from SystemTable) so CLI/UI can render a tree view.
+    - CLI: Remove `mesh` subcommand entirely (replace with `store create`, `store join`, `store peers`)
+- [x] **Legacy Cleanup**:
+    - Convert existing `Mesh` structs to Root Stores (internal usage)
+    - Remove `Mesh` struct and `ControlPlane` code entirely
+
+### 10E: Mesh Naming Debt
+- [x] Rename `Invite.mesh_id` → `store_id` in `lattice-node/src/token.rs` (and all callers in `backend_inprocess.rs`)
+- [x] Rename `NodeEvent::JoinFailed { mesh_id }` → `{ store_id }` in `node.rs` (internal event field; wire format already uses `root_id`)
+- [x] Rename `InProcessBackend.mesh_network` → `network` (`backend_inprocess.rs`)
+- [x] Fix CLI label: `"Meshes:"` → `"Root stores:"` in `node_commands.rs`
+- [x] Clean up stale comments referencing mesh in `backend_inprocess.rs`, `backend.rs`
+- [ ] Rename `MeshService` → `NetworkService` and `lattice-net/src/mesh/` module → `network` or `p2p`
+
+### 10G: Test Coverage
+- [x] `delete_child_store` + `close_descendants` cascade logic (`store_manager.rs`)
+- [x] `consume_invite_secret` system table tracking (`store_manager.rs`)
+- [x] `revoke_peer` system table update (`store_manager.rs`)
+- [x] `RecursiveWatcher` child store reconciliation (`watcher.rs`)
 
 ---
 

@@ -4,8 +4,7 @@
 //! communicate with the daemon over UDS.
 
 use crate::proto::{
-    dynamic_store_service_client::DynamicStoreServiceClient,
-    mesh_service_client::MeshServiceClient, node_service_client::NodeServiceClient,
+    dynamic_store_service_client::DynamicStoreServiceClient, node_service_client::NodeServiceClient,
     store_service_client::StoreServiceClient,
 };
 use hyper_util::rt::TokioIo;
@@ -18,7 +17,6 @@ use tower::service_fn;
 #[derive(Clone)]
 pub struct RpcClient {
     pub node: NodeServiceClient<Channel>,
-    pub mesh: MeshServiceClient<Channel>,
     pub store: StoreServiceClient<Channel>,
     pub dynamic: DynamicStoreServiceClient<Channel>,
 }
@@ -41,7 +39,6 @@ impl RpcClient {
 
         Ok(Self {
             node: NodeServiceClient::new(channel.clone()),
-            mesh: MeshServiceClient::new(channel.clone()),
             store: StoreServiceClient::new(channel.clone()),
             dynamic: DynamicStoreServiceClient::new(channel),
         })

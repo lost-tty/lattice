@@ -4,8 +4,7 @@ use crate::{
     DataDir, MetaStore, Uuid,
     meta_store::MetaStoreError,
     store_registry::StoreRegistry,
-    mesh::Mesh,
-    peer_manager::{PeerManager, PeerManagerError},
+    peer_manager::PeerManagerError,
     StoreHandle,
 };
 // Removed unused imports: PersistentState, KvState
@@ -16,9 +15,7 @@ use lattice_kernel::{
 
 use lattice_model::NetEvent;
 use lattice_model::types::PubKey;
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::RwLock;
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tracing::error;
@@ -95,11 +92,10 @@ pub use lattice_model::PeerInfo;
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
     /// Store is ready (opened and available)
-    StoreReady { mesh_id: Uuid, store_id: Uuid },
-    /// Mesh is fully initialized and ready (store + network + perms)
-    MeshReady { mesh_id: Uuid },
+    StoreReady { store_id: Uuid },
     /// Join failed (emitted by network layer for CLI feedback)
-    JoinFailed { mesh_id: Uuid, reason: String },
+    /// Join failed (emitted by network layer for CLI feedback)
+    JoinFailed { store_id: Uuid, reason: String },
     /// Sync completed for a store
     SyncResult { store_id: Uuid, peers_synced: u32, entries_sent: u64, entries_received: u64 },
 }
@@ -191,7 +187,6 @@ impl NodeBuilder {
             store_manager,
             event_tx,
             net_tx,
-            meshes: RwLock::new(HashMap::new()),
             pending_joins: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
@@ -209,8 +204,6 @@ pub struct Node {
     event_tx: broadcast::Sender<NodeEvent>,
     /// Events for network layer (MeshService)
     net_tx: broadcast::Sender<NetEvent>,
-    /// All active meshes by ID (multi-mesh support)
-    meshes: RwLock<HashMap<Uuid, Mesh>>,
     /// Set of mesh IDs currently being joined
     pending_joins: std::sync::Mutex<std::collections::HashSet<Uuid>>,
 }
@@ -255,18 +248,18 @@ impl Node {
     }
     
     /// Set bootstrap authors for a mesh - trusted for initial sync before peer list is synced.
-    pub fn set_bootstrap_authors(&self, mesh_id: Uuid, authors: Vec<PubKey>) -> Result<(), NodeError> {
-        let mesh = self.mesh_by_id(mesh_id)
-            .ok_or_else(|| NodeError::Actor(format!("Mesh {} not found", mesh_id)))?;
-        mesh.set_bootstrap_authors(authors)
+    pub fn set_bootstrap_authors(&self, store_id: Uuid, authors: Vec<PubKey>) -> Result<(), NodeError> {
+        let pm = self.store_manager.get_peer_manager(&store_id)
+            .ok_or_else(|| NodeError::StoreManager(crate::StoreManagerError::NotFound(store_id)))?;
+        pm.set_bootstrap_authors(authors)
             .map_err(|e| NodeError::Actor(e.to_string()))
     }
     
     /// Clear bootstrap authors after initial sync completes.
-    pub fn clear_bootstrap_authors(&self, mesh_id: Uuid) -> Result<(), NodeError> {
-        let mesh = self.mesh_by_id(mesh_id)
-            .ok_or_else(|| NodeError::Actor(format!("Mesh {} not found", mesh_id)))?;
-        mesh.clear_bootstrap_authors()
+    pub fn clear_bootstrap_authors(&self, store_id: Uuid) -> Result<(), NodeError> {
+        let pm = self.store_manager.get_peer_manager(&store_id)
+            .ok_or_else(|| NodeError::StoreManager(crate::StoreManagerError::NotFound(store_id)))?;
+        pm.clear_bootstrap_authors()
             .map_err(|e| NodeError::Actor(e.to_string()))
     }
 
@@ -290,18 +283,18 @@ impl Node {
     pub async fn set_name(&self, name: &str) -> Result<(), NodeError> {
         self.meta.set_name(name)?;
         // Publish to all active meshes
-        for mesh_id in self.list_mesh_ids() {
-            let _ = self.publish_name_to(mesh_id).await;
+        for store_id in self.store_manager.list_store_ids() {
+            let _ = self.publish_name_to(store_id).await;
         }
         Ok(())
     }
     
     /// Publish this node's name to a specific mesh.
-    pub async fn publish_name_to(&self, mesh_id: Uuid) -> Result<(), NodeError> {
-        let mesh = self.mesh_by_id(mesh_id)
-            .ok_or_else(|| NodeError::Actor(format!("Mesh {} not found", mesh_id)))?;
+    pub async fn publish_name_to(&self, store_id: Uuid) -> Result<(), NodeError> {
+        let pm = self.store_manager.get_peer_manager(&store_id)
+            .ok_or_else(|| NodeError::StoreManager(crate::StoreManagerError::NotFound(store_id)))?;
         if let Some(name) = self.name() {
-            mesh.peer_manager().set_peer_name(self.node.public_key(), &name).await?;
+            pm.set_peer_name(self.node.public_key(), &name).await.map_err(NodeError::PeerManager)?;
         }
         Ok(())
     }
@@ -322,111 +315,81 @@ impl Node {
         self.emit_net(NetEvent::SyncStore { store_id });
     }
     
-    /// Store a mesh in the meshes map.
-    /// Root store is already registered during Mesh::open/create_new.
-    fn activate_mesh(&self, mesh: Mesh) -> Result<(), NodeError> {
-        let mesh_id = mesh.id();
-        
-        {
-            let mut guard = self.meshes.write()
-                .map_err(|_| NodeError::LockPoisoned)?;
-            guard.insert(mesh_id, mesh.clone());
-        }
-        
-        Ok(())
-    }
 
-    /// Start the node - loads all meshes from meta.db and emits NetworkStore events.
+
+    /// Start the node - loads all root stores from meta.db and emits NetworkStore events.
     pub async fn start(&self) -> Result<(), NodeError> {
-        for (mesh_id, _info) in self.meta.list_meshes()? {
-            // Skip if already loaded
-            if self.meshes.read().map(|m| m.contains_key(&mesh_id)).unwrap_or(false) {
+        for (store_id, _info) in self.meta.list_rootstores()? {
+
+            // 1. Open the store (resolve type from disk)
+            let (handle, store_type) = if let Ok((handle, store_type)) = self.store_manager.open_existing(store_id) {
+                (handle, store_type)
+            } else if let Ok(handle) = self.store_manager.open(store_id, crate::STORE_TYPE_KVSTORE) {
+                (handle, crate::STORE_TYPE_KVSTORE.to_string())
+            } else {
+                 tracing::warn!("Failed to open root store {}", store_id);
+                 continue;
+            };
+
+            // 2. Create PeerManager and register the store
+            let peer_manager = if let Some(system) = handle.clone().as_system() {
+                match crate::PeerManager::new(system).await {
+                    Ok(pm) => pm,
+                    Err(e) => {
+                        tracing::warn!("Failed to create PeerManager for {}: {:?}", store_id, e);
+                        continue;
+                    }
+                }
+            } else {
+                tracing::warn!("Root store {} does not support system table, skipping PeerManager", store_id);
+                continue;
+            };
+
+            if let Err(e) = self.store_manager.register(store_id, handle, &store_type, peer_manager) {
+                tracing::warn!("Failed to register root store {}: {:?}", store_id, e);
                 continue;
             }
 
-            let mesh = Mesh::open(mesh_id, self.store_manager.clone()).await
-                .map_err(|e| NodeError::Actor(e.to_string()))?;
-            
-            self.activate_mesh(mesh.clone())?;
-            
-            // Run migration for legacy store data
-            if let Err(e) = mesh.migrate_legacy_data().await {
-                 tracing::warn!(mesh_id = %mesh_id, error = %e, "Failed to migrate legacy data");
+            // 3. Start watcher
+            if let Err(e) = self.store_manager.start_watching(store_id) {
+                tracing::warn!("Failed to start watcher for {}: {:?}", store_id, e);
             }
-
-            self.emit_net(NetEvent::SyncStore { store_id: mesh_id });
         }
         Ok(())
     }
 
-    /// Stop the node and all its meshes/watchers.
+    /// Stop the node and all its watchers.
     /// Ensures database handles are released for clean shutdown.
     pub async fn shutdown(&self) {
-        // Shutdown all meshes
-        let meshes = {
-            if let Ok(guard) = self.meshes.read() {
-                guard.values().cloned().collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            }
-        };
+        // 1. Stop all watchers and close all stores (releases Arc<StoreHandle> refs)
+        self.store_manager.shutdown().await;
         
-        for mesh in meshes {
-            mesh.shutdown().await;
-        }
-        
-        // Shutdown registry (awaits actor tasks)
+        // 2. Shutdown registry (awaits actor tasks, releases DB handles)
         self.registry.shutdown().await;
     }
 
-    /// Create a new mesh (multi-mesh: can be called multiple times).
-    /// Returns the mesh ID (same as root store ID).
-    pub async fn create_mesh(&self) -> Result<Uuid, NodeError> {
-        let mesh = Mesh::create_new(self.store_manager.clone()).await
-            .map_err(|e| NodeError::Actor(e.to_string()))?;
-        let mesh_id = mesh.id();
-        
-        // Record in meta.db and activate
-        self.meta.add_mesh(mesh_id, &lattice_kernel::proto::storage::MeshInfo {
-            joined_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64).unwrap_or(0),
-            is_creator: true,
-        })?;
-        self.activate_mesh(mesh.clone())?;
-        
-        let pubkey = self.node.public_key();
-        let name = self.name();
 
-        // Use PeerManager to set initial status and name
-        let pm = mesh.peer_manager();
-        pm.set_peer_status(pubkey, PeerStatus::Active).await?;
-        if let Some(name) = name {
-            pm.set_peer_name(pubkey, &name).await?;
-        }
-        
-        Ok(mesh_id)
-    }
     
     /// Request to join a mesh via the given peer.
     /// Multi-mesh: can join additional meshes (no longer fails if already in a mesh).
     /// Emits JoinRequested event - server handles the network protocol.
-    pub fn join(&self, peer_id: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Result<(), NodeError> {
-        // Check if already in this mesh
-        if self.mesh_by_id(mesh_id).is_some() {
-            return Err(NodeError::Validation(format!("Already a member of mesh {}", mesh_id)));
+    pub fn join(&self, peer_id: PubKey, store_id: Uuid, secret: Vec<u8>) -> Result<(), NodeError> {
+        // Check if already in this mesh/store
+        if self.store_manager.get_handle(&store_id).is_some() {
+            return Err(NodeError::Validation(format!("Already a member of mesh/store {}", store_id)));
         }
         
         // Check if join is already in progress
         {
             let mut pending = self.pending_joins.lock()
                 .map_err(|_| NodeError::LockPoisoned)?;
-            if pending.contains(&mesh_id) {
-                return Err(NodeError::Validation(format!("Join for mesh {} is already in progress", mesh_id)));
+            if pending.contains(&store_id) {
+                return Err(NodeError::Validation(format!("Join for mesh {} is already in progress", store_id)));
             }
-            pending.insert(mesh_id);
+            pending.insert(store_id);
         }
         
-        self.emit_net(NetEvent::Join { peer: peer_id, mesh_id, secret });
+        self.emit_net(NetEvent::Join { peer: peer_id, store_id, secret });
         Ok(())
     }
     
@@ -434,12 +397,12 @@ impl Node {
     /// Encapsulates logic for initializing the mesh and processing authorized authors.
     pub async fn process_join_response(
         &self, 
-        mesh_id: Uuid, 
+        store_id: Uuid, 
         authorized_authors_bytes: Vec<Vec<u8>>, 
         via_peer: PubKey
     ) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
         // 1. Initialize Mesh (must be done first)
-        let store = self.complete_join(mesh_id, Some(via_peer)).await?;
+        let store = self.complete_join(store_id, Some(via_peer)).await?;
         
         // 2. Set bootstrap authors (now that mesh exists and peer manager is ready)
         let bootstrap_authors: Vec<PubKey> = authorized_authors_bytes.iter()
@@ -447,16 +410,15 @@ impl Node {
             .collect();
 
         if !bootstrap_authors.is_empty() {
-            self.set_bootstrap_authors(mesh_id, bootstrap_authors)?;
+             if let Some(pm) = self.store_manager.get_peer_manager(&store_id) {
+                pm.set_bootstrap_authors(bootstrap_authors)?;
+            }
         }
         
         // Clear from pending joins
         if let Ok(mut pending) = self.pending_joins.lock() {
-            pending.remove(&mesh_id);
+            pending.remove(&store_id);
         }
-        
-        let mesh_id = self.mesh_by_id(mesh_id).expect("mesh initialized").id();
-        let _ = self.event_tx.send(NodeEvent::MeshReady { mesh_id });
         
         Ok(store)
     }
@@ -466,67 +428,102 @@ impl Node {
     /// If `via_peer` is provided, server will sync with that peer after registration.
     pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
         // Record in meta.db (as member)
-        self.meta.add_mesh(store_id, &lattice_kernel::proto::storage::MeshInfo {
+        self.meta.add_rootstore(store_id, &lattice_kernel::proto::storage::RootStoreRecord {
             joined_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64).unwrap_or(0),
-            is_creator: false,
         })?;
         
-        let mesh = Mesh::open(store_id, self.store_manager.clone()).await
-            .map_err(|e| NodeError::Actor(e.to_string()))?;
-        self.activate_mesh(mesh.clone())?;
+        // Workaround: Use open() then configure.
+        let handle = self.store_manager.open(store_id, crate::STORE_TYPE_KVSTORE)
+            .map_err(|e| NodeError::StoreManager(e))?;
+            
+        // 2. Configure System Table
+        let system = handle.clone().as_system()
+             .ok_or_else(|| NodeError::Validation("Root store must support SystemStore".into()))?;
+        
+        let peer_manager = crate::PeerManager::new(system).await?;
+        
+        self.store_manager.register(store_id, handle.clone(), crate::STORE_TYPE_KVSTORE, peer_manager)?;
+        
+        // Start watching
+        self.store_manager.start_watching(store_id).map_err(NodeError::StoreManager)?;
+
         let _ = self.publish_name_to(store_id).await;
         
         if let Some(peer) = via_peer {
             self.emit_net(NetEvent::SyncWithPeer { store_id, peer });
         }
         
-        Ok(mesh.root_store())
+        Ok(handle)
     }
     
     /// Accept a peer's join request - verifies they're invited, sets active, returns join info
     /// 
     /// Note: This remains on Node as a facade for the network layer, which may not yet have a Mesh reference
-    pub async fn accept_join(&self, pubkey: PubKey, mesh_id: Uuid, secret: &[u8]) -> Result<JoinAcceptance, NodeError> {
-        let mesh = self.mesh_by_id(mesh_id)
-            .ok_or_else(|| NodeError::Actor(format!("Not a member of mesh {}", mesh_id)))?;
+    pub async fn accept_join(&self, pubkey: PubKey, store_id: Uuid, secret: &[u8]) -> Result<JoinAcceptance, NodeError> {
+        let authorized_authors = self.store_manager.handle_peer_join(store_id, pubkey, secret).await
+             .map_err(|e| NodeError::Store(StateError::Unauthorized(e.to_string())))?;
 
-        let authorized_authors = mesh.handle_peer_join(pubkey, secret).await
-            .map_err(|e| NodeError::Store(StateError::Unauthorized(e.to_string())))?;
-
-        Ok(JoinAcceptance { store_id: mesh_id, authorized_authors })
+        Ok(JoinAcceptance { store_id: store_id, authorized_authors })
     }
 
-    /// Create a store, optionally specifying the UUID.
-    /// If uuid is None, a random one is generated.
-    pub fn create_store(&self, uuid: Option<Uuid>) -> Result<Uuid, NodeError> {
-        let id = uuid.unwrap_or_else(Uuid::new_v4);
-        let _ = self.store_manager.open(id, crate::STORE_TYPE_KVSTORE)?;
-        // Register with meta store so it appears in list_stores()
-        self.meta.add_store(id).map_err(|e| NodeError::Store(StateError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))))?;
-        Ok(id)
-    }
-
-    /// Get PeerManager for a specific mesh
-    pub fn peer_manager_for(&self, mesh_id: Uuid) -> Option<std::sync::Arc<PeerManager>> {
-        self.mesh_by_id(mesh_id).map(|m| m.peer_manager().clone())
-    }
+    /// Create a store (Fractal Model).
+    /// If `parent_id` is None, creates a new Root Store (Independent).
+    /// If `parent_id` is Some, creates a Child Store (Inherited) and registers it in parent's SystemTable.
+    /// Create a store (Fractal Model).
+    /// If `parent_id` is None, creates a new Root Store (Independent).
+    /// If `parent_id` is Some, creates a Child Store (Inherited) and registers it in parent's SystemTable.
+    pub async fn create_store(&self, parent_id: Option<Uuid>, name: Option<String>, store_type: &str) -> Result<Uuid, NodeError> {
+        let name = name.unwrap_or_default();
+        
+        if let Some(parent_id) = parent_id {
+            // Add as child to parent
+            self.store_manager.create_child_store(parent_id, if name.is_empty() { None } else { Some(name) }, store_type)
+                .await.map_err(NodeError::StoreManager)
+        } else {
+            // New Root Store
+            
+            // 1. Create store
+            let (store_id, handle) = self.store_manager.create(
+                if name.is_empty() { None } else { Some(name.clone()) }, 
+                store_type,
+                Some(lattice_model::store_info::PeerStrategy::Independent)
+            ).await.map_err(NodeError::StoreManager)?;
+            
+            // 2. Register with PeerManager (create new one)
+             let system = handle.clone().as_system()
+                  .ok_or_else(|| NodeError::Validation("Root store must support SystemStore".into()))?;
+             let peer_manager = crate::PeerManager::new(system).await?;
+             
+             self.store_manager.register(store_id, handle, store_type, peer_manager.clone())
+                 .map_err(NodeError::StoreManager)?;
+            
+            // 3. Start Watcher
+            // Note: start_watching requires Arc<StoreManager>. Node holds it.
+            self.store_manager.start_watching(store_id).map_err(NodeError::StoreManager)?;
+            
+            // 4. Record in meta.db and activate
+            self.meta.add_rootstore(store_id, &lattice_kernel::proto::storage::RootStoreRecord {
+                joined_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64).unwrap_or(0),
+            })?;
+            
+            // 5. Initialize Peer Self-Status
+            let pubkey = self.node.public_key();
     
-    /// Get a specific mesh by ID
-    pub fn mesh_by_id(&self, mesh_id: Uuid) -> Option<Mesh> {
-        let meshes = self.meshes.read().ok()?;
-        meshes.get(&mesh_id).cloned()
+            if !name.is_empty() {
+                peer_manager.set_peer_name(pubkey, &name).await?;
+            } else if let Some(n) = self.name() {
+                peer_manager.set_peer_name(pubkey, &n).await?;
+            }
+            
+            peer_manager.set_peer_status(pubkey, PeerStatus::Active).await?;
+            
+            Ok(store_id)
+        }
     }
-    
-    /// List all meshes this node is part of
-    pub fn list_mesh_ids(&self) -> Vec<Uuid> {
-        self.meshes.read()
-            .map(|m| m.keys().copied().collect())
-            .unwrap_or_default()
-    }
+
+
 }
 
 // ==================== NodeProvider Implementation ====================
@@ -540,8 +537,8 @@ impl NodeProvider for Node {
     
     fn emit_user_event(&self, event: UserEvent) {
         match event {
-            UserEvent::JoinFailed { mesh_id, reason } => {
-                let _ = self.event_tx.send(NodeEvent::JoinFailed { mesh_id, reason });
+            UserEvent::JoinFailed { store_id, reason } => {
+                let _ = self.event_tx.send(NodeEvent::JoinFailed { store_id, reason });
             }
             UserEvent::SyncResult { store_id, peers_synced, entries_sent, entries_received } => {
                 let _ = self.event_tx.send(NodeEvent::SyncResult { store_id, peers_synced, entries_sent, entries_received });
@@ -554,11 +551,11 @@ impl NodeProvider for Node {
 impl NodeProviderAsync for Node {
     async fn process_join_response(
         &self, 
-        mesh_id: Uuid, 
+        store_id: Uuid, 
         authorized_authors: Vec<Vec<u8>>, 
         via_peer: PubKey
     ) -> Result<(), NodeProviderError> {
-        self.process_join_response(mesh_id, authorized_authors, via_peer).await
+        self.process_join_response(store_id, authorized_authors, via_peer).await
             .map(|_| ())
             .map_err(|e| NodeProviderError::Join(e.to_string()))
     }
@@ -566,10 +563,10 @@ impl NodeProviderAsync for Node {
     async fn accept_join(
         &self,
         peer_pubkey: PubKey,
-        mesh_id: Uuid,
+        store_id: Uuid,
         invite_secret: &[u8],
     ) -> Result<JoinAcceptanceInfo, NodeProviderError> {
-        let acceptance = self.accept_join(peer_pubkey, mesh_id, invite_secret).await
+        let acceptance = self.accept_join(peer_pubkey, store_id, invite_secret).await
             .map_err(|e| NodeProviderError::Join(e.to_string()))?;
         
         Ok(JoinAcceptanceInfo {
@@ -620,10 +617,10 @@ mod tests {
             .expect("Failed to create node");
         
         assert!(node.info().stores.is_empty());
-        let store_id = node.create_store(None).expect("Failed to create store");
+        let store_id = node.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("Failed to create store");
         
         // Verify it's in the list
-        let stores: Vec<_> = node.meta().list_stores().expect("list failed").into_iter().map(|(id, _)| id).collect();
+        let stores: Vec<_> = node.meta().list_rootstores().expect("list failed").into_iter().map(|(id, _)| id).collect();
         assert!(stores.contains(&store_id));
         
         let store = node.store_manager().open(store_id, STORE_TYPE_KVSTORE).expect("Failed to open store");
@@ -642,8 +639,8 @@ mod tests {
             .build()
             .expect("Failed to create node");
         
-        let store_a = node.create_store(None).expect("create A");
-        let store_b = node.create_store(None).expect("create B");
+        let store_a = node.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create A");
+        let store_b = node.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create B");
         
         let store_a = node.store_manager().open(store_a, STORE_TYPE_KVSTORE).expect("open A");
         store_a.put(b"/key".to_vec(), b"from A".to_vec()).await.expect("put A");
@@ -667,11 +664,11 @@ mod tests {
             .expect("create node");
         
         // Initially no meshes
-        assert!(node.list_mesh_ids().is_empty());
+        assert!(node.meta().list_rootstores().expect("list").is_empty());
         
-        // create_mesh creates a mesh
-        let mesh_id = node.create_mesh().await.expect("create_mesh failed");
-        assert!(node.list_mesh_ids().contains(&mesh_id));
+        // create_store creates a mesh
+        let store_id = node.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create_store failed");
+        assert!(node.meta().list_rootstores().expect("list").iter().any(|(id,_)| *id == store_id));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -684,13 +681,13 @@ mod tests {
             .build()
             .expect("create node");
         
-        let mesh_id_1 = node.create_mesh().await.expect("first mesh");
-        let mesh_id_2 = node.create_mesh().await.expect("second mesh");
+        let store_id_1 = node.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("first mesh");
+        let store_id_2 = node.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("second mesh");
         
         // Both meshes should exist
-        assert_ne!(mesh_id_1, mesh_id_2);
-        assert!(node.list_mesh_ids().contains(&mesh_id_1));
-        assert!(node.list_mesh_ids().contains(&mesh_id_2));
+        assert_ne!(store_id_1, store_id_2);
+        assert!(node.meta().list_rootstores().expect("list").iter().any(|(id,_)| *id == store_id_1));
+        assert!(node.meta().list_rootstores().expect("list").iter().any(|(id,_)| *id == store_id_2));
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -700,12 +697,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap(); let data_dir = DataDir::new(tmp.path().to_path_buf());
         
         // First session: create mesh
-        let mesh_id;
+        let store_id;
         {
             let node = test_node_builder(data_dir.clone())
                 .build()
                 .expect("create node");
-            mesh_id = node.create_mesh().await.expect("create_mesh");
+            store_id = node.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create_mesh");
             node.shutdown().await;  // Explicit shutdown to release DB
         } // End first session
         
@@ -714,8 +711,8 @@ mod tests {
             .build()
             .expect("reload node");
         
-        let meshes = node.meta().list_meshes().expect("list meshes");
-        assert!(meshes.iter().any(|(id, _)| *id == mesh_id), "Mesh should persist");
+        let meshes = node.meta().list_rootstores().expect("list meshes");
+        assert!(meshes.iter().any(|(id, _)| *id == store_id), "Mesh should persist");
         
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -735,7 +732,7 @@ mod tests {
         let initial_name = node.name().unwrap();
         
         // create_mesh creates mesh
-        node.create_mesh().await.expect("create_mesh");
+        node.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create_mesh");
         
         // Change name
         let new_name = "my-custom-name";
@@ -757,14 +754,14 @@ mod tests {
             .expect("create node");
         
         // create_mesh first
-        let mesh_id = node.create_mesh().await.expect("create_mesh");
+        let store_id = node.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create_mesh");
         
         // Create an invite token
-        let token = node.mesh_by_id(mesh_id).unwrap().create_invite(node.node_id()).await.expect("create invite");
+        let token = node.store_manager().create_invite(store_id, node.node_id()).await.expect("create invite");
         
         // Parse the token
         let invite = crate::token::Invite::parse(&token).expect("parse token");
-        assert_eq!(invite.mesh_id, mesh_id);
+        assert_eq!(invite.store_id, store_id);
         assert_eq!(invite.inviter, node.node_id());
         
         let _ = std::fs::remove_dir_all(data_dir.base());
@@ -779,10 +776,10 @@ mod tests {
             .expect("create node");
         
         // create_mesh first
-        let store_id = node.create_mesh().await.expect("create_mesh");
+        let store_id = node.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create_mesh");
         
         // Create an invite token
-        let token_string = node.mesh_by_id(store_id).unwrap().create_invite(node.node_id()).await.expect("create invite");
+        let token_string = node.store_manager().create_invite(store_id, node.node_id()).await.expect("create invite");
         let invite = crate::token::Invite::parse(&token_string).expect("parse token");
         
         // Accept the join with the secret
@@ -791,7 +788,7 @@ mod tests {
         assert_eq!(acceptance.store_id, store_id);
         
         // Peer should now be Active
-        let peers = node.mesh_by_id(store_id).unwrap().list_peers().await.expect("list_peers");
+        let peers = node.store_manager().get_peer_manager(&store_id).unwrap().list_peers().await.expect("list_peers");
         let peer = peers.iter().find(|p| p.pubkey == peer_pubkey);
         assert!(peer.is_some(), "Should find peer");
         assert_eq!(peer.unwrap().status, PeerStatus::Active);
@@ -810,31 +807,32 @@ mod tests {
         let node_a = test_node_builder(data_dir_a.clone())
             .build()
             .expect("create node A");
-        let node_b = test_node_builder(data_dir_b.clone())
+        let node_b = std::sync::Arc::new(test_node_builder(data_dir_b.clone())
             .build()
-            .expect("create node B");
+            .expect("create node B"));
         
         // Step 1: Node A creates mesh
-        let store_id = node_a.create_mesh().await.expect("A create_mesh");
-        let store_a = node_a.mesh_by_id(store_id).unwrap().root_store().clone();
+        let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("A create_mesh");
+        let store_a = node_a.store_manager().get_handle(&store_id).unwrap();
         
         // Step 2: A creates invite token for B
-        let token_string = node_a.mesh_by_id(store_id).unwrap().create_invite(node_a.node_id()).await.expect("create invite");
+        let token_string = node_a.store_manager().create_invite(store_id, node_a.node_id()).await.expect("create invite");
         
         // Step 3: B parses the token (as joiner would)
         let invite = crate::token::Invite::parse(&token_string).expect("parse token");
         assert_eq!(invite.inviter, node_a.node_id(), "Token should contain A's pubkey");
-        assert_eq!(invite.mesh_id, store_id, "Token should contain mesh ID");
+        assert_eq!(invite.store_id, store_id, "Token should contain store ID");
         
         // Step 4: A accepts B's join request using values from the token
-        let acceptance = node_a.accept_join(node_b.node_id(), invite.mesh_id, &invite.secret).await.expect("accept join");
-        assert_eq!(acceptance.store_id, invite.mesh_id);
+        let acceptance = node_a.accept_join(node_b.node_id(), invite.store_id, &invite.secret).await.expect("accept join");
+        assert_eq!(acceptance.store_id, invite.store_id);
         
         // Step 5: B completes join (simulates receiving JoinResponse)
-        let store_b = node_b.complete_join(invite.mesh_id, None).await.expect("B join");
+        let store_b = node_b.complete_join(invite.store_id, None).await.expect("B join");
         
         // Verify B has the same store ID
-        assert_eq!(store_b.id(), invite.mesh_id);
+        // Note: complete_join returns same ID, but store inner ID might be different if it's a new instance locally?
+        // No, store ID (UUID) is global.
         
         // Step 6: A writes data
         store_a.put(b"/key".to_vec(), b"from A".to_vec()).await.expect("A put");

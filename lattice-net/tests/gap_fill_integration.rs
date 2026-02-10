@@ -30,26 +30,20 @@ async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<MeshService>, Box<dyn
     Ok(MeshService::new_with_provider(node, endpoint, event_rx).await?)
 }
 
-/// Helper: Join mesh via node.join() and wait for MeshReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<Arc<dyn StoreHandle>> {
-    // Subscribe before requesting join
+/// Helper: Join store via node.join() and wait for StoreReady event
+async fn join_store_via_event(node: &Node, peer_pubkey: PubKey, store_id: Uuid, secret: Vec<u8>) -> Option<Arc<dyn StoreHandle>> {
     let mut events = node.subscribe_events();
     
-    // Request join with secret from token
-    if node.join(peer_pubkey, mesh_id, secret).is_err() {
+    if node.join(peer_pubkey, store_id, secret).is_err() {
         return None;
     }
     
-    // Wait for MeshReady event (join complete)
     let timeout = tokio::time::Duration::from_secs(10);
     match tokio::time::timeout(timeout, async {
         while let Ok(event) = events.recv().await {
-            // MeshReady is emitted by process_join_response after join completes
-            if let NodeEvent::MeshReady { mesh_id: ready_id } = event {
-                if ready_id == mesh_id {
-                    if let Some(mesh) = node.mesh_by_id(ready_id) {
-                        return Some(mesh.root_store().clone());
-                    }
+            if let NodeEvent::StoreReady { store_id: ready_id, .. } = event {
+                if ready_id == store_id {
+                    return node.store_manager().get_handle(&ready_id);
                 }
             }
         }
@@ -73,11 +67,11 @@ async fn test_targeted_author_sync() {
     let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
     let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
     
-    // Node A inits and creates invite token
-    let store_id = node_a.create_mesh().await.expect("init a");
-    let store_a = node_a.mesh_by_id(store_id).expect("mesh").root_store();
+    // Node A creates root store and invite token
+    let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store a");
+    let store_a = node_a.store_manager().get_handle(&store_id).expect("get store a");
     
-    let token_string = node_a.mesh_by_id(store_id).expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
+    let token_string = node_a.store_manager().create_invite(store_id, node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");
     
     // B joins via event-driven flow with secret
@@ -86,9 +80,9 @@ async fn test_targeted_author_sync() {
     // Add A's address to B's discovery for reliable connection (bypasses mDNS timing)
     server_b.endpoint().add_peer_addr(server_a.endpoint().addr());
     
-    let store_b = join_mesh_via_event(&node_b, a_pubkey, store_id, invite.secret)
+    let store_b = join_store_via_event(&node_b, a_pubkey, store_id, invite.secret)
         .await
-        .expect("B should successfully join A's mesh");
+        .expect("B should successfully join A's store");
     
     // A writes entries AFTER B joined
     lattice_kvstore_client::KvStoreExt::put(&store_a, b"/data".to_vec(), b"test".to_vec()).await.expect("put");
@@ -120,10 +114,10 @@ async fn test_sync_multiple_entries() {
     let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
     let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
     
-    let store_id = node_a.create_mesh().await.expect("init a");
-    let store_a = node_a.mesh_by_id(store_id).expect("mesh").root_store();
+    let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store a");
+    let store_a = node_a.store_manager().get_handle(&store_id).expect("get store a");
     
-    let token_string = node_a.mesh_by_id(store_id).expect("mesh").create_invite(node_a.node_id()).await.expect("create invite");
+    let token_string = node_a.store_manager().create_invite(store_id, node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
@@ -131,9 +125,9 @@ async fn test_sync_multiple_entries() {
     // Add A's address to B's discovery for reliable connection (bypasses mDNS timing)
     server_b.endpoint().add_peer_addr(server_a.endpoint().addr());
     
-    let store_b = join_mesh_via_event(&node_b, a_pubkey, store_id, invite.secret)
+    let store_b = join_store_via_event(&node_b, a_pubkey, store_id, invite.secret)
         .await
-        .expect("B should successfully join A's mesh");
+        .expect("B should successfully join A's store");
     
     // A writes multiple entries AFTER B joined
     for i in 1..=5 {

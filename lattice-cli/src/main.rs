@@ -1,9 +1,10 @@
 //! Lattice Interactive CLI
 
 mod commands;
-mod mesh_commands;
+
 mod node_commands;
 mod store_commands;
+mod peer_commands;
 mod display_helpers;
 mod graph_renderer;
 mod tracing_writer;
@@ -18,22 +19,12 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 use display_helpers::parse_uuid;
 
-fn make_prompt(mesh_id: Option<Uuid>, store_id: Option<Uuid>) -> String {
+fn make_prompt(store_id: Option<Uuid>) -> String {
     use owo_colors::OwoColorize;
     
-    match (mesh_id, store_id) {
-        (Some(m), Some(s)) => {
-            let mesh_str = m.to_string()[..8].to_string();
-            let store_str = s.to_string()[..8].to_string();
-            if mesh_str == store_str {
-                format!("{}:{}> ", "lattice".cyan(), mesh_str.green())
-            } else {
-                format!("{}:{}/{}> ", "lattice".cyan(), mesh_str.green(), store_str.yellow())
-            }
-        }
-        (Some(m), None) => format!("{}:{}> ", "lattice".cyan(), m.to_string()[..8].to_string().green()),
-        (None, Some(s)) => format!("{}:{}> ", "lattice".cyan(), s.to_string()[..8].to_string().yellow()),
-        (None, None) => format!("{}:{}> ", "lattice".cyan(), "no-mesh".yellow()),
+    match store_id {
+        None => format!("{}> ", "lattice".cyan()),
+        Some(id) => format!("{}:{}> ", "lattice".cyan(), id.to_string()[..8].to_string().yellow()),
     }
 }
 
@@ -49,27 +40,18 @@ macro_rules! wout {
 fn handle_node_event(
     event: NodeEvent,
     writer: &rustyline_async::SharedWriter,
-    current_mesh: &Arc<RwLock<Option<Uuid>>>,
-    current_store: &Arc<RwLock<Option<Uuid>>>,
 ) {
     match event {
-        NodeEvent::MeshReady(e) => {
-            if let Ok(uuid) = Uuid::from_slice(&e.mesh_id) {
-                wout!(writer, "\nInfo: Join complete! Mesh {} ready.", &uuid.to_string()[..8]);
-                if let Ok(mut guard) = current_mesh.write() {
-                    *guard = Some(uuid);
-                }
-                if let Ok(mut guard) = current_store.write() {
-                    *guard = Some(uuid); // root store = mesh_id
-                }
+        NodeEvent::StoreReady(e) => {
+            if let Ok(uuid) = Uuid::from_slice(&e.store_id) {
+                wout!(writer, "\nInfo: Store {} ready.", &uuid.to_string()[..8]);
             }
         }
-        NodeEvent::StoreReady(_) => {}
         NodeEvent::JoinFailed(e) => {
-            let short = Uuid::from_slice(&e.mesh_id)
+            let short = Uuid::from_slice(&e.root_id)
                 .map(|u| u.to_string()[..8].to_string())
-                .unwrap_or_else(|_| hex::encode(&e.mesh_id[..4.min(e.mesh_id.len())]));
-            wout!(writer, "\nError: Join failed for mesh {}: {}", short, e.reason);
+                .unwrap_or_else(|_| hex::encode(&e.root_id[..4.min(e.root_id.len())]));
+            wout!(writer, "\nError: Join failed for root {}: {}", short, e.reason);
         }
         NodeEvent::SyncResult(e) => {
             if e.peers_synced > 0 {
@@ -91,27 +73,22 @@ enum DispatchResult {
 async fn dispatch_command(
     cli: commands::LatticeCli,
     backend: &Arc<dyn LatticeBackend>,
-    current_mesh: &Arc<RwLock<Option<Uuid>>>,
     current_store: &Arc<RwLock<Option<Uuid>>>,
     registry: &Arc<subscriptions::SubscriptionRegistry>,
     writer: &rustyline_async::SharedWriter,
 ) -> DispatchResult {
-    use commands::{LatticeCommand, MeshSubcommand, handle_command};
+    use commands::{LatticeCommand, handle_command};
     
     let needs_blocking = matches!(
         &cli.command,
-        LatticeCommand::Mesh { subcommand: MeshSubcommand::Create | MeshSubcommand::Use { .. } }
         | LatticeCommand::Store { subcommand: commands::StoreSubcommand::Use { .. } | commands::StoreSubcommand::Subs | commands::StoreSubcommand::Unsub { .. } }
         | LatticeCommand::Quit
     );
     
-    // Build context
     let ctx = {
-        let mesh_guard = current_mesh.read().ok();
-        let store_guard = current_store.read().ok();
+        let store_id = *current_store.read().unwrap();
         CommandContext {
-            mesh_id: mesh_guard.as_ref().and_then(|g| **g),
-            store_id: store_guard.as_ref().and_then(|g| **g),
+            store_id,
             registry: registry.clone(),
         }
     };
@@ -121,10 +98,7 @@ async fn dispatch_command(
         
         match result {
             Ok(CommandOutput::Continue) => {}
-            Ok(CommandOutput::Switch { mesh_id, store_id }) => {
-                if let Ok(mut guard) = current_mesh.write() {
-                    *guard = Some(mesh_id);
-                }
+            Ok(CommandOutput::Switch { store_id }) => {
                 if let Ok(mut guard) = current_store.write() {
                     *guard = Some(store_id);
                 }
@@ -218,7 +192,7 @@ async fn run_daemon_mode() {
 
 /// Embedded mode: run Node in-process
 async fn run_embedded_mode() {
-    let initial_prompt = make_prompt(None, None);
+    let initial_prompt = make_prompt(None);
     
     let (rl, writer) = match Readline::new(initial_prompt) {
         Ok(r) => r,
@@ -277,9 +251,8 @@ async fn run_cli(
     mut rl: Readline,
     writer: commands::Writer,
 ) {
-    // Context tracking - use Uuid for async-safe updates
+    // Context tracking - current store ID
     let current_store: Arc<RwLock<Option<Uuid>>> = Arc::new(RwLock::new(None));
-    let current_mesh: Arc<RwLock<Option<Uuid>>> = Arc::new(RwLock::new(None));
     
     // Stream subscription registry
     let registry = Arc::new(subscriptions::SubscriptionRegistry::new());
@@ -287,17 +260,13 @@ async fn run_cli(
     // Show node status
     let _ = node_commands::cmd_status(&*backend, writer.clone()).await;
     
-    // Set initial mesh context from first mesh, default to root store
-    if let Ok(meshes) = backend.mesh_list().await {
-        if let Some(mesh) = meshes.first() {
-            if let Some(mesh_id) = parse_uuid(&mesh.id) {
-                if let Ok(mut guard) = current_mesh.write() {
-                    *guard = Some(mesh_id);
-                }
-                // Default to root store (mesh.id = root_store_id)
-                if let Ok(mut guard) = current_store.write() {
-                    *guard = Some(mesh_id);
-                }
+    // Set initial context: Default to first root store if any
+    if let Ok(roots) = backend.store_list(None).await {
+        if let Some(r) = roots.first() {
+            if let Some(id) = parse_uuid(&r.id) {
+                 if let Ok(mut guard) = current_store.write() {
+                     *guard = Some(id);
+                 }
             }
         }
     }
@@ -305,11 +274,9 @@ async fn run_cli(
     // Start event listener for async feedback (works for both in-process and RPC)
     if let Ok(mut rx) = backend.subscribe() {
         let writer = writer.clone();
-        let current_store = current_store.clone();
-        let current_mesh = current_mesh.clone();
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                handle_node_event(event, &writer, &current_mesh, &current_store);
+                 handle_node_event(event, &writer);
             }
         });
     }
@@ -317,11 +284,8 @@ async fn run_cli(
     // REPL loop
     loop {
         let prompt = {
-            let mesh_guard = current_mesh.read().ok();
-            let store_guard = current_store.read().ok();
-            let mesh_id = mesh_guard.as_ref().and_then(|g| **g);
-            let store_id = store_guard.as_ref().and_then(|g| **g);
-            make_prompt(mesh_id, store_id)
+            let guard = current_store.read().unwrap();
+            make_prompt(*guard)
         };
         let _ = rl.update_prompt(&prompt);
         
@@ -347,7 +311,6 @@ async fn run_cli(
                         if let DispatchResult::Quit = dispatch_command(
                             cli,
                             &backend,
-                            &current_mesh,
                             &current_store,
                             &registry,
                             &writer,

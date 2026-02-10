@@ -35,26 +35,20 @@ async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<MeshService>, Box<dyn
     Ok(MeshService::new_with_provider(node, endpoint, event_rx).await?)
 }
 
-/// Helper: Join mesh via node.join() and wait for MeshReady event
-async fn join_mesh_via_event(node: &Node, peer_pubkey: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Option<Arc<dyn StoreHandle>> {
-    // Subscribe before requesting join
+/// Helper: Join store via node.join() and wait for StoreReady event
+async fn join_store_via_event(node: &Node, peer_pubkey: PubKey, store_id: Uuid, secret: Vec<u8>) -> Option<Arc<dyn StoreHandle>> {
     let mut events = node.subscribe_events();
     
-    // Request join with secret from token
-    if node.join(peer_pubkey, mesh_id, secret).is_err() {
+    if node.join(peer_pubkey, store_id, secret).is_err() {
         return None;
     }
     
-    // Wait for MeshReady event (join complete)
     let timeout = tokio::time::Duration::from_secs(10);
     match tokio::time::timeout(timeout, async {
         while let Ok(event) = events.recv().await {
-            // MeshReady is emitted by process_join_response after join completes
-            if let NodeEvent::MeshReady { mesh_id: ready_id } = event {
-                if ready_id == mesh_id {
-                    if let Some(mesh) = node.mesh_by_id(ready_id) {
-                        return Some(mesh.root_store().clone());
-                    }
+            if let NodeEvent::StoreReady { store_id: ready_id, .. } = event {
+                if ready_id == store_id {
+                    return node.store_manager().get_handle(&ready_id);
                 }
             }
         }
@@ -92,11 +86,11 @@ async fn test_production_flow_gossip() {
     let data_a = temp_data_dir("prod_flow_a");
     let data_b = temp_data_dir("prod_flow_b");
     
-    // === Session 1: Node A runs `lattice init` ===
-    let mesh_id;
+    // === Session 1: Node A creates a root store ===
+    let store_id;
     {
         let node_a = Arc::new(test_node_builder(data_a.clone()).build().expect("node a"));
-        mesh_id = node_a.create_mesh().await.expect("init a");
+        store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store a");
         // Node A exits after init - explicit shutdown required for clean DB release
         node_a.shutdown().await;
     }
@@ -108,9 +102,8 @@ async fn test_production_flow_gossip() {
     let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
     node_a.start().await.expect("start a");  // Emits NetworkStore → gossip setup
     
-    // Verify A's mesh is accessible
-    let mesh_a = node_a.mesh_by_id(mesh_id).expect("A should have mesh after start");
-    let store_a = mesh_a.root_store().clone();
+    // Verify A's store is accessible
+    let store_a = node_a.store_manager().get_handle(&store_id).expect("A should have store after start");
     
     // Node B: not yet initialized
     let node_b = Arc::new(test_node_builder(data_b.clone()).build().expect("node b"));
@@ -120,15 +113,15 @@ async fn test_production_flow_gossip() {
     server_b.endpoint().add_peer_addr(server_a.endpoint().addr());
     
     // === Node A: Creates invite token for B ===
-    let token_string = mesh_a.create_invite(node_a.node_id()).await.expect("create invite");
+    let token_string = node_a.store_manager().create_invite(store_id, node_a.node_id()).await.expect("create invite");
     let invite = Invite::parse(&token_string).expect("parse token");
     
     let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
     
     // B joins A via event flow with secret
-    let store_b = join_mesh_via_event(&node_b, a_pubkey, mesh_id, invite.secret)
+    let store_b = join_store_via_event(&node_b, a_pubkey, store_id, invite.secret)
         .await
-        .expect("B should successfully join A's mesh");
+        .expect("B should successfully join A's store");
     
     
     // Verify gossip is connected
@@ -137,7 +130,6 @@ async fn test_production_flow_gossip() {
     // === Test A → B direction ===
     lattice_kvstore_client::KvStoreExt::put(&store_a, b"/from_a".to_vec(), b"hello from A".to_vec()).await.expect("put from A");
     
-    // Wait for gossip propagation (no explicit sync!)
     // Wait for gossip propagation (no explicit sync!)
     let received_at_b = wait_for_entry(&store_b, b"/from_a", b"hello from A").await;
     

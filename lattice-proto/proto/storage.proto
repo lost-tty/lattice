@@ -63,18 +63,15 @@ message SyncAuthor {
   ChainTip state = 2;  // The author's sync state
 }
 
-// 10. Mesh metadata (stored in meta.db)
-message MeshInfo {
-  uint64 joined_at = 1;    // Unix timestamp (ms) when joined
-  bool is_creator = 2;     // Did this node create the mesh?
-  // Future fields: alias, sync_priority, etc.
+// 10. Root store metadata (stored in meta.db)
+message RootStoreRecord {
+  uint64 joined_at = 1;    // Unix timestamp (ms) when joined/created
 }
 
 // 11. Store metadata (stored in meta.db)
-message StoreMetadata {
-  bytes mesh_id = 1;       // UUID of the mesh this store belongs to
+message StoreRecord {
+  bytes parent_id = 1;     // UUID of the parent store (if any)
   uint64 created_at = 2;   // Unix timestamp (ms) when created
-  // Future fields: is_root, alias, etc.
 }
 
 // --- System Operations (M10A) ---

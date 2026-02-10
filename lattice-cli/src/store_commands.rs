@@ -20,32 +20,24 @@ use tokio::sync::mpsc;
 // ==================== Multi-Store Commands ====================
 
 /// Create a new store in the mesh
+/// Create a new store
 pub async fn cmd_store_create(
     backend: &dyn LatticeBackend,
-    mesh_id: Option<Uuid>,
+    parent_id: Option<Uuid>,
     name: Option<String>,
     store_type: &str,
     writer: Writer
 ) -> CmdResult {
     let mut w = writer.clone();
     
-    let mesh_id = match mesh_id {
-        Some(id) => id,
-        None => {
-            let _ = writeln!(w, "Error: No active mesh. Use 'mesh create' first.");
-            return Ok(Continue);
-        }
-    };
-    
-    match backend.store_create(mesh_id, name.clone(), store_type).await {
+    match backend.store_create(parent_id, name.clone(), store_type).await {
         Ok(info) => {
-            let display_name = name.map(|n| format!(" ({})", n)).unwrap_or_default();
-            let _ = writeln!(w, "Created store: {}{}", format_id(&info.id), display_name);
+            let name_display = if info.name.is_empty() { "unnamed" } else { &info.name };
+            let _ = writeln!(w, "Created store {} ({})", name_display, format_id(&info.id));
             let _ = writeln!(w, "Type: {}", info.store_type);
             
-            // Switch to the new store
-            if let Some(store_id) = parse_uuid(&info.id) {
-                return Ok(Switch { mesh_id, store_id });
+            if parse_uuid(&info.id).is_some() {
+                 let _ = writeln!(w, "Use 'store use {}' to switch to it.", format_id(&info.id));
             }
         }
         Err(e) => {
@@ -56,116 +48,189 @@ pub async fn cmd_store_create(
     Ok(Continue)
 }
 
-/// List all stores in the mesh
-pub async fn cmd_store_list(backend: &dyn LatticeBackend, mesh_id: Option<Uuid>, writer: Writer) -> CmdResult {
-    let mut w = writer.clone();
-    
-    let mesh_id = match mesh_id {
-        Some(id) => id,
-        None => {
-            let _ = writeln!(w, "Error: No active mesh.");
-            return Ok(Continue);
-        }
+// ==================== Store Tree Infrastructure ====================
+
+/// A node in the in-memory store tree
+struct StoreNode {
+    store: lattice_runtime::StoreRef,
+    children: Vec<StoreNode>,
+}
+
+/// Format store name for display: " (name)" or empty string
+fn format_store_name(name: &str) -> String {
+    if name.is_empty() { String::new() } else { format!(" ({})", name) }
+}
+
+/// Build the full store tree by recursively fetching roots and their children
+async fn build_store_tree(backend: &dyn LatticeBackend) -> Vec<StoreNode> {
+    let roots = match backend.store_list(None).await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
     };
-    
-    match backend.store_list(mesh_id).await {
-        Ok(stores) => {
-            let _ = writeln!(w, "Stores:");
-            
-            // Root store
-            let _ = writeln!(w, "  {} [root] (Lattice Mesh)", mesh_id);
-            
-            for store in stores {
-                let archived_str = if store.archived { " [archived]" } else { "" };
-                let name_str = if store.name.is_empty() { String::new() } else { format!(" ({})", store.name) };
-                let _ = writeln!(w, "  {} [{}]{}{}", format_id(&store.id), store.store_type, name_str, archived_str);
-            }
-        }
-        Err(e) => {
-            let _ = writeln!(w, "Error listing stores: {}", e);
-        }
+
+    let mut tree = Vec::new();
+    for root in roots {
+        let node = build_subtree(backend, root).await;
+        tree.push(node);
     }
-    
+    tree
+}
+
+/// Recursively build a subtree for a single store
+async fn build_subtree(backend: &dyn LatticeBackend, store: lattice_runtime::StoreRef) -> StoreNode {
+    let children = if let Some(id) = parse_uuid(&store.id) {
+        match backend.store_list(Some(id)).await {
+            Ok(child_refs) => {
+                let mut kids = Vec::new();
+                for child in child_refs {
+                    kids.push(Box::pin(build_subtree(backend, child)).await);
+                }
+                kids
+            }
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    StoreNode { store, children }
+}
+
+/// Flatten a tree into a list of StoreRefs
+fn flatten_tree(nodes: &[StoreNode]) -> Vec<&lattice_runtime::StoreRef> {
+    let mut out = Vec::new();
+    for node in nodes {
+        out.push(&node.store);
+        out.extend(flatten_tree(&node.children));
+    }
+    out
+}
+
+/// Print a store tree with indentation, highlighting the active store
+fn print_tree(nodes: &[StoreNode], active_store: Option<Uuid>, depth: usize, w: &mut Writer) {
+    use owo_colors::OwoColorize;
+
+    for node in nodes {
+        let s = &node.store;
+        let id_str = format_id(&s.id);
+        let type_str = if s.store_type.is_empty() { String::new() } else { format!(" [{}]", s.store_type) };
+        let name_str = format_store_name(&s.name);
+        let archived_str = if s.archived { " [archived]" } else { "" };
+        let indent = "  ".repeat(depth);
+        let prefix = if depth == 0 { "" } else { "└ " };
+
+        let is_active = parse_uuid(&s.id).map(|id| Some(id) == active_store).unwrap_or(false);
+
+        if is_active {
+            let _ = writeln!(w, "{}{}{}{}{}{}", indent, prefix, id_str.yellow().bold(), type_str, name_str, archived_str);
+        } else {
+            let _ = writeln!(w, "{}{}{}{}{}{}", indent, prefix, id_str, type_str, name_str, archived_str);
+        }
+
+        print_tree(&node.children, active_store, depth + 1, w);
+    }
+}
+
+/// List all stores as a tree from roots, highlighting the active store
+pub async fn cmd_store_list(backend: &dyn LatticeBackend, active_store: Option<Uuid>, writer: Writer) -> CmdResult {
+    let mut w = writer.clone();
+    let tree = build_store_tree(backend).await;
+
+    if tree.is_empty() {
+        let _ = writeln!(w, "No stores. Use 'store create' to get started.");
+        return Ok(Continue);
+    }
+
+    print_tree(&tree, active_store, 0, &mut w);
     Ok(Continue)
 }
 
-/// Switch to a specific store
+/// Select a store by UUID prefix (searches all stores flat)
 pub async fn cmd_store_use(
     backend: &dyn LatticeBackend,
-    mesh_id: Option<Uuid>,
     uuid_prefix: &str,
     writer: Writer
 ) -> CmdResult {
     let mut w = writer.clone();
-    
-    let mesh_id = match mesh_id {
-        Some(id) => id,
-        None => {
-            let _ = writeln!(w, "Error: No active mesh.");
-            return Ok(Continue);
-        }
-    };
-    
-    let stores = match backend.store_list(mesh_id).await {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = writeln!(w, "Error: {}", e);
-            return Ok(Continue);
-        }
-    };
-    
-    // Check if matching root store (mesh_id = root_store_id, not in store list)
-    if mesh_id.to_string().starts_with(uuid_prefix) {
-        let _ = writeln!(w, "Switching to root store {}", mesh_id);
-        return Ok(Switch { mesh_id, store_id: mesh_id });
+    let tree = build_store_tree(backend).await;
+    let all_stores = flatten_tree(&tree);
+
+    if all_stores.is_empty() {
+        let _ = writeln!(w, "No stores. Use 'store create' to get started.");
+        return Ok(Continue);
     }
-    
-    // Find matching store from declarations
-    let matches: Vec<_> = stores
+
+    let matches: Vec<_> = all_stores
         .iter()
         .filter(|s| format_id(&s.id).starts_with(uuid_prefix))
         .collect();
-    
+
     match matches.len() {
         0 => {
             let _ = writeln!(w, "No store found matching '{}'", uuid_prefix);
         }
         1 => {
             let store = matches[0];
-            let _ = writeln!(w, "Switching to store {}", format_id(&store.id));
+            let _ = writeln!(w, "Selected store {}{}", format_id(&store.id), format_store_name(&store.name));
             if let Some(store_id) = parse_uuid(&store.id) {
-                return Ok(Switch { mesh_id, store_id });
+                return Ok(Switch { store_id });
             }
         }
         _ => {
-            let _ = writeln!(w, "Ambiguous store ID '{}'. Matches:", uuid_prefix);
+            let _ = writeln!(w, "Ambiguous ID '{}'. Matches:", uuid_prefix);
             for store in matches {
-                let _ = writeln!(w, "  {}", format_id(&store.id));
+                let _ = writeln!(w, "  {}{}", format_id(&store.id), format_store_name(&store.name));
             }
         }
     }
-    
+
     Ok(Continue)
 }
 
-/// Delete (archive) a store
-pub async fn cmd_store_delete(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
+/// Delete (archive) a child store
+pub async fn cmd_store_delete(backend: &dyn LatticeBackend, parent_id: Option<Uuid>, uuid_prefix: &str, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
-    let store_id = match store_id {
+    let parent_id = match parent_id {
         Some(id) => id,
         None => {
-            let _ = writeln!(w, "Error: No store selected.");
+            let _ = writeln!(w, "Error: No store selected. Navigate into a store first.");
             return Ok(Continue);
         }
     };
     
-    match backend.store_delete(store_id).await {
-        Ok(()) => {
-            let _ = writeln!(w, "Archived store: {}", store_id);
+    // Resolve UUID prefix to a child store
+    let children = backend.store_list(Some(parent_id)).await.unwrap_or_default();
+    let matches: Vec<_> = children.iter()
+        .filter(|s| format_id(&s.id).starts_with(uuid_prefix))
+        .collect();
+    
+    match matches.len() {
+        0 => {
+            let _ = writeln!(w, "Error: No child store matches '{}'", uuid_prefix);
         }
-        Err(e) => {
-            let _ = writeln!(w, "Error: {}", e);
+        1 => {
+            let child = &matches[0];
+            let child_id = match parse_uuid(&child.id) {
+                Some(id) => id,
+                None => {
+                    let _ = writeln!(w, "Error: Invalid store ID");
+                    return Ok(Continue);
+                }
+            };
+            match backend.store_delete(parent_id, child_id).await {
+                Ok(()) => {
+                    let _ = writeln!(w, "Archived: {}{}", format_id(&child.id), format_store_name(&child.name));
+                }
+                Err(e) => {
+                    let _ = writeln!(w, "Error: {}", e);
+                }
+            }
+        }
+        _ => {
+            let _ = writeln!(w, "Ambiguous prefix '{}', matches:", uuid_prefix);
+            for store in matches {
+                let _ = writeln!(w, "  {}{}", format_id(&store.id), format_store_name(&store.name));
+            }
         }
     }
     
@@ -196,129 +261,7 @@ pub async fn cmd_store_set_name(backend: &dyn LatticeBackend, store_id: Option<U
     Ok(Continue)
 }
 
-/// List all peers for a store (replaces mesh peers)
-pub async fn cmd_store_peer_list(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
-    use owo_colors::OwoColorize;
-    use crate::display_helpers::format_elapsed;
-    use std::time::Duration;
-    
-    let mut w = writer.clone();
-    
-    let store_id = match store_id {
-        Some(id) => id,
-        None => {
-            let _ = writeln!(w, "No store selected. Use 'store use <uuid>'");
-            return Ok(Continue);
-        }
-    };
-    
-    let mut peers = match backend.store_peers(store_id).await {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = writeln!(w, "Error: {}", e);
-            return Ok(Continue);
-        }
-    };
-    
-    if peers.is_empty() {
-        let _ = writeln!(w, "No peers found.");
-        return Ok(Continue);
-    }
-    
-    // Sort by status then name
-    peers.sort_by(|a, b| a.status.cmp(&b.status).then(a.name.cmp(&b.name)));
-    
-    let my_pubkey = backend.node_id();
-    let mut current_status: Option<&str> = None;
-    
-    for peer in &peers {
-        // Print status header if changed
-        if current_status != Some(&peer.status) {
-            current_status = Some(&peer.status);
-            let count = peers.iter().filter(|p| p.status == peer.status).count();
-            let _ = writeln!(w, "\n[{}] ({}):", peer.status, count);
-        }
-        
-        // Blue ● for self, green ● for online, grey ○ for offline
-        let is_self = peer.public_key == my_pubkey;
-        let bullet = if is_self {
-            format!("{}", "●".blue())
-        } else if peer.online {
-            format!("{}", "●".green())
-        } else {
-            format!("{}", "○".bright_black())
-        };
-        
-        let name_str = if peer.name.is_empty() { String::new() } else { format!(" {}", peer.name) };
-        let last_seen_str = if peer.last_seen_ms > 0 { 
-            format!(" ({})", format_elapsed(Duration::from_millis(peer.last_seen_ms)))
-        } else { 
-            String::new() 
-        };
-        let _ = writeln!(w, "  {} {}{}{}", bullet, hex::encode(&peer.public_key), name_str, last_seen_str);
-    }
-    
-    Ok(Continue)
-}
 
-/// Revoke a peer from the store
-pub async fn cmd_store_peer_revoke(backend: &dyn LatticeBackend, store_id: Option<Uuid>, pubkey: &str, writer: Writer) -> CmdResult {
-    let mut w = writer.clone();
-    
-    let store_id = match store_id {
-        Some(id) => id,
-        None => {
-            let _ = writeln!(w, "Error: No active store.");
-            return Ok(Continue);
-        }
-    };
-    
-    let pk = match hex::decode(pubkey) {
-        Ok(k) => k,
-        Err(e) => {
-            let _ = writeln!(w, "Invalid pubkey: {}", e);
-            return Ok(Continue);
-        }
-    };
-    
-    match backend.store_revoke_peer(store_id, &pk).await {
-        Ok(()) => {
-            let _ = writeln!(w, "Revoked peer: {}", pubkey);
-        }
-        Err(e) => {
-            let _ = writeln!(w, "Error: {}", e);
-        }
-    }
-    
-    Ok(Continue)
-}
-
-/// Generate a one-time invite token for a store
-pub async fn cmd_store_peer_invite(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
-    use owo_colors::OwoColorize;
-    let mut w = writer.clone();
-    
-    let store_id = match store_id {
-        Some(id) => id,
-        None => {
-            let _ = writeln!(w, "Error: No active store.");
-            return Ok(Continue);
-        }
-    };
-    
-    match backend.mesh_invite(store_id).await { // Reusing mesh_invite which takes a generic ID
-        Ok(token) => {
-            let _ = writeln!(w, "Generated one-time join token:");
-            let _ = writeln!(w, "{}", token.green().bold());
-            let _ = writeln!(w, "Share this token securely. It can be used once to join this store/mesh.");
-        }
-        Err(e) => {
-            let _ = writeln!(w, "Error creating token: {}", e);
-        }
-    }
-    
-    Ok(Continue)
-}
 
 // ==================== Store Status/Debug Commands ====================
 

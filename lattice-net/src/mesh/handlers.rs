@@ -108,12 +108,12 @@ async fn handle_join_request(
 ) -> Result<(), LatticeNetError> {
     tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
     
-    // Extract mesh_id from request (mandatory)
-    let mesh_id = Uuid::from_slice(&req.mesh_id)
-        .map_err(|_| LatticeNetError::Connection("Invalid mesh_id in JoinRequest".into()))?;
+    // Extract store_id from request (mandatory)
+    let store_id = Uuid::from_slice(&req.store_id)
+        .map_err(|_| LatticeNetError::Connection("Invalid store_id in JoinRequest".into()))?;
 
-    // Accept the join via trait - verifies token, checks mesh_id matches, sets active, returns store ID & authors
-    let acceptance = provider.accept_join(*remote_pubkey, mesh_id, &req.invite_secret).await
+    // Accept the join via trait - verifies token, checks store_id matches, sets active, returns store ID & authors
+    let acceptance = provider.accept_join(*remote_pubkey, store_id, &req.invite_secret).await
         .map_err(|e| LatticeNetError::Sync(format!("Join failed: {}", e)))?;
     
     // Convert to Vec<Vec<u8>> for protobuf
@@ -126,7 +126,7 @@ async fn handle_join_request(
     
     let resp = PeerMessage {
         message: Some(peer_message::Message::JoinResponse(JoinResponse {
-            mesh_id: acceptance.store_id.as_bytes().to_vec(),
+            store_id: acceptance.store_id.as_bytes().to_vec(),
             inviter_pubkey: provider.node_id().to_vec(),
             authorized_authors,
         })),

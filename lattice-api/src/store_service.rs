@@ -3,8 +3,8 @@
 use crate::backend::Backend;
 use crate::proto::{
     store_service_server::StoreService, AuthorStateRequest, AuthorStateResponse,
-    CleanupResult, CreateStoreRequest, DebugInfo, Empty, SetStoreNameRequest,
-    HistoryRequest, HistoryResponse, MeshId, StoreId, StoreRef, StoreMeta, StoreList, StoreDetails,
+    CleanupResult, CreateStoreRequest, DeleteStoreRequest, DebugInfo, Empty, SetStoreNameRequest,
+    HistoryRequest, HistoryResponse, StoreId, StoreRef, StoreMeta, StoreList, StoreDetails,
     SystemListResponse, SystemEntry, StoreNameResponse, PeerStrategyResponse,
 };
 use tonic::{Request, Response, Status};
@@ -28,16 +28,26 @@ impl StoreServiceImpl {
 impl StoreService for StoreServiceImpl {
     async fn create(&self, request: Request<CreateStoreRequest>) -> Result<Response<StoreRef>, Status> {
         let req = request.into_inner();
-        let mesh_id = Self::parse_uuid(&req.mesh_id)?;
+        let parent_id = if let Some(pid) = req.parent_id {
+            Some(Self::parse_uuid(&pid)?)
+        } else {
+            None
+        };
         let name = if req.name.is_empty() { None } else { Some(req.name) };
-        self.backend.store_create(mesh_id, name, &req.store_type).await
+        self.backend.store_create(parent_id, name, &req.store_type).await
             .map(Response::new)
             .map_err(|e| Status::internal(e.to_string()))
     }
 
-    async fn list(&self, request: Request<MeshId>) -> Result<Response<StoreList>, Status> {
-        let mesh_id = Self::parse_uuid(&request.into_inner().id)?;
-        self.backend.store_list(mesh_id).await
+    async fn list(&self, request: Request<crate::proto::ListStoreRequest>) -> Result<Response<StoreList>, Status> {
+        let req = request.into_inner();
+        let parent_id = if let Some(pid) = req.parent_id {
+            Some(Self::parse_uuid(&pid)?)
+        } else {
+            None
+        };
+        
+        self.backend.store_list(parent_id).await
             .map(|stores| Response::new(StoreList { stores }))
             .map_err(|e| Status::internal(e.to_string()))
     }
@@ -56,9 +66,11 @@ impl StoreService for StoreServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))
     }
 
-    async fn delete(&self, request: Request<StoreId>) -> Result<Response<Empty>, Status> {
-        let store_id = Self::parse_uuid(&request.into_inner().id)?;
-        self.backend.store_delete(store_id).await
+    async fn delete(&self, request: Request<DeleteStoreRequest>) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let store_id = Self::parse_uuid(&req.store_id)?;
+        let child_id = Self::parse_uuid(&req.child_id)?;
+        self.backend.store_delete(store_id, child_id).await
             .map(|_| Response::new(Empty {}))
             .map_err(|e| Status::internal(e.to_string()))
     }
@@ -135,8 +147,8 @@ impl StoreService for StoreServiceImpl {
     async fn revoke_peer(&self, request: Request<crate::proto::RevokePeerRequest>) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
         let store_id = Self::parse_uuid(&req.store_id)?;
-        self.backend.store_revoke_peer(store_id, &req.peer_key).await
-            .map(|_| Response::new(Empty {}))
+        self.backend.store_peer_revoke(store_id, &req.peer_key).await
+             .map(|_| Response::new(Empty {}))
             .map_err(|e| Status::internal(e.to_string()))
     }
 
@@ -144,6 +156,21 @@ impl StoreService for StoreServiceImpl {
         let store_id = Self::parse_uuid(&request.into_inner().id)?;
         self.backend.store_peer_strategy(store_id).await
             .map(|strategy| Response::new(PeerStrategyResponse { strategy }))
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    async fn join(&self, request: Request<crate::proto::JoinRequest>) -> Result<Response<crate::proto::JoinResponse>, Status> {
+        self.backend.store_join(&request.into_inner().token).await
+            .map(|store_id| Response::new(crate::proto::JoinResponse {
+                store_id: store_id.as_bytes().to_vec(),
+            }))
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    async fn invite(&self, request: Request<StoreId>) -> Result<Response<crate::proto::InviteToken>, Status> {
+        let store_id = Self::parse_uuid(&request.into_inner().id)?;
+        self.backend.store_peer_invite(store_id).await
+            .map(|token| Response::new(crate::proto::InviteToken { token }))
             .map_err(|e| Status::internal(e.to_string()))
     }
 }

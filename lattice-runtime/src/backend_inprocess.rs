@@ -7,7 +7,7 @@ use crate::StoreHandle;
 use lattice_api::proto::{StoreMeta, StoreRef};
 use lattice_model::types::PubKey;
 use lattice_net::MeshService;
-use lattice_node::{mesh::Mesh, Node};
+use lattice_node::Node;
 use lattice_systemstore::SystemBatch;
 use lattice_model::store_info::PeerStrategy;
 use std::sync::Arc;
@@ -16,15 +16,13 @@ use uuid::Uuid;
 // Convert from internal node events (Uuid) to transport-layer NodeEvent (Vec<u8>)
 fn to_node_event(event: lattice_node::NodeEvent) -> NodeEvent {
     match event {
-        lattice_node::NodeEvent::MeshReady { mesh_id } => 
-            NodeEvent::MeshReady(MeshReadyEvent { mesh_id: mesh_id.as_bytes().to_vec() }),
-        lattice_node::NodeEvent::StoreReady { mesh_id, store_id } => 
+        lattice_node::NodeEvent::StoreReady { store_id } => 
             NodeEvent::StoreReady(StoreReadyEvent { 
-                mesh_id: mesh_id.as_bytes().to_vec(), 
+                root_id: vec![], 
                 store_id: store_id.as_bytes().to_vec() 
             }),
-        lattice_node::NodeEvent::JoinFailed { mesh_id, reason } => 
-            NodeEvent::JoinFailed(JoinFailedEvent { mesh_id: mesh_id.as_bytes().to_vec(), reason }),
+        lattice_node::NodeEvent::JoinFailed { store_id, reason } => 
+            NodeEvent::JoinFailed(JoinFailedEvent { root_id: store_id.as_bytes().to_vec(), reason }),
         lattice_node::NodeEvent::SyncResult { store_id, peers_synced, entries_sent, entries_received } => 
             NodeEvent::SyncResult(SyncResultEvent { 
                 store_id: store_id.as_bytes().to_vec(), 
@@ -37,18 +35,15 @@ fn to_node_event(event: lattice_node::NodeEvent) -> NodeEvent {
 
 pub struct InProcessBackend {
     node: Arc<Node>,
-    mesh_network: Option<Arc<MeshService>>,
+    network: Option<Arc<MeshService>>,
 }
 
 impl InProcessBackend {
-    pub fn new(node: Arc<Node>, mesh_network: Option<Arc<MeshService>>) -> Self {
-        Self { node, mesh_network }
+    pub fn new(node: Arc<Node>, network: Option<Arc<MeshService>>) -> Self {
+        Self { node, network }
     }
     
-    fn get_mesh(&self, mesh_id: Uuid) -> BackendResult<Mesh> {
-        self.node.mesh_by_id(mesh_id)
-            .ok_or_else(|| "Mesh not found".into())
-    }
+
     
     fn get_store(&self, store_id: Uuid) -> BackendResult<Arc<dyn StoreHandle>> {
         self.node.store_manager().get_handle(&store_id)
@@ -63,7 +58,7 @@ impl LatticeBackend for InProcessBackend {
                 public_key: self.node.node_id().to_vec(),
                 display_name: self.node.name().unwrap_or_default(),
                 data_path: self.node.data_path().display().to_string(),
-                mesh_count: self.node.list_mesh_ids().len() as u32,
+                mesh_count: self.node.meta().list_rootstores().map(|m| m.len() as u32).unwrap_or(0),
             })
         })
     }
@@ -94,75 +89,39 @@ impl LatticeBackend for InProcessBackend {
         Ok(event_rx)
     }
     
-    fn mesh_create(&self) -> AsyncResult<'_, MeshInfo> {
+    fn store_peer_invite(&self, store_id: Uuid) -> AsyncResult<'_, String> {
+        let node_id = self.node.node_id().to_vec();
         Box::pin(async move {
-            let mesh_id = self.node.create_mesh().await?;
+            let store = self.get_store(store_id)?;
+            let system = store.as_system()
+                .ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Store does not support system table")) as Box<dyn std::error::Error + Send + Sync>)?;
             
-            let name = self.node.store_manager().get_handle(&mesh_id)
-                .and_then(|h| h.as_system())
-                .and_then(|s| s.get_name().ok().flatten())
-                .unwrap_or_default();
-
-            Ok(MeshInfo {
-                id: mesh_id.as_bytes().to_vec(),
-                name,
-            })
-        })
-    }
-    
-    fn mesh_list(&self) -> AsyncResult<'_, Vec<MeshInfo>> {
-        Box::pin(async move {
-            let meshes = self.node.meta().list_meshes()?;
-            let mut result = Vec::new();
-            
-            for (id, _info) in meshes {
-                let name = self.node.store_manager().get_handle(&id)
-                    .and_then(|h| h.as_system())
-                    .and_then(|s| s.get_name().ok().flatten())
-                    .unwrap_or_default();
-
-                result.push(MeshInfo {
-                    id: id.as_bytes().to_vec(),
-                    name,
-                });
+            // Validation: Must be Independent
+            match system.get_peer_strategy()? {
+                Some(PeerStrategy::Inherited) => {
+                    return Err("Cannot create invite for Inherited store. Invite to the parent Independent store instead.".into());
+                }
+                Some(PeerStrategy::Snapshot(_)) => {
+                     return Err("Cannot create invite for Snapshot strategy.".into());
+                }
+                _ => {} // Independent or Unknown (default to allowed if we have PeerHandler)
             }
+
+            // Get PeerManager from StoreManager
+            let peer_manager = self.node.store_manager().get_peer_manager(&store_id)
+                .ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Peer manager not found for store")) as Box<dyn std::error::Error + Send + Sync>)?;
             
-            Ok(result)
-        })
-    }
-    
-    fn mesh_status(&self, mesh_id: Uuid) -> AsyncResult<'_, MeshInfo> {
-        Box::pin(async move {
-            let name = self.node.store_manager().get_handle(&mesh_id)
-                .and_then(|h| h.as_system())
-                .and_then(|s| s.get_name().ok().flatten())
-                .unwrap_or_default();
+            // Create invite
+            let token = peer_manager.create_invite(
+                lattice_model::types::PubKey::try_from(node_id.as_slice())?,
+                store_id
+            ).await.map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as Box<dyn std::error::Error + Send + Sync>)?;
             
-            Ok(MeshInfo {
-                id: mesh_id.as_bytes().to_vec(),
-                name,
-            })
-        })
-    }
-    
-    fn mesh_join(&self, token: &str) -> AsyncResult<'_, Uuid> {
-        let token = token.to_string();
-        Box::pin(async move {
-            let invite = lattice_node::token::Invite::parse(&token)?;
-            self.node.join(invite.inviter, invite.mesh_id, invite.secret)?;
-            Ok(invite.mesh_id)
-        })
-    }
-    
-    fn mesh_invite(&self, mesh_id: Uuid) -> AsyncResult<'_, String> {
-        Box::pin(async move {
-            let mesh = self.get_mesh(mesh_id)?;
-            let token = mesh.create_invite(self.node.node_id()).await?;
             Ok(token)
         })
     }
     
-    fn store_revoke_peer(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()> {
+    fn store_peer_revoke(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()> {
         let peer_key = peer_key.to_vec();
         Box::pin(async move {
             let store = self.get_store(store_id)?;
@@ -183,12 +142,12 @@ impl LatticeBackend for InProcessBackend {
         })
     }
     
-    fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef> {
+    fn store_create(&self, parent_id: Option<Uuid>, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef> {
         let store_type_str = store_type.to_string();
         Box::pin(async move {
-            let mesh = self.get_mesh(mesh_id)?;
-            let store_id = mesh.create_store(name.clone(), &store_type_str).await?;
-            
+            let store_id = self.node.create_store(parent_id, name.clone(), &store_type_str).await
+                .map_err(|e| BackendError::from(e.to_string()))?;
+
             Ok(StoreRef {
                 id: store_id.as_bytes().to_vec(),
                 store_type: store_type_str,
@@ -198,17 +157,53 @@ impl LatticeBackend for InProcessBackend {
         })
     }
     
-    fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreRef>> {
+    fn store_join(&self, token: &str) -> AsyncResult<'_, Uuid> {
+        let token = token.to_string();
         Box::pin(async move {
-            let mesh = self.get_mesh(mesh_id)?;
-            let stores = mesh.list_stores().await?;
-            
-            Ok(stores.into_iter().map(|s| StoreRef {
-                id: s.id.as_bytes().to_vec(),
-                store_type: s.store_type.to_string(),
-                name: s.name.unwrap_or_default(),
-                archived: s.archived,
-            }).collect())
+            let invite = lattice_node::token::Invite::parse(&token)?;
+            self.node.join(invite.inviter, invite.store_id, invite.secret)?;
+            Ok(invite.store_id)
+        })
+    }
+
+    fn store_list(&self, parent_id: Option<Uuid>) -> AsyncResult<'_, Vec<StoreRef>> {
+        Box::pin(async move {
+            match parent_id {
+                None => {
+                    // List Roots
+                    let stored_roots = self.node.meta().list_rootstores()?;
+                    let mut result = Vec::new();
+                    
+                    for (id, _info) in stored_roots {
+                        let info = self.node.store_manager().get_info(&id);
+                        let name = self.node.store_manager().get_handle(&id)
+                            .and_then(|h| h.as_system())
+                            .and_then(|s| s.get_name().ok().flatten())
+                            .unwrap_or_default();
+                        let store_type = info.map(|i| i.store_type).unwrap_or_default();
+                            
+                        result.push(StoreRef {
+                            id: id.as_bytes().to_vec(),
+                            store_type,
+                            name,
+                            archived: false,
+                        });
+                    }
+                    Ok(result)
+                },
+                Some(id) => {
+                    let handle = self.get_store(id)?;
+                    let system = handle.as_system()
+                        .ok_or_else(|| "Store does not support system table".to_string())?;
+                    let children = system.get_children().map_err(|e| e.to_string())?;
+                    Ok(children.into_iter().map(|c| StoreRef {
+                        id: c.id.as_bytes().to_vec(),
+                        store_type: c.store_type.unwrap_or_default(),
+                        name: c.alias.unwrap_or_default(),
+                        archived: c.status == lattice_model::store_info::ChildStatus::Archived,
+                    }).collect())
+                }
+            }
         })
     }
     
@@ -235,7 +230,7 @@ impl LatticeBackend for InProcessBackend {
             
             // Get online status from network layer
             // Note: Currently online status is global (by PubKey), but we filter by peers known to this store
-            let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = self.mesh_network
+            let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = self.network
                 .as_ref()
                 .and_then(|m| m.connected_peers().ok())
                 .unwrap_or_default();
@@ -276,21 +271,6 @@ impl LatticeBackend for InProcessBackend {
         })
     }
     
-    fn store_delete(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
-        Box::pin(async move {
-            if let Ok(meshes) = self.node.meta().list_meshes() {
-                for (mesh_id, _) in meshes {
-                    if let Some(mesh) = self.node.mesh_by_id(mesh_id) {
-                        if mesh.delete_store(store_id).await.is_ok() {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-            Err("Store not found".into())
-        })
-    }
-    
     fn store_set_name(&self, store_id: Uuid, name: &str) -> AsyncResult<'_, ()> {
         let name = name.to_string();
         Box::pin(async move {
@@ -316,6 +296,13 @@ impl LatticeBackend for InProcessBackend {
             }
             
             Ok(None)
+        })
+    }
+    
+    fn store_delete(&self, parent_id: Uuid, child_id: Uuid) -> AsyncResult<'_, ()> {
+        Box::pin(async move {
+            self.node.store_manager().delete_child_store(parent_id, child_id).await
+                .map_err(|e| e.to_string().into())
         })
     }
     

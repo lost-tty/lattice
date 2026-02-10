@@ -8,8 +8,9 @@
 
 use crate::auth::{PeerEvent, PeerProvider};
 use lattice_kernel::PeerStatus;
-use lattice_model::{PeerInfo, PubKey, SystemEvent};
+use lattice_model::{PeerInfo, PubKey, SystemEvent, InviteStatus, Uuid};
 use lattice_systemstore::{SystemStore, SystemBatch};
+use rand::RngCore;
 
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock, Mutex};
@@ -223,6 +224,23 @@ impl PeerManager {
             .set_peer_name(pubkey, name.to_string())
             .commit().await
             .map_err(PeerManagerError::StateWriter)
+    }
+
+    /// Create a one-time join token.
+    pub async fn create_invite(&self, inviter: PubKey, store_id: Uuid) -> Result<String, PeerManagerError> {
+        let mut secret = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut secret);
+        
+        let hash = blake3::hash(&secret);
+        
+        SystemBatch::new(&*self.store)
+            .set_invite_status(hash.as_bytes(), InviteStatus::Valid)
+            .set_invite_invited_by(hash.as_bytes(), inviter)
+            .commit().await
+            .map_err(PeerManagerError::StateWriter)?;
+        
+        let invite = crate::token::Invite::new(inviter, store_id, secret.to_vec());
+        Ok(invite.to_string())
     }
     
     /// Get a peer's display name (from SystemStore)

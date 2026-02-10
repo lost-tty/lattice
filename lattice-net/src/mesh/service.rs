@@ -223,7 +223,7 @@ impl MeshService {
 
     /// Handle JoinRequested event - does network protocol (outbound)
     #[tracing::instrument(skip(self, secret), fields(peer = %peer_id.fmt_short()))]
-    pub async fn handle_join_request_event(&self, peer_id: iroh::PublicKey, mesh_id: Uuid, secret: Vec<u8>) -> Result<iroh::endpoint::Connection, LatticeNetError> {
+    pub async fn handle_join_request_event(&self, peer_id: iroh::PublicKey, store_id: Uuid, secret: Vec<u8>) -> Result<iroh::endpoint::Connection, LatticeNetError> {
         tracing::info!("Join protocol: connecting to peer");
         
         let conn = self.endpoint.connect(peer_id).await
@@ -243,7 +243,7 @@ impl MeshService {
         let req = PeerMessage {
             message: Some(peer_message::Message::JoinRequest(JoinRequest {
                 node_pubkey: self.provider.node_id().to_vec(),
-                mesh_id: mesh_id.as_bytes().to_vec(),
+                store_id: store_id.as_bytes().to_vec(),
                 invite_secret: secret,
             })),
         };
@@ -256,13 +256,13 @@ impl MeshService {
         
         match msg.message {
             Some(peer_message::Message::JoinResponse(resp)) => {
-                let mesh_id = Uuid::from_slice(&resp.mesh_id)
+                let store_id = Uuid::from_slice(&resp.store_id)
                     .map_err(|_| LatticeNetError::Connection("Invalid UUID from peer".to_string()))?;
                 
                 let via_peer = PubKey::from(*peer_id.as_bytes());
                 
-                tracing::info!(mesh_id = %mesh_id, "Join protocol: processing join response");
-                self.provider.process_join_response(mesh_id, resp.authorized_authors, via_peer).await
+                tracing::info!(store_id = %store_id, "Join protocol: processing join response");
+                self.provider.process_join_response(store_id, resp.authorized_authors, via_peer).await
                     .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
                 
                 // Mark peer as online so sync can find them immediately
@@ -492,15 +492,15 @@ impl MeshService {
             let service = service.clone();
             
             match event {
-                NetEvent::Join { peer, mesh_id, secret } => {
+                NetEvent::Join { peer, store_id, secret } => {
                     tokio::spawn(async move {
                         let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
                             tracing::error!(peer = %PubKey::from(peer), "Join: invalid PubKey");
                             return;
                         };
-                        tracing::info!(peer = %iroh_peer_id.fmt_short(), mesh = %mesh_id, "NetEvent::Join → starting join protocol");
+                        tracing::info!(peer = %iroh_peer_id.fmt_short(), mesh = %store_id, "NetEvent::Join → starting join protocol");
                         
-                        match service.handle_join_request_event(iroh_peer_id, mesh_id, secret).await {
+                        match service.handle_join_request_event(iroh_peer_id, store_id, secret).await {
                             Ok(conn) => {
                                 tracing::info!(peer = %iroh_peer_id.fmt_short(), "Join successful, keeping connection active");
                                 let provider = service.provider.clone();
@@ -511,7 +511,7 @@ impl MeshService {
                             }
                             Err(e) => {
                                 tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "NetEvent::Join → join failed");
-                                service.provider.emit_user_event(UserEvent::JoinFailed { mesh_id, reason: e.to_string() });
+                                service.provider.emit_user_event(UserEvent::JoinFailed { store_id, reason: e.to_string() });
                             }
                         }
                     });

@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Add uniffi::Record to message types exposed in FFI
         let ffi_records = [
             "NodeStatus",
-            "MeshInfo", 
+            "RootStoreRecord", 
             "StoreRef",
             "StoreDetails",
             "StoreMeta",

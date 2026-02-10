@@ -15,28 +15,15 @@ service NodeService {
 }
 
 // ============================================================================
-// MeshService - Mesh management
-// ============================================================================
-
-service MeshService {
-  rpc Create(Empty) returns (MeshInfo);
-  rpc List(Empty) returns (MeshList);
-  rpc GetStatus(MeshId) returns (MeshInfo);
-  rpc Join(JoinRequest) returns (JoinResponse);
-  rpc Invite(MeshId) returns (InviteToken);
-
-}
-
-// ============================================================================
 // StoreService - Store management
 // ============================================================================
 
 service StoreService {
   rpc Create(CreateStoreRequest) returns (StoreRef);
-  rpc List(MeshId) returns (StoreList);
+  rpc List(ListStoreRequest) returns (StoreList);
   rpc GetStatus(StoreId) returns (StoreMeta);
   rpc GetDetails(StoreId) returns (StoreDetails);
-  rpc Delete(StoreId) returns (Empty);
+  rpc Delete(DeleteStoreRequest) returns (Empty);
   rpc SetName(SetStoreNameRequest) returns (Empty);
   rpc GetName(StoreId) returns (StoreNameResponse);
   rpc Sync(StoreId) returns (Empty);
@@ -48,6 +35,10 @@ service StoreService {
   rpc ListPeers(StoreId) returns (PeerList);
   rpc RevokePeer(RevokePeerRequest) returns (Empty);
   rpc GetPeerStrategy(StoreId) returns (PeerStrategyResponse);
+  
+  // Root Store Operations
+  rpc Join(JoinRequest) returns (JoinResponse);
+  rpc Invite(StoreId) returns (InviteToken);
 }
 
 // ============================================================================

@@ -28,25 +28,21 @@ message SetNameRequest {
 // ============================================================================
 
 message NodeEvent {
+  reserved 1; // mesh_ready
   oneof node_event {
-    MeshReadyEvent mesh_ready = 1;
     StoreReadyEvent store_ready = 2;
     JoinFailedEvent join_failed = 3;
     SyncResultEvent sync_result = 4;
   }
 }
 
-message MeshReadyEvent {
-  bytes mesh_id = 1;
-}
-
 message StoreReadyEvent {
-  bytes mesh_id = 1;
+  bytes root_id = 1;
   bytes store_id = 2;
 }
 
 message JoinFailedEvent {
-  bytes mesh_id = 1;
+  bytes root_id = 1;
   string reason = 2;
 }
 
@@ -58,20 +54,11 @@ message SyncResultEvent {
 }
 
 // ============================================================================
-// Mesh Types
+// Store Types
 // ============================================================================
 
-message MeshId {
-  bytes id = 1;
-}
-
-message MeshInfo {
-  bytes id = 1;
-  string name = 2;
-}
-
-message MeshList {
-  repeated MeshInfo meshes = 1;
+message ListStoreRequest {
+  optional bytes parent_id = 1;
 }
 
 message JoinRequest {
@@ -79,7 +66,7 @@ message JoinRequest {
 }
 
 message JoinResponse {
-  bytes mesh_id = 1;
+  bytes store_id = 1;
 }
 
 message InviteToken {
@@ -113,7 +100,7 @@ message StoreId {
 }
 
 message CreateStoreRequest {
-  bytes mesh_id = 1;
+  optional bytes parent_id = 1;
   string name = 2;
   string store_type = 3;
 }
@@ -121,6 +108,11 @@ message CreateStoreRequest {
 message SetStoreNameRequest {
   bytes store_id = 1;
   string name = 2;
+}
+
+message DeleteStoreRequest {
+  bytes store_id = 1;
+  bytes child_id = 2;
 }
 
 message StoreNameResponse {

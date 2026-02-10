@@ -6,7 +6,7 @@
 use crate::{StoreRegistry, peer_manager::PeerManager, NodeEvent};
 use crate::StoreHandle;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore};
-use lattice_model::{NetEvent, Uuid};
+use lattice_model::{NetEvent, Uuid, PeerProvider};
 use lattice_systemstore::SystemBatch;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -57,6 +57,7 @@ pub struct StoreManager {
     net_tx: broadcast::Sender<NetEvent>,
     stores: RwLock<HashMap<Uuid, StoredEntry>>,
     openers: RwLock<HashMap<String, Box<dyn StoreOpener>>>,
+    watchers: RwLock<HashMap<Uuid, Arc<crate::watcher::RecursiveWatcher>>>,
 }
 
 impl StoreManager {
@@ -72,6 +73,7 @@ impl StoreManager {
             net_tx,
             stores: RwLock::new(HashMap::new()),
             openers: RwLock::new(HashMap::new()),
+            watchers: RwLock::new(HashMap::new()),
         }
     }
     
@@ -144,7 +146,6 @@ impl StoreManager {
     /// Register an opened store with its peer_manager. Emits NetEvent::StoreReady.
     pub fn register(
         &self,
-        mesh_id: Uuid,
         store_id: Uuid,
         store_handle: Arc<dyn StoreHandle>,
         store_type: impl Into<String>,
@@ -169,7 +170,8 @@ impl StoreManager {
         }
         
         // Emit events (outside lock)
-        let _ = self.event_tx.send(NodeEvent::StoreReady { mesh_id, store_id });
+        // Emit events (outside lock)
+        let _ = self.event_tx.send(NodeEvent::StoreReady { store_id });
         let _ = self.net_tx.send(NetEvent::StoreReady { store_id });
         
         Ok(())
@@ -212,8 +214,10 @@ impl StoreManager {
             .unwrap_or_default()
     }
     
-    /// Close a store (remove from registry).
     pub fn close(&self, store_id: &Uuid) -> Result<(), StoreManagerError> {
+        // Stop watcher if exists
+        self.stop_watching(store_id);
+        
         let mut stores = self.stores.write()
             .map_err(|_| StoreManagerError::Lock("stores lock poisoned".into()))?;
         
@@ -223,7 +227,269 @@ impl StoreManager {
         info!(store_id = %store_id, "Closed store");
         Ok(())
     }
+
+    /// Start watching using an Arc reference (needed for the watcher task)
+    pub fn start_watching(self: &Arc<Self>, store_id: Uuid) -> Result<(), StoreManagerError> {
+         let (store, peer_manager) = {
+             let stores = self.stores.read().map_err(|_| StoreManagerError::Lock("stores lock poisoned".into()))?;
+             let entry = stores.get(&store_id).ok_or(StoreManagerError::NotFound(store_id))?;
+             (entry.store_handle.clone(), entry.peer_manager.clone())
+        };
+
+        let watcher = Arc::new(crate::watcher::RecursiveWatcher::new(
+            self.clone(),
+            store_id,
+            store,
+            peer_manager
+        ));
+        
+        watcher.start();
+        
+        let mut watchers = self.watchers.write().map_err(|_| StoreManagerError::Lock("watchers lock poisoned".into()))?;
+        watchers.insert(store_id, watcher);
+        
+        Ok(())
+    }
+
+    /// Stop watching a store.
+    pub fn stop_watching(&self, store_id: &Uuid) {
+        if let Ok(mut watchers) = self.watchers.write() {
+            if let Some(watcher) = watchers.remove(store_id) {
+                // shutdown_tx.send(()) is synchronous — just signals the watcher task to exit
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(watcher.shutdown());
+                });
+            }
+        }
+    }
+    
+    /// Shutdown the entire StoreManager: stop all watchers, close all stores, release all handles.
+    pub async fn shutdown(&self) {
+        // 1. Stop all watchers first (they hold Arc<StoreManager>)
+        {
+            if let Ok(mut watchers) = self.watchers.write() {
+                for (_id, watcher) in watchers.drain() {
+                    watcher.shutdown().await;
+                }
+            }
+        }
+        
+        // 2. Close all stores (drops StoreHandle arcs)
+        {
+            if let Ok(mut stores) = self.stores.write() {
+                let ids: Vec<Uuid> = stores.keys().copied().collect();
+                for id in &ids {
+                    self.registry.close(id);
+                }
+                stores.clear();
+            }
+        }
+        
+        info!("StoreManager shutdown complete");
+    }
+    // ==================== Child Store Management ====================
+
+    /// Create a new child store declaration in a root/parent store.
+    /// This combines creating the store (if needed) and registering it in the parent's System Table.
+    pub async fn create_child_store(&self, parent_id: Uuid, name: Option<String>, store_type: &str) -> Result<Uuid, StoreManagerError> {
+        // 1. Create actual store instance (DB)
+        let (child_id, handle) = self.create(
+            name.clone(), 
+            store_type,
+            Some(lattice_model::store_info::PeerStrategy::Inherited)
+        ).await?;
+
+        // 2. Register child locally - using parent's PeerManager
+        // If parent is not a root or doesn't have a peer manager, we might have issues.
+        // Assuming parent is open and has a peer manager since we are calling this.
+        let peer_manager = self.get_peer_manager(&parent_id)
+            .or_else(|| {
+                // If parent doesn't have one (maybe it's not a root?), create a new one?
+                // For now, fail if parent not found.
+                None
+            })
+            .ok_or_else(|| StoreManagerError::NotFound(parent_id))?;
+        
+        self.register(
+            child_id,
+            handle.clone(),
+            store_type.to_string(),
+            peer_manager
+        ).map_err(|e| StoreManagerError::Registry(e.to_string()))?;
+
+        // 4. Write declaration to parent's SystemTable
+        let parent_handle = self.get_handle(&parent_id)
+            .ok_or(StoreManagerError::NotFound(parent_id))?;
+            
+        let system = parent_handle.as_system()
+             .ok_or_else(|| StoreManagerError::Store("Parent store must support SystemStore".to_string()))?;
+
+        let mut batch = SystemBatch::new(system.as_ref());
+        if let Some(n) = name {
+            batch = batch.add_child(child_id, n, store_type);
+        } else {
+             batch = batch.add_child(child_id, "".to_string(), store_type);
+        }
+        batch = batch.set_child_status(child_id, lattice_model::store_info::ChildStatus::Active);
+        
+        batch.commit().await
+            .map_err(|e| StoreManagerError::Store(format!("Failed to commit child declaration: {}", e)))?;
+        
+        // 5. If we are watching the parent, the watcher will pick this up. 
+        // But since we just registered it, we are good.
+        // If parent is being watched, update the watcher's tracking set.
+        if let Ok(watchers) = self.watchers.read() {
+            if let Some(watcher) = watchers.get(&parent_id) {
+                watcher.track_store(child_id);
+            }
+        }
+
+        info!(parent_id = %parent_id, child_id = %child_id, "Created child store");
+        Ok(child_id)
+    }
+
+    // ==================== Peer Management / Invites ====================
+    
+    /// Create a one-time join token for a store (using its system table).
+    pub async fn create_invite(&self, store_id: Uuid, inviter: lattice_model::types::PubKey) -> Result<String, StoreManagerError> {
+        use rand::RngCore;
+        use lattice_model::InviteStatus;
+        use crate::Invite;
+        
+        let handle = self.get_handle(&store_id)
+            .ok_or(StoreManagerError::NotFound(store_id))?;
+            
+        let system = handle.as_system()
+             .ok_or_else(|| StoreManagerError::Store("Store must support SystemStore".to_string()))?;
+
+        let mut secret = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut secret);
+        let hash = blake3::hash(&secret);
+        
+        SystemBatch::new(system.as_ref())
+            .set_invite_status(hash.as_bytes(), InviteStatus::Valid)
+            .set_invite_invited_by(hash.as_bytes(), inviter)
+            .commit().await
+            .map_err(|e| StoreManagerError::Store(format!("Failed to commit invite: {}", e)))?;
+        
+        let invite = Invite::new(inviter, store_id, secret.to_vec());
+        Ok(invite.to_string())
+    }
+    
+    /// Revoke a peer's access to a store (and its cluster).
+    pub async fn revoke_peer(&self, store_id: Uuid, pubkey: lattice_model::types::PubKey) -> Result<(), StoreManagerError> {
+        let peer_manager = self.get_peer_manager(&store_id)
+            .ok_or(StoreManagerError::NotFound(store_id))?;
+            
+        peer_manager.revoke_peer(pubkey).await
+             .map_err(|e| StoreManagerError::Store(format!("PeerManager error: {}", e)))
+    }
+
+    /// Validate and consume an invite secret.
+    pub async fn consume_invite_secret(&self, store_id: Uuid, secret: &[u8], claimer: lattice_model::types::PubKey) -> Result<bool, StoreManagerError> {
+        use lattice_model::InviteStatus;
+        
+        // Hash secret first
+        let hash = blake3::hash(secret);
+        
+        let handle = self.get_handle(&store_id)
+            .ok_or(StoreManagerError::NotFound(store_id))?;
+            
+        let system = handle.as_system()
+             .ok_or_else(|| StoreManagerError::Store("Store must support SystemStore".to_string()))?;
+             
+        // Check if exists and is valid
+        let info = system.get_invite(hash.as_bytes())
+             .map_err(|e| StoreManagerError::Store(e.to_string()))?;
+             
+        if let Some(invite) = info {
+            if invite.status == InviteStatus::Valid {
+                // Mark as claimed
+                SystemBatch::new(system.as_ref())
+                    .set_invite_status(hash.as_bytes(), InviteStatus::Claimed)
+                    .set_invite_claimed_by(hash.as_bytes(), claimer)
+                    .commit().await
+                    .map_err(|e| StoreManagerError::Store(format!("Failed to claim invite: {}", e)))?;
+                Ok(true)
+            } else {
+                tracing::warn!("Invite {} is not valid (status: {:?})", hex::encode(hash.as_bytes()), invite.status);
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+    
+    /// Handle a peer join request: validate token, activate peer, return authorized authors.
+    pub async fn handle_peer_join(&self, store_id: Uuid, pubkey: lattice_model::types::PubKey, secret: &[u8]) -> Result<Vec<lattice_model::types::PubKey>, StoreManagerError> {
+         // Check invite token (propagate infrastructure errors)
+        let valid_token = self.consume_invite_secret(store_id, secret, pubkey).await?;
+        
+        let peer_manager = self.get_peer_manager(&store_id)
+            .ok_or(StoreManagerError::NotFound(store_id))?;
+            
+        // If token invalid, check if already authorized (re-join)
+        let is_already_authorized = !valid_token && peer_manager.can_join(&pubkey);
+        
+        if !valid_token && !is_already_authorized {
+            return Err(StoreManagerError::Store(
+                format!("Peer {} provided invalid token and is not already authorized", hex::encode(pubkey))
+            ));
+        }
+        
+        // Activate peer (idempotent)
+        peer_manager.activate_peer(pubkey).await.map_err(|e| StoreManagerError::Registry(e.to_string()))?;
+        
+        // Return authorized authors
+        Ok(peer_manager.list_acceptable_authors())
+    }
+
+    pub async fn delete_child_store(&self, parent_id: Uuid, child_id: Uuid) -> Result<(), StoreManagerError> {
+        // 1. Cascade: locally close all descendants of the child FIRST.
+        //    Must happen before the SystemTable write, because the watcher will
+        //    race to close the child once it sees the Archived status.
+        //    We only unregister descendants from StoreManager (no SystemTable writes),
+        //    so un-archiving the parent later lets the watcher rediscover them.
+        self.close_descendants(child_id);
+
+        // 2. Mark as Archived in parent's SystemTable
+        let parent_handle = self.get_handle(&parent_id)
+            .ok_or(StoreManagerError::NotFound(parent_id))?;
+
+        let system = parent_handle.as_system()
+             .ok_or_else(|| StoreManagerError::Store("Parent store must support SystemStore".to_string()))?;
+        
+        let mut batch = SystemBatch::new(system.as_ref());
+        batch = batch.set_child_status(child_id, lattice_model::store_info::ChildStatus::Archived);
+        batch.commit().await.map_err(|e| StoreManagerError::Store(e.to_string()))?;
+
+        info!(parent_id = %parent_id, child_id = %child_id, "Deleted (archived) child store");
+        Ok(())
+    }
+
+    /// Recursively close a store and all its descendants from the local StoreManager.
+    /// Does NOT write to any SystemTable — purely local cleanup.
+    fn close_descendants(&self, store_id: Uuid) {
+        // Read children from the store's SystemTable before closing it
+        let child_ids: Vec<Uuid> = self.get_handle(&store_id)
+            .and_then(|h| h.as_system())
+            .and_then(|sys| sys.get_children().ok())
+            .map(|children| children.into_iter()
+                .filter(|c| c.status != lattice_model::store_info::ChildStatus::Archived)
+                .map(|c| c.id)
+                .collect())
+            .unwrap_or_default();
+
+        // Recurse into each child first (depth-first)
+        for child_id in child_ids {
+            self.close_descendants(child_id);
+        }
+
+        // Close this store (stops watcher + removes from registry)
+        let _ = self.close(&store_id);
+    }
 }
+
 
 impl NetworkStoreRegistry for StoreManager {
     fn get_network_store(&self, id: &Uuid) -> Option<NetworkStore> {

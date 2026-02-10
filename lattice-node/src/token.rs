@@ -10,14 +10,14 @@ const TOKEN_VERSION: u8 = 0x4C;
 #[derive(Debug, Clone)]
 pub struct Invite {
     pub inviter: PubKey,
-    pub mesh_id: Uuid,
+    pub store_id: Uuid,
     pub secret: Vec<u8>,
 }
 
 impl Invite {
     /// Create a new invite
-    pub fn new(inviter: PubKey, mesh_id: Uuid, secret: Vec<u8>) -> Self {
-        Self { inviter, mesh_id, secret }
+    pub fn new(inviter: PubKey, store_id: Uuid, secret: Vec<u8>) -> Self {
+        Self { inviter, store_id, secret }
     }
 
     /// Encode as Base58Check string with Lattice version byte
@@ -25,7 +25,7 @@ impl Invite {
     pub fn to_string(&self) -> String {
         let proto = InviteToken {
             inviter_pubkey: self.inviter.to_vec(),
-            mesh_id: self.mesh_id.as_bytes().to_vec(),
+            store_id: self.store_id.as_bytes().to_vec(),
             secret: self.secret.clone(),
         };
         let bytes = proto.encode_to_vec();
@@ -46,13 +46,14 @@ impl Invite {
         let inviter = PubKey::try_from(token.inviter_pubkey.as_slice())
             .map_err(|_| "Invalid inviter pubkey length")?;
             
-        let mesh_id = Uuid::from_slice(&token.mesh_id)
-            .map_err(|_| "Invalid mesh ID length")?;
+        let store_id = Uuid::from_slice(&token.store_id)
+            .map_err(|_| "Invalid store ID length")?;
             
         Ok(Self {
             inviter,
-            mesh_id,
+            store_id,
             secret: token.secret,
         })
     }
+
 }

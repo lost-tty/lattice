@@ -27,8 +27,7 @@ pub mod backend;
 
 #[cfg(feature = "server")]
 mod node_service;
-#[cfg(feature = "server")]
-mod mesh_service;
+
 #[cfg(feature = "server")]
 mod store_service;
 #[cfg(feature = "server")]

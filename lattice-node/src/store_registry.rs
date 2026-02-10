@@ -65,7 +65,7 @@ impl StoreRegistry {
         let _ = OpenedStore::new(store_id, sigchain_dir, state)?;
         
         // Register in meta
-        self.meta.add_store(store_id).map_err(|e| StateError::Io(std::io::Error::new(
+        self.meta.add_store(store_id, Uuid::nil()).map_err(|e| StateError::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
             e.to_string(),
         )))?;

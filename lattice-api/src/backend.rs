@@ -10,11 +10,11 @@ use uuid::Uuid;
 
 // Re-export proto types as the canonical backend types
 pub use crate::proto::{
-    NodeStatus, MeshInfo, PeerInfo, StoreDetails, StoreMeta, StoreRef,
+    NodeStatus, PeerInfo, StoreDetails, StoreMeta, StoreRef,
     AuthorState, HistoryEntry, SyncResult,
     // Event types - inner enum for consumer matching
-    MeshReadyEvent, StoreReadyEvent, JoinFailedEvent, SyncResultEvent,
-    node_event::NodeEvent,  // Consumers use NodeEvent::MeshReady(...), etc.
+    StoreReadyEvent, JoinFailedEvent, SyncResultEvent,
+    node_event::NodeEvent,  // Consumers use NodeEvent::StoreReady(...), etc.
 };
 
 // Re-export model types needed by backends
@@ -46,24 +46,17 @@ pub trait LatticeBackend: Send + Sync {
     fn node_set_name(&self, name: &str) -> AsyncResult<'_, ()>;
     fn node_id(&self) -> Vec<u8>;
     
-    /// Subscribe to backend events (mesh ready, join failed, etc.)
+    /// Subscribe to backend events (store ready, join failed, etc.)
     fn subscribe(&self) -> BackendResult<EventReceiver>;
     
-    // ---- Mesh operations ----
-    fn mesh_create(&self) -> AsyncResult<'_, MeshInfo>;
-    fn mesh_list(&self) -> AsyncResult<'_, Vec<MeshInfo>>;
-    fn mesh_status(&self, mesh_id: Uuid) -> AsyncResult<'_, MeshInfo>;
-    fn mesh_join(&self, token: &str) -> AsyncResult<'_, Uuid>;
-    fn mesh_invite(&self, mesh_id: Uuid) -> AsyncResult<'_, String>;
-    
     // ---- Store operations ----
-    fn store_create(&self, mesh_id: Uuid, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef>;
-    fn store_list(&self, mesh_id: Uuid) -> AsyncResult<'_, Vec<StoreRef>>;
+    fn store_create(&self, parent_id: Option<Uuid>, name: Option<String>, store_type: &str) -> AsyncResult<'_, StoreRef>;
+    fn store_delete(&self, parent_id: Uuid, child_id: Uuid) -> AsyncResult<'_, ()>;
+    fn store_list(&self, parent_id: Option<Uuid>) -> AsyncResult<'_, Vec<StoreRef>>;
     fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreMeta>;
     fn store_peers(&self, store_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>>;
-    fn store_revoke_peer(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()>;
+    fn store_join(&self, token: &str) -> AsyncResult<'_, Uuid>;
     fn store_details(&self, store_id: Uuid) -> AsyncResult<'_, StoreDetails>;
-    fn store_delete(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
     fn store_set_name(&self, store_id: Uuid, name: &str) -> AsyncResult<'_, ()>;
     fn store_get_name(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>>;
     fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
@@ -73,7 +66,9 @@ pub trait LatticeBackend: Send + Sync {
     fn store_orphan_cleanup(&self, store_id: Uuid) -> AsyncResult<'_, u32>;
     fn store_system_list(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, Vec<u8>)>>;
     fn store_peer_strategy(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>>;
-    
+    fn store_peer_invite(&self, store_id: Uuid) -> AsyncResult<'_, String>;
+    fn store_peer_revoke(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()>;
+
     // ---- Dynamic store operations ----
     fn store_exec(&self, store_id: Uuid, method: &str, payload: &[u8]) -> AsyncResult<'_, Vec<u8>>;
     /// Get store's descriptor bytes and service name for client-side reflection

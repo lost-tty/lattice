@@ -13,7 +13,7 @@ pub enum NetEvent {
     /// Request sync for a store (with all peers)
     SyncStore { store_id: Uuid },
     /// Request join via peer
-    Join { peer: PubKey, mesh_id: Uuid, secret: Vec<u8> },
+    Join { peer: PubKey, store_id: Uuid, secret: Vec<u8> },
     /// Sync with specific peer (after join)
     SyncWithPeer { store_id: Uuid, peer: PubKey },
 }

@@ -1,7 +1,7 @@
 //! CLI command handlers and dispatch
 
 use lattice_runtime::LatticeBackend;
-use crate::{mesh_commands, node_commands, store_commands};
+use crate::{node_commands, store_commands, peer_commands};
 use crate::subscriptions::SubscriptionRegistry;
 use clap::{Parser, Subcommand, CommandFactory};
 use rustyline_async::SharedWriter;
@@ -28,8 +28,8 @@ pub type Writer = SharedWriter;
 pub enum CommandOutput {
     /// Command completed, continue REPL
     Continue,
-    /// Switch to a different context
-    Switch { mesh_id: Uuid, store_id: Uuid },
+    /// Switch to a different store context
+    Switch { store_id: Uuid },
     /// Exit the REPL
     Quit,
 }
@@ -39,7 +39,6 @@ pub type CmdResult = Result<CommandOutput, anyhow::Error>;
 
 /// Context for command dispatch
 pub struct CommandContext {
-    pub mesh_id: Option<Uuid>,
     pub store_id: Option<Uuid>,
     pub registry: Arc<SubscriptionRegistry>,
 }
@@ -51,7 +50,7 @@ pub struct LatticeCli {
     pub command: LatticeCommand,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 #[command(allow_external_subcommands = true)]
 pub enum LatticeCommand {
     /// Show all commands, or detailed help for a specific command/stream
@@ -64,15 +63,15 @@ pub enum LatticeCommand {
         #[command(subcommand)]
         subcommand: NodeSubcommand,
     },
-    /// Mesh operations (init, join, invite, peers)
-    Mesh {
-        #[command(subcommand)]
-        subcommand: MeshSubcommand,
-    },
     /// Store management
     Store {
         #[command(subcommand)]
         subcommand: StoreSubcommand,
+    },
+    /// Peer management
+    Peer {
+        #[command(subcommand)]
+        subcommand: PeerSubcommand,
     },
     /// Exit the CLI
     #[command(next_help_heading = "General")]
@@ -125,7 +124,7 @@ fn format_recursive_help(cmd: &clap::Command, prefix: &str, output: &mut String)
     }
 }
 
-#[derive(Subcommand, Clone)]
+#[derive(Subcommand, Clone, Debug)]
 pub enum NodeSubcommand {
     /// Show node info (local identity)
     Status,
@@ -135,19 +134,10 @@ pub enum NodeSubcommand {
     Join { token: String },
 }
 
-#[derive(Subcommand, Clone)]
-pub enum MeshSubcommand {
-    /// Create a new mesh
-    Create,
-    /// List all meshes
-    List,
-    /// Switch to a mesh
-    Use { mesh_id: String },
-    /// Show mesh status
-    Status,
-}
 
-#[derive(Subcommand, Clone)]
+
+#[derive(Subcommand, Clone, Debug)]
+#[command(allow_external_subcommands = true)]
 pub enum StoreSubcommand {
     /// Create a new store
     Create {
@@ -156,24 +146,28 @@ pub enum StoreSubcommand {
         /// Store type (e.g., kvstore)
         #[arg(short = 't', long)]
         r#type: String,
+        /// Create as a new Root Store (independent of current context)
+        #[arg(long, default_value_t = false)]
+        root: bool,
     },
     /// List stores
     List,
-    /// Switch to a store
-    Use { uuid: String },
-    /// Delete (archive) a store
-    Delete { uuid: String },
+    /// Select a store by UUID prefix
+    Use {
+        /// Store UUID prefix
+        uuid: String,
+    },
+    /// Archive a child store
+    Delete {
+        /// Child store UUID to archive
+        uuid: String,
+    },
     /// Set the display name for a store
     SetName { name: String },
     /// Show store status
     Status {
         #[arg(short, long)]
         verbose: bool,
-    },
-    /// Peer management
-    Peer {
-        #[command(subcommand)]
-        subcommand: PeerSubcommand,
     },
     /// Debug graph output
     Debug,
@@ -208,15 +202,18 @@ pub enum StoreSubcommand {
         #[command(subcommand)]
         subcommand: SystemSubcommand,
     },
+    /// Dynamic store commands (Put, Get, etc.)
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
-#[derive(Subcommand, Clone)]
+#[derive(Subcommand, Clone, Debug)]
 pub enum SystemSubcommand {
     /// Show system table contents
     Show,
 }
 
-#[derive(Subcommand, Clone)]
+#[derive(Subcommand, Clone, Debug)]
 pub enum PeerSubcommand {
     /// List all peers for this store
     List,
@@ -274,41 +271,27 @@ pub async fn handle_command(
             NodeSubcommand::Join { token } => node_commands::cmd_join(backend, &token, writer).await,
         },
         
-        LatticeCommand::Mesh { subcommand } => {
-            let mesh_ctx = mesh_commands::MeshContext { mesh_id: ctx.mesh_id };
-            mesh_commands::handle_command(backend, &mesh_ctx, subcommand, writer).await
-        }
+        // Mesh command removed in favor of fractal stores
         
         LatticeCommand::Store { subcommand } => match subcommand {
-            StoreSubcommand::Create { name, r#type } => {
-                store_commands::cmd_store_create(backend, ctx.mesh_id, name, &r#type, writer).await
+            StoreSubcommand::Create { name, r#type, root } => {
+                let parent_id = if root { None } else { ctx.store_id };
+                store_commands::cmd_store_create(backend, parent_id, name, &r#type, writer).await
             }
             StoreSubcommand::List => {
-                store_commands::cmd_store_list(backend, ctx.mesh_id, writer).await
+                store_commands::cmd_store_list(backend, ctx.store_id, writer).await
             }
             StoreSubcommand::Use { uuid } => {
-                store_commands::cmd_store_use(backend, ctx.mesh_id, &uuid, writer).await
+                store_commands::cmd_store_use(backend, &uuid, writer).await
             }
             StoreSubcommand::Delete { uuid } => {
-                let id = Uuid::parse_str(&uuid).ok();
-                store_commands::cmd_store_delete(backend, id, writer).await
+                store_commands::cmd_store_delete(backend, ctx.store_id, &uuid, writer).await
             }
             StoreSubcommand::SetName { name } => {
                 store_commands::cmd_store_set_name(backend, ctx.store_id, &name, writer).await
             }
             StoreSubcommand::Status { verbose: _ } => {
                 store_commands::cmd_store_status(backend, ctx.store_id, writer).await
-            }
-            StoreSubcommand::Peer { subcommand } => match subcommand {
-                PeerSubcommand::List => {
-                    store_commands::cmd_store_peer_list(backend, ctx.store_id, writer).await
-                }
-                PeerSubcommand::Revoke { pubkey } => {
-                    store_commands::cmd_store_peer_revoke(backend, ctx.store_id, &pubkey, writer).await
-                }
-                PeerSubcommand::Invite => {
-                     store_commands::cmd_store_peer_invite(backend, ctx.store_id, writer).await
-                }
             }
             StoreSubcommand::Debug => {
                 store_commands::cmd_store_debug(backend, ctx.store_id, writer).await
@@ -338,6 +321,21 @@ pub async fn handle_command(
                 SystemSubcommand::Show => {
                     store_commands::cmd_store_system_show(backend, ctx.store_id, writer).await
                 }
+            }
+            StoreSubcommand::External(args) => {
+                store_commands::cmd_dynamic_exec(backend, ctx, &args, writer).await
+            }
+        },
+
+        LatticeCommand::Peer { subcommand } => match subcommand {
+            PeerSubcommand::List => {
+                peer_commands::cmd_peer_list(backend, ctx.store_id, writer).await
+            }
+            PeerSubcommand::Revoke { pubkey } => {
+                peer_commands::cmd_peer_revoke(backend, ctx.store_id, &pubkey, writer).await
+            }
+            PeerSubcommand::Invite => {
+                 peer_commands::cmd_peer_invite(backend, ctx.store_id, writer).await
             }
         },
         
