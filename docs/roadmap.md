@@ -23,107 +23,81 @@ This document outlines the development plan for Lattice.
 
 ---
 
-## Milestone 11: Content-Addressable Store (CAS)
+## Milestone 11: The Weaver Protocol
 
-**Goal:** Blob storage for large files (prerequisite for Lattice Drive). We use **CIDs (Content Identifiers)** for self-describing formats and IPFS/IPLD compatibility.
+**Goal:** Replace the legacy linear-log sync with a **Negentropy-based set reconciliation protocol** and a **Transaction-based Data Model**. This establishes the correct metadata structure before storing heavy blobs (CAS).
 
-### 11A: CAS Integration
-- [ ] `lattice-cas` crate with pluggable backend (local FS, Garage S3)
-- [ ] `put_blob(data) -> CID`, `get_blob(CID) -> data`
+> **See:** `weaver-hs/lattice-weaver.md` for the transition guide.
 
-### 11B: Metadata & Pinning
-- [ ] `/cas/pins/{node_id}/{hash}` in root store
-- [ ] Pin reconciler: watch pins, trigger fetch
+### 11A: The Transaction Model (Intention & Entry)
+- [ ] Define `Intention` struct: `{ author, timestamp, entries: [Entry], signature }`
+- [ ] Define `Entry` struct: `{ store_id, store_prev, causal_deps, payload }`
+- [ ] Implement validation logic:
+  - `store_prev` hash chain continuity per (store, author)
+  - `causal_deps` DAG validation
+  - Atomic signature verification over the full Intention
 
-### 11C: CLI
-- [ ] `cas put`, `cas get`, `cas pin`, `cas ls`
+### 11B: Intention Storage (Metadata)
+- [ ] `intentions.db` (redb): Local storage for validated Intentions and Entries
+- [ ] Index: `Hash -> Entry` (for random access/sync)
+- [ ] Decouple storage from sequential log files
+- [ ] Implement `WitnessLog` for local audit trail
+
+### 11C: Negentropy Sync
+- [ ] Port `negentropy` implementation to Rust (no-std compatible)
+- [ ] Implement `sync_v2` protocol:
+  - Phase 1: Exchange author timestamps (fast-path check) + Acks
+  - Phase 2: Negentropy reconciliation over `Entry` hashes
+  - Phase 3: Bulk fetch of missing Intentions
+- [ ] Remove `OrphanStore` (reconciliation handles gaps automatically)
+
+### 11D: Trans-Store Atomicity
+- [ ] APIs for creating multi-entry Intentions (e.g., "move file from Store A to B")
+- [ ] Ensure validation enforces atomicity (all-or-nothing accept)
 
 ---
 
-## Milestone 12: Lattice Drive MVP (File Sync)
+## Milestone 12: Content-Addressable Store (CAS)
 
-**Goal:** A functioning file sync tool that proves the architecture. Requires Fractal Stores (M10) and CAS (M11).
+**Goal:** Provide a high-performance, node-local "Dumb Pipe" for content storage. Replication and policy are handled separately by a "Smart Manager".
 
-> **Note:** We are prioritizing this over Weaver Protocol to get a user-facing product sooner.
+### 12A: Low-Level Storage (`lattice-cas`)
+- [ ] `CasBackend` trait interface (`fs`, `block`, `s3`)
+- [ ] Isolation: Mandatory `store_id` for all ops
+- [ ] `redb` metadata index: ARC (Adaptive Replacement Cache), RefCounting
+- [ ] `FsBackend`: Sharded local disk blob storage
 
-### 12A: Filesystem Logic
+### 12B: Replication & Safety (`CasManager`)
+- [ ] `ReplicationPolicy` trait: `crush_map()` and `replication_factor()` from System Table
+- [ ] `StateMachine::referenced_blobs()`: Pinning via State declarations
+- [ ] Pull-based reconciler: `ensure(cid)`, `calculate_duties()`, `gc()` with Soft Handoff
+
+### 12C: Wasm & FUSE Integration
+- [ ] **Wasm**: Host Handles (avoid linear memory copy)
+- [ ] **FUSE**: `get_range` (random access) and `put_batch` (buffered write)
+- [ ] **Encryption**: Store-side encryption (client responsibility)
+
+### 12D: CLI & Observability
+- [ ] `cas put`, `cas get`, `cas pin`, `cas status`
+
+---
+
+## Milestone 13: Lattice Drive MVP (File Sync)
+
+**Goal:** A functioning file sync tool that requires M11 (Sync) and M12 (CAS).
+
+### 13A: Filesystem Logic
 - [ ] Define `DirEntry` schema: `{ name, mode, cid, modified_at }` in KV Store
 - [ ] Map file operations (`write`, `mkdir`, `rename`) to KV Ops
 
-### 12B: FUSE Interface
+### 13B: FUSE Interface
 - [ ] Write `lattice-fs` using the `fuser` crate
 - [ ] Mount the Store as a folder on Linux/macOS
 - [ ] **Demo:** `cp photo.jpg ~/lattice/` → Syncs to second node
 
 ---
 
-## Milestone 13: The Weaver Protocol (Data Model Refactor)
-
-**Goal:** Implement the "Ly" data model by splitting the monolithic `Entry` into `Intention` (Transport-Agnostic Signal) and `Witness` (Chain-Specific Ordering). This decoupling enables "Ghost Parent" resolution and selective data sharing.
-
-> **See:** [Ly Architecture](ly_architecture.md) for full protocol details.
-
-### 13A: The Intention
-- [ ] Define `Intention` struct: `{ payload: Vec<u8>, author: PubKey, seq: u64, prev_hash: Hash, sig: Signature }`
-- [ ] Implement `Intention` validation (author signature check + seq/hash continuity)
-- [ ] Ensure `Intention` is valid independent of any chain (floating message)
-
-### 13B: The Witness
-- [ ] Define `Witness` event in `Entry`: `Entry { parent: Hash, event: Witness(Intention), sig: MySig }`
-- [ ] Update `SigChain` to append `Witness` events
-- [ ] Implement "Ingest/Digest" envelope pattern for Gossip
-
----
-
-## Milestone 14: Negentropy Sync Protocol
-
-**Goal:** Replace O(n) vector clock sync with sub-linear bandwidth using range-based set reconciliation.
-
-Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
-
-### 14A: Infrastructure
-- [ ] Add hash→entry index (for efficient fetch-by-hash)
-- [ ] Implement negentropy fingerprint generation per store
-
-### 14B: Protocol Migration
-- [ ] Replace `SyncState` protocol with negentropy exchange
-- [ ] Decouple `seq` from network sync protocol (keep internal only)
-- [ ] Update `FetchRequest` to use hashes instead of seq ranges
-
-**Current `seq` Dependencies to Migrate:**
-| Component | Current | Negentropy Approach |
-|-----------|---------|---------------------|
-| `SyncState.diff()` | `MissingRange{from_seq, to_seq}` | Hash fingerprint exchange → list of missing hashes |
-| `FetchRequest.ranges` | `{author, from_seq, to_seq}` | Fetch by hash directly |
-| `Log::iter_range()` | Range by seq | Need hash→entry index for lookup |
-| `GapInfo` | Triggers sync when `seq > next_seq` | "Missing prev_hash X" → fetch by hash |
-
-**What to Keep:**
-- `seq` for **local sigchain validation** (prevents insertion attacks, enforces append-only)
-- `ChainTip.seq` as internal implementation detail
-
-- **Ref:** [Negentropy Protocol](https://github.com/hoytech/negentropy)
-
----
-
-## Milestone 15: Wasm Runtime
-
-**Goal:** Replace hardcoded state machine logic with dynamic Wasm modules.
-
-### 15A: Wasm Integration
-- [ ] Integrate `wasmtime` into the Kernel
-- [ ] Define minimal Host ABI: `kv_get`, `kv_set`, `log_append`, `get_head`
-- [ ] Replace hardcoded `KvStore::apply()` with `WasmRuntime::call_apply()`
-- [ ] Map Host Functions to `StorageBackend` calls (M9 prerequisite)
-
-### 15B: Data Structures & Verification
-- [ ] Finalize `Entry`, `SignedEntry`, `Hash`, `PubKey` structs for Wasm boundary
-- [ ] Wasm-side SigChain verification (optional, for paranoid clients)
-- **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
-
----
-
-## Milestone 16: Log Lifecycle & Pruning
+## Milestone 14: Log Lifecycle & Pruning
 
 **Goal:** Enable long-running nodes to manage log growth through snapshots, pruning, and finality checkpoints.
 
@@ -147,6 +121,23 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
 ### 16D: Hash Index Optimization
 - [ ] Replace in-memory `HashSet<Hash>` with on-disk index (redb) or Bloom Filter
 - [ ] Support 100M+ entries without excessive RAM
+
+---
+
+## Milestone 15: Wasm Runtime
+
+**Goal:** Replace hardcoded state machine logic with dynamic Wasm modules.
+
+### 15A: Wasm Integration
+- [ ] Integrate `wasmtime` into the Kernel
+- [ ] Define minimal Host ABI: `kv_get`, `kv_set`, `log_append`, `get_head`
+- [ ] Replace hardcoded `KvStore::apply()` with `WasmRuntime::call_apply()`
+- [ ] Map Host Functions to `StorageBackend` calls (M9 prerequisite)
+
+### 15B: Data Structures & Verification
+- [ ] Finalize `Entry`, `SignedEntry`, `Hash`, `PubKey` structs for Wasm boundary
+- [ ] Wasm-side SigChain verification (optional, for paranoid clients)
+- **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
 
 ---
 
@@ -221,3 +212,4 @@ Range-based set reconciliation using hash fingerprints. Used by Nostr ecosystem.
   - Identity mapping layer (PublicKey → User name/email)
   - Tamper-evident audit export (signed Merkle bundles for external auditors)
   - Optional: External audit sink (stream to S3/SIEM)
+- **USB Gadget Node**: A dedicated hardware device (e.g., Pi Zero, RISC-V dongle) that plugs into a host and enumerates as a USB Ethernet gadget. It runs a standalone Lattice Node and peers with the host over the virtual network interface. This provides a "smart external drive" experience—physically pluggable storage that syncs via standard Lattice protocols, decoupled from the host's filesystem limitations.
