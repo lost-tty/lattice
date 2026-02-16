@@ -2,10 +2,11 @@
 
 use crate::backend::Backend;
 use crate::proto::{
-    store_service_server::StoreService, AuthorStateRequest, AuthorStateResponse,
-    CleanupResult, CreateStoreRequest, DeleteStoreRequest, DebugInfo, Empty, SetStoreNameRequest,
-    HistoryRequest, HistoryResponse, StoreId, StoreRef, StoreMeta, StoreList, StoreDetails,
+    store_service_server::StoreService,
+    CreateStoreRequest, DeleteStoreRequest, DebugInfo, Empty, SetStoreNameRequest,
+    WitnessLogRequest, WitnessLogResponse, StoreId, StoreRef, StoreMeta, StoreList, StoreDetails,
     SystemListResponse, SystemEntry, StoreNameResponse, PeerStrategyResponse,
+    FloatingIntentionsResponse, GetIntentionRequest, GetIntentionResponse,
 };
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -104,28 +105,41 @@ impl StoreService for StoreServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))
     }
 
-    async fn history(&self, request: Request<HistoryRequest>) -> Result<Response<HistoryResponse>, Status> {
+    async fn witness_log(&self, request: Request<WitnessLogRequest>) -> Result<Response<WitnessLogResponse>, Status> {
         let req = request.into_inner();
         let store_id = Self::parse_uuid(&req.store_id)?;
-        self.backend.store_history(store_id).await
-            .map(|entries| Response::new(HistoryResponse { entries }))
+        self.backend.store_witness_log(store_id).await
+            .map(|entries| Response::new(WitnessLogResponse { entries }))
             .map_err(|e| Status::internal(e.to_string()))
     }
 
-    async fn author_state(&self, request: Request<AuthorStateRequest>) -> Result<Response<AuthorStateResponse>, Status> {
-        let req = request.into_inner();
-        let store_id = Self::parse_uuid(&req.store_id)?;
-        let author = if req.author_key.is_empty() { None } else { Some(req.author_key.as_slice()) };
-        self.backend.store_author_state(store_id, author).await
-            .map(|authors| Response::new(AuthorStateResponse { authors }))
-            .map_err(|e| Status::internal(e.to_string()))
-    }
-
-    async fn orphan_cleanup(&self, request: Request<StoreId>) -> Result<Response<CleanupResult>, Status> {
+    async fn floating_intentions(&self, request: Request<StoreId>) -> Result<Response<FloatingIntentionsResponse>, Status> {
         let store_id = Self::parse_uuid(&request.into_inner().id)?;
-        self.backend.store_orphan_cleanup(store_id).await
-            .map(|orphans_removed| Response::new(CleanupResult { orphans_removed }))
+        self.backend.store_floating(store_id).await
+            .map(|intentions| Response::new(FloatingIntentionsResponse { intentions }))
             .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    async fn get_intention(&self, request: Request<GetIntentionRequest>) -> Result<Response<GetIntentionResponse>, Status> {
+        let req = request.into_inner();
+        let store_id = Self::parse_uuid(&req.store_id)?;
+        match self.backend.store_get_intention(store_id, &req.hash_prefix).await {
+            Ok(mut results) if results.len() == 1 => {
+                let detail = results.remove(0);
+                Ok(Response::new(GetIntentionResponse {
+                    intention: Some(detail.intention),
+                    ops: detail.ops.into_iter().map(Into::into).collect(),
+                }))
+            }
+            Ok(results) if results.is_empty() => Err(Status::not_found("intention not found")),
+            Ok(results) => {
+                let hashes: Vec<String> = results.iter()
+                    .map(|d| hex::encode(&d.intention.hash))
+                    .collect();
+                Err(Status::failed_precondition(format!("ambiguous prefix, matches: {}", hashes.join(", "))))
+            }
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
     }
 
     async fn system_list(&self, request: Request<StoreId>) -> Result<Response<SystemListResponse>, Status> {

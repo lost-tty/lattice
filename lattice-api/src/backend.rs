@@ -11,11 +11,18 @@ use uuid::Uuid;
 // Re-export proto types as the canonical backend types
 pub use crate::proto::{
     NodeStatus, PeerInfo, StoreDetails, StoreMeta, StoreRef,
-    AuthorState, HistoryEntry, SyncResult,
+    AuthorState, WitnessLogEntry, SignedIntention, SyncResult,
     // Event types - inner enum for consumer matching
     StoreReadyEvent, JoinFailedEvent, SyncResultEvent,
     node_event::NodeEvent,  // Consumers use NodeEvent::StoreReady(...), etc.
 };
+pub use lattice_model::SExpr;
+
+/// An intention with its decoded operations.
+pub struct IntentionDetail {
+    pub intention: SignedIntention,
+    pub ops: Vec<SExpr>,
+}
 
 // Re-export model types needed by backends
 pub use lattice_store_base::{StreamDescriptor, BoxByteStream};
@@ -61,9 +68,9 @@ pub trait LatticeBackend: Send + Sync {
     fn store_get_name(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>>;
     fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
     fn store_debug(&self, store_id: Uuid) -> AsyncResult<'_, Vec<AuthorState>>;
-    fn store_history(&self, store_id: Uuid) -> AsyncResult<'_, Vec<HistoryEntry>>;
-    fn store_author_state(&self, store_id: Uuid, author: Option<&[u8]>) -> AsyncResult<'_, Vec<AuthorState>>;
-    fn store_orphan_cleanup(&self, store_id: Uuid) -> AsyncResult<'_, u32>;
+    fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessLogEntry>>;
+    fn store_floating(&self, store_id: Uuid) -> AsyncResult<'_, Vec<SignedIntention>>;
+    fn store_get_intention(&self, store_id: Uuid, hash_prefix: &[u8]) -> AsyncResult<'_, Vec<IntentionDetail>>;
     fn store_system_list(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, Vec<u8>)>>;
     fn store_peer_strategy(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>>;
     fn store_peer_invite(&self, store_id: Uuid) -> AsyncResult<'_, String>;

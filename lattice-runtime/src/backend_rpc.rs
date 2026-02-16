@@ -5,7 +5,7 @@
 use crate::backend::*;
 use lattice_api::proto::{
     Empty, StoreId, JoinRequest, CreateStoreRequest, DeleteStoreRequest, RevokePeerRequest, SetNameRequest,
-    SetStoreNameRequest, HistoryRequest, ExecRequest,
+    SetStoreNameRequest, WitnessLogRequest, ExecRequest, GetIntentionRequest,
 };
 use lattice_api::RpcClient;
 use uuid::Uuid;
@@ -203,27 +203,43 @@ impl LatticeBackend for RpcBackend {
         })
     }
     
-    fn store_history(&self, store_id: Uuid) -> AsyncResult<'_, Vec<HistoryEntry>> {
+    fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessLogEntry>> {
         Box::pin(async move {
             let mut client = self.client.clone();
-            let resp = client.store.history(HistoryRequest {
+            let resp = client.store.witness_log(WitnessLogRequest {
                 store_id: store_id.as_bytes().to_vec(),
-                author: Vec::new(),
-                limit: 0,
             }).await?;
             Ok(resp.into_inner().entries)
         })
     }
     
-    fn store_author_state(&self, store_id: Uuid, _author: Option<&[u8]>) -> AsyncResult<'_, Vec<AuthorState>> {
-        self.store_debug(store_id)
-    }
-    
-    fn store_orphan_cleanup(&self, store_id: Uuid) -> AsyncResult<'_, u32> {
+    fn store_floating(&self, store_id: Uuid) -> AsyncResult<'_, Vec<SignedIntention>> {
         Box::pin(async move {
             let mut client = self.client.clone();
-            let resp = client.store.orphan_cleanup(StoreId { id: store_id.as_bytes().to_vec() }).await?;
-            Ok(resp.into_inner().orphans_removed)
+            let resp = client.store.floating_intentions(StoreId { id: store_id.as_bytes().to_vec() }).await?;
+            Ok(resp.into_inner().intentions)
+        })
+    }
+
+    fn store_get_intention(&self, store_id: Uuid, hash_prefix: &[u8]) -> AsyncResult<'_, Vec<IntentionDetail>> {
+        let prefix = hash_prefix.to_vec();
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client.store.get_intention(GetIntentionRequest {
+                store_id: store_id.as_bytes().to_vec(),
+                hash_prefix: prefix,
+            }).await;
+            match resp {
+                Ok(r) => {
+                    let r = r.into_inner();
+                    Ok(vec![IntentionDetail {
+                        intention: r.intention.unwrap(),
+                        ops: r.ops.into_iter().map(Into::into).collect(),
+                    }])
+                }
+                Err(e) if e.code() == lattice_api::tonic::Code::NotFound => Ok(vec![]),
+                Err(e) => Err(e.into()),
+            }
         })
     }
 

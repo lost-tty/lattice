@@ -1,7 +1,7 @@
 //! KvState - persistent KV state with DAG-based conflict resolution
 //!
 //! This is a pure StateMachine implementation that knows nothing about entries,
-//! sigchains, or replication. It only knows how to apply operations.
+//! intentions, or replication. It only knows how to apply operations.
 //!
 //! Uses redb for efficient embedded storage.
 //! Tables:
@@ -30,7 +30,7 @@ use regex::bytes::Regex;
 /// Persistent state for KV with DAG conflict resolution.
 /// 
 /// This is a derived materialized view - the actual source of truth is
-/// the sigchain log managed by the replication layer.
+/// the intention log managed by the replication layer.
 /// 
 /// KvState is the logic component. Consumers interact with `PersistentState<KvState>`.
 pub struct KvState {
@@ -387,15 +387,16 @@ impl Introspectable for KvState {
          false
     }
     
-    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<String> {
+    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<lattice_model::SExpr> {
         payload_summary::summarize(payload)
     }
 }
 
 mod payload_summary {
     use prost_reflect::{DynamicMessage, Value};
+    use lattice_model::SExpr;
 
-    pub fn summarize(payload: &DynamicMessage) -> Vec<String> {
+    pub fn summarize(payload: &DynamicMessage) -> Vec<SExpr> {
         if let Some(Value::List(ops)) = payload.get_field_by_name("ops").map(|v| v.into_owned()) {
             let entries: Vec<_> = ops.iter().filter_map(summarize_op).collect();
             if !entries.is_empty() { return entries; }
@@ -403,23 +404,25 @@ mod payload_summary {
         format_entry(payload, false).into_iter().collect()
     }
 
-    fn summarize_op(op: &Value) -> Option<String> {
+    fn summarize_op(op: &Value) -> Option<SExpr> {
         let Value::Message(m) = op else { return None };
         get_msg(m, "delete").and_then(|d| format_entry(&d, true))
             .or_else(|| get_msg(m, "put").and_then(|p| format_entry(&p, false)))
     }
 
-    fn format_entry(msg: &DynamicMessage, is_delete: bool) -> Option<String> {
+    fn format_entry(msg: &DynamicMessage, is_delete: bool) -> Option<SExpr> {
         let k = String::from_utf8_lossy(&get_bytes(msg, "key")?).to_string();
         let is_tombstone = matches!(
             msg.get_field_by_name("tombstone").map(|f| f.into_owned()),
             Some(Value::Bool(true))
         );
         if is_delete || is_tombstone {
-            Some(format!("{} ⊗", k))
+            Some(SExpr::list(vec![SExpr::sym("del"), SExpr::str(k)]))
         } else {
-            let v = get_bytes(msg, "value").map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
-            Some(format!("{}={}", k, v))
+            let v = get_bytes(msg, "value")
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            Some(SExpr::list(vec![SExpr::sym("put"), SExpr::str(k), SExpr::str(v)]))
         }
     }
 

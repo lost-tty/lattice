@@ -5,7 +5,7 @@ use crate::commands::{CmdResult, CommandOutput::*, Writer};
 use crate::graph_renderer;
 use crate::display_helpers::{format_id, parse_uuid};
 use crate::subscriptions::SubscriptionRegistry;
-use lattice_runtime::{Hash, PubKey};
+use lattice_runtime::{Hash, PubKey, SExpr};
 use std::io::Write;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -304,11 +304,11 @@ pub async fn cmd_store_status(backend: &dyn LatticeBackend, store_id: Option<Uui
         if details.author_count > 0 {
             let _ = writeln!(w, "Authors:   {}", details.author_count);
         }
-        if details.log_file_count > 0 {
-            let _ = writeln!(w, "Logs:      {} files, {} bytes", details.log_file_count, details.log_bytes);
+        if details.intention_count > 0 {
+            let _ = writeln!(w, "Intentions: {}", details.intention_count);
         }
-        if details.orphan_count > 0 {
-            let _ = writeln!(w, "Orphans:   {} (pending parent entries)", details.orphan_count);
+        if details.witness_count > 0 {
+            let _ = writeln!(w, "Witnesses:  {}", details.witness_count);
         }
     }
     
@@ -349,140 +349,189 @@ pub async fn cmd_store_debug(backend: &dyn LatticeBackend, store_id: Option<Uuid
             return Ok(Continue);
         }
     };
+
+    let mut sections: Vec<SExpr> = vec![SExpr::sym("store-debug")];
     
-    // Get author state
-    let authors = match backend.store_author_state(store_id, None).await {
-        Ok(a) => a,
-        Err(e) => {
-            let _ = writeln!(w, "Error: {}", e);
-            return Ok(Continue);
+    // ---- Author Tips ----
+    let authors = backend.store_debug(store_id).await.unwrap_or_default();
+    {
+        let mut tips = vec![SExpr::sym("author-tips")];
+        for a in &authors {
+            tips.push(SExpr::list(vec![
+                SExpr::raw(a.public_key.clone()),
+                SExpr::sym(":tip"),
+                SExpr::raw(a.hash.clone()),
+            ]));
         }
-    };
-    
-    let _ = writeln!(w, "Store {} - {} authors\n", store_id, authors.len());
-    
-    // Get all history entries
-    let entries = match backend.store_history(store_id).await {
-        Ok(e) => e,
-        Err(e) => {
-            let _ = writeln!(w, "Error getting entries: {}", e);
-            return Ok(Continue);
-        }
-    };
-    
-    // Group entries by author
-    let mut by_author: std::collections::HashMap<Vec<u8>, Vec<_>> = std::collections::HashMap::new();
-    for entry in entries {
-        by_author.entry(entry.author.clone()).or_default().push(entry);
+        sections.push(SExpr::list(tips));
     }
     
-    // Sort authors and display
-    let mut sorted_authors: Vec<_> = authors.into_iter().collect();
-    sorted_authors.sort_by(|a, b| a.public_key.cmp(&b.public_key));
-    
-    for author in sorted_authors {
-        let author_short = hex::encode(&author.public_key[..8.min(author.public_key.len())]);
-        let hash_short = if author.hash.len() >= 8 { hex::encode(&author.hash[..8]) } else { "".to_string() };
-        let _ = writeln!(w, "Author {} (seq: {}, hash: {})", author_short, author.seq, hash_short);
-        
-        if let Some(entries) = by_author.get(&author.public_key) {
-            let mut sorted_entries: Vec<_> = entries.iter().collect();
-            sorted_entries.sort_by(|a, b| a.seq.cmp(&b.seq));
-            
-            for entry in sorted_entries {
-                let hash_short = hex::encode(&entry.hash[..8.min(entry.hash.len())]);
-                let prev_hash_short = hex::encode(&entry.prev_hash[..8.min(entry.prev_hash.len())]);
-                
-                // HLC: timestamp is already (wall_time << 16 | counter)
-                let wall_time = entry.timestamp >> 16;
-                let counter = entry.timestamp & 0xFFFF;
-                let hlc = format!("{}.{}", wall_time, counter);
-                
-                let parents_str = if entry.causal_deps.is_empty() {
-                    String::new()
-                } else {
-                    let ps: Vec<String> = entry.causal_deps.iter()
-                        .map(|h| hex::encode(&h[..8.min(h.len())]))
-                        .collect();
-                    format!(" parents:[{}]", ps.join(","))
-                };
-                
-                let _ = writeln!(w, "  seq:{:<4} prev:{}  hash:{}  hlc:{}  {}{}", 
-                    entry.seq, prev_hash_short, hash_short, hlc, entry.summary, parents_str);
+    // ---- Witness Log ----
+    let witness_entries = backend.store_witness_log(store_id).await.unwrap_or_default();
+    {
+        let mut log = vec![SExpr::sym("witness-log")];
+        for entry in &witness_entries {
+            if let Ok(content) = lattice_runtime::WitnessContent::decode(entry.content.as_slice()) {
+                log.push(SExpr::list(vec![
+                    SExpr::num(entry.seq),
+                    SExpr::sym(":hash"),
+                    SExpr::raw(content.intention_hash.clone()),
+                    SExpr::sym(":wall"),
+                    SExpr::num(content.wall_time),
+                    SExpr::sym(":sig"),
+                    SExpr::raw(entry.signature.clone()),
+                ]));
             }
         }
-        let _ = writeln!(w);
+        sections.push(SExpr::list(log));
     }
+    
+    // ---- Intentions (fetched via witness log hashes) ----
+    {
+        let mut intentions = vec![SExpr::sym("intentions")];
+        for entry in &witness_entries {
+            if let Ok(content) = lattice_runtime::WitnessContent::decode(entry.content.as_slice()) {
+                let details = backend.store_get_intention(store_id, &content.intention_hash).await.unwrap_or_default();
+                if let Some(detail) = details.into_iter().next() {
+                    intentions.push(detail_to_sexpr(&detail));
+                }
+            }
+        }
+        sections.push(SExpr::list(intentions));
+    }
+    
+    // ---- Floating Intentions ----
+    let floating = backend.store_floating(store_id).await.unwrap_or_default();
+    {
+        let mut floats = vec![SExpr::sym("floating")];
+        for f in &floating {
+            let details = backend.store_get_intention(store_id, &f.hash).await.unwrap_or_default();
+            if let Some(detail) = details.into_iter().next() {
+                floats.push(detail_to_sexpr(&detail));
+            }
+        }
+        sections.push(SExpr::list(floats));
+    }
+    
+    let _ = writeln!(w, "{}", crate::display_helpers::render_sexpr_pretty_colored(&SExpr::list(sections), 8));
     
     Ok(Continue)
 }
 
-
-pub async fn cmd_author_state(backend: &dyn LatticeBackend, store_id: Option<Uuid>, pubkey: Option<&str>, show_all: bool, writer: Writer) -> CmdResult {
+pub async fn cmd_store_debug_intention(backend: &dyn LatticeBackend, store_id: Option<Uuid>, hash_hex: &str, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let store_id = match store_id {
         Some(id) => id,
         None => {
-            let _ = writeln!(w, "Error: no store selected");
+            let _ = writeln!(w, "No store selected.");
+            return Ok(Continue);
+        }
+    };
+
+    let hash_hex = hash_hex.trim_end_matches('…');
+    let hash_bytes = match hex::decode(hash_hex.to_lowercase()) {
+        Ok(b) if !b.is_empty() && b.len() <= 32 => b,
+        _ => {
+            let _ = writeln!(w, "Invalid hex hash prefix: {}", hash_hex);
             return Ok(Continue);
         }
     };
     
-    // Parse target author
-    let target = if !show_all {
-        if let Some(hex_str) = pubkey {
-            let clean = hex_str.trim_start_matches("0x");
-            match hex::decode(clean) {
-                Ok(pk) => Some(pk),
-                Err(e) => {
-                    let _ = writeln!(w, "Error: {}", e);
-                    return Ok(Continue);
-                }
-            }
-        } else {
-            Some(backend.node_id())
+    match backend.store_get_intention(store_id, &hash_bytes).await {
+        Ok(results) if results.is_empty() => {
+            let _ = writeln!(w, "No intention found matching '{}'", hash_hex);
         }
-    } else {
-        None
-    };
-    
-    match backend.store_author_state(store_id, target.as_ref().map(|v| v.as_slice())).await {
-        Ok(authors) => {
-            if authors.is_empty() {
-                if show_all {
-                    let _ = writeln!(w, "(no authors)");
-                } else {
-                    let _ = writeln!(w, "No state for author");
-                }
-                return Ok(Continue);
-            }
-            
-            if show_all {
-                let _ = writeln!(w, "{} author(s):\n", authors.len());
-            }
-            
-            for author in authors {
-                if !show_all {
-                    let _ = writeln!(w, "Author: {}", hex::encode(&author.public_key));
-                } else {
-                    let _ = writeln!(w, "{}", hex::encode(&author.public_key));
-                }
-                let _ = writeln!(w, "  seq:  {}", author.seq);
-                if !author.hash.is_empty() {
-                    let _ = writeln!(w, "  hash: {}", hex::encode(&author.hash));
-                }
-            }
+        Ok(results) => {
+            let sexprs: Vec<SExpr> = results.iter().map(detail_to_sexpr).collect();
+            let output = if sexprs.len() == 1 {
+                sexprs.into_iter().next().unwrap()
+            } else {
+                SExpr::list(sexprs)
+            };
+            let _ = writeln!(w, "{}", crate::display_helpers::render_sexpr_pretty_colored(&output, 8));
         }
-        Err(e) => {
-            let _ = writeln!(w, "Error: {}", e);
-        }
+        Err(e) => { let _ = writeln!(w, "Error: {}", e); }
     }
     
     Ok(Continue)
 }
 
-pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, key: Option<&str>, writer: Writer) -> CmdResult {
+fn detail_to_sexpr(detail: &lattice_runtime::IntentionDetail) -> SExpr {
+    let intention = &detail.intention;
+    let mut fields: Vec<SExpr> = vec![SExpr::sym("intention")];
+    
+    fields.push(SExpr::list(vec![SExpr::sym("hash"), SExpr::raw(intention.hash.clone())]));
+    fields.push(SExpr::list(vec![SExpr::sym("author"), SExpr::raw(intention.author.clone())]));
+    fields.push(SExpr::list(vec![SExpr::sym("store-id"), SExpr::raw(intention.store_id.clone())]));
+    fields.push(SExpr::list(vec![SExpr::sym("store-prev"), SExpr::raw(intention.store_prev.clone())]));
+    
+    // Condition
+    if let Some(ref cond) = intention.condition {
+        if let Some(ref c) = cond.condition {
+            match c {
+                lattice_runtime::condition::Condition::V1(deps) => {
+                    let mut cond_items = vec![SExpr::sym("v1")];
+                    for h in &deps.hashes {
+                        cond_items.push(SExpr::raw(h.clone()));
+                    }
+                    fields.push(SExpr::list(vec![SExpr::sym("condition"), SExpr::list(cond_items)]));
+                }
+            }
+        }
+    }
+    
+    // Timestamp
+    if let Some(ref ts) = intention.timestamp {
+        fields.push(SExpr::list(vec![
+            SExpr::sym("timestamp"),
+            SExpr::num(ts.wall_time),
+            SExpr::sym(":counter"),
+            SExpr::num(ts.counter as u64),
+        ]));
+    }
+    
+    // Signature
+    fields.push(SExpr::list(vec![SExpr::sym("signature"), SExpr::raw(intention.signature.clone())]));
+    
+    // Decoded ops
+    if !detail.ops.is_empty() {
+        let mut ops_items = vec![SExpr::sym("ops")];
+        ops_items.extend(detail.ops.clone());
+        fields.push(SExpr::list(ops_items));
+    }
+    
+    SExpr::list(fields)
+}
+
+/// Short format: (intention (hash ..) (author ..) (timestamp ..) (ops ..))
+/// Omits store-id, store-prev, condition, signature — clear from context.
+fn detail_to_sexpr_short(detail: &lattice_runtime::IntentionDetail) -> SExpr {
+    let intention = &detail.intention;
+    let mut fields: Vec<SExpr> = vec![SExpr::sym("intention")];
+    
+    fields.push(SExpr::list(vec![SExpr::sym("hash"), SExpr::raw(intention.hash.clone())]));
+    fields.push(SExpr::list(vec![SExpr::sym("author"), SExpr::raw(intention.author.clone())]));
+    
+    if let Some(ref ts) = intention.timestamp {
+        fields.push(SExpr::list(vec![
+            SExpr::sym("timestamp"),
+            SExpr::num(ts.wall_time),
+            SExpr::sym(":counter"),
+            SExpr::num(ts.counter as u64),
+        ]));
+    }
+    
+    if !detail.ops.is_empty() {
+        let mut ops_items = vec![SExpr::sym("ops")];
+        ops_items.extend(detail.ops.clone());
+        fields.push(SExpr::list(ops_items));
+    }
+    
+    SExpr::list(fields)
+}
+
+pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
     
     let store_id = match store_id {
@@ -493,8 +542,8 @@ pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, k
         }
     };
     
-    // Unified path - works for both RPC and in-process via backend abstraction
-    let entries = match backend.store_history(store_id).await {
+    // Get witness log entries
+    let witness_entries = match backend.store_witness_log(store_id).await {
         Ok(e) => e,
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);
@@ -502,41 +551,45 @@ pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, k
         }
     };
     
-    if entries.is_empty() {
+    if witness_entries.is_empty() {
         let _ = writeln!(w, "(no matching history found)");
         return Ok(Continue);
     }
     
     let mut graph_entries: HashMap<Hash, graph_renderer::RenderEntry> = HashMap::new();
-    let filter_val = key.map(|k| k.to_string());
     
-    for entry in entries {
-        let hash = Hash::try_from(entry.hash.as_slice()).unwrap_or(Hash::ZERO);
-        let author = PubKey::try_from(entry.author.as_slice()).unwrap_or(PubKey::default());
-        let causal_deps: Vec<Hash> = entry.causal_deps.iter()
-            .filter_map(|h| Hash::try_from(h.as_slice()).ok())
-            .collect();
-        
-        // Use server-provided summary (handles Put, Delete, etc. correctly)
-        let label = if entry.summary.is_empty() {
-            hex::encode(&entry.hash[..4])
-        } else {
-            entry.summary.clone()
+    // For each witness entry, decode the hash and fetch the full intention
+    for entry in &witness_entries {
+        let content = match lattice_runtime::WitnessContent::decode(entry.content.as_slice()) {
+            Ok(c) => c,
+            Err(_) => continue,
         };
         
-        // Apply filter if specified
-        if let Some(ref filter) = filter_val {
-            if !label.contains(filter) {
-                continue;
-            }
-        }
+        let details = backend.store_get_intention(store_id, &content.intention_hash).await.unwrap_or_default();
+        let detail = match details.into_iter().next() {
+            Some(d) => d,
+            None => continue,
+        };
+        let intention = &detail.intention;
+        
+        let hash = Hash::try_from(intention.hash.as_slice()).unwrap_or(Hash::ZERO);
+        let author = PubKey::try_from(intention.author.as_slice()).unwrap_or(PubKey::default());
+        let causal_deps: Vec<Hash> = intention.condition.as_ref()
+            .and_then(|c| match c.condition.as_ref()? {
+                lattice_runtime::condition::Condition::V1(d) => {
+                    Some(d.hashes.iter().filter_map(|h| Hash::try_from(h.as_slice()).ok()).collect())
+                }
+            })
+            .unwrap_or_default();
+        
+        let intention_sexpr = detail_to_sexpr_short(&detail);
         
         graph_entries.insert(hash, graph_renderer::RenderEntry {
-            label,
+            intention: intention_sexpr,
             author,
-            hlc: entry.timestamp,
-            causal_deps,
-            is_merge: entry.causal_deps.len() > 1,
+            hlc: intention.timestamp.as_ref().map(|t| (t.wall_time << 16) | (t.counter as u64)).unwrap_or(0),
+            causal_deps: causal_deps.clone(),
+            is_merge: causal_deps.len() > 1,
         });
     }
     
@@ -545,37 +598,10 @@ pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, k
         return Ok(Continue);
     }
     
-    let target = filter_val.unwrap_or_else(|| "*".to_string());
+    let target = "*".to_string();
     let _ = writeln!(w, "History for: {}\n", target);
     let output = graph_renderer::render_dag(&graph_entries, target.as_bytes());
     let _ = write!(w, "{}", output);
-    
-    Ok(Continue)
-}
-
-pub async fn cmd_orphan_cleanup(backend: &dyn LatticeBackend, store_id: Option<Uuid>, writer: Writer) -> CmdResult {
-    let mut w = writer.clone();
-    
-    let store_id = match store_id {
-        Some(id) => id,
-        None => {
-            let _ = writeln!(w, "No store selected.");
-            return Ok(Continue);
-        }
-    };
-    
-    match backend.store_orphan_cleanup(store_id).await {
-        Ok(removed) => {
-            if removed > 0 {
-                let _ = writeln!(w, "Cleaned up {} stale orphan(s)", removed);
-            } else {
-                let _ = writeln!(w, "No stale orphans to clean up");
-            }
-        }
-        Err(e) => {
-            let _ = writeln!(w, "Error: {}", e);
-        }
-    }
     
     Ok(Continue)
 }

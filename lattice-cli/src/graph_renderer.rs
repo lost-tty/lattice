@@ -4,8 +4,8 @@
 //! Design inspired by git-graph: https://github.com/mlange-42/git-graph (MIT)
 
 use std::fmt::Write;
-use lattice_runtime::{PubKey, Hash};
-use crate::display_helpers::{author_color, ansi_code};
+use lattice_runtime::{PubKey, Hash, SExpr};
+use crate::display_helpers::{author_color, ansi_code, render_sexpr_colored};
 
 // Character codes for grid cells
 pub const SPACE: u8 = 0;
@@ -272,7 +272,7 @@ impl Grid {
 
 #[derive(Clone)]
 pub struct RenderEntry {
-    pub label: String,
+    pub intention: SExpr,
     pub author: PubKey,
     pub hlc: u64,
     pub causal_deps: Vec<Hash>,
@@ -532,15 +532,8 @@ pub fn render_dag(
         };
         grid.set_colored(grid_x, row, marker, 0, color_code); // Entries have highest priority
         
-        // Create colored label
-        let hash_short = hex::encode(&hash[..4]);
-        let author_short = hex::encode(&entry.author[..4]);
-        
-        // Format with ANSI color: \x1b[{color}m ... \x1b[0m
-        labels[row] = format!(
-            "\x1b[{}m[{}] {} \x1b[{}m(a:{})\x1b[0m", 
-            color_code, hash_short, entry.label, color_code, author_short
-        );
+        // Render full intention as single-line SExpr
+        labels[row] = render_sexpr_colored(&entry.intention, 4);
         
         // Draw connections to parents (use parents_in_set from above)
         for (p_idx, parent) in parents_in_set.iter().enumerate() {

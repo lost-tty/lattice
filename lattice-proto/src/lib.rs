@@ -78,3 +78,7 @@ pub mod kv {
         }
     }
 }
+
+pub mod weaver {
+    include!(concat!(env!("OUT_DIR"), "/lattice.weaver.rs"));
+}

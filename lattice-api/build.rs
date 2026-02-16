@@ -13,15 +13,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "StoreDetails",
             "StoreMeta",
             "PeerInfo",
-            "HistoryEntry",
+            "WitnessLogEntry",
+            "SignedIntention",
+            "Condition",
+            "CausalDeps",
+            "HLC",
             "AuthorState",
-            "CleanupResult",
             "JoinResponse",
             // Event message types (for BackendEvent unification)
             "MeshReadyEvent",
             "StoreReadyEvent",
             "JoinFailedEvent",
             "SyncResultEvent",
+            "SExpr",
+            "SExprList",
+            "GetIntentionRequest",
         ];
         
         let mut config = config;
@@ -32,7 +38,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Add uniffi::Enum to enum types
         let ffi_enums = [
             "ErrorCode",
-            "node_event.NodeEvent",  // The inner oneof enum for node events
+            ".lattice.daemon.v1.NodeEvent.node_event",
+            ".lattice.daemon.v1.Condition.condition",
+            ".lattice.daemon.v1.SExpr.value",
         ];
         
         for e in ffi_enums {

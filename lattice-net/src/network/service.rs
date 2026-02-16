@@ -6,7 +6,7 @@
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
 use lattice_net_types::{NetworkStore, NodeProviderExt};
 use lattice_model::{NetEvent, Uuid, UserEvent};
-use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinRequest, StatusRequest};
+use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinRequest, StatusRequest, AuthorTip};
 use lattice_model::types::PubKey;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
-use crate::peer_sync_store::PeerSyncStore;
 
 /// Result of a sync operation with a peer
 pub struct SyncResult {
@@ -24,8 +23,8 @@ pub struct SyncResult {
     pub entries_sent: u64,
 }
 
-/// Registry of peer-side sync stores, keyed by store_id
-pub type PeerStoreRegistry = Arc<RwLock<HashMap<Uuid, Arc<PeerSyncStore>>>>;
+/// Peer store registry - now just tracks which stores have been registered for networking
+pub type PeerStoreRegistry = Arc<RwLock<std::collections::HashSet<Uuid>>>;
 
 /// Central service for mesh networking.
 /// Combines routing, gossip, and sync into a unified API.
@@ -94,8 +93,8 @@ impl NetworkService {
     ) -> Result<Arc<Self>, super::error::ServerError> {
         let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint));
         
-        // Create peer stores registry (network-layer specific)
-        let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashMap::new()));
+        // Track which stores are registered for networking
+        let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(std::collections::HashSet::new()));
         
         let sync_protocol = SyncProtocol { 
             provider: provider.clone(), 
@@ -122,6 +121,36 @@ impl NetworkService {
         tokio::spawn(async move {
             Self::run_net_event_handler(service_clone, event_rx).await;
         });
+
+        // Consume gossip-triggered sync requests (tip divergence)
+        if let Some(mut sync_rx) = gossip_manager.take_sync_request_rx().await {
+            let service_clone = service.clone();
+            tokio::spawn(async move {
+                while let Some((store_id, peer)) = sync_rx.recv().await {
+                    let Ok(iroh_peer) = iroh::PublicKey::from_bytes(&peer.0) else { continue };
+                    tracing::info!(
+                        store_id = %store_id,
+                        peer = %iroh_peer.fmt_short(),
+                        "Gossip tip divergence → triggering sync"
+                    );
+                    let svc = service_clone.clone();
+                    tokio::spawn(async move {
+                        match svc.sync_with_peer_by_id(store_id, iroh_peer, &[]).await {
+                            Ok(r) => tracing::info!(
+                                store_id = %store_id,
+                                entries = r.entries_received,
+                                "Gossip-triggered sync complete"
+                            ),
+                            Err(e) => tracing::debug!(
+                                store_id = %store_id,
+                                error = %e,
+                                "Gossip-triggered sync failed (may retry)"
+                            ),
+                        }
+                    });
+                }
+            });
+        }
         
         Ok(service)
     }
@@ -281,13 +310,13 @@ impl NetworkService {
 
     // ==================== Status Operations ====================
 
-    /// Request status from a single peer
+    /// Request status (author_tips) from a single peer
     pub async fn status_peer(
         &self, 
         peer_id: iroh::PublicKey, 
         store_id: Uuid, 
-        our_sync_state: Option<lattice_kernel::proto::storage::SyncState>
-    ) -> Result<(u64, Option<lattice_kernel::proto::storage::SyncState>), LatticeNetError> {
+        our_tips: Option<Vec<AuthorTip>>,
+    ) -> Result<(u64, Vec<AuthorTip>), LatticeNetError> {
         let start = std::time::Instant::now();
         
         let conn = self.endpoint.connect(peer_id).await
@@ -301,7 +330,7 @@ impl NetworkService {
         let req = PeerMessage {
             message: Some(peer_message::Message::StatusRequest(StatusRequest {
                 store_id: store_id.as_bytes().to_vec(),
-                sync_state: our_sync_state,
+                author_tips: our_tips.unwrap_or_default(),
             })),
         };
         sink.send(&req).await?;
@@ -314,21 +343,21 @@ impl NetworkService {
             ?
             .ok_or_else(|| LatticeNetError::Connection("No status response".into()))?;
         
-        let sync_state = match resp.message {
-            Some(peer_message::Message::StatusResponse(res)) => res.sync_state,
+        let peer_tips = match resp.message {
+            Some(peer_message::Message::StatusResponse(res)) => res.author_tips,
             _ => return Err(LatticeNetError::Connection("Expected StatusResponse".into())),
         };
         
         let rtt_ms = start.elapsed().as_millis() as u64;
-        Ok((rtt_ms, sync_state))
+        Ok((rtt_ms, peer_tips))
     }
     
     /// Request status from all active peers
     pub async fn status_all(
         &self, 
         store_id: Uuid, 
-        our_sync_state: Option<lattice_kernel::proto::storage::SyncState>
-    ) -> HashMap<iroh::PublicKey, Result<(u64, Option<lattice_kernel::proto::storage::SyncState>), String>> {
+        our_tips: Option<Vec<AuthorTip>>,
+    ) -> HashMap<iroh::PublicKey, Result<(u64, Vec<AuthorTip>), String>> {
         use futures_util::StreamExt;
         
         let peer_ids = match self.active_peer_ids().await {
@@ -337,9 +366,9 @@ impl NetworkService {
         };
         
         let futures = peer_ids.into_iter().map(|peer_id| {
-            let sync_state = our_sync_state.clone();
+            let tips = our_tips.clone();
             async move {
-                let result = self.status_peer(peer_id, store_id, sync_state).await
+                let result = self.status_peer(peer_id, store_id, tips).await
                     .map_err(|e| e.to_string());
                 (peer_id, result)
             }
@@ -376,11 +405,7 @@ impl NetworkService {
         
         let peer_pubkey: PubKey = peer_id.to_lattice();
         
-        let store_id = store.id();
-        let peer_store = self.peer_stores.read().await.get(&store_id).cloned()
-            .ok_or_else(|| LatticeNetError::Sync(format!("PeerStore {} not registered during sync", store_id)))?;
-            
-        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_pubkey, &peer_store);
+        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_pubkey);
         let result = session.run_as_initiator().await?;
         
         sink.finish().await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
@@ -587,8 +612,8 @@ impl NetworkService {
     /// Register a store for network access.
     /// The store must already be registered in Node's StoreManager.
     pub async fn register_store_by_id(self: &Arc<Self>, store_id: Uuid, pm: std::sync::Arc<dyn lattice_model::PeerProvider>) {
-        // Check if already registered for network (using peer_stores as indicator)
-        if self.peer_stores.read().await.contains_key(&store_id) {
+        // Check if already registered for network
+        if self.peer_stores.read().await.contains(&store_id) {
             tracing::debug!(store_id = %store_id, "Store already registered for network");
             return;
         }
@@ -601,19 +626,13 @@ impl NetworkService {
         
         tracing::info!(store_id = %store_id, "Registering store for network");
         
-        // Create PeerSyncStore (in-memory, network-layer specific)
-        let peer_store = Arc::new(PeerSyncStore::new());
-        self.peer_stores.write().await.insert(store_id, peer_store.clone());
-        
-        // Subscribe BEFORE gossip setup to avoid missing events
-        let (sync_needed_tx, sync_needed_rx) = broadcast::channel(128);
+        // Mark as registered
+        self.peer_stores.write().await.insert(store_id);
         
         if let Err(e) = self.gossip_manager.setup_for_store(
             pm, 
             self.sessions.clone(), 
             network_store.clone(),
-            peer_store.clone(),
-            sync_needed_tx
         ).await {
             tracing::error!(error = %e, "Gossip setup failed");
         }
@@ -641,134 +660,6 @@ impl NetworkService {
                 
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
-        });
-        
-        Self::spawn_gap_watcher(self.clone(), network_store.clone());
-        Self::spawn_sync_coordinator_with_rx(self.clone(), network_store, peer_store, sync_needed_rx);
-    }
-    
-    /// Spawn gap watcher
-    fn spawn_gap_watcher(service: Arc<Self>, store: NetworkStore) {
-        tokio::spawn(async move {
-            let Ok(mut gap_rx) = store.subscribe_gaps().await else { return };
-            
-            use std::collections::HashSet;
-            use tokio::sync::broadcast::error::RecvError;
-            let syncing = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::<PubKey>::new()));
-            
-            loop {
-                match gap_rx.recv().await {
-                    Ok(gap) => {
-                        let author = gap.author;
-                        
-                        {
-                            let mut guard = syncing.lock().await;
-                            if guard.contains(&author) { continue; }
-                            guard.insert(author);
-                        }
-                        
-                        tracing::debug!(
-                            author = %hex::encode(&author[..8]),
-                            from_seq = gap.from_seq, to_seq = gap.to_seq,
-                            "Gap detected, syncing"
-                        );
-                        
-                        let _ = service.sync_author_all(&store, author).await;
-                        syncing.lock().await.remove(&author);
-                    }
-                    Err(RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "Gap watcher lagged");
-                        continue;
-                    }
-                    Err(RecvError::Closed) => break,
-                }
-            }
-        });
-    }
-    
-    /// Sync coordinator
-    fn spawn_sync_coordinator_with_rx(
-        service: Arc<Self>, 
-        store: NetworkStore,
-        peer_store: Arc<PeerSyncStore>,
-        mut sync_rx: tokio::sync::broadcast::Receiver<lattice_kernel::SyncNeeded>,
-    ) {
-        const COOLDOWN_SECS: u64 = 30;
-        const DEFER_SECS: u64 = 3;
-        
-        tokio::spawn(async move {
-            use std::collections::{HashMap, HashSet};
-            use std::time::{Duration, Instant};
-            use tokio::sync::broadcast::error::RecvError;
-            use futures_util::stream::{FuturesUnordered, StreamExt};
-            
-            let cooldown = Duration::from_secs(COOLDOWN_SECS);
-            let defer_delay = Duration::from_secs(DEFER_SECS);
-            let mut last_attempt: HashMap<PubKey, Instant> = HashMap::new();
-            let mut pending_peers: HashSet<PubKey> = HashSet::new();
-            let mut pending_timers: FuturesUnordered<_> = FuturesUnordered::new();
-            let store_id = store.id();
-            
-            tracing::info!(store_id = %store_id, "Sync coordinator started");
-            
-            loop {
-                tokio::select! {
-                    result = sync_rx.recv() => {
-                         match result {
-                            Ok(needed) => {
-                                if pending_peers.contains(&needed.peer) { continue; }
-                                if let Some(last) = last_attempt.get(&needed.peer) {
-                                    if last.elapsed() < cooldown { continue; }
-                                }
-                                pending_peers.insert(needed.peer);
-                                let peer: PubKey = needed.peer;
-                                pending_timers.push(async move {
-                                    tokio::time::sleep(defer_delay).await;
-                                    peer
-                                });
-                            }
-                            Err(RecvError::Lagged(n)) => {
-                                tracing::warn!(store_id = %store_id, skipped = n, "Sync coordinator lagged");
-                            }
-                            Err(RecvError::Closed) => break,
-                         }
-                    }
-                    Some(peer_bytes) = pending_timers.next(), if !pending_timers.is_empty() => {
-                        pending_peers.remove(&peer_bytes);
-                        
-                        let still_out_of_sync = match peer_store.get_peer_sync_state(&peer_bytes) {
-                            Ok(Some(info)) => {
-                                if let Some(ref peer_proto) = info.sync_state {
-                                    let peer_state = lattice_kernel::SyncState::from_proto(peer_proto);
-                                    match store.sync_state().await {
-                                        Ok(local) => local.calculate_discrepancy(&peer_state).is_out_of_sync(),
-                                        Err(_) => false,
-                                    }
-                                } else { false }
-                            }
-                            _ => false,
-                        };
-                        
-                        if still_out_of_sync {
-                             if let Some(last) = last_attempt.get(&peer_bytes) {
-                                if last.elapsed() < cooldown { continue; }
-                            }
-                            
-                            let Ok(peer_pk) = iroh::PublicKey::try_from(peer_bytes.as_slice()) else { continue; };
-                            last_attempt.insert(peer_bytes, Instant::now());
-                            
-                            tracing::info!(store_id = %store_id, peer = %peer_pk.fmt_short(), "Deferred auto-sync triggered");
-                            
-                            let service = service.clone();
-                            let store = store.clone();
-                            tokio::spawn(async move {
-                                let _ = service.sync_with_peer(&store, peer_pk, &[]).await;
-                            });
-                        }
-                    }
-                }
-            }
-            tracing::warn!(store_id = %store_id, "Sync coordinator ended");
         });
     }
 }

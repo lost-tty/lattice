@@ -57,12 +57,12 @@ impl StoreRegistry {
         // Create storage directories
         let store_dir = self.data_dir.store_dir(store_id);
         let state_dir = store_dir.join("state");
-        let sigchain_dir = store_dir.join("sigchain");
-        std::fs::create_dir_all(&sigchain_dir)?;
+        let intentions_dir = store_dir.join("intentions");
+        std::fs::create_dir_all(&intentions_dir)?;
         
         // Open Initial State (creates db) using provided function
         let state = Arc::new(open_fn(&state_dir)?);
-        let _ = OpenedStore::new(store_id, sigchain_dir, state)?;
+        let _ = OpenedStore::new(store_id, intentions_dir, state)?;
         
         // Register in meta
         self.meta.add_store(store_id, Uuid::nil()).map_err(|e| StateError::Io(std::io::Error::new(
@@ -96,11 +96,11 @@ impl StoreRegistry {
         // Not cached - open and cache the ORIGINAL (keeps actor alive)
         let store_dir = self.data_dir.store_dir(store_id);
         let state_dir = store_dir.join("state");
-        let sigchain_dir = store_dir.join("sigchain");
-        std::fs::create_dir_all(&sigchain_dir)?;
+        let intentions_dir = store_dir.join("intentions");
+        std::fs::create_dir_all(&intentions_dir)?;
         
         let state = Arc::new(open_fn(&state_dir)?);
-        let opened = OpenedStore::new(store_id, sigchain_dir, state)?;
+        let opened = OpenedStore::new(store_id, intentions_dir, state)?;
         let (store_handle, info, runner) = opened.into_handle((*self.node).clone())?;
         
         // Spawn the actor runner as tokio task

@@ -3,11 +3,11 @@
 use crate::{LatticeEndpoint, ToLattice};
 use super::error::GossipError;
 use lattice_model::{PeerStatus, PeerEvent, PeerProvider, Uuid, types::PubKey};
+use lattice_model::types::Hash;
+use lattice_model::weaver::SignedIntention;
 use lattice_net_types::NetworkStore;
-use lattice_kernel::proto::storage::PeerSyncInfo;
 use lattice_kernel::proto::network::GossipMessage;
-use lattice_kernel::SyncNeeded;
-use crate::peer_sync_store::PeerSyncStore;
+use lattice_kernel::weaver::convert::{intention_to_proto, intention_from_proto, tips_to_proto, tips_from_proto};
 use iroh_gossip::Gossip;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,16 +29,21 @@ pub struct GossipManager {
     senders: Arc<RwLock<HashMap<Uuid, iroh_gossip::api::GossipSender>>>,
     my_pubkey: iroh::PublicKey,
     cancel_token: tokio_util::sync::CancellationToken,
+    sync_request_tx: tokio::sync::mpsc::UnboundedSender<(Uuid, PubKey)>,
+    sync_request_rx: tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(Uuid, PubKey)>>>,
 }
 
 impl GossipManager {
     /// Create a new GossipManager
     pub fn new(endpoint: &LatticeEndpoint) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             gossip: Gossip::builder().spawn(endpoint.endpoint().clone()),
             senders: Arc::new(RwLock::new(HashMap::new())),
             my_pubkey: endpoint.public_key(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            sync_request_tx: tx,
+            sync_request_rx: tokio::sync::Mutex::new(Some(rx)),
         }
     }
 
@@ -51,6 +56,11 @@ impl GossipManager {
     pub fn gossip(&self) -> &Gossip {
         &self.gossip
     }
+
+    /// Take the sync request receiver. Called once by NetworkService to consume sync requests.
+    pub async fn take_sync_request_rx(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<(Uuid, PubKey)>> {
+        self.sync_request_rx.lock().await.take()
+    }
     
     /// Setup gossip for a store - uses supplied PeerProvider trait for auth and SessionTracker for online state
     #[tracing::instrument(skip(self, pm, sessions, store), fields(store_id = %store.id()))]
@@ -59,8 +69,6 @@ impl GossipManager {
         pm: std::sync::Arc<dyn PeerProvider>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
         store: NetworkStore,
-        peer_store: std::sync::Arc<PeerSyncStore>,
-        sync_needed_tx: tokio::sync::broadcast::Sender<SyncNeeded>,
     ) -> Result<(), GossipError> {
         let store_id = store.id();
         
@@ -86,197 +94,153 @@ impl GossipManager {
         let (sender, receiver) = topic_handle.split();
         self.senders.write().await.insert(store_id, sender);
         
-        // Simple pending flag for SyncState piggybacking. Start true to announce on startup.
-        let pending_syncstate = Arc::new(AtomicBool::new(true));
+        // Simple pending flag for author_tips piggybacking. Start true to announce on startup.
+        let pending_tips = Arc::new(AtomicBool::new(true));
         
-        // Subscribe BEFORE spawning tasks to avoid missing entries
-        let entry_rx = store.subscribe_entries();
+        // Subscribe to intentions BEFORE spawning tasks to avoid missing them
+        let intention_rx = store.subscribe_intentions();
         
-        // Spawn background tasks - all use AuthorizedStore for security
-        // SessionTracker (network layer) tracks online status, not PeerManager (core layer)
+        // Spawn background tasks
         let token = self.cancel_token.clone();
-        self.spawn_receiver(store.clone(), receiver, pm.clone(), sessions, pending_syncstate.clone(), peer_store, sync_needed_tx, token.clone());
-        self.spawn_forwarder(store.clone(), entry_rx, pending_syncstate.clone(), token.clone());
-        self.spawn_syncstate_fallback(store, pending_syncstate, token.clone());
+        let sync_tx = self.sync_request_tx.clone();
+        self.spawn_receiver(store.clone(), receiver, pm.clone(), sessions, pending_tips.clone(), sync_tx, token.clone());
+        self.spawn_forwarder(store.clone(), intention_rx, pending_tips.clone(), token.clone());
+        self.spawn_tips_fallback(store, pending_tips, token.clone());
         self.spawn_peer_watcher(store_id, rx, token);
         
         tracing::debug!("Gossip tasks spawned");
         Ok(())
     }
+
     fn spawn_receiver(
         &self,
         store: NetworkStore,
         mut rx: iroh_gossip::api::GossipReceiver,
         pm: std::sync::Arc<dyn PeerProvider>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
-        pending_syncstate: Arc<AtomicBool>,
-        peer_store: std::sync::Arc<PeerSyncStore>,
-        sync_needed_tx: tokio::sync::broadcast::Sender<SyncNeeded>,
+        pending_tips: Arc<AtomicBool>,
+        sync_tx: tokio::sync::mpsc::UnboundedSender<(Uuid, PubKey)>,
         token: tokio_util::sync::CancellationToken,
     ) {
         let store_id = store.id();
         
         tokio::spawn(async move {
-            // Get initial neighbors and mark as online in SessionTracker
             let neighbors: Vec<_> = rx.neighbors().collect();
-            tracing::info!(
-                store_id = %store_id, 
-                count = neighbors.len(), 
-                "Initial gossip neighbors"
-            );
             for peer in &neighbors {
-                tracing::debug!(peer = %peer.fmt_short(), "Initial gossip neighbor");
-                if let Err(e) = sessions.mark_online(peer.to_lattice()) {
-                    tracing::warn!(store_id = %store_id, error = %e, "Session lock poisoned during init");
-                    // If lock is poisoned this early, we might as well break/return or just continue?
-                    // We can't really "break" the gossip loop here as it hasn't started. 
-                }
+                let _ = sessions.mark_online(peer.to_lattice());
             }
-            tracing::info!(store_id = %store_id, initial_neighbors = neighbors.len(), "Gossip receiver started");
+            tracing::info!(store_id = %store_id, neighbors = neighbors.len(), "Gossip receiver started");
             
             loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        tracing::debug!(store_id = %store_id, "Gossip receiver cancelled");
-                        break;
-                    }
+                let event = tokio::select! {
+                    _ = token.cancelled() => break,
                     event = futures_util::StreamExt::next(&mut rx) => {
-                         let Some(event) = event else { break };
-                tracing::debug!(store_id = %store_id, event = ?event, "Gossip event");
-                match event {
-                    Ok(iroh_gossip::api::Event::Received(msg)) => {
-                        // Check if gossip sender is authorized (separate from entry author check)
-                        let sender: PubKey = msg.delivered_from.to_lattice();
-                        
-                        // Check if this peer is tracked as online
-                        match sessions.mark_online(sender) {
-                            Ok(true) => {
-                                tracing::warn!(
-                                    store_id = %store_id,
-                                    peer = %msg.delivered_from.fmt_short(),
-                                    "Received gossip from peer NOT marked online (missing NeighborUp?)"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(store_id = %store_id, error = %e, "Session lock poisoned");
-                                break;
-                            }
-                            _ => {}
-                        }
-                        
-                        if !pm.can_connect(&sender) {
-                            tracing::warn!(
-                                store_id = %store_id,
-                                sender = %sender,
-                                "Rejected gossip from unauthorized peer"
-                            );
-                            continue;
-                        }
-                        
-                        // Decode GossipMessage (new optional-field structure)
-                        let gossip_msg = match GossipMessage::decode(&msg.content[..]) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                tracing::warn!(store_id = %store_id, error = %e, "Failed to decode gossip message");
+                        match event {
+                            Some(Ok(e)) => e,
+                            Some(Err(e)) => {
+                                tracing::warn!(store_id = %store_id, error = %e, "Gossip receive error");
                                 continue;
                             }
-                        };
-                        
-                        // Handle entry (if present) - AuthorizedStore checks entry author
-                        if let Some(entry) = gossip_msg.entry {
-                            tracing::debug!(store_id = %store_id, from = %msg.delivered_from.fmt_short(), "Gossip entry received");
-                            let internal: Result<lattice_kernel::SignedEntry, _> = entry.try_into();
-                            if let Ok(internal_entry) = internal {
-                                let _ = store.ingest_entry(internal_entry).await;
-                            }
-                            // Mark pending for SyncState piggybacking on next outbound
-                            pending_syncstate.store(true, Ordering::SeqCst);
-                        }
-                        
-                        // Handle piggybacked sender_state (if present)
-                        // Store broadcasts SyncNeeded event if we're behind - MeshNetwork subscribes
-                        if let Some(sync_state) = gossip_msg.sender_state {
-                            let formatted = format_sync_state(&sync_state);
-                            
-                            let info = PeerSyncInfo {
-                                sync_state: Some(sync_state.clone()),
-                                updated_at: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs(),
-                            };
-                            
-                            if let Err(e) = peer_store.set_peer_sync_state(&sender, info) {
-                                tracing::warn!(store_id = %store_id, error = %e, "Failed to update peer sync state");
-                            }
-
-                            // Check discrepancy and emit SyncNeeded
-                            if let Ok(local_state) = store.sync_state().await {
-                                let peer_state_obj = lattice_kernel::SyncState::from_proto(&sync_state);
-                                let discrepancy = local_state.calculate_discrepancy(&peer_state_obj);
-                                if discrepancy.is_out_of_sync() {
-                                    let _ = sync_needed_tx.send(SyncNeeded {
-                                        peer: sender,
-                                        discrepancy,
-                                    });
-                                }
-                            }
-                            
-                            tracing::info!(
-                                store_id = %store_id,
-                                from = %sender,
-                                state = %formatted,
-                                "Received SyncState"
-                            );
+                            None => break,
                         }
                     }
-                    Ok(iroh_gossip::api::Event::NeighborUp(peer_id)) => {
-                        let peer: PubKey = peer_id.to_lattice();
-                        if let Err(e) = sessions.mark_online(peer) {
-                            tracing::error!(store_id = %store_id, error = %e, "Session lock poisoned on NeighborUp");
-                            break;
-                        }
-                        let count = sessions.online_peers().map(|m| m.len()).unwrap_or(0);
-                        tracing::info!(
-                            store_id = %store_id,
-                            peer = %peer_id.fmt_short(), 
-                            total_neighbors = count,
-                            "NeighborUp: gossip peer connected"
-                        );
-                    }
-                    Ok(iroh_gossip::api::Event::NeighborDown(peer_id)) => {
-                        let peer: PubKey = peer_id.to_lattice();
-                        if let Err(e) = sessions.mark_offline(peer) {
-                            tracing::error!(store_id = %store_id, error = %e, "Session lock poisoned on NeighborDown");
-                            break;
-                        }
-                        let count = sessions.online_peers().map(|m| m.len()).unwrap_or(0);
-                        tracing::info!(
-                            store_id = %store_id,
-                            peer = %peer_id.fmt_short(), 
-                            total_neighbors = count,
-                            "NeighborDown: gossip peer disconnected"
-                        );
-                    }
-                    Ok(iroh_gossip::api::Event::Lagged) => {
-                        tracing::warn!(store_id = %store_id, "Gossip receiver lagged");
-                    }
-                    Err(e) => {
-                        tracing::warn!(store_id = %store_id, error = %e, "Gossip receive error");
-                    }
-                }
-                }
-                }
+                };
+                
+                Self::handle_gossip_event(
+                    &store, store_id, event,
+                    &pm, &sessions, &pending_tips, &sync_tx,
+                ).await;
             }
             tracing::warn!(store_id = %store_id, "Gossip receiver ended");
         });
     }
     
+    async fn handle_gossip_event(
+        store: &NetworkStore,
+        store_id: Uuid,
+        event: iroh_gossip::api::Event,
+        pm: &std::sync::Arc<dyn PeerProvider>,
+        sessions: &std::sync::Arc<super::session::SessionTracker>,
+        pending_tips: &AtomicBool,
+        sync_tx: &tokio::sync::mpsc::UnboundedSender<(Uuid, PubKey)>,
+    ) {
+        match event {
+            iroh_gossip::api::Event::Received(msg) => {
+                let sender: PubKey = msg.delivered_from.to_lattice();
+                let _ = sessions.mark_online(sender);
+                
+                if !pm.can_connect(&sender) {
+                    tracing::warn!(store_id = %store_id, sender = %sender, "Rejected gossip from unauthorized peer");
+                    return;
+                }
+                
+                let gossip_msg = match GossipMessage::decode(&msg.content[..]) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!(store_id = %store_id, error = %e, "Failed to decode gossip message");
+                        return;
+                    }
+                };
+                
+                // Ingest intention if present
+                if let Some(proto_intention) = gossip_msg.intention {
+                    tracing::debug!(store_id = %store_id, from = %msg.delivered_from.fmt_short(), "Gossip intention received");
+                    if let Ok(signed) = intention_from_proto(&proto_intention) {
+                        let _ = store.ingest_intention(signed).await;
+                    }
+                    pending_tips.store(true, Ordering::SeqCst);
+                }
+                
+                // Compare piggybacked tips — request sync on divergence
+                if !gossip_msg.sender_tips.is_empty() {
+                    Self::handle_tip_divergence(store, store_id, &gossip_msg.sender_tips, sender, sync_tx).await;
+                }
+            }
+            iroh_gossip::api::Event::NeighborUp(peer_id) => {
+                let _ = sessions.mark_online(peer_id.to_lattice());
+                let count = sessions.online_peers().map(|m| m.len()).unwrap_or(0);
+                tracing::info!(store_id = %store_id, peer = %peer_id.fmt_short(), total = count, "NeighborUp");
+            }
+            iroh_gossip::api::Event::NeighborDown(peer_id) => {
+                let _ = sessions.mark_offline(peer_id.to_lattice());
+                let count = sessions.online_peers().map(|m| m.len()).unwrap_or(0);
+                tracing::info!(store_id = %store_id, peer = %peer_id.fmt_short(), total = count, "NeighborDown");
+            }
+            iroh_gossip::api::Event::Lagged => {
+                tracing::warn!(store_id = %store_id, "Gossip receiver lagged");
+            }
+        }
+    }
+    
+    async fn handle_tip_divergence(
+        store: &NetworkStore,
+        store_id: Uuid,
+        sender_tips_proto: &[lattice_kernel::proto::network::AuthorTip],
+        sender: PubKey,
+        sync_tx: &tokio::sync::mpsc::UnboundedSender<(Uuid, PubKey)>,
+    ) {
+        let peer_tips = tips_from_proto(sender_tips_proto);
+        let Ok(local_tips) = store.author_tips().await else { return };
+        
+        for (author, remote_hash) in &peer_tips {
+            let local_hash = local_tips.get(author).copied().unwrap_or(Hash::ZERO);
+            if *remote_hash != local_hash {
+                tracing::info!(
+                    store_id = %store_id,
+                    author = %hex::encode(&author.0[..4]),
+                    "Tip divergence — requesting sync"
+                );
+                let _ = sync_tx.send((store_id, sender));
+                return; // One sync request covers all authors
+            }
+        }
+    }
+    
     fn spawn_forwarder(
         &self,
         store: NetworkStore,
-        mut entry_rx: tokio::sync::broadcast::Receiver<lattice_kernel::SignedEntry>,
-        pending_syncstate: Arc<AtomicBool>,
+        mut intention_rx: tokio::sync::broadcast::Receiver<SignedIntention>,
+        pending_tips: Arc<AtomicBool>,
         token: tokio_util::sync::CancellationToken,
     ) {
         let senders = self.senders.clone();
@@ -284,84 +248,94 @@ impl GossipManager {
         let my_pubkey_bytes = self.my_pubkey.as_bytes().to_vec();
         
         tokio::spawn(async move {
-            tracing::debug!(store_id = %store_id, "Entry forwarder started");
+            tracing::debug!(store_id = %store_id, "Intention forwarder started");
             loop {
                 tokio::select! {
                     _ = token.cancelled() => {
-                        tracing::debug!(store_id = %store_id, "Entry forwarder cancelled");
+                        tracing::debug!(store_id = %store_id, "Intention forwarder cancelled");
                         break;
                     }
-                    res = entry_rx.recv() => {
-                        let Ok(entry) = res else { break };
-                // Unified Entry Feed: filtering required
-                if my_pubkey_bytes.as_slice() == entry.author_id.as_ref() {
-                    tracing::debug!(store_id = %store_id, "Broadcasting local entry via gossip");
+                    res = intention_rx.recv() => {
+                        let Ok(signed) = res else { break };
+                // Only broadcast our own local intentions
+                if my_pubkey_bytes.as_slice() == signed.intention.author.0.as_ref() {
+                    tracing::debug!(store_id = %store_id, "Broadcasting local intention via gossip");
                     if let Some(sender) = senders.read().await.get(&store_id) {
-                        // Always piggyback SyncState on local writes
-                        let sender_state = store.sync_state().await.ok().map(|s| s.to_proto());
-                            let proto_entry: lattice_kernel::proto::storage::SignedEntry = entry.into();
-                            let msg = GossipMessage {
-                                entry: Some(proto_entry),
-                                sender_state,
-                            };
+                        // Piggyback author_tips on local writes
+                        let author_tips = store.author_tips().await
+                            .ok()
+                            .map(|tips| tips_to_proto(&tips))
+                            .unwrap_or_default();
+                        
+                        let proto_intention = intention_to_proto(&signed);
+                        
+                        let msg = GossipMessage {
+                            intention: Some(proto_intention),
+                            sender_tips: author_tips,
+                        };
                         
                         if let Err(e) = sender.broadcast(msg.encode_to_vec().into()).await {
                             tracing::warn!(error = %e, "Gossip broadcast failed");
-                        } else if let Some(state) = &msg.sender_state {
-                             let formatted = format_sync_state(state);
-                             tracing::info!(store_id = %store_id, state = %formatted, "Piggybacked SyncState on entry");
                         }
                     }
                 } else {
-                    // Remote entry (Gossip or RPC) - just mark state as pending broadcast
-                    pending_syncstate.store(true, Ordering::SeqCst);
+                    // Remote intention - mark tips as pending broadcast
+                    pending_tips.store(true, Ordering::SeqCst);
                 }
             }
         }
     }
-            tracing::warn!(store_id = %store_id, "Entry forwarder ended");
+            tracing::warn!(store_id = %store_id, "Intention forwarder ended");
         });
     }
     
-    /// Fallback timer for read-only nodes - broadcasts SyncState when pending but no outbound entries
-    fn spawn_syncstate_fallback(
+    /// Fallback timer - broadcasts author_tips when pending but no outbound intentions.
+    /// Fires an initial broadcast shortly after startup to announce tips that may have
+    /// been created before the gossip forwarder subscribed (race with store writes).
+    fn spawn_tips_fallback(
         &self,
         store: NetworkStore,
-        pending_syncstate: Arc<AtomicBool>,
+        pending_tips: Arc<AtomicBool>,
         token: tokio_util::sync::CancellationToken,
     ) {
         let senders = self.senders.clone();
         let store_id = store.id();
         const FALLBACK_INTERVAL: Duration = Duration::from_secs(10);
+        const INITIAL_DELAY: Duration = Duration::from_secs(1);
         
         tokio::spawn(async move {
+            // Short initial delay then broadcast — catches tips created before forwarder subscribed
+            tokio::select! {
+                _ = token.cancelled() => { return; }
+                _ = tokio::time::sleep(INITIAL_DELAY) => {}
+            }
+            // Force an initial broadcast regardless of pending flag
+            pending_tips.store(true, Ordering::SeqCst);
+
             loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                         tracing::debug!(store_id = %store_id, "SyncState fallback cancelled");
-                         break;
-                    }
-                    _ = tokio::time::sleep(FALLBACK_INTERVAL) => {}
-                }
-                
-                // If pending (received entries but no outbound), broadcast SyncState alone
-                if pending_syncstate.swap(false, Ordering::SeqCst) {
-                    if let Ok(sync_state) = store.sync_state().await {
+                // Check and broadcast if tips are pending
+                if pending_tips.swap(false, Ordering::SeqCst) {
+                    if let Ok(tips) = store.author_tips().await {
                         if let Some(sender) = senders.read().await.get(&store_id) {
                             let msg = GossipMessage {
-                                entry: None,
-                                sender_state: Some(sync_state.to_proto()),
+                                intention: None,
+                                sender_tips: tips_to_proto(&tips),
                             };
                             if let Err(e) = sender.broadcast(msg.encode_to_vec().into()).await {
-                                tracing::warn!(error = %e, "SyncState fallback broadcast failed");
+                                tracing::warn!(error = %e, "Tips fallback broadcast failed");
                             } else {
-                                if let Some(state) = &msg.sender_state {
-                                    let formatted = format_sync_state(state);
-                                    tracing::info!(store_id = %store_id, state = %formatted, "Fallback SyncState broadcast");
-                                }
+                                tracing::info!(store_id = %store_id, authors = tips.len(), "Fallback tips broadcast");
                             }
                         }
                     }
+                }
+
+                tokio::select! {
+                    _ = token.cancelled() => {
+                         tracing::debug!(store_id = %store_id, "Tips fallback cancelled");
+                         break;
+                    }
+                    _ = tokio::time::sleep(FALLBACK_INTERVAL) => {}
                 }
             }
         });
@@ -424,23 +398,4 @@ impl GossipManager {
             }
         });
     }
-}
-
-/// Helper to format SyncState for logging (hex authors/hashes/hlc)
-fn format_sync_state(state: &lattice_kernel::proto::storage::SyncState) -> String {
-    let mut parts = Vec::new();
-    for sync_author in &state.authors {
-        let author = hex::encode(&sync_author.author_id).chars().take(8).collect::<String>();
-        if let Some(author_state) = &sync_author.state {
-            let hash_short = hex::encode(&author_state.hash).chars().take(8).collect::<String>();
-            let hlc_str = author_state.hlc.as_ref()
-                .map(|h| format!("{}.{}", h.wall_time, h.counter))
-                .unwrap_or_else(|| "-".to_string());
-            parts.push(format!("{}:{} hash={} hlc={}", author, author_state.seq, hash_short, hlc_str));
-        }
-    }
-    let common = state.common_hlc.as_ref()
-        .map(|h| format!("{}.{}", h.wall_time, h.counter))
-        .unwrap_or_else(|| "-".to_string());
-    format!("[{} common={}]", parts.join(", "), common)
 }

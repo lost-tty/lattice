@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package lattice.weaver;
+
+// Signed Intention envelope.
+//
+// `intention_borsh` contains the canonical Borsh-serialized Intention body.
+// These bytes are never re-encoded — they flow unchanged from signing
+// through storage and sync. The content hash is derived by the receiver
+// as blake3(intention_borsh).
+message SignedIntention {
+  bytes intention_borsh = 1;  // Borsh(Intention) — opaque, deterministic
+  bytes signature = 2;        // Ed25519 signature over blake3(intention_borsh)
+}
+
+// Witness content — the attestation fields covered by the signature.
+// Serialized to bytes via protobuf; those bytes are hashed and signed.
+message WitnessContent {
+  bytes store_id = 1;         // Store UUID this witness belongs to (16 bytes)
+  bytes intention_hash = 2;   // blake3 hash of the witnessed intention (32 bytes)
+  uint64 wall_time = 3;       // Wall-clock time when witnessed (Unix ms)
+}
+
+// Signed witness envelope — stored in TABLE_WITNESS.
+// Follows the content+envelope pattern: the signature covers blake3(content).
+message WitnessRecord {
+  bytes content = 1;          // protobuf-encoded WitnessContent
+  bytes signature = 2;        // Ed25519 sign(node_key, blake3(content))
+}

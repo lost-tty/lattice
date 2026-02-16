@@ -2,21 +2,18 @@
 
 use super::actor::{ReplicationController, ReplicationControllerCmd};
 use super::error::StoreError;
-use crate::entry::SignedEntry;
+use crate::weaver::intention_store::IntentionStore;
 use lattice_model::Uuid;
-use lattice_model::types::PubKey;
+use lattice_model::types::{Hash, PubKey};
+use lattice_model::weaver::{Condition, SignedIntention};
+use lattice_proto::weaver::WitnessRecord;
 use lattice_model::NodeIdentity;
-use lattice_model::{StateMachine, Op, LogEntry};
+use lattice_model::{StateMachine, Op};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
-use futures_util::StreamExt;
-use lattice_model::replication::EntryStreamProvider;
-use prost::Message;
-use super::sigchain::SigChainManager;
-use std::collections::HashMap;
 use lattice_model::StoreMeta;
 
 /// Information about a store open operation
@@ -39,7 +36,7 @@ impl<S: StateMachine + Send + Sync + 'static> StoreHandle for Store<S> {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn shutdown(&self) {
         Store::shutdown(self);
     }
@@ -55,7 +52,7 @@ impl<S: StateMachine + Send + Sync + 'static> Shutdownable for Store<S> {
 }
 
 // =============================================================================
-// Store Handle Traits - Enables Store<S> to implement the node-level StoreHandle
+// Store Handle Traits
 // =============================================================================
 
 use std::ops::Deref;
@@ -63,7 +60,6 @@ use lattice_store_base::{StateProvider, Dispatchable, Dispatcher};
 use std::pin::Pin;
 use std::future::Future;
 
-// Store<S> derefs to S for ergonomic state access
 impl<S: StateMachine> Deref for Store<S> {
     type Target = S;
     fn deref(&self) -> &S {
@@ -71,7 +67,6 @@ impl<S: StateMachine> Deref for Store<S> {
     }
 }
 
-// StateProvider enables blanket Introspectable impl
 impl<S: StateMachine + Send + Sync + 'static> StateProvider for Store<S> {
     type State = S;
     fn state(&self) -> &S {
@@ -79,15 +74,12 @@ impl<S: StateMachine + Send + Sync + 'static> StateProvider for Store<S> {
     }
 }
 
-// Dispatchable enables blanket CommandDispatcher impl
-// Delegates to S::Dispatcher (when S: Dispatcher)
 impl<S: StateMachine + Dispatcher + Send + Sync + 'static> Dispatchable for Store<S> {
     fn dispatch_command<'a>(
         &'a self,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
     ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
-        // Delegate to state's Dispatcher, passing self as the writer
         self.state().dispatch(self, method_name, request)
     }
 }
@@ -102,7 +94,7 @@ pub struct Store<S> {
     store_id: Uuid,
     state: std::sync::Arc<S>,
     tx: mpsc::Sender<ReplicationControllerCmd>,
-    entry_tx: broadcast::Sender<SignedEntry>,
+    intention_tx: broadcast::Sender<SignedIntention>,
     shutdown_token: CancellationToken,
 }
 
@@ -112,7 +104,7 @@ impl<S> Clone for Store<S> {
             store_id: self.store_id,
             state: self.state.clone(),
             tx: self.tx.clone(),
-            entry_tx: self.entry_tx.clone(),
+            intention_tx: self.intention_tx.clone(),
             shutdown_token: self.shutdown_token.clone(),
         }
     }
@@ -128,79 +120,95 @@ impl<S> std::fmt::Debug for Store<S> {
 
 /// An opened replica without an actor running.
 /// Use `into_handle()` to spawn the actor when ready.
-///
-/// Generic over state machine type `S`. Caller provides the opened state.
 pub struct OpenedStore<S> {
     store_id: Uuid,
     state: Arc<S>,
     entries_replayed: u64,
-    chain_manager: Option<SigChainManager>,
+    intention_store: Option<IntentionStore>,
 }
 
 impl<S: StateMachine + 'static> OpenedStore<S> {
     /// Create from an already-opened state machine.
-    /// - `store_id`: UUID for this store
-    /// - `sigchain_dir`: Directory for sigchain logs
-    /// - `state`: Already-opened state machine instance
-    pub fn new(store_id: Uuid, sigchain_dir: PathBuf, state: Arc<S>) -> Result<Self, super::StateError> {
-        // Ensure sigchain directory exists
-        std::fs::create_dir_all(&sigchain_dir)?;
-        
-        // Open sigchain manager and replay any entries not yet applied to state
-        let mut chain_manager = SigChainManager::new(&sigchain_dir)?;
-        let entries_replayed = replay_sigchains(&mut chain_manager, &state)?;
-        
-        Ok(Self { store_id, state, entries_replayed, chain_manager: Some(chain_manager) })
+    /// Opens the IntentionStore and replays any unapplied intentions.
+    pub fn new(
+        store_id: Uuid,
+        store_dir: PathBuf,
+        state: Arc<S>,
+    ) -> Result<Self, super::StateError> {
+        std::fs::create_dir_all(&store_dir)?;
+
+        let intention_store = IntentionStore::open(&store_dir, store_id)?;
+        let entries_replayed = replay_intentions(&intention_store, &state)?;
+
+        Ok(Self {
+            store_id,
+            state,
+            entries_replayed,
+            intention_store: Some(intention_store),
+        })
     }
 
-    /// Get the store ID
-    pub fn id(&self) -> Uuid { self.store_id }
+    pub fn id(&self) -> Uuid {
+        self.store_id
+    }
 
     /// Spawn actor and get a handle. Consumes the OpenedStore.
-    /// Returns the Store handle and an ActorRunner that MUST be spawned/run by the caller.
-    pub fn into_handle(self, node: NodeIdentity) -> Result<(Store<S>, StoreInfo, ActorRunner<S>), super::StateError> {
+    pub fn into_handle(
+        self,
+        node: NodeIdentity,
+    ) -> Result<(Store<S>, StoreInfo, ActorRunner<S>), super::StateError> {
         let (tx, rx) = mpsc::channel(32);
-        let (entry_tx, _entry_rx) = broadcast::channel(64);
+        let (intention_tx, _rx) = broadcast::channel(64);
         let shutdown_token = CancellationToken::new();
 
-        let state_for_actor = self.state.clone();
-        
-        // Use the pre-initialized chain manager
-        let chain_manager = self.chain_manager.expect("OpenedStore must have chain_manager");
-        
+        let intention_store = self
+            .intention_store
+            .expect("OpenedStore must have intention_store");
+
         let actor = ReplicationController::new(
-            state_for_actor, chain_manager,
-            node, rx, entry_tx.clone(),
+            self.store_id,
+            self.state.clone(),
+            intention_store,
+            node,
+            rx,
+            intention_tx.clone(),
         )?;
-        
-        let runner = ActorRunner { actor, shutdown_token: shutdown_token.clone() };
+
+        let runner = ActorRunner {
+            actor,
+            shutdown_token: shutdown_token.clone(),
+        };
 
         let handle = Store {
             store_id: self.store_id,
             state: self.state,
             tx,
-            entry_tx,
+            intention_tx,
             shutdown_token,
         };
-        let info = StoreInfo { store_id: self.store_id, entries_replayed: self.entries_replayed };
+        let info = StoreInfo {
+            store_id: self.store_id,
+            entries_replayed: self.entries_replayed,
+        };
         Ok((handle, info, runner))
     }
 
-    /// Access the underlying state directly (no actor).
-    pub fn state(&self) -> &S { &self.state }
+    pub fn state(&self) -> &S {
+        &self.state
+    }
 
-    /// Get number of entries replayed during crash recovery.
-    pub fn entries_replayed(&self) -> u64 { self.entries_replayed }
+    pub fn entries_replayed(&self) -> u64 {
+        self.entries_replayed
+    }
 }
 
-/// Runner for the replication actor. Must be spawned as a tokio task.
+/// Runner for the replication actor
 pub struct ActorRunner<S: StateMachine> {
     actor: ReplicationController<S>,
     shutdown_token: CancellationToken,
 }
 
 impl<S: StateMachine + Send + Sync + 'static> ActorRunner<S> {
-    /// Run the actor loop. This is async and should be spawned via tokio::spawn.
     pub async fn run(self) {
         self.actor.run(self.shutdown_token).await;
     }
@@ -211,220 +219,127 @@ impl<S: StateMachine> Store<S> {
         self.store_id
     }
 
-    /// Request actor shutdown (non-blocking).
-    /// 
-    /// 1. Tries to send a polite `Shutdown` command (preserves order).
-    /// 2. If the channel is full, cancels the `shutdown_token` (immediate stop).
     pub fn shutdown(&self) {
         use tokio::sync::mpsc::error::TrySendError;
-        
         match self.tx.try_send(ReplicationControllerCmd::Shutdown) {
-            Ok(_) => {
-                // Sent successfully. Actor will process queue then stop.
-            }
+            Ok(_) => {}
             Err(TrySendError::Full(_)) => {
-                // Channel is full! Pull the emergency brake.
                 self.shutdown_token.cancel();
             }
-            Err(TrySendError::Closed(_)) => {
-                // Actor is already dead. Do nothing.
-            }
+            Err(TrySendError::Closed(_)) => {}
         }
     }
-    
-    /// Shuts down the store and waits for the background actor to exit.
-    /// 
-    /// This ensures the SigChain buffers are flushed to disk before returning.
-    /// Preferred over `shutdown()` when you can await.
+
     pub async fn close(&self) {
         self.shutdown();
-        // Wait for the actor to drop the receiver
         self.tx.closed().await;
     }
 
-    /// Direct read access to the state machine.
-    /// Use this for all read operations - they don't need replication.
     pub fn state(&self) -> &S {
         &self.state
     }
 
-    /// Get a cloned Arc to the state machine.
     pub fn state_arc(&self) -> Arc<S> {
         self.state.clone()
     }
 
-    /// Subscribe to receive entries as they're committed locally
-    pub fn subscribe_entries(&self) -> broadcast::Receiver<SignedEntry> {
-        self.entry_tx.subscribe()
+    /// Subscribe to receive intentions as they're committed
+    pub fn subscribe_intentions(&self) -> broadcast::Receiver<SignedIntention> {
+        self.intention_tx.subscribe()
     }
 
-    pub async fn log_seq(&self) -> u64 {
-        use ReplicationControllerCmd;
+    /// Get author tips for sync
+    pub async fn author_tips(&self) -> Result<HashMap<PubKey, Hash>, StoreError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ReplicationControllerCmd::AuthorTips { resp: resp_tx })
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?;
+        resp_rx
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?
+            .map_err(StoreError::Store)
+    }
+
+    /// Ingest a signed intention from a peer
+    pub async fn ingest_intention(&self, intention: SignedIntention) -> Result<(), StoreError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ReplicationControllerCmd::IngestIntention {
+                intention,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?;
+        resp_rx
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?
+            .map_err(StoreError::Store)
+    }
+
+    /// Fetch intentions by content hash
+    pub async fn fetch_intentions(
+        &self,
+        hashes: Vec<Hash>,
+    ) -> Result<Vec<SignedIntention>, StoreError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ReplicationControllerCmd::FetchIntentions {
+                hashes,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?;
+        resp_rx
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?
+            .map_err(StoreError::Store)
+    }
+
+    /// Get number of intentions
+    pub async fn intention_count(&self) -> u64 {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
-            .send(ReplicationControllerCmd::LogSeq { resp: resp_tx })
+            .send(ReplicationControllerCmd::IntentionCount { resp: resp_tx })
             .await;
         resp_rx.await.unwrap_or(0)
     }
 
-    pub async fn applied_seq(&self) -> Result<u64, StoreError> {
-        use ReplicationControllerCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(ReplicationControllerCmd::AppliedSeq { resp: resp_tx })
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
-    }
-
-    pub async fn chain_tip(
-        &self,
-        author: &PubKey,
-    ) -> Result<Option<crate::proto::storage::ChainTip>, StoreError> {
-        use ReplicationControllerCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(ReplicationControllerCmd::ChainTip {
-                author: *author,
-                resp: resp_tx,
-            })
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
-    }
-
-    /// Get log directory statistics (file count, total bytes, orphan count)
-    pub async fn log_stats(&self) -> (usize, u64, usize) {
-        use ReplicationControllerCmd;
+    /// Get number of witness log entries
+    pub async fn witness_count(&self) -> u64 {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
-            .send(ReplicationControllerCmd::LogStats { resp: resp_tx })
-            .await;
-        resp_rx.await.unwrap_or((0, 0, 0))
-    }
-
-    /// Get log file paths for diagnostics
-    pub async fn log_paths(&self) -> Vec<(String, u64, std::path::PathBuf)> {
-        use ReplicationControllerCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let _ = self
-            .tx
-            .send(ReplicationControllerCmd::LogPaths { resp: resp_tx })
-            .await;
-        resp_rx.await.unwrap_or_default()
-    }
-
-    /// Get list of orphaned entries
-    pub async fn orphan_list(&self) -> Vec<super::OrphanInfo> {
-        use ReplicationControllerCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let _ = self
-            .tx
-            .send(ReplicationControllerCmd::OrphanList { resp: resp_tx })
-            .await;
-        resp_rx.await.unwrap_or_default()
-    }
-
-    /// Cleanup stale orphans that are already in the sigchain
-    /// Returns the number of orphans removed
-    pub async fn orphan_cleanup(&self) -> usize {
-        use ReplicationControllerCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let _ = self
-            .tx
-            .send(ReplicationControllerCmd::OrphanCleanup { resp: resp_tx })
+            .send(ReplicationControllerCmd::WitnessCount { resp: resp_tx })
             .await;
         resp_rx.await.unwrap_or(0)
     }
 
-    pub async fn sync_state(&self) -> Result<super::SyncState, StoreError> {
-        use ReplicationControllerCmd;
+    /// Get raw witness log entries
+    pub async fn witness_log(&self) -> Vec<(u64, WitnessRecord)> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(ReplicationControllerCmd::SyncState { resp: resp_tx })
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
+        let _ = self
+            .tx
+            .send(ReplicationControllerCmd::WitnessLog { resp: resp_tx })
+            .await;
+        resp_rx.await.unwrap_or_default()
     }
 
-    pub async fn ingest_entry(&self, entry: SignedEntry) -> Result<(), StoreError> {
-        use ReplicationControllerCmd;
+    /// Get floating (unapplied) intentions
+    pub async fn floating_intentions(&self) -> Vec<SignedIntention> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(ReplicationControllerCmd::IngestEntry {
-                entry: entry,
-                resp: resp_tx,
-            })
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
-    }
-
-    /// Subscribe to gap detection events (emitted when orphan entries are buffered)
-    pub async fn subscribe_gaps(
-        &self,
-    ) -> Result<broadcast::Receiver<super::GapInfo>, StoreError> {
-        use ReplicationControllerCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(ReplicationControllerCmd::SubscribeGaps { resp: resp_tx })
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx.await.map_err(|_| StoreError::ChannelClosed)
-    }
-
-    // ==================== Peer Sync State Methods ====================
-
-    /// Store a peer's sync state (received via gossip or status command).
-    /// Returns SyncDiscrepancy showing what each side is missing.
-
-
-    /// Stream entries for an author within a sequence range [from_seq, to_seq]
-    /// If to_seq is 0, streams entries from from_seq to latest
-    pub async fn stream_entries_in_range(
-        &self,
-        author: &PubKey,
-        from_seq: u64,
-        to_seq: u64,
-    ) -> Result<tokio::sync::mpsc::Receiver<SignedEntry>, StoreError> {
-        use ReplicationControllerCmd;
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(ReplicationControllerCmd::StreamEntriesInRange {
-                author: *author,
-                from_seq,
-                to_seq,
-                resp: resp_tx,
-            })
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
+        let _ = self
+            .tx
+            .send(ReplicationControllerCmd::FloatingIntentions { resp: resp_tx })
+            .await;
+        resp_rx.await.unwrap_or_default()
     }
 }
 
 // ==================== StateWriter implementation ====================
 
-use lattice_model::types::Hash;
 use lattice_model::{StateWriter, StateWriterError};
-
-// ==================== AsRef implementation ====================
 
 impl<S> AsRef<S> for Store<S> {
     fn as_ref(&self) -> &S {
@@ -467,244 +382,178 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         self.store_id
     }
 
-    fn sync_state(
+    fn author_tips(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<super::SyncState, StoreError>> + Send + '_>> {
-        Box::pin(Store::sync_state(self))
+    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, StoreError>> + Send + '_>> {
+        Box::pin(Store::author_tips(self))
     }
 
-    fn ingest_entry(
+    fn ingest_intention(
         &self,
-        entry: SignedEntry,
+        intention: SignedIntention,
     ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>> {
-        Box::pin(Store::ingest_entry(self, entry))
+        Box::pin(Store::ingest_intention(self, intention))
     }
 
-    fn stream_entries_in_range(
+    fn fetch_intentions(
         &self,
-        author: PubKey,
-        from_seq: u64,
-        to_seq: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<mpsc::Receiver<SignedEntry>, StoreError>> + Send + '_>>
-    {
-        Box::pin(
-            async move { Store::stream_entries_in_range(self, &author, from_seq, to_seq).await },
-        )
+        hashes: Vec<Hash>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, StoreError>> + Send + '_>> {
+        Box::pin(Store::fetch_intentions(self, hashes))
     }
 
-    fn subscribe_entries(&self) -> broadcast::Receiver<SignedEntry> {
-        Store::subscribe_entries(self)
+    fn subscribe_intentions(&self) -> broadcast::Receiver<SignedIntention> {
+        Store::subscribe_intentions(self)
     }
-
-    fn subscribe_gaps(
-        &self,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<broadcast::Receiver<super::GapInfo>, StoreError>>
-                + Send
-                + '_,
-        >,
-    > {
-        Box::pin(Store::subscribe_gaps(self))
-    }
-
 }
 
 // ==================== StoreInspector implementation ====================
 
-use crate::store_inspector::{StoreInspector, LogStats, LogPathInfo, HistoryEntry};
+use crate::store_inspector::StoreInspector;
 
 impl<S: StateMachine + 'static> StoreInspector for Store<S> {
     fn id(&self) -> Uuid {
         self.store_id
     }
 
-    fn sync_state(
+    fn author_tips(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<super::SyncState, StoreError>> + Send + '_>> {
-        Box::pin(Store::sync_state(self))
+    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, StoreError>> + Send + '_>> {
+        Box::pin(Store::author_tips(self))
     }
 
-    fn log_stats(&self) -> Pin<Box<dyn Future<Output = LogStats> + Send + '_>> {
-        Box::pin(async move {
-            let (file_count, total_bytes, orphan_count) = Store::log_stats(self).await;
-            LogStats { file_count, total_bytes, orphan_count }
-        })
+    fn intention_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>> {
+        Box::pin(Store::intention_count(self))
     }
 
-    fn log_paths(&self) -> Pin<Box<dyn Future<Output = Vec<LogPathInfo>> + Send + '_>> {
-        Box::pin(async move {
-            Store::log_paths(self).await.into_iter().map(|(name, size, path)| {
-                LogPathInfo { name, size, path }
-            }).collect()
-        })
+    fn witness_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>> {
+        Box::pin(Store::witness_count(self))
     }
 
-    fn orphan_list(&self) -> Pin<Box<dyn Future<Output = Vec<super::OrphanInfo>> + Send + '_>> {
-        Box::pin(Store::orphan_list(self))
-    }
-
-    fn orphan_cleanup(&self) -> Pin<Box<dyn Future<Output = usize> + Send + '_>> {
-        Box::pin(Store::orphan_cleanup(self))
-    }
-
-    fn stream_entries_in_range(
+    fn witness_log(
         &self,
-        author: PubKey,
-        from_seq: u64,
-        to_seq: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<mpsc::Receiver<SignedEntry>, StoreError>> + Send + '_>> {
-        Box::pin(async move {
-            Store::stream_entries_in_range(self, &author, from_seq, to_seq).await
-        })
+    ) -> Pin<Box<dyn Future<Output = Vec<(u64, WitnessRecord)>> + Send + '_>> {
+        Box::pin(Store::witness_log(self))
     }
 
-    fn history(
+    fn floating_intentions(
         &self,
-        filter_author: Option<PubKey>,
-        limit: Option<u32>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<HistoryEntry>, StoreError>> + Send + '_>> {
-        Box::pin(async move {
-            let sync_state = Store::sync_state(self).await?;
-            let mut entries = Vec::new();
-            
-            // Determine which authors to query
-            let authors: Vec<PubKey> = if let Some(author) = filter_author {
-                vec![author]
-            } else {
-                sync_state.authors().iter().map(|(a, _)| *a).collect()
-            };
-            
-            // Stream entries from each author
-            for author in authors {
-                let mut rx = Store::stream_entries_in_range(self, &author, 1, 0).await?;
-                while let Some(signed) = rx.recv().await {
-                    let entry = &signed.entry;
-                    let hash = Hash::from(signed.hash());
-                    let prev_hash = Hash::try_from(entry.prev_hash.as_slice()).unwrap_or(Hash::ZERO);
-                    let causal_deps: Vec<Hash> = entry.causal_deps.iter()
-                        .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok().map(Hash::from))
-                        .collect();
-                    let timestamp = (entry.timestamp.wall_time << 16) | entry.timestamp.counter as u64;
-                    
-                    entries.push(HistoryEntry {
-                        seq: entry.seq,
-                        author,
-                        payload: entry.payload.clone(),
-                        timestamp,
-                        hash,
-                        prev_hash,
-                        causal_deps,
-                    });
-                }
-            }
-            
-            // Sort by timestamp descending (most recent first)
-            entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-            
-            // Apply limit if specified
-            if let Some(n) = limit {
-                entries.truncate(n as usize);
-            }
-            
-            Ok(entries)
-        })
+    ) -> Pin<Box<dyn Future<Output = Vec<SignedIntention>> + Send + '_>> {
+        Box::pin(Store::floating_intentions(self))
     }
-    
+
     fn store_meta(&self) -> Pin<Box<dyn Future<Output = StoreMeta> + Send + '_>> {
+        Box::pin(async move { self.state.store_meta() })
+    }
+
+    fn get_intention(
+        &self,
+        hash_prefix: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, StoreError>> + Send + '_>> {
         Box::pin(async move {
-            self.state.store_meta()
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            self.tx
+                .send(ReplicationControllerCmd::FetchIntentionsByPrefix {
+                    prefix: hash_prefix,
+                    resp: resp_tx,
+                })
+                .await
+                .map_err(|_| StoreError::ChannelClosed)?;
+            resp_rx
+                .await
+                .map_err(|_| StoreError::ChannelClosed)?
+                .map_err(StoreError::Store)
         })
     }
 }
 
-// ==================== EntryStreamProvider implementation ====================
+// ==================== EntryStreamProvider (intention-based) ====================
+
+use lattice_model::replication::EntryStreamProvider;
+use prost::Message;
+use tokio_stream::wrappers::BroadcastStream;
+use futures_util::StreamExt;
 
 impl<S: StateMachine + Send + Sync + 'static> EntryStreamProvider for Store<S> {
     fn subscribe_entries(&self) -> Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + Unpin> {
-        let rx = self.entry_tx.subscribe();
-        let stream = BroadcastStream::new(rx)
-            .filter_map(|res| async move {
-                 match res {
-                     Ok(entry) => {
-                         // Convert to ProtoSignedEntry to get the wire format
-                         let proto: lattice_proto::storage::SignedEntry = entry.into();
-                         Some(proto.encode_to_vec())
-                     }
-                     Err(_) => None, // Lagging or closed
-                 }
-            });
+        let rx = self.intention_tx.subscribe();
+        let stream = BroadcastStream::new(rx).filter_map(|res| async move {
+            match res {
+                Ok(signed) => {
+                    let proto = lattice_proto::weaver::SignedIntention {
+                        intention_borsh: signed.intention.to_borsh(),
+                        signature: signed.signature.0.to_vec(),
+                    };
+                    Some(proto.encode_to_vec())
+                }
+                Err(_) => None,
+            }
+        });
         Box::new(Box::pin(stream))
     }
 }
 
-/// Helper to replay sigchain logs into a state machine.
-/// Returns number of entries replayed.
-fn replay_sigchains<S: StateMachine>(
-    chain_manager: &mut SigChainManager,
+/// Replay intentions from the store into the state machine.
+/// Returns number of intentions replayed.
+fn replay_intentions<S: StateMachine>(
+    store: &IntentionStore,
     state: &Arc<S>,
 ) -> Result<u64, super::StateError> {
-    let mut entries_replayed = 0;
-
-    // 1. Get applied tips from state machine
-    let applied_tips = state.applied_chaintips().map_err(|e| super::StateError::Backend(e.to_string()))?;
+    let applied_tips = state
+        .applied_chaintips()
+        .map_err(|e| super::StateError::Backend(e.to_string()))?;
     let applied_map: HashMap<PubKey, Hash> = applied_tips.into_iter().collect();
 
-    // 2. Iterate each chain (author) in the logs
-    for author in chain_manager.authors() {
-        let chain = chain_manager.get(&author).ok_or_else(|| super::StateError::Backend("Chain not found".into()))?;
-        let tip = chain.tip().map(|t| t.hash).unwrap_or(Hash::ZERO);
-        
-        // Check if state is already caught up for this author
-        let applied_hash = applied_map.get(&author).cloned().unwrap_or(Hash::ZERO);
-        if tip == applied_hash {
-            continue;
+    // Get all stored intentions and compare tips
+    let store_tips = store.all_author_tips();
+    let mut entries_replayed = 0u64;
+
+    for (author, store_tip) in &store_tips {
+        let applied_tip = applied_map.get(author).cloned().unwrap_or(Hash::ZERO);
+        if *store_tip == applied_tip {
+            continue; // Already caught up
         }
 
-
-        // We are behind (or ahead? assuming behind). Replay needed.
-        // Iterate log to find start point
-        if let Ok(iter) = chain.iter() {
-            let mut applying = applied_hash == Hash::ZERO;
-
-            // If starting from ZERO, we apply everything. 
-            // If starting from Hash::X, we skip until we see Hash::X, then apply subsequent.
-            
-            for result in iter {
-                let signed_entry = result.map_err(|e| super::StateError::Backend(e.to_string()))?;
-                let entry_hash = Hash::from(signed_entry.hash());
-
-                if !applying {
-                    if entry_hash == applied_hash {
-                        applying = true;
-                    }
-                    continue;
-                }
-
-                // Apply
-                // Construct Op
-                let causal_deps: Vec<Hash> = signed_entry
-                    .entry
-                    .causal_deps
-                    .iter()
-                    .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok().map(Hash::from))
-                    .collect();
-
-                let op = Op {
-                    id: entry_hash,
-                    causal_deps: &causal_deps,
-                    payload: &signed_entry.entry.payload,
-                    author: signed_entry.author(),
-                    timestamp: signed_entry.entry.timestamp,
-                    prev_hash: Hash::try_from(signed_entry.entry.prev_hash.as_slice()).unwrap_or(Hash::ZERO),
-                };
-
-                state.apply(&op).map_err(|e| super::StateError::Backend(e.to_string()))?;
-                entries_replayed += 1;
+        // Need to replay intentions from this author.
+        // Walk the chain from store_tip backwards to find unapplied ones,
+        // then apply in forward order.
+        let mut chain = Vec::new();
+        let mut current = *store_tip;
+        while current != applied_tip && current != Hash::ZERO {
+            if let Some(signed) = store
+                .get(&current)
+                .map_err(|e| super::StateError::Backend(e.to_string()))?
+            {
+                let prev = signed.intention.store_prev;
+                chain.push(signed);
+                current = prev;
+            } else {
+                break; // Gap in chain
             }
         }
+
+        // Apply in forward order (oldest first)
+        chain.reverse();
+        for signed in chain {
+            let intention = &signed.intention;
+            let hash = intention.hash();
+            let causal_deps = match &intention.condition {
+                Condition::V1(deps) => deps,
+            };
+            let op = Op {
+                id: hash,
+                causal_deps,
+                payload: &intention.ops,
+                author: intention.author,
+                timestamp: intention.timestamp,
+                prev_hash: intention.store_prev,
+            };
+            state
+                .apply(&op)
+                .map_err(|e| super::StateError::Backend(e.to_string()))?;
+            entries_replayed += 1;
+        }
     }
-    
+
     Ok(entries_replayed)
 }
-

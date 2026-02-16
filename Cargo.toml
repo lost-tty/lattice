@@ -72,6 +72,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 
 # Serialization
+borsh = { version = "1", features = ["derive"] }
 prost = "0.14"
 prost-types = "0.14"
 prost-build = "0.14"

@@ -11,13 +11,11 @@ pub mod endpoint;
 pub mod error;
 pub mod framing;
 pub mod network;
-pub mod peer_sync_store;
 
 pub use endpoint::{LatticeEndpoint, PublicKey, LATTICE_ALPN};
 pub use error::LatticeNetError;
 pub use framing::{MessageSink, MessageStream};
-pub use lattice_kernel::proto::storage::SyncState;
-pub use lattice_kernel::proto::network::{StatusRequest, StatusResponse, FetchRequest, FetchResponse, AuthorRange};
+pub use lattice_kernel::proto::network::{StatusRequest, StatusResponse, FetchIntentions, IntentionResponse, AuthorTip};
 pub use network::{NetworkService, SyncResult};
 pub use lattice_model::types::PubKey;
 

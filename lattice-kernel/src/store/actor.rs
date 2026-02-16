@@ -1,77 +1,63 @@
-//! ReplicationController - dedicated thread that owns StateMachine + SigChain and processes commands
+//! ReplicationController - actor that owns StateMachine + IntentionStore and processes commands
 //!
 //! This actor is generic over any StateMachine implementation.
+//! Intentions are persisted in the IntentionStore. The store is "dumb" — the actor handles
+//! authorization and applies intentions to the state machine.
 
-use crate::store::{
-    sigchain::{
-        GapInfo, Log, OrphanInfo, SigChainError, SigChainManager,
-        SyncState,
-    },
-    StateError,
-};
-use crate::{entry::SignedEntry, proto::storage::ChainTip, NodeIdentity};
+use crate::weaver::intention_store::{IntentionStore, IntentionStoreError};
+use crate::store::StateError;
 use lattice_model::types::Hash;
 use lattice_model::types::PubKey;
-use lattice_model::{LogEntry, StateMachine};
+use lattice_model::weaver::{Condition, Intention, SignedIntention};
+use lattice_proto::weaver::WitnessRecord;
+use lattice_model::{NodeIdentity, StateMachine};
+use uuid::Uuid;
 
+use std::collections::HashMap;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Commands sent to the ReplicationController actor
-///
-/// These are state-machine agnostic replication commands.
-/// State-machine-specific commands (like KV Get/Put) live in the state machine's crate.
 pub enum ReplicationControllerCmd {
-    /// Get current log sequence
-    LogSeq { resp: oneshot::Sender<u64> },
-    /// Get applied sequence
-    AppliedSeq {
-        resp: oneshot::Sender<Result<u64, StateError>>,
+    /// Get author tips for sync
+    AuthorTips {
+        resp: oneshot::Sender<Result<HashMap<PubKey, Hash>, StateError>>,
     },
-    /// Get chain tip for author
-    ChainTip {
-        author: PubKey,
-        resp: oneshot::Sender<Result<Option<ChainTip>, StateError>>,
-    },
-    /// Get sync state for reconciliation
-    SyncState {
-        resp: oneshot::Sender<Result<SyncState, StateError>>,
-    },
-    /// Ingest an entry from network
-    IngestEntry {
-        entry: SignedEntry,
+    /// Ingest a signed intention from network
+    IngestIntention {
+        intention: SignedIntention,
         resp: oneshot::Sender<Result<(), StateError>>,
     },
-    /// Submit a payload to create a local entry
-    /// Used by StateWriter implementations
+    /// Fetch intentions by hash (for sync)
+    FetchIntentions {
+        hashes: Vec<Hash>,
+        resp: oneshot::Sender<Result<Vec<SignedIntention>, StateError>>,
+    },
+    /// Fetch intentions whose hash starts with a given prefix
+    FetchIntentionsByPrefix {
+        prefix: Vec<u8>,
+        resp: oneshot::Sender<Result<Vec<SignedIntention>, StateError>>,
+    },
+    /// Submit a payload to create a local intention
     Submit {
         payload: Vec<u8>,
         causal_deps: Vec<Hash>,
         resp: oneshot::Sender<Result<Hash, StateError>>,
     },
-    /// Get log statistics
-    LogStats {
-        resp: oneshot::Sender<(usize, u64, usize)>,
+    /// Get number of intentions
+    IntentionCount {
+        resp: oneshot::Sender<u64>,
     },
-    /// Get log file paths
-    LogPaths {
-        resp: oneshot::Sender<Vec<(String, u64, std::path::PathBuf)>>,
+    /// Get number of witness log entries
+    WitnessCount {
+        resp: oneshot::Sender<u64>,
     },
-    /// List orphaned entries
-    OrphanList {
-        resp: oneshot::Sender<Vec<OrphanInfo>>,
+    /// Get raw witness log entries
+    WitnessLog {
+        resp: oneshot::Sender<Vec<(u64, WitnessRecord)>>,
     },
-    /// Cleanup stale orphans
-    OrphanCleanup { resp: oneshot::Sender<usize> },
-    /// Subscribe to gap events
-    SubscribeGaps {
-        resp: oneshot::Sender<broadcast::Receiver<GapInfo>>,
-    },
-    /// Stream entries in sequence range
-    StreamEntriesInRange {
-        author: PubKey,
-        from_seq: u64,
-        to_seq: u64,
-        resp: oneshot::Sender<Result<mpsc::Receiver<SignedEntry>, StateError>>,
+    /// Get floating (unapplied) intentions
+    FloatingIntentions {
+        resp: oneshot::Sender<Vec<SignedIntention>>,
     },
     /// Shutdown the actor
     Shutdown,
@@ -80,7 +66,7 @@ pub enum ReplicationControllerCmd {
 #[derive(Debug)]
 pub enum ReplicationControllerError {
     State(StateError),
-    SigChain(SigChainError),
+    IntentionStore(IntentionStoreError),
 }
 
 impl From<StateError> for ReplicationControllerError {
@@ -89,9 +75,9 @@ impl From<StateError> for ReplicationControllerError {
     }
 }
 
-impl From<SigChainError> for ReplicationControllerError {
-    fn from(e: SigChainError) -> Self {
-        ReplicationControllerError::SigChain(e)
+impl From<IntentionStoreError> for ReplicationControllerError {
+    fn from(e: IntentionStoreError) -> Self {
+        ReplicationControllerError::IntentionStore(e)
     }
 }
 
@@ -99,61 +85,55 @@ impl std::fmt::Display for ReplicationControllerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReplicationControllerError::State(e) => write!(f, "State error: {}", e),
-            ReplicationControllerError::SigChain(e) => write!(f, "SigChain error: {}", e),
+            ReplicationControllerError::IntentionStore(e) => write!(f, "IntentionStore error: {}", e),
         }
     }
 }
 
 impl std::error::Error for ReplicationControllerError {}
 
-/// ReplicationController - actor that owns StateMachine + SigChain
+/// ReplicationController - actor that owns StateMachine + IntentionStore
 ///
-/// Runs in its own thread, processes replication commands.
+/// Runs in its own task, processes replication commands.
 /// Generic over state machine type `S`.
-///
-/// State is held in Arc for sharing with Store handle (for direct reads).
 pub struct ReplicationController<S: StateMachine> {
+    store_id: Uuid,
     state: std::sync::Arc<S>,
-    chain_manager: SigChainManager,
+    intention_store: IntentionStore,
     node: NodeIdentity,
 
     rx: mpsc::Receiver<ReplicationControllerCmd>,
-    /// Broadcast sender for emitting entries after they're committed locally
-    entry_tx: broadcast::Sender<SignedEntry>,
+    /// Broadcast sender for emitting intentions after they're committed locally
+    intention_tx: broadcast::Sender<SignedIntention>,
 }
 
 impl<S: StateMachine> ReplicationController<S> {
-    /// Create a new ReplicationController (but don't start the thread yet)
+    /// Create a new ReplicationController
     pub fn new(
+        store_id: Uuid,
         state: std::sync::Arc<S>,
-        mut chain_manager: SigChainManager,
+        intention_store: IntentionStore,
         node: NodeIdentity,
-
         rx: mpsc::Receiver<ReplicationControllerCmd>,
-        entry_tx: broadcast::Sender<SignedEntry>,
+        intention_tx: broadcast::Sender<SignedIntention>,
     ) -> Result<Self, StateError> {
-        let local_author = node.public_key();
-        chain_manager.get_or_create(local_author)?; // Ensure local chain exists
-
         Ok(Self {
+            store_id,
             state,
-            chain_manager,
+            intention_store,
             node,
             rx,
-            entry_tx,
+            intention_tx,
         })
     }
 
-    /// Run the actor loop - processes commands until Shutdown, cancellation, or channel closed
+    /// Run the actor loop
     pub async fn run(mut self, shutdown_token: tokio_util::sync::CancellationToken) {
         loop {
             tokio::select! {
-                // Priority: Cancellation Token (Emergency Brake)
                 _ = shutdown_token.cancelled() => {
                     break;
                 }
-                
-                // Normal Message Processing
                 msg = self.rx.recv() => {
                     match msg {
                         Some(ReplicationControllerCmd::Shutdown) => {
@@ -168,244 +148,334 @@ impl<S: StateMachine> ReplicationController<S> {
             }
         }
     }
-    
-    /// Handle a single command (keeps select! block clean)
+
     fn handle_command(&mut self, cmd: ReplicationControllerCmd) {
         match cmd {
-            ReplicationControllerCmd::LogSeq { resp } => {
-                let local_author = self.node.public_key();
-                let len = self
-                    .chain_manager
-                    .get(&local_author)
-                    .map(|c| c.len())
-                    .unwrap_or(0);
-                let _ = resp.send(len);
+            ReplicationControllerCmd::AuthorTips { resp } => {
+                let tips = self.intention_store.all_author_tips();
+                let _ = resp.send(Ok(tips));
             }
-            ReplicationControllerCmd::AppliedSeq { resp } => {
-                let author = self.node.public_key();
-                let result = self
-                    .chain_manager
-                    .get(&author)
-                    .and_then(|chain| chain.tip())
-                    .map(|tip| tip.seq)
-                    .unwrap_or(0);
-                let _ = resp.send(Ok(result));
-            }
-            ReplicationControllerCmd::ChainTip { author, resp } => {
-                let result = self
-                    .chain_manager
-                    .get(&author)
-                    .and_then(|chain| chain.tip())
-                    .map(|tip| tip.clone().into());
-                let _ = resp.send(Ok(result));
-            }
-            ReplicationControllerCmd::SyncState { resp } => {
-                let _ = resp.send(Ok(self.chain_manager.sync_state()));
-            }
-            ReplicationControllerCmd::IngestEntry { entry, resp } => {
-                let result = self.apply_ingested_entry(&entry).map_err(|e| match e {
-                    ReplicationControllerError::SigChain(e) => StateError::from(e),
+            ReplicationControllerCmd::IngestIntention { intention, resp } => {
+                let result = self.apply_ingested_intention(&intention).map_err(|e| match e {
+                    ReplicationControllerError::IntentionStore(e) => {
+                        StateError::Backend(e.to_string())
+                    }
                     ReplicationControllerError::State(e) => e,
                 });
                 let _ = resp.send(result);
             }
-            ReplicationControllerCmd::Submit { payload, causal_deps, resp } => {
+            ReplicationControllerCmd::FetchIntentions { hashes, resp } => {
+                let result = self.do_fetch_intentions(&hashes);
+                let _ = resp.send(result);
+            }
+            ReplicationControllerCmd::FetchIntentionsByPrefix { prefix, resp } => {
+                let result = self.intention_store.get_by_prefix(&prefix)
+                    .map_err(|e| StateError::Backend(e.to_string()));
+                let _ = resp.send(result);
+            }
+            ReplicationControllerCmd::Submit {
+                payload,
+                causal_deps,
+                resp,
+            } => {
                 let result = self
-                    .create_and_commit_local_entry(payload, causal_deps)
+                    .create_and_commit_local_intention(payload, causal_deps)
                     .map_err(|e| match e {
-                        ReplicationControllerError::SigChain(e) => StateError::from(e),
+                        ReplicationControllerError::IntentionStore(e) => {
+                            StateError::Backend(e.to_string())
+                        }
                         ReplicationControllerError::State(e) => e,
                     });
                 let _ = resp.send(result);
             }
-            ReplicationControllerCmd::LogStats { resp } => {
-                let _ = resp.send(self.chain_manager.log_stats());
+            ReplicationControllerCmd::IntentionCount { resp } => {
+                let count = self.intention_store.intention_count().unwrap_or(0);
+                let _ = resp.send(count);
             }
-            ReplicationControllerCmd::LogPaths { resp } => {
-                let _ = resp.send(self.chain_manager.log_paths());
+            ReplicationControllerCmd::WitnessCount { resp } => {
+                let count = self.intention_store.witness_count().unwrap_or(0);
+                let _ = resp.send(count);
             }
-            ReplicationControllerCmd::OrphanList { resp } => {
-                let _ = resp.send(self.chain_manager.orphan_list());
+            ReplicationControllerCmd::WitnessLog { resp } => {
+                let log = self.intention_store.witness_log().unwrap_or_default();
+                let _ = resp.send(log);
             }
-            ReplicationControllerCmd::OrphanCleanup { resp } => {
-                let removed = self.cleanup_stale_orphans();
-                let _ = resp.send(removed);
-            }
-            ReplicationControllerCmd::SubscribeGaps { resp } => {
-                let _ = resp.send(self.chain_manager.subscribe_gaps());
-            }
-            ReplicationControllerCmd::StreamEntriesInRange {
-                author,
-                from_seq,
-                to_seq,
-                resp,
-            } => {
-                let result = self.do_stream_entries_in_range(&author, from_seq, to_seq);
-                let _ = resp.send(result);
+            ReplicationControllerCmd::FloatingIntentions { resp } => {
+                let floating = self.collect_unapplied()
+                    .map(|m| m.into_values().collect())
+                    .unwrap_or_default();
+                let _ = resp.send(floating);
             }
             ReplicationControllerCmd::Shutdown => {
-                // Handled in select! above, but keep for completeness
+                // Handled in select! above
             }
         }
     }
 
-    /// Cleanup stale orphans that are already committed to the sigchain.
-    /// Returns the number of orphans removed.
-    fn cleanup_stale_orphans(&mut self) -> usize {
-        let orphans = self.chain_manager.orphan_list();
-        let mut removed = 0;
-
-        for orphan in orphans {
-            // Check if this entry is already in the sigchain
-            let Ok(chain) = self.chain_manager.get_or_create(orphan.author) else {
-                continue;
-            };
-            if orphan.seq < chain.next_seq() {
-                // Entry is behind the current position - it's already applied
-                self.chain_manager.delete_sigchain_orphan(
-                    &orphan.author,
-                    &orphan.prev_hash,
-                    &orphan.entry_hash,
-                );
-                removed += 1;
-            }
-        }
-
-        removed
-    }
-
-    /// Create and commit a local entry from a payload
-    ///
-    /// This is the write path for StateWriter - takes opaque payload bytes,
-    /// builds a signed entry, commits via sigchain, and applies to state.
-    /// Returns the hash of the created entry.
-    fn create_and_commit_local_entry(
+    /// Create and commit a local intention from a payload
+    fn create_and_commit_local_intention(
         &mut self,
         payload: Vec<u8>,
         causal_deps: Vec<Hash>,
     ) -> Result<Hash, ReplicationControllerError> {
         let author = self.node.public_key();
+        let store_prev = self.intention_store.author_tip(&author);
 
-        // Get or create chain, then build entry using existing helper
-        let chain = self.chain_manager.get_or_create(author)?;
-        let signed_entry = chain.build_entry(&self.node, causal_deps, payload);
-        let entry_hash = signed_entry.hash();
+        let intention = Intention {
+            author,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: self.store_id,
+            store_prev,
+            condition: Condition::v1(causal_deps),
+            ops: payload,
+        };
 
-        // Commit via normal path
-        self.commit_entry(&signed_entry)?;
+        let signed = SignedIntention::sign(intention, self.node.signing_key());
 
-        Ok(entry_hash)
-    }
-
-    /// Ingest entry through unified validation: sigchain + state.
-    /// Common path for both local and remote entries.
-    /// Entry is only committed when both validations pass.
-    ///
-    /// Note: This implements strict consistency where sigchain entries are blocked
-    /// until their DAG dependencies are resolved (head-of-line blocking by design).
-    ///
-    /// Note: Signature is verified here as defense in depth, even though
-    /// AuthorizedStore also verifies at the network layer.
-    fn apply_ingested_entry(&mut self, entry: &SignedEntry) -> Result<(), ReplicationControllerError> {
-        // Verify signature - defense in depth
-        entry.verify().map_err(|_| {
-            ReplicationControllerError::State(StateError::Unauthorized("Invalid signature".to_string()))
+        // Verify round-trip before persisting
+        signed.verify().map_err(|_| {
+            ReplicationControllerError::State(StateError::Backend(
+                "Self-signed intention failed verification".into(),
+            ))
         })?;
 
-        self.commit_entry(entry)
+        let hash = self.intention_store.insert(&signed)?;
+        self.apply_intention_to_state(&signed)?;
+
+        // Broadcast to listeners
+        let _ = self.intention_tx.send(signed);
+
+        Ok(hash)
     }
 
-    /// Process a verified entry.
-    /// - Validates sigchain
-    /// - Applies to State via StateMachine::apply
-    /// - Commits to SigChain log
-    /// - Broadcasts to listeners
-    /// 
-    /// The work_queue/orphan cascading logic is now delegated to SigChainManager::ingest_entry.
-    fn commit_entry(&mut self, signed_entry: &SignedEntry) -> Result<(), ReplicationControllerError> {
-        // Delegate validation, buffering, and orphan cascading to SigChainManager
-        let ready_entries = self.chain_manager.ingest_entry(signed_entry)?;
-        
-        // Apply each ready entry to state and broadcast
-        for ready in ready_entries {
-            // Build Op using helper (deps already validated during ingest)
-            let op = ready.to_op();
-            
-            if let Err(e) = self.state.apply(&op) {
-                // CRITICAL: WAL advanced but State update failed.
-                // Fail-stop immediately to prevent divergence. Restarting will repair state via replay.
-                let msg = format!(
-                    "FATAL: State divergence! WAL committed entry {} (author {}) but State::apply failed: {}. Node must restart to repair state from WAL.",
-                    ready.hash, ready.entry.author(), e
-                );
-                eprintln!("{}", msg);
-                panic!("{}", msg);
-            }
-            
-            // Broadcast to listeners
-            let _ = self.entry_tx.send(ready.entry);
+    /// Ingest a signed intention from network/peer
+    fn apply_ingested_intention(
+        &mut self,
+        signed: &SignedIntention,
+    ) -> Result<(), ReplicationControllerError> {
+        // Verify signature
+        signed.verify().map_err(|_| {
+            ReplicationControllerError::State(StateError::Unauthorized(
+                "Invalid signature".to_string(),
+            ))
+        })?;
+
+        // Reject intentions not addressed to this store
+        if signed.intention.store_id != self.store_id {
+            return Err(ReplicationControllerError::State(StateError::Unauthorized(
+                format!(
+                    "Intention store_id {} does not match this store {}",
+                    signed.intention.store_id, self.store_id,
+                ),
+            )));
         }
-        
+
+        let hash = signed.intention.hash();
+
+        // Idempotent — skip if already stored
+        if self.intention_store.contains(&hash)? {
+            return Ok(());
+        }
+
+        // Store it
+        self.intention_store.insert(signed)?;
+
+        // Broadcast to listeners
+        let _ = self.intention_tx.send(signed.clone());
+
+        // Try to apply this and any other pending intentions that may
+        // now be unblocked by having their causal deps satisfied.
+        self.try_apply_all_pending()?;
+
         Ok(())
     }
 
-    /// Spawn a thread to stream entries in a sequence range via channel.
-    fn do_stream_entries_in_range(
-        &self,
-        author: &PubKey,
-        from_seq: u64,
-        to_seq: u64,
-    ) -> Result<mpsc::Receiver<SignedEntry>, StateError> {
-        let author_hex = hex::encode(author);
-        let log_path = self
-            .chain_manager
-            .logs_dir()
-            .join(format!("{}.log", author_hex));
+    /// Collect all intentions stored but not yet applied to state.
+    fn collect_unapplied(&self) -> Result<HashMap<Hash, SignedIntention>, ReplicationControllerError> {
+        let applied_tips = self.state.applied_chaintips()
+            .map_err(|e| ReplicationControllerError::State(StateError::Backend(e.to_string())))?;
+        let applied_map: HashMap<PubKey, Hash> = applied_tips.into_iter().collect();
 
-        // Channel with backpressure
-        let (tx, rx) = mpsc::channel(256);
-
-        // Spawn thread to stream entries
-        std::thread::spawn(move || {
-            let log = match Log::open(&log_path) {
-                Ok(l) => l,
-                Err(_) => return,
-            };
-            let iter = match log.iter_range(from_seq, to_seq) {
-                Ok(iter) => iter,
-                Err(_) => return,
-            };
-
-            for result in iter {
-                match result {
-                    Ok(entry) => {
-                        if tx.blocking_send(entry).is_err() {
-                            return; // Consumer dropped
-                        }
-                    }
-                    Err(_) => return,
+        let mut unapplied = HashMap::new();
+        for (author, store_tip) in self.intention_store.all_author_tips() {
+            let applied_tip = applied_map.get(&author).copied().unwrap_or(Hash::ZERO);
+            if store_tip == applied_tip {
+                continue;
+            }
+            let mut current = store_tip;
+            while current != applied_tip && current != Hash::ZERO {
+                if let Some(signed) = self.intention_store.get(&current)
+                    .map_err(ReplicationControllerError::IntentionStore)?
+                {
+                    let prev = signed.intention.store_prev;
+                    unapplied.insert(current, signed);
+                    current = prev;
+                } else {
+                    break;
                 }
             }
-        });
+        }
+        Ok(unapplied)
+    }
 
-        Ok(rx)
+    /// Build a dependency graph over unapplied intentions.
+    /// Returns (in_degree per hash, reverse map: dep → dependents).
+    /// Deps outside the unapplied set are checked against the store —
+    /// if missing entirely, the intention is permanently blocked.
+    fn build_dep_graph(
+        unapplied: &HashMap<Hash, SignedIntention>,
+        store: &IntentionStore,
+    ) -> (HashMap<Hash, usize>, HashMap<Hash, Vec<Hash>>) {
+        let unapplied_set: std::collections::HashSet<Hash> = unapplied.keys().copied().collect();
+        let mut in_degree: HashMap<Hash, usize> = HashMap::new();
+        let mut dependents: HashMap<Hash, Vec<Hash>> = HashMap::new();
+
+        for (hash, signed) in unapplied {
+            let mut deg = 0;
+
+            // Chain dependency
+            let prev = signed.intention.store_prev;
+            if prev != Hash::ZERO {
+                if unapplied_set.contains(&prev) {
+                    deg += 1;
+                    dependents.entry(prev).or_default().push(*hash);
+                } else if !store.contains(&prev).unwrap_or(false) {
+                    // Predecessor missing entirely — permanently blocked
+                    deg += 1;
+                }
+            }
+
+            // Causal deps
+            match &signed.intention.condition {
+                Condition::V1(deps) => {
+                    for dep in deps {
+                        if *dep == Hash::ZERO {
+                            continue;
+                        }
+                        if unapplied_set.contains(dep) {
+                            deg += 1;
+                            dependents.entry(*dep).or_default().push(*hash);
+                        } else if !store.contains(dep).unwrap_or(false) {
+                            // External dep missing — permanently blocked
+                            deg += 1;
+                        }
+                        // else: dep exists in store and is already applied → satisfied
+                    }
+                }
+            }
+
+            in_degree.insert(*hash, deg);
+        }
+
+        (in_degree, dependents)
+    }
+
+    /// Apply all pending intentions in topological order.
+    fn try_apply_all_pending(&self) -> Result<(), ReplicationControllerError> {
+        let unapplied = self.collect_unapplied()?;
+        if unapplied.is_empty() {
+            return Ok(());
+        }
+
+        let (mut in_degree, dependents) = Self::build_dep_graph(&unapplied, &self.intention_store);
+
+        let mut queue: std::collections::VecDeque<Hash> = in_degree.iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(h, _)| *h)
+            .collect();
+
+        while let Some(hash) = queue.pop_front() {
+            if let Some(signed) = unapplied.get(&hash) {
+                let _ = self.apply_intention_to_state(signed);
+            }
+            
+            if let Some(deps) = dependents.get(&hash) {
+                for dependent_hash in deps {
+                    if let Some(deg) = in_degree.get_mut(dependent_hash) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(*dependent_hash);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Apply a single intention's ops to the state machine
+    fn apply_intention_to_state(
+        &self,
+        signed: &SignedIntention,
+    ) -> Result<(), ReplicationControllerError> {
+        let intention = &signed.intention;
+        let hash = intention.hash();
+
+        let causal_deps = match &intention.condition {
+            Condition::V1(deps) => deps,
+        };
+
+        let op = lattice_model::Op {
+            id: hash,
+            causal_deps,
+            payload: &intention.ops,
+            author: intention.author,
+            timestamp: intention.timestamp,
+            prev_hash: intention.store_prev,
+        };
+
+        self.state.apply(&op).map_err(|e| {
+            let msg = format!(
+                "FATAL: State divergence! Intention {} (author {}) apply failed: {}",
+                hash,
+                hex::encode(intention.author),
+                e
+            );
+            eprintln!("{}", msg);
+            ReplicationControllerError::State(StateError::Backend(msg))
+        })?;
+
+        // Write witness record — this is a local node witnessing the intention
+        let wall_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let _ = self.intention_store.witness(
+            hash,
+            wall_time,
+            self.node.signing_key(),
+        );
+
+        Ok(())
+    }
+
+    /// Fetch intentions by hash (for sync)
+    fn do_fetch_intentions(&self, hashes: &[Hash]) -> Result<Vec<SignedIntention>, StateError> {
+        let mut results = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            if let Some(signed) = self
+                .intention_store
+                .get(hash)
+                .map_err(|e| StateError::Backend(e.to_string()))?
+            {
+                results.push(signed);
+            }
+        }
+        Ok(results)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entry::{ChainTip, Entry};
-    use lattice_model::NodeIdentity;
-    use lattice_model::clock::MockClock;
-    use lattice_model::hlc::HLC;
+    use prost::Message;
     use lattice_model::types::{Hash, PubKey};
-    use std::sync::{Arc, RwLock};
-    use std::collections::HashMap;
+    use lattice_model::weaver::Condition;
     use lattice_model::StateWriter;
-    use uuid::Uuid;
-
     use std::collections::HashSet;
+    use std::sync::{Arc, RwLock};
+    use uuid::Uuid;
 
     #[derive(Clone)]
     struct MockStateMachine {
@@ -442,20 +512,18 @@ mod tests {
         }
 
         fn apply(&self, op: &lattice_model::Op) -> Result<(), std::io::Error> {
-            // Track tip
             self.tips.write().unwrap().insert(op.author, op.id);
-            // Track applied op
             self.applied_ops.write().unwrap().insert(op.id);
             Ok(())
         }
     }
 
-    /// Helper: open a Store for testing
+    const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
+
     fn open_test_store(
         store_id: Uuid,
         store_dir: std::path::PathBuf,
         node: NodeIdentity,
-        runtime: &tokio::runtime::Runtime,
     ) -> Result<
         (
             crate::store::Store<MockStateMachine>,
@@ -465,504 +533,619 @@ mod tests {
         crate::store::StateError,
     > {
         let state = Arc::new(MockStateMachine::new());
-        let logs_dir = store_dir.join("logs");
-        
-        let opened = crate::store::OpenedStore::new(
-            store_id,
-            logs_dir,
-            state.clone(),
-        )?;
-        
-        let (handle, info, runner) = opened.into_handle(node)?;
-        let join_handle = runtime.spawn(async move { runner.run().await });
-        Ok((handle, info, join_handle))
-    }
-    
-    /// Async version for use in #[tokio::test] contexts (tokio::spawn works directly)
-    fn open_test_store_async(
-        store_id: Uuid,
-        store_dir: std::path::PathBuf,
-        node: NodeIdentity,
-    ) -> Result<
-        (
-            crate::store::Store<MockStateMachine>,
-            crate::store::StoreInfo,
-            tokio::task::JoinHandle<()>,
-        ),
-        crate::store::StateError,
-    > {
-        let state = Arc::new(MockStateMachine::new());
-        let logs_dir = store_dir.join("logs");
-        
-        let opened = crate::store::OpenedStore::new(
-            store_id,
-            logs_dir,
-            state.clone(),
-        )?;
-        
+        let opened = crate::store::OpenedStore::new(store_id, store_dir.clone(), state.clone())?;
         let (handle, info, runner) = opened.into_handle(node)?;
         let join_handle = tokio::spawn(async move { runner.run().await });
         Ok((handle, info, join_handle))
     }
 
-    const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
-
-    /// Test that entries with invalid parent_hashes are buffered as DAG orphans
-    /// and applied when the parent entry arrives.
-    #[test]
-    fn test_dag_orphan_buffering_and_retry() {
+    #[tokio::test]
+    async fn test_submit_and_author_tips() {
         let tmp = tempfile::tempdir().unwrap();
-        let store_dir = tmp.path().to_path_buf();
-
         let node = NodeIdentity::generate();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node.clone(), &rt).unwrap();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node.clone()).unwrap();
 
-        // Create entry1: first write to /key
-        let clock1 = MockClock::new(1000);
-        let entry1 = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock1))
-            .prev_hash(Hash::ZERO)
-            .causal_deps(vec![])
-            .payload(b"test".to_vec())
-            .sign(&node);
-        let hash1 = entry1.hash();
+        // Submit a payload
+        let hash = handle
+            .submit(b"hello".to_vec(), vec![])
+            .await
+            .unwrap();
 
-        // Create entry2: cites entry1 as parent
-        let clock2 = MockClock::new(2000);
-        let entry2 = Entry::next_after(Some(&ChainTip::from(&entry1)))
-            .timestamp(HLC::now_with_clock(&clock2))
-            .causal_deps(vec![hash1])
-            .payload(b"test".to_vec())
-            .sign(&node);
-        let hash2 = entry2.hash();
+        // Check author tips
+        let tips = handle.author_tips().await.unwrap();
+        assert_eq!(tips.len(), 1);
+        assert_eq!(tips[&node.public_key()], hash);
 
-        // Step 1: Ingest entry2 FIRST -> buffered
-        let result = rt.block_on(handle.ingest_entry(entry2.clone()));
-        assert!(result.is_ok(), "entry2 should be accepted (buffered)");
+        // Check state was applied
+        assert!(handle.state().has_applied(hash));
 
-        // Verify entry2 not applied yet
-        assert!(!handle.state().has_applied(hash2));
-
-        // Step 2: Ingest entry1 -> applies both
-        let result = rt.block_on(handle.ingest_entry(entry1.clone()));
-        assert!(result.is_ok());
-
-        // Step 3: Verify both applied
-        assert!(handle.state().has_applied(hash1));
-        assert!(handle.state().has_applied(hash2));
-
-        drop(handle);
+        handle.close().await;
     }
 
-    /// Test merge conflict resolution with simple LWW mock.
-    /// A and B write concurrently. C merges.
-    #[test]
-    fn test_merge_conflict_partial_parent_satisfaction() {
+    #[tokio::test]
+    async fn test_ingest_intention() {
         let tmp = tempfile::tempdir().unwrap();
-        let store_dir = tmp.path().to_path_buf();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
 
-        let node1 = NodeIdentity::generate(); 
-        let node2 = NodeIdentity::generate(); 
-        let node3 = NodeIdentity::generate(); 
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Create an intention from node_b
+        let intention = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"from_peer".to_vec(),
+        };
+        let signed = SignedIntention::sign(intention, node_b.signing_key());
+        let hash = signed.intention.hash();
 
-        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone(), &rt).unwrap();
+        // Ingest it
+        handle.ingest_intention(signed).await.unwrap();
 
-        // Author1: entry_a
-        let clock_a = MockClock::new(1000);
-        let entry_a = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock_a))
-            .causal_deps(vec![])
-            .payload(b"test".to_vec())
-            .sign(&node1);
-        let hash_a = entry_a.hash();
+        // Verify applied
+        assert!(handle.state().has_applied(hash));
 
-        // Author2: entry_b
-        let clock_b = MockClock::new(2000);
-        let entry_b = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock_b))
-            .causal_deps(vec![])
-            .payload(b"test".to_vec())
-            .sign(&node2);
-        let hash_b = entry_b.hash();
+        // Verify tips
+        let tips = handle.author_tips().await.unwrap();
+        assert_eq!(tips[&node_b.public_key()], hash);
 
-        // Author3: entry_c merges both
-        let clock_c = MockClock::new(3000);
-        let entry_c = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock_c))
-            .causal_deps(vec![hash_a, hash_b])
-            .payload(b"test".to_vec())
-            .sign(&node3);
-        let hash_c = entry_c.hash();
-
-        // Step 1: C arrives first -> buffered
-        assert!(rt.block_on(handle.ingest_entry(entry_c.clone())).is_ok());
-        assert!(!handle.state().has_applied(hash_c));
-
-        // Step 2: B arrives -> applies.
-        assert!(rt.block_on(handle.ingest_entry(entry_b.clone())).is_ok());
-        assert!(handle.state().has_applied(hash_b));
-
-        // Step 3: A arrives -> applies. triggers C.
-        assert!(rt.block_on(handle.ingest_entry(entry_a.clone())).is_ok());
-        assert!(handle.state().has_applied(hash_a));
-
-        // Final Verify: C should be applied
-        assert!(handle.state().has_applied(hash_c));
-
-        drop(handle);
+        handle.close().await;
     }
-    
-    #[test]
-    fn test_merge_conflict_rebuffer_on_partial_satisfaction() {
+
+    #[tokio::test]
+    async fn test_fetch_intentions() {
         let tmp = tempfile::tempdir().unwrap();
-        let store_dir = tmp.path().to_path_buf();
+        let node = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node.clone()).unwrap();
 
-        let node1 = NodeIdentity::generate();
-        let node2 = NodeIdentity::generate();
-        let node3 = NodeIdentity::generate();
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let hash1 = handle.submit(b"op1".to_vec(), vec![]).await.unwrap();
+        let hash2 = handle.submit(b"op2".to_vec(), vec![]).await.unwrap();
 
-        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone(), &rt).unwrap();
+        // Fetch both
+        let results = handle.fetch_intentions(vec![hash1, hash2]).await.unwrap();
+        assert_eq!(results.len(), 2);
 
-        // Setup entries A, B, C (see previous test)
-        let clock_a = MockClock::new(1000);
-        let entry_a = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock_a))
-            .causal_deps(vec![])
-            .payload(b"test".to_vec())
-            .sign(&node1);
-        let hash_a = entry_a.hash();
+        // Fetch nonexistent
+        let results = handle
+            .fetch_intentions(vec![Hash::ZERO])
+            .await
+            .unwrap();
+        assert!(results.is_empty());
 
-        let clock_b = MockClock::new(2000);
-        let entry_b = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock_b))
-            .causal_deps(vec![])
-            .payload(b"test".to_vec())
-            .sign(&node2);
-        let hash_b = entry_b.hash();
-
-        let clock_c = MockClock::new(3000);
-        let entry_c = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock_c))
-            .causal_deps(vec![hash_a, hash_b])
-            .payload(b"test".to_vec())
-            .sign(&node3);
-        let hash_c = entry_c.hash();
-
-        // 1. C -> buffers (needs A, B)
-        assert!(rt.block_on(handle.ingest_entry(entry_c.clone())).is_ok());
-
-        // 2. A -> applies. C wakes, misses B, rebuffers.
-        assert!(rt.block_on(handle.ingest_entry(entry_a.clone())).is_ok());
-        // Verify A applied, C still grounded
-        assert!(handle.state().has_applied(hash_a));
-        assert!(!handle.state().has_applied(hash_c));
-
-        // 3. B -> applies. C wakes, has both, applies.
-        assert!(rt.block_on(handle.ingest_entry(entry_b.clone())).is_ok());
-        
-        // Verify C applied
-        assert!(handle.state().has_applied(hash_c));
-
-        drop(handle);
+        handle.close().await;
     }
 
-    #[test]
-    fn test_multinode_sync_after_merge() {
-         let tmp_a = tempfile::tempdir().unwrap();
-        let tmp_d = tempfile::tempdir().unwrap(); // Just needing A and D for this simplified test?
+    #[tokio::test]
+    async fn test_duplicate_ingest_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
 
-        let store_dir_a = tmp_a.path().to_path_buf();
-        let store_dir_d = tmp_d.path().to_path_buf();
+        let intention = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"data".to_vec(),
+        };
+        let signed = SignedIntention::sign(intention, node_b.signing_key());
 
+        // Ingest twice
+        handle.ingest_intention(signed.clone()).await.unwrap();
+        handle.ingest_intention(signed).await.unwrap();
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_out_of_order_chain_arrival() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+
+        // Build a chain: i1 -> i2 -> i3
+        let i1 = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"op1".to_vec(),
+        };
+        let s1 = SignedIntention::sign(i1, node_b.signing_key());
+        let h1 = s1.intention.hash();
+
+        let i2 = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h1,
+            condition: Condition::v1(vec![]),
+            ops: b"op2".to_vec(),
+        };
+        let s2 = SignedIntention::sign(i2, node_b.signing_key());
+        let h2 = s2.intention.hash();
+
+        let i3 = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h2,
+            condition: Condition::v1(vec![]),
+            ops: b"op3".to_vec(),
+        };
+        let s3 = SignedIntention::sign(i3, node_b.signing_key());
+        let h3 = s3.intention.hash();
+
+        // Ingest tip first — should float
+        handle.ingest_intention(s3.clone()).await.unwrap();
+        assert!(!handle.state().has_applied(h3), "tip should float without predecessor");
+
+        // Ingest middle — still floating (no root)
+        handle.ingest_intention(s2.clone()).await.unwrap();
+        assert!(!handle.state().has_applied(h2), "middle should float without root");
+        assert!(!handle.state().has_applied(h3), "tip still floating");
+
+        // Ingest root — all should cascade
+        handle.ingest_intention(s1.clone()).await.unwrap();
+        assert!(handle.state().has_applied(h1), "root should be applied");
+        assert!(handle.state().has_applied(h2), "middle should be applied after root");
+        assert!(handle.state().has_applied(h3), "tip should be applied after root");
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_cross_author_causal_dep() {
+        let tmp = tempfile::tempdir().unwrap();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let node_c = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+
+        // B's intention depends on C's intention (causal dep)
+        let i_c = Intention {
+            author: node_c.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"from_c".to_vec(),
+        };
+        let s_c = SignedIntention::sign(i_c, node_c.signing_key());
+        let h_c = s_c.intention.hash();
+
+        let i_b = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![h_c]), // depends on C
+            ops: b"from_b".to_vec(),
+        };
+        let s_b = SignedIntention::sign(i_b, node_b.signing_key());
+        let h_b = s_b.intention.hash();
+
+        // Ingest B first — should float (C not present)
+        handle.ingest_intention(s_b.clone()).await.unwrap();
+        assert!(!handle.state().has_applied(h_b), "B should float without C");
+
+        // Ingest C — both should now be applied
+        handle.ingest_intention(s_c.clone()).await.unwrap();
+        assert!(handle.state().has_applied(h_c), "C should be applied");
+        assert!(handle.state().has_applied(h_b), "B should be applied after C arrives");
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_diamond_dependency() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_local = NodeIdentity::generate();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let node_c = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_local.clone()).unwrap();
+
+        // A and B are independent roots
+        let i_a = Intention {
+            author: node_a.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"from_a".to_vec(),
+        };
+        let s_a = SignedIntention::sign(i_a, node_a.signing_key());
+        let h_a = s_a.intention.hash();
+
+        let i_b = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"from_b".to_vec(),
+        };
+        let s_b = SignedIntention::sign(i_b, node_b.signing_key());
+        let h_b = s_b.intention.hash();
+
+        // C depends on both A and B
+        let i_c = Intention {
+            author: node_c.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![h_a, h_b]),
+            ops: b"from_c".to_vec(),
+        };
+        let s_c = SignedIntention::sign(i_c, node_c.signing_key());
+        let h_c = s_c.intention.hash();
+
+        // Ingest C first — floats (neither A nor B present)
+        handle.ingest_intention(s_c.clone()).await.unwrap();
+        assert!(!handle.state().has_applied(h_c), "C should float");
+
+        // Ingest A — C still floats (B missing)
+        handle.ingest_intention(s_a.clone()).await.unwrap();
+        assert!(handle.state().has_applied(h_a), "A should be applied");
+        assert!(!handle.state().has_applied(h_c), "C still floats without B");
+
+        // Ingest B — C should now be applied
+        handle.ingest_intention(s_b.clone()).await.unwrap();
+        assert!(handle.state().has_applied(h_b), "B should be applied");
+        assert!(handle.state().has_applied(h_c), "C should be applied after both deps met");
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_missing_external_dep_floats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+
+        // A non-existent hash
+        let phantom_hash = Hash::from([0xDEu8; 32]);
+
+        let i_b = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![phantom_hash]),
+            ops: b"blocked".to_vec(),
+        };
+        let s_b = SignedIntention::sign(i_b, node_b.signing_key());
+        let h_b = s_b.intention.hash();
+
+        // Ingest — should float permanently (dep never arrives)
+        handle.ingest_intention(s_b.clone()).await.unwrap();
+        assert!(!handle.state().has_applied(h_b), "should stay floating with missing dep");
+
+        // Verify the floating one doesn't block other *authors*
         let node_d = NodeIdentity::generate();
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let i_d = Intention {
+            author: node_d.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"independent".to_vec(),
+        };
+        let s_d = SignedIntention::sign(i_d, node_d.signing_key());
+        let h_d = s_d.intention.hash();
 
-        let (handle_a, _info_a, _join_a) = open_test_store(TEST_STORE, store_dir_a, node_a.clone(), &rt).unwrap();
-        let (handle_d, _info_d, _join_d) = open_test_store(TEST_STORE, store_dir_d, node_d.clone(), &rt).unwrap();
-        
-        let mut entry_rx_a = handle_a.subscribe_entries();
-        let clock = MockClock::new(1000);
+        handle.ingest_intention(s_d.clone()).await.unwrap();
+        assert!(handle.state().has_applied(h_d), "independent author should not be blocked");
+        assert!(!handle.state().has_applied(h_b), "B should still be floating");
 
-        // A, B, C write to same key.
-        // With simple LWW, last one wins.
-        // We ensure strict ordering by timestamps if we want deterministic winner
-        let entry_a = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock)) // 1000
-            .causal_deps(vec![])
-            .payload(b"test".to_vec())
-            .sign(&node_a);
-
-        let clock = MockClock::new(1001);
-        let entry_b = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock)) // 1001
-            .causal_deps(vec![])
-            .payload(b"test".to_vec())
-            .sign(&node_b);
-
-        let clock = MockClock::new(1002);
-        let entry_c = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock)) // 1002
-            .causal_deps(vec![])
-            .payload(b"test".to_vec())
-            .sign(&node_c);
-
-        // Ingest all to A
-        rt.block_on(handle_a.ingest_entry(entry_a.clone())).unwrap();
-        rt.block_on(handle_a.ingest_entry(entry_b.clone())).unwrap();
-        rt.block_on(handle_a.ingest_entry(entry_c.clone())).unwrap();
-
-        // Verify A has C
-        assert!(handle_a.state().has_applied(entry_c.hash()));
-
-        // Now A merges? Or just syncs?
-        // Original test merged. Let's do a merge explicitly.
-        // Merge means a new entry citing tips.
-        // With simple mock, we don't track chain tips of state machine, but we can just write a new value properly.
-        let merge_payload = b"test".to_vec();
-        let hash_merged = rt.block_on(handle_a.submit(merge_payload, vec![])).unwrap();
-        
-        // Verify merged
-        assert!(handle_a.state().has_applied(hash_merged));
-
-        // Sync to D
-        let sync_a = rt.block_on(handle_a.sync_state()).unwrap();
-        let sync_d = rt.block_on(handle_d.sync_state()).unwrap();
-        assert!(!sync_d.diff(&sync_a).is_empty());
-
-        while let Ok(entry) = entry_rx_a.try_recv() {
-           let _ = rt.block_on(handle_d.ingest_entry(entry));
-        }
-
-        // D should have merged value
-        assert!(handle_d.state().has_applied(hash_merged));
-        drop(handle_a);
-        drop(handle_d);
-    }
-
-    struct FailingStateMachine;
-    impl lattice_model::StateMachine for FailingStateMachine {
-        type Error = std::io::Error;
-        fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> { Ok(Box::new(std::io::Cursor::new(Vec::new()))) }
-        fn restore(&self, _: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> { Ok(()) }
-        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> { Ok(Vec::new()) }
-        fn apply(&self, _: &lattice_model::Op) -> Result<(), std::io::Error> {
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "Simulated Failure"))
-        }
-    }
-
-    #[test]
-    fn test_state_apply_failure_causes_panic() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store_dir = tmp.path().to_path_buf();
-        let node = NodeIdentity::generate();
-
-        // Manual open to inject FailingStateMachine
-        let state = Arc::new(FailingStateMachine);
-        let logs_dir = store_dir.join("logs");
-        let opened = crate::store::OpenedStore::new(Uuid::new_v4(), logs_dir, state).unwrap();
-        let (handle, _, runner) = opened.into_handle(node.clone()).unwrap();
-        
-        // Spawn actor in thread (using std::thread to catch panic result)
-        let join_handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(runner.run());
-        });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-
-        // Create an entry
-        let entry = Entry::next_after(None)
-            .payload(b"trigger".to_vec())
-            .sign(&node);
-
-        // Ingest -> This should commit to WAL then fail on apply -> PANIC
-        let _ = rt.block_on(handle.ingest_entry(entry));
-
-        // Join the thread -> Should encounter panic
-        let result = join_handle.join();
-        assert!(result.is_err(), "Actor should have panicked");
-        
-        let err = result.err().unwrap();
-        if let Some(msg) = err.downcast_ref::<&str>() {
-            assert!(msg.contains("FATAL: State divergence"));
-        } else if let Some(msg) = err.downcast_ref::<String>() {
-            assert!(msg.contains("FATAL: State divergence"));
-        } else {
-             // Panic payload type might vary, checking simple error existence is enough given assertion above
-        }
-    }
-
-    
-    #[tokio::test]
-    async fn test_wal_pattern_state_and_log_consistent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store_dir = tmp.path().to_path_buf();
-        let node = NodeIdentity::generate();
-
-        // Phase 1: Write
-        {
-            let (handle, _info, _join) = open_test_store_async(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
-            let h1 = handle.submit(b"x".to_vec(), vec![]).await.unwrap();
-            let h2 = handle.submit(b"x".to_vec(), vec![]).await.unwrap();
-            
-            assert!(handle.state().has_applied(h1));
-            assert!(handle.state().has_applied(h2));
-            
-            // Log check
-            let log_seq = handle.log_seq().await;
-            assert!(log_seq >= 2);
-            handle.shutdown();
-            // Small delay to let actor finish cleanly
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-
-        // Phase 2: Re-open (simulate crash)
-        {
-            let (handle, info, _join) = open_test_store_async(TEST_STORE, store_dir.clone(), node.clone()).unwrap();
-            // Should have replayed entries from log
-            assert!(info.entries_replayed >= 2, "Should replay from log");
-            
-            // Note: Since we don't have stable hashes in previous block (h1, h2 lost),
-             // Check value restored via replay count
-             // (We can't easily check hashes without refactoring test setup to capture them)
-             
-             handle.shutdown();
-             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-             // Or better: Re-calculate hashes? No, random timestamps.
-             // We can use SigChainManager to peek hashes.
-             let chain_manager = crate::store::sigchain::SigChainManager::new(&store_dir.join("logs")).unwrap();
-             let chain = chain_manager.get(&node.public_key()).unwrap();
-             let count = chain.iter().unwrap().count();
-             assert_eq!(count, 2);
-        }
-    }
-    
-    // Previous tests like orphan_cleanup etc should be ported similarly generic.
-    // I will include one orphan cleanup test to be safe.
-    #[test]
-    fn test_orphan_store_cleanup_on_rebuffer() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store_dir = tmp.path().to_path_buf();
-        let logs_dir = store_dir.join("logs");
-
-        let node1 = NodeIdentity::generate();
-        let node2 = NodeIdentity::generate();
-        let node3 = NodeIdentity::generate();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-
-        let (handle, _info, _join) = open_test_store(TEST_STORE, store_dir, node1.clone(), &rt).unwrap();
-
-        // A, B, C merging
-        let clock_a = MockClock::new(1000);
-        let entry_a = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock_a))
-            .causal_deps(vec![])
-            .payload(b"test".to_vec())
-            .sign(&node1);
-        let hash_a = entry_a.hash();
-
-         let clock_b = MockClock::new(2000);
-        let entry_b = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock_b))
-            .causal_deps(vec![])
-            .payload(b"test".to_vec())
-            .sign(&node2);
-        let hash_b = entry_b.hash();
-
-        let clock_c = MockClock::new(3000);
-        let entry_c = Entry::next_after(None)
-            .timestamp(HLC::now_with_clock(&clock_c))
-            .causal_deps(vec![hash_a, hash_b])
-            .payload(b"test".to_vec())
-            .sign(&node3);
-        let hash_c = entry_c.hash();
-
-        assert!(rt.block_on(handle.ingest_entry(entry_c.clone())).is_ok());
-        assert!(rt.block_on(handle.ingest_entry(entry_a.clone())).is_ok());
-        assert!(rt.block_on(handle.ingest_entry(entry_b.clone())).is_ok());
-
-        assert!(handle.state().has_applied(hash_c));
-        // Use close() which properly awaits actor termination
-        rt.block_on(handle.close());
-
-        let orphan_db_path = logs_dir.join("orphans.db");
-        let orphan_store = crate::store::sigchain::orphan_store::OrphanStore::open(&orphan_db_path).unwrap();
-        let cnt = crate::store::sigchain::orphan_store::tests::count_dag_orphans(&orphan_store);
-        assert_eq!(cnt, 0);
+        handle.close().await;
     }
 
     #[tokio::test]
-    async fn test_partial_replay() {
-        use lattice_model::Op;
-        const TEST_STORE_LOCAL: Uuid = Uuid::from_bytes([2u8; 16]);
-        
+    async fn test_duplicate_ingest_no_duplicate_witness() {
         let tmp = tempfile::tempdir().unwrap();
-        let store_dir = tmp.path().to_path_buf();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+
+        let i_b = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"hello".to_vec(),
+        };
+        let s_b = SignedIntention::sign(i_b, node_b.signing_key());
+
+        // First ingest — should succeed and create one witness record
+        handle.ingest_intention(s_b.clone()).await.unwrap();
+        let count_after_first = handle.witness_count().await;
+
+        // Second ingest of the same intention — should be idempotent
+        handle.ingest_intention(s_b.clone()).await.unwrap();
+        let count_after_second = handle.witness_count().await;
+
+        assert_eq!(count_after_first, count_after_second,
+            "duplicate ingest should not create additional witness record");
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_local_submit_creates_witness() {
+        let tmp = tempfile::tempdir().unwrap();
         let node = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node.clone()).unwrap();
 
-        // 1. Create full history (3 entries)
-        {
-            let (handle, _, _join) = open_test_store_async(TEST_STORE_LOCAL, store_dir.clone(), node.clone()).unwrap();
-            handle.submit(b"x".to_vec(), vec![]).await.unwrap();
-            handle.submit(b"x".to_vec(), vec![]).await.unwrap();
-            handle.submit(b"x".to_vec(), vec![]).await.unwrap();
-            handle.shutdown();
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let hash = handle.submit(b"hello".to_vec(), vec![]).await.unwrap();
+
+        // Witness count should be 1
+        assert_eq!(handle.witness_count().await, 1);
+
+        // History should return one entry
+        let log = handle.witness_log().await;
+        assert_eq!(log.len(), 1);
+
+        let (seq, record) = &log[0];
+        assert_eq!(*seq, 1);
+        let content = lattice_proto::weaver::WitnessContent::decode(record.content.as_slice()).unwrap();
+        assert!(content.wall_time > 0);
+        assert_eq!(content.intention_hash, hash.as_bytes());
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_history_order_matches_apply_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node.clone()).unwrap();
+
+        let h1 = handle.submit(b"op1".to_vec(), vec![]).await.unwrap();
+        let h2 = handle.submit(b"op2".to_vec(), vec![]).await.unwrap();
+        let h3 = handle.submit(b"op3".to_vec(), vec![]).await.unwrap();
+
+        let log = handle.witness_log().await;
+        assert_eq!(log.len(), 3);
+
+        // Sequence numbers are monotonic
+        assert_eq!(log[0].0, 1);
+        assert_eq!(log[1].0, 2);
+        assert_eq!(log[2].0, 3);
+
+        // Order matches submit order (decode intention hashes)
+        let c0 = lattice_proto::weaver::WitnessContent::decode(log[0].1.content.as_slice()).unwrap();
+        let c1 = lattice_proto::weaver::WitnessContent::decode(log[1].1.content.as_slice()).unwrap();
+        let c2 = lattice_proto::weaver::WitnessContent::decode(log[2].1.content.as_slice()).unwrap();
+        assert_eq!(c0.intention_hash, h1.as_bytes());
+        assert_eq!(c1.intention_hash, h2.as_bytes());
+        assert_eq!(c2.intention_hash, h3.as_bytes());
+
+        // Wall times are non-decreasing
+        assert!(c0.wall_time <= c1.wall_time);
+        assert!(c1.wall_time <= c2.wall_time);
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_ingested_intention_creates_witness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+
+        let intention = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"from_peer".to_vec(),
+        };
+        let signed = SignedIntention::sign(intention, node_b.signing_key());
+        let hash = signed.intention.hash();
+
+        handle.ingest_intention(signed).await.unwrap();
+
+        assert_eq!(handle.witness_count().await, 1);
+
+        let log = handle.witness_log().await;
+        assert_eq!(log.len(), 1);
+        let c = lattice_proto::weaver::WitnessContent::decode(log[0].1.content.as_slice()).unwrap();
+        assert_eq!(c.intention_hash, hash.as_bytes());
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_out_of_order_cascade_witness_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+
+        // Build chain: i1 -> i2 -> i3
+        let i1 = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"op1".to_vec(),
+        };
+        let s1 = SignedIntention::sign(i1, node_b.signing_key());
+        let h1 = s1.intention.hash();
+
+        let i2 = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h1,
+            condition: Condition::v1(vec![]),
+            ops: b"op2".to_vec(),
+        };
+        let s2 = SignedIntention::sign(i2, node_b.signing_key());
+        let h2 = s2.intention.hash();
+
+        let i3 = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h2,
+            condition: Condition::v1(vec![]),
+            ops: b"op3".to_vec(),
+        };
+        let s3 = SignedIntention::sign(i3, node_b.signing_key());
+        let h3 = s3.intention.hash();
+
+        // Ingest out of order: tip first, then middle, then root
+        handle.ingest_intention(s3.clone()).await.unwrap();
+        handle.ingest_intention(s2.clone()).await.unwrap();
+        assert_eq!(handle.witness_count().await, 0, "no witnesses yet — both floating");
+
+        // Root arrives — cascade applies all three
+        handle.ingest_intention(s1.clone()).await.unwrap();
+        assert_eq!(handle.witness_count().await, 3, "all three should be witnessed after cascade");
+
+        let log = handle.witness_log().await;
+        assert_eq!(log.len(), 3);
+
+        // Apply order should be: root -> middle -> tip (causal order)
+        let c0 = lattice_proto::weaver::WitnessContent::decode(log[0].1.content.as_slice()).unwrap();
+        let c1 = lattice_proto::weaver::WitnessContent::decode(log[1].1.content.as_slice()).unwrap();
+        let c2 = lattice_proto::weaver::WitnessContent::decode(log[2].1.content.as_slice()).unwrap();
+        assert_eq!(c0.intention_hash, h1.as_bytes());
+        assert_eq!(c1.intention_hash, h2.as_bytes());
+        assert_eq!(c2.intention_hash, h3.as_bytes());
+
+        // Sequence numbers should be monotonic
+        assert!(log[0].0 < log[1].0);
+        assert!(log[1].0 < log[2].0);
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_invalid_signature_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+
+        let intention = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"legit payload".to_vec(),
+        };
+        let mut signed = SignedIntention::sign(intention, node_b.signing_key());
+
+        // Corrupt the signature
+        signed.signature.0[0] ^= 0xFF;
+
+        let result = handle.ingest_intention(signed).await;
+        assert!(result.is_err(), "tampered signature should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::store::error::StoreError::Store(StateError::Unauthorized(_))),
+            "expected Unauthorized, got: {:?}", err,
+        );
+
+        // Store should remain clean
+        assert_eq!(handle.intention_count().await, 0);
+        assert_eq!(handle.witness_count().await, 0);
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_store_id_mismatch_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_a = NodeIdentity::generate();
+        let node_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+
+        // Create intention targeting a DIFFERENT store
+        let wrong_store = Uuid::new_v4();
+        let intention = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: wrong_store,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"wrong store".to_vec(),
+        };
+        let signed = SignedIntention::sign(intention, node_b.signing_key());
+
+        let result = handle.ingest_intention(signed).await;
+        assert!(result.is_err(), "mismatched store_id should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::store::error::StoreError::Store(StateError::Unauthorized(_))),
+            "expected Unauthorized, got: {:?}", err,
+        );
+
+        // Store should remain clean
+        assert_eq!(handle.intention_count().await, 0);
+        assert_eq!(handle.witness_count().await, 0);
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_hlc_monotonicity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node.clone()).unwrap();
+
+        let mut hashes = Vec::new();
+        // Submit 50 intentions rapidly
+        for i in 0..50 {
+            let payload = format!("op{}", i).into_bytes();
+            let hash = handle.submit(payload, vec![]).await.unwrap();
+            hashes.push(hash);
         }
 
-        // 2. Create state with PARTIAL history (simulating a snapshot or lagging state)
-        let state = Arc::new(MockStateMachine::new());
-        let logs_dir = store_dir.join("logs");
-        let chain_manager = crate::store::sigchain::SigChainManager::new(&logs_dir).unwrap();
-        
-        // Get the first entry from the chain
-        let author = node.public_key();
-        let chain = chain_manager.get(&author).unwrap();
-        let first_entry = chain.iter().unwrap().next().unwrap().unwrap();
-        
-        // Apply ONLY the first entry to our state
-        {
-             let causal_deps: Vec<Hash> = first_entry.entry.causal_deps.iter()
-                .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok().map(Hash::from))
-                .collect();
-             let op = Op {
-                id: Hash::from(first_entry.hash()),
-                causal_deps: &causal_deps,
-                payload: &first_entry.entry.payload,
-                author: first_entry.author(),
-                timestamp: first_entry.entry.timestamp,
-                prev_hash: Hash::try_from(first_entry.entry.prev_hash.as_slice()).unwrap_or(Hash::ZERO),
-            };
-            state.apply(&op).unwrap();
+        // Fetch all intentions to check timestamps
+        let intentions = handle.fetch_intentions(hashes).await.unwrap();
+        assert_eq!(intentions.len(), 50);
+
+        for i in 0..49 {
+            let t1 = intentions[i].intention.timestamp;
+            let t2 = intentions[i+1].intention.timestamp;
+            
+            // HLC must be strictly increasing locally
+            assert!(t1 < t2, "HLC not monotonic at index {}: {:?} >= {:?}", i, t1, t2);
         }
-        
-        // DROP manager to release lock on orphans.db
-        drop(chain_manager);
-        
-        // Now open the store using this PARTIALLY applied state.
-        // It should detect we are at seq 1, and replay seq 2 and 3.
-        let opened = crate::store::OpenedStore::new(
-            TEST_STORE_LOCAL,
-            logs_dir,
-            state.clone(),
-        ).unwrap();
-        
-        assert_eq!(opened.entries_replayed(), 2, "Should replay remaining 2 entries");
-        
-        // Verify state has all 3
-        // We can't check hash easily without capturing IDs from setup block.
-        // But since we assert entry count in replay, and we manually applied first...
-        // Let's verification is:
-        // Replay count should be 2.
-        // Total applied count in state should be 3.
-        assert_eq!(state.applied_ops.read().unwrap().len(), 3);
+
+        handle.close().await;
     }
 }
-
-

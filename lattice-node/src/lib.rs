@@ -32,11 +32,9 @@ pub use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, STORE_TYPE_KVST
 // Re-export from lattice-kernel (replication engine)
 pub use lattice_kernel::{
     NodeIdentity, PeerStatus,
-    Entry, SignedEntry,
     StateError, Store, StoreInfo,
     ReplicationController, ReplicationControllerCmd, ReplicationControllerError,
-    LogError, SyncState, MissingRange, SyncDiscrepancy, SyncNeeded, SyncProvider,
-    MAX_ENTRY_SIZE,
+    SyncProvider,
 };
 
 // Re-export from lattice-net-types (network layer types)

@@ -7,7 +7,6 @@ pub mod types;
 pub mod hlc;
 pub mod clock;
 pub mod state_machine;
-pub mod log_traits;
 pub mod replication;
 pub mod node_identity;
 pub mod peer_provider;
@@ -18,6 +17,8 @@ pub mod openable;
 pub mod store_info;
 pub mod head;
 pub mod merge;
+pub mod weaver;
+pub mod sexpr;
 
 // Re-exports from dependencies
 pub use uuid::Uuid;
@@ -26,7 +27,6 @@ pub use types::{Hash, PubKey, Signature};
 pub use hlc::HLC;
 pub use clock::{Clock, SystemClock, MockClock};
 pub use state_machine::{StateMachine, StateWriter, StateWriterError, Op};
-pub use log_traits::{LogEntry, LogManager, ChainTipInfo, LogValidation, Identity};
 pub use replication::{
     // Traits
     SyncProvider, Shutdownable,
@@ -44,3 +44,4 @@ pub use openable::{Openable, OpenError};
 pub use store_info::{StoreInfo, StoreMeta, StoreLink, SystemEvent};
 pub use head::{Head, HeadError};
 pub use merge::Merge;
+pub use sexpr::SExpr;

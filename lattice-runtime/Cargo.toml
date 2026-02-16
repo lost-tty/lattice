@@ -14,6 +14,7 @@ lattice-store-base = { workspace = true }
 lattice-storage = { workspace = true }
 lattice-systemstore = { workspace = true }
 lattice-api = { workspace = true }
+lattice-proto = { workspace = true }
 lattice-kvstore = { workspace = true }
 lattice-logstore = { workspace = true }
 hex = { workspace = true }

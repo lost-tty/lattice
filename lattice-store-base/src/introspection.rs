@@ -3,6 +3,7 @@
 //! These traits enable dynamic command discovery and execution without
 //! compile-time knowledge of specific state machine types.
 
+use lattice_model::SExpr;
 use prost_reflect::{DynamicMessage, ServiceDescriptor};
 use std::error::Error;
 use std::future::Future;
@@ -50,8 +51,8 @@ pub trait Introspectable: Send + Sync {
     }
 
     /// Summarize a payload for history display.
-    /// Returns a list of human-readable summary strings (e.g. "key=val", "delete key").
-    fn summarize_payload(&self, _payload: &DynamicMessage) -> Vec<String> {
+    /// Returns structured s-expression summaries (e.g. `(put "key" "val")`).
+    fn summarize_payload(&self, _payload: &DynamicMessage) -> Vec<SExpr> {
         Vec::new()
     }
 }
@@ -164,7 +165,7 @@ impl<T: Introspectable + ?Sized> Introspectable for std::sync::Arc<T> {
         (**self).matches_filter(payload, filter)
     }
 
-    fn summarize_payload(&self, payload: &DynamicMessage) -> Vec<String> {
+    fn summarize_payload(&self, payload: &DynamicMessage) -> Vec<SExpr> {
         (**self).summarize_payload(payload)
     }
 }

@@ -22,7 +22,7 @@ pub struct Op<'a> {
 
 /// A StateMachine applies ordered operations to materialize a state.
 ///
-/// It is agnostic to the replication log format (SigChain/Entry) and 
+/// It is agnostic to the replication log format (Intention/IntentionStore) and 
 /// only deals with opaque payload bytes.
 pub trait StateMachine: Send + Sync {
     /// The specific error type returned by this state machine

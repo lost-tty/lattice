@@ -1,18 +1,17 @@
 //! SyncProvider - Object-safe trait for network layer access to replicas
 //!
 //! This trait provides the interface that the network layer (lattice-net) uses
-//! to interact with any replica. It enables type erasure so MeshNetwork can
+//! to interact with any replica. It enables type erasure so NetworkService can
 //! hold replicas of different state machine types.
 
-use crate::{
-    store::{GapInfo, StoreError, SyncState},
-    SignedEntry,
-};
+use crate::store::StoreError;
+use lattice_model::types::{Hash, PubKey};
+use lattice_model::weaver::SignedIntention;
 use lattice_model::Uuid;
-use lattice_model::types::PubKey;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 /// Object-safe trait for sync operations on a replica.
 ///
@@ -21,25 +20,23 @@ use tokio::sync::{broadcast, mpsc};
 pub trait SyncProvider: Send + Sync {
     fn id(&self) -> Uuid;
 
-    fn sync_state(
+    /// Get author tips (PubKey → latest intention hash) for sync
+    fn author_tips(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<SyncState, StoreError>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, StoreError>> + Send + '_>>;
 
-    fn ingest_entry(
+    /// Ingest a signed intention from a peer
+    fn ingest_intention(
         &self,
-        entry: SignedEntry,
+        intention: SignedIntention,
     ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>>;
 
-    fn stream_entries_in_range(
+    /// Fetch intentions by content hash
+    fn fetch_intentions(
         &self,
-        author: PubKey,
-        from_seq: u64,
-        to_seq: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<mpsc::Receiver<SignedEntry>, StoreError>> + Send + '_>>;
+        hashes: Vec<Hash>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, StoreError>> + Send + '_>>;
 
-    fn subscribe_entries(&self) -> broadcast::Receiver<SignedEntry>;
-
-    fn subscribe_gaps(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<broadcast::Receiver<GapInfo>, StoreError>> + Send + '_>>;
+    /// Subscribe to newly committed intentions
+    fn subscribe_intentions(&self) -> broadcast::Receiver<SignedIntention>;
 }

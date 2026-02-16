@@ -28,9 +28,9 @@ service StoreService {
   rpc GetName(StoreId) returns (StoreNameResponse);
   rpc Sync(StoreId) returns (Empty);
   rpc Debug(StoreId) returns (DebugInfo);
-  rpc History(HistoryRequest) returns (HistoryResponse);
-  rpc AuthorState(AuthorStateRequest) returns (AuthorStateResponse);
-  rpc OrphanCleanup(StoreId) returns (CleanupResult);
+  rpc WitnessLog(WitnessLogRequest) returns (WitnessLogResponse);
+  rpc FloatingIntentions(StoreId) returns (FloatingIntentionsResponse);
+  rpc GetIntention(GetIntentionRequest) returns (GetIntentionResponse);
   rpc SystemList(StoreId) returns (SystemListResponse);
   rpc ListPeers(StoreId) returns (PeerList);
   rpc RevokePeer(RevokePeerRequest) returns (Empty);

@@ -1,6 +1,6 @@
 [package]
 name = "lattice-kernel"
-description = "Replication engine: Replica, SigChain, Entry, Sync protocols"
+description = "Replication engine: IntentionStore, Weaver protocol, Sync"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,6 +16,7 @@ prost-reflect = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 blake3 = { workspace = true }
+borsh = { workspace = true }
 hex = { workspace = true }
 redb = { workspace = true }
 uuid = { workspace = true }
@@ -26,5 +27,6 @@ futures-util.workspace = true
 tokio-util = "0.7"
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync", "rt-multi-thread"] }
 tokio-test = { workspace = true }
 tempfile = "3"

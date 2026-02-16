@@ -9,9 +9,9 @@ use lattice_model::{StateWriter, StateWriterError, StateMachine};
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::hlc::HLC;
 use lattice_model::Op;
+use lattice_model::weaver::{Intention, Condition};
 use lattice_storage::PersistentState;
 use lattice_storage::state_db::StateLogic;
-use lattice_proto::storage::{Entry, SignedEntry};
 use prost::Message;
 use tokio::sync::broadcast;
 use futures_util::StreamExt;
@@ -24,6 +24,7 @@ pub struct MockWriter<S: StateLogic> {
     state: Arc<PersistentState<S>>,
     next_hash: Arc<AtomicU64>,
     entry_tx: broadcast::Sender<Vec<u8>>,
+    store_id: lattice_model::Uuid,
 }
 
 impl<S: StateLogic> MockWriter<S> {
@@ -34,6 +35,7 @@ impl<S: StateLogic> MockWriter<S> {
             state,
             next_hash: Arc::new(AtomicU64::new(1)),
             entry_tx,
+            store_id: lattice_model::Uuid::new_v4(),
         }
     }
 
@@ -60,6 +62,7 @@ impl<S: StateLogic> Clone for MockWriter<S> {
             state: self.state.clone(),
             next_hash: self.next_hash.clone(),
             entry_tx: self.entry_tx.clone(),
+            store_id: self.store_id,
         }
     }
 }
@@ -81,6 +84,7 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
         let state = self.state.clone();
         let hash_num = self.next_hash.fetch_add(1, Ordering::SeqCst);
         let tx = self.entry_tx.clone();
+        let store_id = self.store_id;
 
         Box::pin(async move {
             // Generate unique hash
@@ -119,23 +123,23 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
             StateMachine::apply(&*state, &op)
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
 
-            // Emit entry for watch subscribers
-            let entry = Entry {
-                version: 1,
-                prev_hash: prev_hash.to_vec(),
-                seq: hash_num,
-                timestamp: Some(HLC::now().into()),
-                causal_deps: causal_deps.iter().map(|h| h.to_vec()).collect(),
-                payload: payload.clone(),
+            // Emit as SignedIntention format (matching real kernel)
+            let intention = Intention {
+                author,
+                timestamp: HLC::now(),
+                store_id,
+                store_prev: prev_hash,
+                condition: Condition::v1(causal_deps),
+                ops: payload,
             };
-            let signed = SignedEntry {
-                entry_bytes: entry.encode_to_vec(),
+            let proto = lattice_proto::weaver::SignedIntention {
+                intention_borsh: intention.to_borsh(),
                 signature: vec![],
-                author_id: author.to_vec(),
             };
-            let _ = tx.send(signed.encode_to_vec());
+            let _ = tx.send(proto.encode_to_vec());
 
             Ok(hash)
         })
     }
 }
+

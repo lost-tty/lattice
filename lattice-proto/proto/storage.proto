@@ -8,41 +8,11 @@ message HLC {
   uint32 counter = 2;    // Logical counter for same-ms ordering
 }
 
-// 1. The Wrapper (What flies over the wire and gets stored)
-message SignedEntry {
-  bytes entry_bytes = 1;  // Serialized Entry message (kept as bytes for stable signature verification)
-  bytes signature = 2;    // Ed25519 Signature of entry_bytes
-  bytes author_id = 3;    // Public Key of the author (32 bytes)
-}
-
-// 2. The Log Entry (The Atomic Unit)
-message Entry {
-  uint32 version = 1;             // Format version for future evolution
-  bytes prev_hash = 2;            // Link to previous sigchain entry (32 bytes)
-  uint64 seq = 3;                 // Monotonic sequence number
-  HLC timestamp = 4;              // Hybrid Logical Clock
-  repeated bytes causal_deps = 7;  // DAG ancestry: hashes of entries this supersedes
-  bytes payload = 5;              // Opaque payload (Store implementation determines format)
-}
-
 // 5. Per-author state (DB and wire)
 message ChainTip {
   uint64 seq = 1;   // Highest sequence number from this author
-  bytes hash = 2;   // Hash of last entry (tip of sigchain)
+  bytes hash = 2;   // Hash of last entry (tip of author's chain)
   HLC hlc = 4;      // Highest HLC seen from this author
-}
-
-// 6. Log file record
-message LogRecord {
-  bytes hash = 1;         // BLAKE3 hash of entry_bytes (32 bytes)
-  bytes entry_bytes = 2;  // Serialized SignedEntry
-}
-
-// 7. Orphan buffer storage
-message OrphanedEntry {
-  uint64 seq = 1;            // Sequence number of the orphaned entry
-  SignedEntry entry = 2;     // The orphaned entry itself
-  uint64 received_at = 3;    // Unix timestamp (seconds) when orphan was received
 }
 
 // 8. Stored peer sync info (state.db)
@@ -90,7 +60,13 @@ message SystemOp {
         PeerStrategyOp strategy = 3;
         StoreOp store = 4;
         InviteOp invite = 5;
+        SystemBatch batch = 6;
     }
+}
+
+// Batch of system operations — applied atomically in one intention.
+message SystemBatch {
+    repeated SystemOp ops = 1;
 }
 
 message StoreOp {

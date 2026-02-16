@@ -146,9 +146,8 @@ message StoreList {
 // Runtime statistics
 message StoreDetails {
   uint32 author_count = 1;
-  uint32 log_file_count = 2;
-  uint64 log_bytes = 3;
-  uint32 orphan_count = 4;
+  uint64 intention_count = 2;
+  uint64 witness_count = 3;
 }
 
 message SyncResult {
@@ -161,25 +160,78 @@ message DebugInfo {
   repeated AuthorState authors = 1;
 }
 
-message HistoryRequest {
+message WitnessLogRequest {
   bytes store_id = 1;
-  bytes author = 2;
-  uint32 limit = 3;
 }
 
-message HistoryEntry {
-  uint64 seq = 1;
-  bytes author = 2;
-  bytes payload = 3;
-  uint64 timestamp = 4;
-  bytes hash = 5;
-  bytes prev_hash = 6;
-  repeated bytes causal_deps = 7;
-  string summary = 8;
+// Causal dependency condition — mirrors kernel's Condition enum.
+message Condition {
+  oneof condition {
+    CausalDeps v1 = 1;  // Explicit causal dependencies (AND logic)
+  }
 }
 
-message HistoryResponse {
-  repeated HistoryEntry entries = 1;
+message CausalDeps {
+  repeated bytes hashes = 1;  // Sorted list of prerequisite intention hashes
+}
+
+message HLC {
+  uint64 wall_time = 1;  // Milliseconds since Unix epoch
+  uint32 counter = 2;    // Logical counter for same-ms ordering
+}
+
+// Signed intention — structured API representation.
+// (Internal storage uses Borsh for deterministic hashing; this is the user-facing view.)
+message SignedIntention {
+  bytes hash = 1;               // blake3 content hash (32 bytes)
+  bytes author = 2;             // Ed25519 public key (32 bytes)
+  bytes signature = 3;          // Ed25519 signature (64 bytes)
+  HLC timestamp = 4;            // Hybrid logical clock
+  bytes store_id = 5;           // Target store UUID (16 bytes)
+  bytes store_prev = 6;         // Previous intention hash in author's chain
+  Condition condition = 7;      // Causal dependency condition
+  bytes ops = 8;                // Opaque operation payload
+}
+
+// Transport wrapper: weaver.WitnessRecord + sequence number.
+// content/signature fields mirror weaver.proto WitnessRecord exactly.
+message WitnessLogEntry {
+  uint64 seq = 1;               // Witness sequence (apply order)
+  bytes content = 2;            // protobuf-encoded WitnessContent
+  bytes signature = 3;          // Ed25519 signature over blake3(content)
+}
+
+// Structured s-expression for operation summaries.
+message SExpr {
+  oneof value {
+    string symbol = 1;  // Unquoted symbol/keyword: put, child-add, :active
+    string str = 2;     // Quoted string value
+    bytes raw = 3;      // Binary data (rendered as hex)
+    uint64 num = 4;     // Numeric value
+    SExprList list = 5; // Nested list: (put "key" "value")
+  }
+}
+
+message SExprList {
+  repeated SExpr items = 1;
+}
+
+message WitnessLogResponse {
+  repeated WitnessLogEntry entries = 1;
+}
+
+message FloatingIntentionsResponse {
+  repeated SignedIntention intentions = 1;
+}
+
+message GetIntentionRequest {
+  bytes store_id = 1;
+  bytes hash_prefix = 2;
+}
+
+message GetIntentionResponse {
+  SignedIntention intention = 1;
+  repeated SExpr ops = 2;
 }
 
 message AuthorStateRequest {

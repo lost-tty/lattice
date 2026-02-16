@@ -9,7 +9,7 @@ use prost_reflect::prost::Message;
 // Re-export proto types directly (have UniFFI derives via lattice-api ffi feature)
 pub use lattice_api::proto::{
     NodeStatus, StoreRef, StoreMeta, StoreDetails, PeerInfo, 
-    HistoryEntry, AuthorState, CleanupResult, JoinResponse,
+    WitnessLogEntry, AuthorState, JoinResponse,
 };
 
 // FFI-compatible event type (uses Vec<u8> for IDs which UniFFI supports)
@@ -293,11 +293,12 @@ impl Lattice {
             .map_err(|e| LatticeError::from_backend(e))
     }
 
-    pub fn store_delete(&self, store_id: String) -> Result<(), LatticeError> {
+    pub fn store_delete(&self, parent_store_id: String, child_store_id: String) -> Result<(), LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().store_delete(id))
+        let parent_id = Uuid::parse_str(&parent_store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
+        let child_id = Uuid::parse_str(&child_store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
+        self.rt.block_on(r.backend().store_delete(parent_id, child_id))
             .map_err(|e| LatticeError::from_backend(e))
     }
 
@@ -310,28 +311,11 @@ impl Lattice {
             .map_err(|e| LatticeError::from_backend(e))
     }
 
-    pub fn store_history(&self, store_id: String) -> Result<Vec<HistoryEntry>, LatticeError> {
+    pub fn store_witness_log(&self, store_id: String) -> Result<Vec<WitnessLogEntry>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().store_history(id))
-            .map_err(|e| LatticeError::from_backend(e))
-    }
-    
-    pub fn store_author_state(&self, store_id: String, author: Option<Vec<u8>>) -> Result<Vec<AuthorState>, LatticeError> {
-        let r_guard = self.rt.block_on(self.runtime.read());
-        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().store_author_state(id, author.as_deref()))
-            .map_err(|e| LatticeError::from_backend(e))
-    }
-
-    pub fn store_orphan_cleanup(&self, store_id: String) -> Result<CleanupResult, LatticeError> {
-        let r_guard = self.rt.block_on(self.runtime.read());
-        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
-        self.rt.block_on(r.backend().store_orphan_cleanup(id))
-            .map(|orphans_removed| CleanupResult { orphans_removed })
+        self.rt.block_on(r.backend().store_witness_log(id))
             .map_err(|e| LatticeError::from_backend(e))
     }
 

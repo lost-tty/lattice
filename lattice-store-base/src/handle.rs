@@ -73,7 +73,7 @@ where
         self.state().matches_filter(payload, filter)
     }
 
-    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<String> {
+    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<lattice_model::SExpr> {
         self.state().summarize_payload(payload)
     }
 }

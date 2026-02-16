@@ -682,7 +682,7 @@ impl<T: StateLogic + Introspectable> Introspectable for PersistentState<T> {
         self.inner.matches_filter(payload, filter)
     }
 
-    fn summarize_payload(&self, payload: &DynamicMessage) -> Vec<String> {
+    fn summarize_payload(&self, payload: &DynamicMessage) -> Vec<lattice_model::SExpr> {
         self.inner.summarize_payload(payload)
     }
 }

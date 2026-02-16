@@ -3,6 +3,8 @@
 //! Semantic newtypes for common fixed-size byte arrays, replacing raw `[u8; N]`.
 
 use std::fmt;
+use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::io::{Read, Write};
 
 /// Macro to define fixed-size byte arrays with strong types.
 /// 
@@ -38,6 +40,21 @@ macro_rules! define_bytes {
                     ));
                 }
                 Ok(Self(bytes.try_into().map_err(|_| "internal error: length mismatch".to_string())?))
+            }
+        }
+
+        // Borsh: serialize/deserialize as raw [u8; N]
+        impl BorshSerialize for $name {
+            fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+                writer.write_all(&self.0)
+            }
+        }
+
+        impl BorshDeserialize for $name {
+            fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+                let mut buf = [0u8; $len];
+                reader.read_exact(&mut buf)?;
+                Ok(Self(buf))
             }
         }
 

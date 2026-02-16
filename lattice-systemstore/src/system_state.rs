@@ -47,14 +47,6 @@ impl<S> SystemLayer<S> {
     }
 }
 
-// Deref to inner to expose inner methods
-impl<S> std::ops::Deref for SystemLayer<S> {
-    type Target = S;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
 // ==================== System Logic ====================
 
 impl<S: StateLogic> SystemLayer<S> {
@@ -77,12 +69,21 @@ impl<S: StateLogic> SystemLayer<S> {
     }
 
     /// Apply a SystemOp to the system table.
+    /// For Batch ops, recurses before opening the table to avoid borrow conflicts.
     fn apply_system_op(
         &self,
         txn: &mut redb::WriteTransaction,
         sys_op: SystemOp,
         op: &Op
     ) -> Result<(), StateDbError> {
+        // Handle Batch first (before opening table) to avoid borrow conflict
+        if let Some(system_op::Kind::Batch(batch)) = sys_op.kind {
+            for inner_op in batch.ops {
+                self.apply_system_op(txn, inner_op, op)?;
+            }
+            return Ok(());
+        }
+
         let raw_table = txn.open_table(lattice_storage::TABLE_SYSTEM)?;
         let mut table = crate::tables::SystemTable::new(raw_table);
         
@@ -150,6 +151,7 @@ impl<S: StateLogic> SystemLayer<S> {
                       None => {},
                  }
             },
+            Some(system_op::Kind::Batch(_)) => unreachable!("handled above"),
             None => {},
         }
         
@@ -167,29 +169,26 @@ where
     type Error = SystemLayerError;
     
     fn apply(&self, op: &Op) -> Result<(), Self::Error> {
-        // M10A: Universal Envelope Interception
-        if let Ok(universal) = UniversalOp::decode(op.payload) {
-             match universal.op {
-                 Some(universal_op::Op::System(sys_op)) => {
-                      return self.apply_system_transaction(op, sys_op).map_err(SystemLayerError::Db);
-                 },
-                 Some(universal_op::Op::AppData(data)) => {
-                     // Pass unwrapped data to inner
-                     let new_op = Op {
-                         id: op.id,
-                         causal_deps: op.causal_deps,
-                         payload: &data, 
-                         author: op.author,
-                         timestamp: op.timestamp,
-                         prev_hash: op.prev_hash,
-                     };
-                     return StateMachine::apply(&self.inner, &new_op).map_err(|e| SystemLayerError::Inner(Box::new(e)));
-                 },
-                 None => {} // Unknown universal op
-             }
+        let universal = UniversalOp::decode(op.payload)
+            .map_err(|e| SystemLayerError::Inner(format!("invalid UniversalOp envelope: {e}").into()))?;
+
+        match universal.op {
+            Some(universal_op::Op::System(sys_op)) => {
+                self.apply_system_transaction(op, sys_op).map_err(SystemLayerError::Db)
+            },
+            Some(universal_op::Op::AppData(data)) => {
+                let new_op = Op {
+                    id: op.id,
+                    causal_deps: op.causal_deps,
+                    payload: &data,
+                    author: op.author,
+                    timestamp: op.timestamp,
+                    prev_hash: op.prev_hash,
+                };
+                StateMachine::apply(&self.inner, &new_op).map_err(|e| SystemLayerError::Inner(Box::new(e)))
+            },
+            None => Ok(()),
         }
-        
-        StateMachine::apply(&self.inner, op).map_err(|e| SystemLayerError::Inner(Box::new(e)))
     }
 
     fn snapshot(&self) -> Result<Box<dyn Read + Send>, Self::Error> {
@@ -224,8 +223,44 @@ impl<S: Openable + StateLogic> Openable for SystemLayer<S> {
     }
 }
 
-// NOTE: Introspectable and Dispatcher are implemented via blanket impls in store-base
-// because SystemLayer implements Deref<Target=S> and StateProvider (below).
+// NOTE: Introspectable is still via blanket (Deref + StateProvider).
+// Dispatcher is now explicit so we can wrap app-data writes in UniversalOp(AppData).
+
+use lattice_store_base::Dispatcher;
+use lattice_model::StateWriter;
+
+/// A StateWriter wrapper that wraps every submit in UniversalOp(AppData(...)).
+struct WrappingWriter<'a> {
+    inner: &'a dyn StateWriter,
+}
+
+impl StateWriter for WrappingWriter<'_> {
+    fn submit(
+        &self,
+        payload: Vec<u8>,
+        causal_deps: Vec<Hash>,
+    ) -> Pin<Box<dyn Future<Output = Result<Hash, lattice_model::StateWriterError>> + Send + '_>> {
+        let envelope = UniversalOp {
+            op: Some(universal_op::Op::AppData(payload)),
+        };
+        let wrapped = envelope.encode_to_vec();
+        self.inner.submit(wrapped, causal_deps)
+    }
+}
+
+impl<S: Dispatcher + Send + Sync> Dispatcher for SystemLayer<S> {
+    fn dispatch<'a>(
+        &'a self,
+        writer: &'a dyn StateWriter,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+        let wrapping = WrappingWriter { inner: writer };
+        Box::pin(async move {
+            self.inner.dispatch(&wrapping, method_name, request).await
+        })
+    }
+}
 
 impl<S: StreamProvider + 'static + Sync> StreamProvider for SystemLayer<S> {
     fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {

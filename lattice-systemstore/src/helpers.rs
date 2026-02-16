@@ -1,20 +1,18 @@
-use lattice_model::{SystemEvent, StoreLink, StateWriter, PeerStatus as ModelStatus};
+use lattice_model::{SystemEvent, StoreLink, PeerStatus as ModelStatus};
 use lattice_model::store_info::PeerStrategy;
 use lattice_model::replication::EntryStreamProvider;
 use lattice_proto::storage::{
     SystemOp, system_op, peer_op, hierarchy_op, peer_strategy_op, peer_strategy,
     store_op, SetStoreName,
-    invite_op, InviteOp, SetInviteStatus, SetInviteInvitedBy, SetInviteClaimedBy,
-    SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, SetPeerName, UniversalOp, universal_op, PeerOp, SignedEntry, Entry,
+    invite_op, SetInviteStatus, SetInviteInvitedBy, SetInviteClaimedBy,
+    SetPeerStatus, SetPeerAddedAt, SetPeerAddedBy, SetPeerName, UniversalOp, universal_op, PeerOp,
     PeerStatus as ProtoStatus, ChildStatus as ProtoChildStatus, InviteStatus as ProtoInviteStatus,
     PeerStrategyOp, SetPeerStrategy,
 };
-use lattice_store_base::StateProvider;
 use lattice_model::InviteStatus;
 use futures_util::{Stream, StreamExt};
 use prost::Message;
 use std::pin::Pin;
-use std::future::Future;
 
 pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, String>> {
     match sys_op.kind {
@@ -103,65 +101,17 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
              }
          },
          Some(system_op::Kind::Invite(_)) => None,
+         Some(system_op::Kind::Batch(batch)) => {
+              // Recursively decode each inner op, return first event found
+              for inner_op in batch.ops {
+                  if let Some(event) = decode_system_event(inner_op) {
+                      return Some(event);
+                  }
+              }
+              None
+         },
          None => None,
      }
-}
-
-pub fn put_system_key<T>(writer: T, key: Vec<u8>, payload: Vec<u8>) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
-where
-    T: StateProvider + StateWriter + Clone + Send + Sync + 'static,
-    T::State: crate::SystemReader,
-{
-    Box::pin(async move {
-        let deps = writer.state()._get_deps(&key)?;
-        writer.submit(payload, deps).await.map(|_| ()).map_err(|e| e.to_string())
-    })
-}
-
-/// Helper to wrap a peer operation in the full envelope
-fn wrap_peer_op(pubkey: &[u8], op: peer_op::Op) -> Vec<u8> {
-    let envelope = UniversalOp {
-        op: Some(universal_op::Op::System(SystemOp {
-            kind: Some(system_op::Kind::Peer(PeerOp {
-                pubkey: pubkey.to_vec(),
-                op: Some(op)
-            }))
-        }))
-    };
-    envelope.encode_to_vec()
-}
-
-pub fn create_set_status_payload(pubkey: lattice_model::PubKey, status: lattice_model::PeerStatus) -> Vec<u8> {
-    let proto_status = match status {
-        ModelStatus::Invited => ProtoStatus::Invited,
-        ModelStatus::Active => ProtoStatus::Active,
-        ModelStatus::Dormant => ProtoStatus::Dormant,
-        ModelStatus::Revoked => ProtoStatus::Revoked,
-    };
-    wrap_peer_op(pubkey.as_slice(), peer_op::Op::SetStatus(SetPeerStatus { status: proto_status as i32 }))
-}
-
-pub fn create_set_added_at_payload(pubkey: lattice_model::PubKey, timestamp: u64) -> Vec<u8> {
-    wrap_peer_op(pubkey.as_slice(), peer_op::Op::SetAddedAt(SetPeerAddedAt { timestamp }))
-}
-
-pub fn create_set_added_by_payload(pubkey: lattice_model::PubKey, adder: lattice_model::PubKey) -> Vec<u8> {
-    wrap_peer_op(pubkey.as_slice(), peer_op::Op::SetAddedBy(SetPeerAddedBy { adder_pubkey: adder.to_vec() }))
-}
-
-pub fn create_set_peer_name_payload(pubkey: lattice_model::PubKey, name: String) -> Vec<u8> {
-    wrap_peer_op(pubkey.as_slice(), peer_op::Op::SetName(SetPeerName { name }))
-}
-
-pub fn create_set_store_name_payload(name: String) -> Vec<u8> {
-    let envelope = UniversalOp {
-        op: Some(universal_op::Op::System(SystemOp {
-            kind: Some(system_op::Kind::Store(lattice_proto::storage::StoreOp {
-                op: Some(store_op::Op::SetName(SetStoreName { name }))
-            }))
-        }))
-    };
-    envelope.encode_to_vec()
 }
 
 pub fn map_to_model_status(proto: ProtoChildStatus) -> lattice_model::store_info::ChildStatus {
@@ -180,46 +130,6 @@ pub fn map_to_proto_status(model: lattice_model::store_info::ChildStatus) -> Pro
     }
 }
 
-/// Helper to wrap a hierarchy operation in the full envelope
-fn wrap_hierarchy_op(op: hierarchy_op::Op) -> Vec<u8> {
-    let envelope = UniversalOp {
-        op: Some(universal_op::Op::System(SystemOp {
-            kind: Some(system_op::Kind::Hierarchy(lattice_proto::storage::HierarchyOp {
-                op: Some(op)
-            }))
-        }))
-    };
-    envelope.encode_to_vec()
-}
-
-pub fn create_add_child_payload(target_id: lattice_model::Uuid, alias: String, store_type: String) -> Vec<u8> {
-    wrap_hierarchy_op(hierarchy_op::Op::AddChild(lattice_proto::storage::ChildAdd {
-        target_id: target_id.as_bytes().to_vec(),
-        alias,
-        store_type,
-    }))
-}
-
-pub fn create_remove_child_payload(target_id: lattice_model::Uuid) -> Vec<u8> {
-    wrap_hierarchy_op(hierarchy_op::Op::RemoveChild(lattice_proto::storage::ChildRemove {
-        target_id: target_id.as_bytes().to_vec(),
-    }))
-}
-
-// ==================== Strategy Helpers ====================
-
-/// Helper to wrap a strategy operation in the full envelope
-fn wrap_strategy_op(op: peer_strategy_op::Op) -> Vec<u8> {
-    let envelope = UniversalOp {
-        op: Some(universal_op::Op::System(SystemOp {
-            kind: Some(system_op::Kind::Strategy(PeerStrategyOp {
-                op: Some(op)
-            }))
-        }))
-    };
-    envelope.encode_to_vec()
-}
-
 pub fn map_to_proto_strategy(model: PeerStrategy) -> lattice_proto::storage::PeerStrategy {
     use lattice_proto::storage::peer_strategy::Type;
     let type_enum = match model {
@@ -232,57 +142,52 @@ pub fn map_to_proto_strategy(model: PeerStrategy) -> lattice_proto::storage::Pee
     }
 }
 
-pub fn create_set_strategy_payload(strategy: PeerStrategy) -> Vec<u8> {
-    let proto = map_to_proto_strategy(strategy);
-    wrap_strategy_op(peer_strategy_op::Op::Set(SetPeerStrategy {
-        strategy: Some(proto),
-    }))
-}
-
-// ==================== Invite Helpers ====================
-
-fn wrap_invite_op(token_hash: Vec<u8>, op: invite_op::Op) -> Vec<u8> {
-    let envelope = UniversalOp {
-        op: Some(universal_op::Op::System(SystemOp {
-            kind: Some(system_op::Kind::Invite(InviteOp {
-                token_hash,
-                op: Some(op)
-            }))
-        }))
-    };
-    envelope.encode_to_vec()
-}
-
-pub fn create_set_invite_status_payload(token_hash: &[u8], status: lattice_model::InviteStatus) -> Vec<u8> {
-    let proto_status = match status {
-        InviteStatus::Unknown => ProtoInviteStatus::Unknown,
-        InviteStatus::Valid => ProtoInviteStatus::Valid,
-        InviteStatus::Revoked => ProtoInviteStatus::Revoked,
-        InviteStatus::Claimed => ProtoInviteStatus::Claimed,
-    };
-    wrap_invite_op(token_hash.to_vec(), invite_op::Op::SetStatus(SetInviteStatus { status: proto_status as i32 }))
-}
-
-pub fn create_set_invited_by_payload(token_hash: &[u8], inviter: lattice_model::PubKey) -> Vec<u8> {
-    wrap_invite_op(token_hash.to_vec(), invite_op::Op::SetInvitedBy(SetInviteInvitedBy { inviter_pubkey: inviter.to_vec() }))
-}
-
-pub fn create_set_claimed_by_payload(token_hash: &[u8], claimer: lattice_model::PubKey) -> Vec<u8> {
-    wrap_invite_op(token_hash.to_vec(), invite_op::Op::SetClaimedBy(SetInviteClaimedBy { claimer_pubkey: claimer.to_vec() }))
-}
-
 // ==================== Batch Builder ====================
 
-/// A pending write operation (key + payload)
+/// A pending system operation (dep key + SystemOp)
 struct PendingOp {
     key: Vec<u8>,
-    payload: Vec<u8>,
+    sys_op: SystemOp,
 }
 
-/// Builder for batching multiple system operations.
+/// Builder for batching multiple system operations into a single intention.
 pub struct SystemBatch<'a, T: ?Sized> {
     store: &'a T,
     ops: Vec<PendingOp>,
+}
+
+fn make_peer_op(pubkey: &lattice_model::PubKey, op: peer_op::Op) -> SystemOp {
+    SystemOp {
+        kind: Some(system_op::Kind::Peer(PeerOp {
+            pubkey: pubkey.as_slice().to_vec(),
+            op: Some(op),
+        })),
+    }
+}
+
+fn make_hierarchy_op(op: hierarchy_op::Op) -> SystemOp {
+    SystemOp {
+        kind: Some(system_op::Kind::Hierarchy(lattice_proto::storage::HierarchyOp {
+            op: Some(op),
+        })),
+    }
+}
+
+fn make_strategy_op(op: peer_strategy_op::Op) -> SystemOp {
+    SystemOp {
+        kind: Some(system_op::Kind::Strategy(PeerStrategyOp {
+            op: Some(op),
+        })),
+    }
+}
+
+fn make_invite_op(token_hash: &[u8], op: invite_op::Op) -> SystemOp {
+    SystemOp {
+        kind: Some(system_op::Kind::Invite(lattice_proto::storage::InviteOp {
+            token_hash: token_hash.to_vec(),
+            op: Some(op),
+        })),
+    }
 }
 
 impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
@@ -294,110 +199,159 @@ impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
     /// Set peer status
     pub fn set_status(mut self, pubkey: lattice_model::PubKey, status: lattice_model::PeerStatus) -> Self {
         let key = format!("peer/{}/status", hex::encode(pubkey.as_slice())).into_bytes();
-        let payload = create_set_status_payload(pubkey, status);
-        self.ops.push(PendingOp { key, payload });
+        let proto_status = match status {
+            lattice_model::PeerStatus::Invited => ProtoStatus::Invited,
+            lattice_model::PeerStatus::Active => ProtoStatus::Active,
+            lattice_model::PeerStatus::Dormant => ProtoStatus::Dormant,
+            lattice_model::PeerStatus::Revoked => ProtoStatus::Revoked,
+        };
+        let sys_op = make_peer_op(&pubkey, peer_op::Op::SetStatus(SetPeerStatus { status: proto_status as i32 }));
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     /// Set peer added_at timestamp  
     pub fn set_added_at(mut self, pubkey: lattice_model::PubKey, timestamp: u64) -> Self {
         let key = format!("peer/{}/added_at", hex::encode(pubkey.as_slice())).into_bytes();
-        let payload = create_set_added_at_payload(pubkey, timestamp);
-        self.ops.push(PendingOp { key, payload });
+        let sys_op = make_peer_op(&pubkey, peer_op::Op::SetAddedAt(SetPeerAddedAt { timestamp }));
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     /// Set peer added_by
     pub fn set_added_by(mut self, pubkey: lattice_model::PubKey, adder: lattice_model::PubKey) -> Self {
         let key = format!("peer/{}/added_by", hex::encode(pubkey.as_slice())).into_bytes();
-        let payload = create_set_added_by_payload(pubkey, adder);
-        self.ops.push(PendingOp { key, payload });
+        let sys_op = make_peer_op(&pubkey, peer_op::Op::SetAddedBy(SetPeerAddedBy { adder_pubkey: adder.to_vec() }));
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     /// Set peer name (in System Table)
     pub fn set_peer_name(mut self, pubkey: lattice_model::PubKey, name: String) -> Self {
         let key = format!("peer/{}/name", hex::encode(pubkey.as_slice())).into_bytes();
-        let payload = create_set_peer_name_payload(pubkey, name);
-        self.ops.push(PendingOp { key, payload });
+        let sys_op = make_peer_op(&pubkey, peer_op::Op::SetName(SetPeerName { name }));
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     /// Set store name
     pub fn set_name(mut self, name: &str) -> Self {
         let key = b"name".to_vec();
-        let payload = create_set_store_name_payload(name.to_string());
-        self.ops.push(PendingOp { key, payload });
+        let sys_op = SystemOp {
+            kind: Some(system_op::Kind::Store(lattice_proto::storage::StoreOp {
+                op: Some(store_op::Op::SetName(SetStoreName { name: name.to_string() })),
+            })),
+        };
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     /// Add child store
     pub fn add_child(mut self, child_id: lattice_model::Uuid, alias: String, store_type: &str) -> Self {
         let key = format!("child/{}/name", child_id).into_bytes();
-        let payload = create_add_child_payload(child_id, alias, store_type.to_string());
-        self.ops.push(PendingOp { key, payload });
+        let sys_op = make_hierarchy_op(hierarchy_op::Op::AddChild(lattice_proto::storage::ChildAdd {
+            target_id: child_id.as_bytes().to_vec(),
+            alias,
+            store_type: store_type.to_string(),
+        }));
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     /// Remove child store
     pub fn remove_child(mut self, child_id: lattice_model::Uuid) -> Self {
         let key = format!("child/{}/name", child_id).into_bytes();
-        let payload = create_remove_child_payload(child_id);
-        self.ops.push(PendingOp { key, payload });
+        let sys_op = make_hierarchy_op(hierarchy_op::Op::RemoveChild(lattice_proto::storage::ChildRemove {
+            target_id: child_id.as_bytes().to_vec(),
+        }));
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     /// Set child store status
     pub fn set_child_status(mut self, child_id: lattice_model::Uuid, status: lattice_model::store_info::ChildStatus) -> Self {
         let key = format!("child/{}/status", child_id).into_bytes();
-        
         let proto_status = map_to_proto_status(status);
-        
-        let payload = wrap_hierarchy_op(hierarchy_op::Op::SetStatus(lattice_proto::storage::ChildSetStatus {
+        let sys_op = make_hierarchy_op(hierarchy_op::Op::SetStatus(lattice_proto::storage::ChildSetStatus {
             target_id: child_id.as_bytes().to_vec(),
             status: proto_status as i32,
         }));
-        self.ops.push(PendingOp { key, payload });
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     /// Set peer strategy
     pub fn set_strategy(mut self, strategy: PeerStrategy) -> Self {
         let key = b"strategy".to_vec();
-        let payload = create_set_strategy_payload(strategy);
-        self.ops.push(PendingOp { key, payload });
+        let proto = map_to_proto_strategy(strategy);
+        let sys_op = make_strategy_op(peer_strategy_op::Op::Set(SetPeerStrategy {
+            strategy: Some(proto),
+        }));
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     /// Create/Update invite
     pub fn set_invite_status(mut self, token_hash: &[u8], status: lattice_model::InviteStatus) -> Self {
         let key = format!("invite/{}/status", hex::encode(token_hash)).into_bytes();
-        let payload = create_set_invite_status_payload(token_hash, status);
-        self.ops.push(PendingOp { key, payload });
+        let proto_status = match status {
+            InviteStatus::Unknown => ProtoInviteStatus::Unknown,
+            InviteStatus::Valid => ProtoInviteStatus::Valid,
+            InviteStatus::Revoked => ProtoInviteStatus::Revoked,
+            InviteStatus::Claimed => ProtoInviteStatus::Claimed,
+        };
+        let sys_op = make_invite_op(token_hash, invite_op::Op::SetStatus(SetInviteStatus { status: proto_status as i32 }));
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     pub fn set_invite_invited_by(mut self, token_hash: &[u8], inviter: lattice_model::PubKey) -> Self {
         let key = format!("invite/{}/invited_by", hex::encode(token_hash)).into_bytes();
-        let payload = create_set_invited_by_payload(token_hash, inviter);
-        self.ops.push(PendingOp { key, payload });
+        let sys_op = make_invite_op(token_hash, invite_op::Op::SetInvitedBy(SetInviteInvitedBy { inviter_pubkey: inviter.to_vec() }));
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
     pub fn set_invite_claimed_by(mut self, token_hash: &[u8], claimer: lattice_model::PubKey) -> Self {
         let key = format!("invite/{}/claimed_by", hex::encode(token_hash)).into_bytes();
-        let payload = create_set_claimed_by_payload(token_hash, claimer);
-        self.ops.push(PendingOp { key, payload });
+        let sys_op = make_invite_op(token_hash, invite_op::Op::SetClaimedBy(SetInviteClaimedBy { claimer_pubkey: claimer.to_vec() }));
+        self.ops.push(PendingOp { key, sys_op });
         self
     }
 
-    /// Commit all batched operations
+    /// Commit all batched operations as a single intention.
     pub async fn commit(self) -> Result<(), String> {
-        for op in self.ops {
-            let deps = self.store._get_deps(&op.key)?;
-            self.store._submit_entry(op.payload, deps).await?;
+        if self.ops.is_empty() {
+            return Ok(());
         }
-        Ok(())
+
+        // Collect deps from all affected keys (deduped)
+        let mut all_deps: Vec<lattice_model::Hash> = Vec::new();
+        for op in &self.ops {
+            for dep in self.store._get_deps(&op.key)? {
+                if !all_deps.contains(&dep) {
+                    all_deps.push(dep);
+                }
+            }
+        }
+
+        // Build the SystemOp payload — single op or batch
+        let sys_op = if self.ops.len() == 1 {
+            self.ops.into_iter().next().unwrap().sys_op
+        } else {
+            SystemOp {
+                kind: Some(system_op::Kind::Batch(lattice_proto::storage::SystemBatch {
+                    ops: self.ops.into_iter().map(|o| o.sys_op).collect(),
+                })),
+            }
+        };
+
+        // Wrap in UniversalOp and submit as a single intention
+        let envelope = UniversalOp {
+            op: Some(universal_op::Op::System(sys_op)),
+        };
+        let payload = envelope.encode_to_vec();
+        self.store._submit_entry(payload, all_deps).await
     }
 }
 
@@ -405,18 +359,21 @@ pub fn subscribe_system_events<P>(provider: &P) -> Pin<Box<dyn Stream<Item = Res
 where
     P: EntryStreamProvider + ?Sized
 {
+    use lattice_model::weaver::Intention;
+    
     let stream = provider.subscribe_entries();
     
     Box::pin(stream.filter_map(|payload_bytes| async move {
-        let signed_entry = match SignedEntry::decode(payload_bytes.as_slice()) {
-            Ok(e) => e,
+        // New format: proto SignedIntention → borsh Intention → ops = UniversalOp
+        let signed_proto = match lattice_proto::weaver::SignedIntention::decode(payload_bytes.as_slice()) {
+            Ok(s) => s,
             Err(_) => return None,
         };
-        let entry = match Entry::decode(signed_entry.entry_bytes.as_slice()) {
-            Ok(e) => e,
+        let intention = match Intention::from_borsh(&signed_proto.intention_borsh) {
+            Ok(i) => i,
             Err(_) => return None,
         };
-        let universal = match UniversalOp::decode(entry.payload.as_slice()) {
+        let universal = match UniversalOp::decode(intention.ops.as_slice()) {
             Ok(u) => u,
             Err(_) => return None,
         };
@@ -430,7 +387,7 @@ where
     }))
 }
 
-use crate::{SystemStore, SystemReader};
+use crate::SystemStore;
 
 /// Migration hook for root stores.
 /// 

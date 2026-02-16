@@ -28,7 +28,7 @@ pub enum NodeError {
 
 /// A node in the Lattice mesh.
 ///
-/// Each node has an Ed25519 keypair used for signing sigchain entries
+/// Each node has an Ed25519 keypair used for signing intentions
 /// and establishing trust within the network.
 #[derive(Clone)]
 pub struct NodeIdentity {

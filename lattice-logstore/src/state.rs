@@ -3,7 +3,7 @@
 //! Uses redb for efficient embedded storage.
 //! Key: (HLC, Author) for globally consistent causal ordering.
 
-use lattice_model::{Op, PubKey, Uuid};
+use lattice_model::{Op, PubKey, SExpr, Uuid};
 
 use std::path::Path;
 use redb::{ReadableTable, ReadableTableMetadata};
@@ -259,11 +259,11 @@ impl lattice_store_base::Introspectable for LogState {
         false
     }
 
-    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<String> {
+    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<lattice_model::SExpr> {
         if let Some(content) = payload.get_field_by_name("content") {
             if let Some(bytes) = content.as_bytes() {
                 let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(50)]);
-                return vec![preview.to_string()];
+                return vec![SExpr::list(vec![SExpr::sym("append"), SExpr::str(preview)])];
             }
         }
         Vec::new()

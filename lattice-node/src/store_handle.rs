@@ -125,7 +125,7 @@ impl Introspectable for dyn StoreHandle {
         self.as_dispatcher().matches_filter(payload, filter)
     }
 
-    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<String> {
+    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<lattice_model::SExpr> {
         self.as_dispatcher().summarize_payload(payload)
     }
 }

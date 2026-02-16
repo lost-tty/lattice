@@ -6,7 +6,8 @@
 use crate::{MessageSink, MessageStream, LatticeNetError};
 use super::service::PeerStoreRegistry;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore, NodeProviderExt};
-use lattice_kernel::proto::network::{peer_message, StatusRequest, JoinResponse, PeerMessage};
+use lattice_kernel::proto::network::{peer_message, StatusRequest, JoinResponse, PeerMessage, FetchIntentions, IntentionResponse};
+use lattice_kernel::weaver::convert::{intention_to_proto, tips_from_proto};
 use lattice_model::{Uuid, types::PubKey};
 use iroh::endpoint::Connection;
 use std::sync::Arc;
@@ -64,11 +65,11 @@ async fn handle_stream(
     let mut stream = MessageStream::new(recv);
     const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
     
-    // Dispatch loop - handles multiple messages per stream (e.g. RPC session)
+    // Dispatch loop - handles multiple messages per stream
     loop {
         let msg = match tokio::time::timeout(STREAM_TIMEOUT, stream.recv()).await {
             Ok(Ok(Some(m))) => m,
-            Ok(Ok(None)) => break,  // Stream closed cleanly
+            Ok(Ok(None)) => break,
             Ok(Err(e)) => {
                 tracing::debug!("Stream recv error: {}", e);
                 break;
@@ -82,13 +83,13 @@ async fn handle_stream(
         match msg.message {
             Some(peer_message::Message::JoinRequest(req)) => {
                 handle_join_request(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
-                break;  // Join protocol complete for this stream
+                break;
             }
             Some(peer_message::Message::StatusRequest(req)) => {
                 handle_status_request(provider.as_ref(), peer_stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
             }
-            Some(peer_message::Message::FetchRequest(req)) => {
-                handle_fetch_request(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
+            Some(peer_message::Message::FetchIntentions(req)) => {
+                handle_fetch_intentions(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
             }
             _ => {
                 tracing::debug!("Unexpected message type");
@@ -108,15 +109,12 @@ async fn handle_join_request(
 ) -> Result<(), LatticeNetError> {
     tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
     
-    // Extract store_id from request (mandatory)
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id in JoinRequest".into()))?;
 
-    // Accept the join via trait - verifies token, checks store_id matches, sets active, returns store ID & authors
     let acceptance = provider.accept_join(*remote_pubkey, store_id, &req.invite_secret).await
         .map_err(|e| LatticeNetError::Sync(format!("Join failed: {}", e)))?;
     
-    // Convert to Vec<Vec<u8>> for protobuf
     let authorized_authors: Vec<Vec<u8>> = acceptance.authorized_authors
         .into_iter()
         .map(|p| p.to_vec())
@@ -140,7 +138,7 @@ async fn handle_join_request(
 /// Handle an incoming status request using symmetric SyncSession
 async fn handle_status_request(
     provider: &dyn NodeProviderExt,
-    peer_stores: PeerStoreRegistry,
+    _peer_stores: PeerStoreRegistry,
     remote_pubkey: &PubKey,
     req: StatusRequest,
     sink: &mut MessageSink,
@@ -151,99 +149,64 @@ async fn handle_status_request(
     
     tracing::debug!("[Status] Received status request for store {}", store_id);
     
-    // Lookup store from provider's store_registry
     let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
-    let peer_store = peer_stores.read().await.get(&store_id).cloned()
-        .ok_or_else(|| LatticeNetError::Connection(format!("PeerStore {} not registered", store_id)))?;
     
-    // Verify peer can connect (using store's peer provider)
     if !authorized_store.can_connect(remote_pubkey) {
         return Err(LatticeNetError::Connection(format!(
             "Peer {} not authorized", hex::encode(remote_pubkey)
         )));
     };
     
-    // Parse incoming peer state
-    let incoming_state = req.sync_state
-        .map(|s| lattice_kernel::SyncState::from_proto(&s))
-        .unwrap_or_default();
+    // Parse incoming peer tips
+    let peer_tips = tips_from_proto(&req.author_tips);
     
-    // Use SyncSession for symmetric handling
-    let mut session = crate::network::sync_session::SyncSession::new(&authorized_store, sink, stream, *remote_pubkey, &peer_store);
-    let _ = session.run_as_responder(incoming_state).await?;
+    let mut session = crate::network::sync_session::SyncSession::new(&authorized_store, sink, stream, *remote_pubkey);
+    let _ = session.run_as_responder(peer_tips).await?;
     
     Ok(())
 }
 
-/// Handle a FetchRequest - streams entries in chunks
-async fn handle_fetch_request(
+/// Handle a FetchIntentions request - returns requested intentions
+async fn handle_fetch_intentions(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
-    req: lattice_kernel::proto::network::FetchRequest,
+    req: FetchIntentions,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
+    use lattice_model::types::Hash;
+
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
-    // Lookup store from provider's store_registry
     let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
     
-    // Verify peer can connect (using store's peer provider)
     if !authorized_store.can_connect(remote_pubkey) {
         return Err(LatticeNetError::Connection(format!(
             "Peer {} not authorized", hex::encode(remote_pubkey)
         )));
     };
     
-    // Stream entries in chunks
-    stream_entries_to_sink(sink, &authorized_store, &req.store_id, &req.ranges).await?;
+    // Parse requested hashes
+    let hashes: Vec<Hash> = req.hashes.iter()
+        .filter_map(|h| Hash::try_from(h.as_slice()).ok())
+        .collect();
     
-    Ok(())
-}
-
-/// Stream entries for requested ranges in chunks
-const CHUNK_SIZE: usize = 100;
-
-async fn stream_entries_to_sink(
-    sink: &mut MessageSink,
-    store: &NetworkStore,
-    store_id: &[u8],
-    ranges: &[lattice_kernel::proto::network::AuthorRange],
-) -> Result<(), LatticeNetError> {
-    let mut chunk: Vec<lattice_kernel::proto::storage::SignedEntry> = Vec::with_capacity(CHUNK_SIZE);
+    let intentions = authorized_store.fetch_intentions(hashes).await
+        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
     
-    for range in ranges {
-        if let Ok(author_bytes) = <PubKey>::try_from(range.author_id.as_slice()) {
-            let author = PubKey::from(author_bytes);
-            if let Ok(mut rx) = store.stream_entries_in_range(&author, range.from_seq, range.to_seq).await {
-                while let Some(entry) = rx.recv().await {
-                    chunk.push(entry.into());
-                    
-                    if chunk.len() >= CHUNK_SIZE {
-                        let resp = PeerMessage {
-                            message: Some(peer_message::Message::FetchResponse(lattice_kernel::proto::network::FetchResponse {
-                                store_id: store_id.to_vec(),
-                                status: 200,
-                                done: false,
-                                entries: std::mem::take(&mut chunk),
-                            })),
-                        };
-                        sink.send(&resp).await?;
-                    }
-                }
-            }
-        }
-    }
+    let proto_intentions: Vec<_> = intentions
+        .iter()
+        .map(intention_to_proto)
+        .collect();
     
-    let resp = PeerMessage {
-        message: Some(peer_message::Message::FetchResponse(lattice_kernel::proto::network::FetchResponse {
-            store_id: store_id.to_vec(),
-            status: 200,
+    let msg = PeerMessage {
+        message: Some(peer_message::Message::IntentionResponse(IntentionResponse {
+            store_id: req.store_id,
             done: true,
-            entries: chunk,
+            intentions: proto_intentions,
         })),
     };
-    sink.send(&resp).await?;
+    sink.send(&msg).await?;
     
     Ok(())
 }

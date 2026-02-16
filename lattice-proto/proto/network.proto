@@ -3,6 +3,7 @@ syntax = "proto3";
 package lattice.network;
 
 import "storage.proto";
+import "weaver.proto";
 
 // 1. Join Protocol
 message JoinRequest {
@@ -30,48 +31,41 @@ message PeerMessage {
     JoinResponse join_response = 2;
     StatusRequest status_request = 3;
     StatusResponse status_response = 4;
-    FetchRequest fetch_request = 5;
-    FetchResponse fetch_response = 6;
+    FetchIntentions fetch_intentions = 5;
+    IntentionResponse intention_response = 6;
   }
 }
 
-// 3. Status Protocol
+// 3. Status Protocol — exchange author tips (PubKey → latest intention Hash)
+message AuthorTip {
+  bytes author_id = 1;  // Ed25519 public key (32 bytes)
+  bytes tip_hash = 2;   // Hash of latest intention from this author (32 bytes)
+}
+
 message StatusRequest {
-  bytes store_id = 1;                      // Store UUID (16 bytes)
-  lattice.storage.SyncState sync_state = 2;  // Sender's current sync state
+  bytes store_id = 1;                  // Store UUID (16 bytes)
+  repeated AuthorTip author_tips = 2;  // Sender's current author tips
 }
 
 message StatusResponse {
-  bytes store_id = 1;                      // Store UUID (16 bytes)
-  lattice.storage.SyncState sync_state = 2;  // Responder's current sync state
+  bytes store_id = 1;                  // Store UUID (16 bytes)
+  repeated AuthorTip author_tips = 2;  // Responder's current author tips
 }
 
-// 4. Fetch Protocol
-message AuthorRange {
-  bytes author_id = 1;  // Author public key (32 bytes)
-  uint64 from_seq = 2;  // Inclusive start sequence
-  uint64 to_seq = 3;    // Inclusive end sequence (0 = to latest)
+// 4. Fetch Protocol — request intentions by content hash
+message FetchIntentions {
+  bytes store_id = 1;              // Store UUID (16 bytes)
+  repeated bytes hashes = 2;      // Intention content hashes to fetch (32 bytes each)
 }
 
-message FetchRequest {
-  bytes store_id = 1;             // Store UUID (16 bytes)
-  repeated AuthorRange ranges = 2;  // Ranges to fetch
-}
-
-message FetchResponse {
-  bytes store_id = 1;                              // Store UUID (16 bytes)
-  uint32 status = 2;                               // HTTP-like: 200=OK, 206=Partial, 401=Unauthorized, 404=NotFound
-  bool done = 3;                                   // true = last chunk (stream complete)
-  repeated lattice.storage.SignedEntry entries = 4;  // Chunk of entries
+message IntentionResponse {
+  bytes store_id = 1;                                       // Store UUID (16 bytes)
+  bool done = 2;                                            // true = last chunk
+  repeated lattice.weaver.SignedIntention intentions = 3;   // Chunk of signed intentions
 }
 
 // 5. Gossip Protocol
 message GossipMessage {
-  optional lattice.storage.SignedEntry entry = 1;       // Entry broadcast (if any)
-  optional lattice.storage.SyncState sender_state = 2;  // Sender's sync state (piggybacked)
-}
-
-message SyncStateAnnounce {
-  bytes store_id = 1;                      // Store UUID (16 bytes)
-  lattice.storage.SyncState sync_state = 2;  // Sender's current sync state
+  optional lattice.weaver.SignedIntention intention = 1;  // Intention broadcast (if any)
+  repeated AuthorTip sender_tips = 2;                     // Sender's author tips (piggybacked)
 }

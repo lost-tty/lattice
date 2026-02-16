@@ -11,7 +11,7 @@ use crate::clock::{Clock, SystemClock};
 pub const DEFAULT_MAX_DRIFT_MS: u64 = 60 * 60 * 1000;
 
 /// Hybrid Logical Clock
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct HLC {
     /// Wall clock time in milliseconds since Unix epoch
     pub wall_time: u64,

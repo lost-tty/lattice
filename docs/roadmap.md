@@ -1,11 +1,12 @@
 ## Lattice Roadmap
 
-**Status:** Milestone 10 (Fractal Stores) complete. Current focus: M11 (CAS).
+**Status:** Milestone 10 (Fractal Stores) complete. Current focus: M11 (Weaver Protocol).
 
 This document outlines the development plan for Lattice.
 - **Completed M1-M10:** Core RSM platform, Handle-Less Architecture, Typed API, Fractal Store Model.
-- **Current Focus (M11):** Content-Addressable Store (CAS).
-- **Upcoming:** Lattice Drive (M12), Weaver Protocol (M13).
+- **Completed M11A-B:** Intention data model, IntentionStore, floating intentions, witness records.
+- **Current Focus (M11C):** Negentropy sync.
+- **Upcoming:** Network Abstraction & Simulation (M12), CAS (M13).
 
 ## Completed
 
@@ -25,116 +26,142 @@ This document outlines the development plan for Lattice.
 
 ## Milestone 11: The Weaver Protocol
 
-**Goal:** Replace the legacy linear-log sync with a **Negentropy-based set reconciliation protocol** and a **Transaction-based Data Model**. This establishes the correct metadata structure before storing heavy blobs (CAS).
+**Goal:** Replace the legacy linear-log sync with a **Negentropy-based set reconciliation protocol** and an **Intention-based Data Model**.
 
 > **See:** `weaver-hs/lattice-weaver.md` for the transition guide.
 
-### 11A: The Transaction Model (Intention & Entry)
-- [ ] Define `Intention` struct: `{ author, timestamp, entries: [Entry], signature }`
-- [ ] Define `Entry` struct: `{ store_id, store_prev, causal_deps, payload }`
-- [ ] Implement validation logic:
-  - `store_prev` hash chain continuity per (store, author)
-  - `causal_deps` DAG validation
-  - Atomic signature verification over the full Intention
+### 11A: The Intention Data Model ✅
+- [x] Define `Intention` struct: `{ author, timestamp, store_id, store_prev, condition, ops }`
+- [x] Define `Condition` enum: `V1(Vec<Hash>)` — causal dependencies
+- [x] Borsh serialization, content-addressed `Intention::hash()`
+- [x] `SignedIntention` envelope with Ed25519 signing + verification
+- [x] `WitnessRecord` type with signed witness attestation
+- [x] `HLC` (Hybrid Logical Clock) for causal timestamps
 
-### 11B: Intention Storage (Metadata)
-- [ ] `intentions.db` (redb): Local storage for validated Intentions and Entries
-- [ ] Index: `Hash -> Entry` (for random access/sync)
-- [ ] Decouple storage from sequential log files
-- [ ] Implement `WitnessLog` for local audit trail
+### 11B: Intention Storage ✅
+- [x] `IntentionStore` (redb): `TABLE_INTENTIONS` (hash → borsh) + `TABLE_WITNESS` (seq → borsh)
+- [x] In-memory `author_tips` tracking, rebuilt from DB on open
+- [x] Idempotent insert, out-of-order chain arrival
+- [x] Floating intention support (store-and-forward for unresolved causal deps)
+- [x] Witness records written on state application
+- [x] `HistoryEntry` proto with embedded `SignedIntention`, `HLC`, `Condition`
+- [x] Composable `From` impls (kernel → proto) for `HLC`, `Condition`, `SignedIntention`
+- [x] Remove legacy `Entry`/`SignedEntry`/`LogRecord` from storage proto
+- [x] Delete sigchain module + entry.rs + log_traits.rs
+
+### 11B½: Validation Hardening & Test Coverage
+- [x] Reject ingested intentions with invalid signature (actor-level enforcement + test)
+- [x] Reject ingested intentions with mismatched `store_id` (actor-level enforcement + test)
+- [x] Verify duplicate ingest doesn't create duplicate witness record
+- [x] Multi-author convergence test (3+ authors on same store)
+- [x] HLC monotonicity across sequential submits at actor level
 
 ### 11C: Negentropy Sync
 - [ ] Port `negentropy` implementation to Rust (no-std compatible)
 - [ ] Implement `sync_v2` protocol:
   - Phase 1: Exchange author timestamps (fast-path check) + Acks
-  - Phase 2: Negentropy reconciliation over `Entry` hashes
+  - Phase 2: Negentropy reconciliation over `Intention` hashes
   - Phase 3: Bulk fetch of missing Intentions
 - [ ] Remove `OrphanStore` (reconciliation handles gaps automatically)
-
-### 11D: Trans-Store Atomicity
-- [ ] APIs for creating multi-entry Intentions (e.g., "move file from Store A to B")
-- [ ] Ensure validation enforces atomicity (all-or-nothing accept)
+- [ ] **Gate:** 50-node simulation (M12) runs flawlessly before moving to M13
 
 ---
 
-## Milestone 12: Content-Addressable Store (CAS)
+## Milestone 12: Network Abstraction & Simulation
 
-**Goal:** Provide a high-performance, node-local "Dumb Pipe" for content storage. Replication and policy are handled separately by a "Smart Manager".
+**Goal:** Decouple `lattice-net` from Iroh-specific types to enable deterministic in-memory simulation of multi-node networks. Prerequisite for validating Negentropy sync at scale.
 
-### 12A: Low-Level Storage (`lattice-cas`)
+### 12A: Transport Abstraction
+- [ ] Extract `Transport` trait from `LatticeEndpoint` (connect/accept → MessageSink/MessageStream)
+- [ ] Extract `GossipLayer` trait from `iroh_gossip::Gossip` (join/broadcast/subscribe)
+- [ ] `IrohTransport` + `IrohGossip`: Production implementations wrapping Iroh QUIC
+- [ ] `NetworkService` generic over `Transport` + `GossipLayer`
+
+### 12B: In-Memory Simulation Harness
+- [ ] `ChannelTransport` + `BroadcastGossip`: In-memory implementations using mpsc channels
+- [ ] N-node simulator: configurable topology, round-based sync, convergence metrics
+- [ ] **Gate:** 20+ node simulation shows reliable convergence
+
+---
+
+## Milestone 13: Log Lifecycle & Pruning
+
+**Goal:** Enable long-running nodes to manage log growth through snapshots, pruning, and finality checkpoints.
+
+> **See:** [DAG-Based Pruning Architecture](pruning.md) for details on Ancestry-based metrics and Log Rewriting.
+
+### 13A: Snapshotting
+- [ ] `state.snapshot()` when log grows large
+- [ ] Store snapshots in `snapshot.db`
+- [ ] Bootstrap new peers from snapshot instead of full log replay
+
+### 13B: Waterlevel Pruning
+- [ ] Calculate stability frontier (min seq acknowledged by all peers)
+- [ ] `truncate_prefix(seq)` for old log entries
+- [ ] Preserve entries newer than frontier
+
+### 13C: Checkpointing / Finality
+- [ ] Periodically finalize state hash (protect against "Deep History Attacks")
+- [ ] Signed checkpoint entries in sigchain
+- [ ] Nodes reject entries that contradict finalized checkpoints
+
+### 13D: Hash Index Optimization
+- [ ] Replace in-memory `HashSet<Hash>` with on-disk index (redb) or Bloom Filter
+- [ ] Support 100M+ entries without excessive RAM
+
+---
+
+## Milestone 14: Content-Addressable Store (CAS)
+
+**Goal:** Provide a high-performance, node-local "Dumb Pipe" for content storage. Replication and policy are handled separately by a "Smart Manager". Requires M11 (Weaver sync) and M12 (simulation harness for validation).
+
+### 14A: Low-Level Storage (`lattice-cas`)
 - [ ] `CasBackend` trait interface (`fs`, `block`, `s3`)
 - [ ] Isolation: Mandatory `store_id` for all ops
 - [ ] `redb` metadata index: ARC (Adaptive Replacement Cache), RefCounting
 - [ ] `FsBackend`: Sharded local disk blob storage
 
-### 12B: Replication & Safety (`CasManager`)
+### 14B: Replication & Safety (`CasManager`)
 - [ ] `ReplicationPolicy` trait: `crush_map()` and `replication_factor()` from System Table
 - [ ] `StateMachine::referenced_blobs()`: Pinning via State declarations
 - [ ] Pull-based reconciler: `ensure(cid)`, `calculate_duties()`, `gc()` with Soft Handoff
 
-### 12C: Wasm & FUSE Integration
+### 14C: Wasm & FUSE Integration
 - [ ] **Wasm**: Host Handles (avoid linear memory copy)
 - [ ] **FUSE**: `get_range` (random access) and `put_batch` (buffered write)
 - [ ] **Encryption**: Store-side encryption (client responsibility)
 
-### 12D: CLI & Observability
+### 14D: CLI & Observability
 - [ ] `cas put`, `cas get`, `cas pin`, `cas status`
 
 ---
 
-## Milestone 13: Lattice Drive MVP (File Sync)
+## Milestone 15: Lattice File Sync MVP
 
-**Goal:** A functioning file sync tool that requires M11 (Sync) and M12 (CAS).
+**Goal:** A functioning file sync tool that requires M11 (Sync) and M14 (CAS).
 
-### 13A: Filesystem Logic
+### 15A: Filesystem Logic
 - [ ] Define `DirEntry` schema: `{ name, mode, cid, modified_at }` in KV Store
 - [ ] Map file operations (`write`, `mkdir`, `rename`) to KV Ops
 
-### 13B: FUSE Interface
+### 15B: FUSE Interface
 - [ ] Write `lattice-fs` using the `fuser` crate
 - [ ] Mount the Store as a folder on Linux/macOS
 - [ ] **Demo:** `cp photo.jpg ~/lattice/` → Syncs to second node
 
 ---
 
-## Milestone 14: Log Lifecycle & Pruning
-
-**Goal:** Enable long-running nodes to manage log growth through snapshots, pruning, and finality checkpoints.
-
-> **See:** [DAG-Based Pruning Architecture](pruning.md) for details on Ancestry-based metrics and Log Rewriting.
-
-### 16A: Snapshotting
-- [ ] `state.snapshot()` when log grows large
-- [ ] Store snapshots in `snapshot.db`
-- [ ] Bootstrap new peers from snapshot instead of full log replay
-
-### 16B: Waterlevel Pruning
-- [ ] Calculate stability frontier (min seq acknowledged by all peers)
-- [ ] `truncate_prefix(seq)` for old log entries
-- [ ] Preserve entries newer than frontier
-
-### 16C: Checkpointing / Finality
-- [ ] Periodically finalize state hash (protect against "Deep History Attacks")
-- [ ] Signed checkpoint entries in sigchain
-- [ ] Nodes reject entries that contradict finalized checkpoints
-
-### 16D: Hash Index Optimization
-- [ ] Replace in-memory `HashSet<Hash>` with on-disk index (redb) or Bloom Filter
-- [ ] Support 100M+ entries without excessive RAM
-
----
-
-## Milestone 15: Wasm Runtime
+## Milestone 16: Wasm Runtime
 
 **Goal:** Replace hardcoded state machine logic with dynamic Wasm modules.
 
-### 15A: Wasm Integration
+### 16A: Wasm Integration
 - [ ] Integrate `wasmtime` into the Kernel
 - [ ] Define minimal Host ABI: `kv_get`, `kv_set`, `log_append`, `get_head`
 - [ ] Replace hardcoded `KvStore::apply()` with `WasmRuntime::call_apply()`
 - [ ] Map Host Functions to `StorageBackend` calls (M9 prerequisite)
 
-### 15B: Data Structures & Verification
+### 16B: Data Structures & Verification
 - [ ] Finalize `Entry`, `SignedEntry`, `Hash`, `PubKey` structs for Wasm boundary
 - [ ] Wasm-side SigChain verification (optional, for paranoid clients)
 - **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
@@ -168,6 +195,7 @@ This document outlines the development plan for Lattice.
 - [ ] **Data Directory Lock File**: Investigate lock file mechanism to prevent multiple processes from using the same data directory simultaneously (daemon + embedded app conflict). Options: flock, PID file, or socket-based detection.
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 - [ ] **Payload Validation Strategy**: Decide where semantic validation occurs and what happens on failure. Options: build-time only, versioned rules, entry replacement, or separate chain/payload advancement. See `test_rejected_entry_breaks_chain` in `lattice-kvstore/src/kv.rs`.
+- [ ] **Signer Trait**: Introduce a `Signer` trait (sign hash → signature) to avoid passing raw `SigningKey` through the stack. Affects intention creation (`SignedIntention::sign`), witness signing (`WitnessRecord::sign`), and the M11 migration path.
 
 ---
 
@@ -212,4 +240,6 @@ This document outlines the development plan for Lattice.
   - Identity mapping layer (PublicKey → User name/email)
   - Tamper-evident audit export (signed Merkle bundles for external auditors)
   - Optional: External audit sink (stream to S3/SIEM)
-- **USB Gadget Node**: A dedicated hardware device (e.g., Pi Zero, RISC-V dongle) that plugs into a host and enumerates as a USB Ethernet gadget. It runs a standalone Lattice Node and peers with the host over the virtual network interface. This provides a "smart external drive" experience—physically pluggable storage that syncs via standard Lattice protocols, decoupled from the host's filesystem limitations.
+- **USB Gadget Node**: A dedicated hardware device (e.g., Pi Zero, RISC-V dongle) that plugs into a host and enumerates as a USB Ethernet gadget. It runs a standalone Lattice Node and peers with the host over the virtual network interface. This provides a "smart pluggable storage" experience—physically pluggable storage that syncs via standard Lattice protocols, decoupled from the host's filesystem limitations.
+- **Blind Ops / Cryptographic Revealing** (research): Encrypted intention payloads revealed only to nodes possessing specific keys (Convergent Encryption or ZK proofs). Enables selective disclosure within atomic transactions.
+- **S-Expression Intention View**: Enhance `store history` and `store debug` to optionally display Intentions as S-expressions, providing a structured, verifiable view of the underlying data for debugging.

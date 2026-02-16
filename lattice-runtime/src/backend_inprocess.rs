@@ -259,14 +259,14 @@ impl LatticeBackend for InProcessBackend {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
             
-            let sync_state = inspector.sync_state().await?;
-            let log_stats = inspector.log_stats().await;
+            let tips = inspector.author_tips().await?;
+            let intention_count = inspector.intention_count().await;
+            let witness_count = inspector.witness_count().await;
             
             Ok(StoreDetails {
-                author_count: sync_state.authors().len() as u32,
-                log_file_count: log_stats.file_count as u32,
-                log_bytes: log_stats.total_bytes,
-                orphan_count: log_stats.orphan_count as u32,
+                author_count: tips.len() as u32,
+                intention_count,
+                witness_count,
             })
         })
     }
@@ -308,10 +308,8 @@ impl LatticeBackend for InProcessBackend {
     
     fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
-            let store = self.get_store(store_id)?;
-            let sync_provider = store.as_sync_provider();
-            // Trigger sync - actual result comes via SyncResult event from subscribe()
-            sync_provider.sync_state().await?;
+            // Trigger sync via network event - actual result comes via SyncResult event from subscribe()
+            self.node.trigger_store_sync(store_id);
             Ok(())
         })
     }
@@ -320,58 +318,63 @@ impl LatticeBackend for InProcessBackend {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
-            let sync_state = inspector.sync_state().await?;
+            let tips = inspector.author_tips().await?;
             
-            Ok(sync_state.authors().iter().map(|(author, tip)| AuthorState {
+            Ok(tips.into_iter().map(|(author, hash)| AuthorState {
                 public_key: author.to_vec(),
-                seq: tip.seq,
-                hash: tip.hash.to_vec(),
+                seq: 0, // seq no longer used in intention model
+                hash: hash.to_vec(),
             }).collect())
         })
     }
     
-    fn store_history(&self, store_id: Uuid) -> AsyncResult<'_, Vec<HistoryEntry>> {
+    fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessLogEntry>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
-            let dispatcher = store.as_dispatcher();
+            let log = inspector.witness_log().await;
             
-            let entries = inspector.history(None, None).await?;
-            
-            Ok(entries.into_iter()
-                .map(|e| {
-                    let summary = dispatcher.decode_payload(&e.payload)
-                        .map(|msg| {
-                            let summaries = dispatcher.summarize_payload(&msg);
-                            if summaries.is_empty() { hex::encode(&e.hash[..4]) }
-                            else { summaries.join(", ") }
-                        })
-                        .unwrap_or_else(|_| hex::encode(&e.hash[..4]));
-                    
-                    HistoryEntry {
-                        seq: e.seq,
-                        author: e.author.to_vec(),
-                        payload: e.payload,
-                        timestamp: e.timestamp,
-                        hash: e.hash.to_vec(),
-                        prev_hash: e.prev_hash.to_vec(),
-                        causal_deps: e.causal_deps.into_iter().map(|h| h.to_vec()).collect(),
-                        summary,
-                    }
+            Ok(log.into_iter()
+                .map(|(seq, record)| WitnessLogEntry {
+                    seq,
+                    content: record.content,
+                    signature: record.signature,
                 })
                 .collect())
         })
     }
     
-    fn store_author_state(&self, store_id: Uuid, _author: Option<&[u8]>) -> AsyncResult<'_, Vec<AuthorState>> {
-        self.store_debug(store_id)
-    }
-    
-    fn store_orphan_cleanup(&self, store_id: Uuid) -> AsyncResult<'_, u32> {
+    fn store_floating(&self, store_id: Uuid) -> AsyncResult<'_, Vec<SignedIntention>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
-            Ok(inspector.orphan_cleanup().await as u32)
+            let floating = inspector.floating_intentions().await;
+            Ok(floating.into_iter().map(Into::into).collect())
+        })
+    }
+
+    fn store_get_intention(&self, store_id: Uuid, hash_prefix: &[u8]) -> AsyncResult<'_, Vec<IntentionDetail>> {
+        let prefix = hash_prefix.to_vec();
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            let inspector = store.as_inspector();
+            let dispatcher = store.as_dispatcher();
+
+            let results = inspector.get_intention(prefix).await?;
+            Ok(results.into_iter()
+                .map(|si| {
+                    let hash = si.intention.hash();
+                    let ops = crate::ops_summary::summarize_intention_ops(
+                        &si.intention.ops,
+                        dispatcher.as_ref(),
+                        &hash,
+                    );
+                    IntentionDetail {
+                        intention: si.into(),
+                        ops,
+                    }
+                })
+                .collect())
         })
     }
 

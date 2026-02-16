@@ -169,20 +169,13 @@ pub enum StoreSubcommand {
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Debug graph output
-    Debug,
-    /// Clean up stale orphaned entries
-    OrphanCleanup,
-    /// Show history for a key
-    History { key: Option<String> },
-    /// Show author sync state
-    AuthorState {
-        /// Optional pubkey (defaults to self)
-        pubkey: Option<String>,
-        /// Show all authors
-        #[arg(short, long)]
-        all: bool,
+    /// Debug store internals
+    Debug {
+        #[command(subcommand)]
+        sub: Option<DebugSubcommand>,
     },
+    /// Show history
+    History,
     /// Sync with all peers
     Sync,
     /// Explore a message type's schema
@@ -205,6 +198,15 @@ pub enum StoreSubcommand {
     /// Dynamic store commands (Put, Get, etc.)
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum DebugSubcommand {
+    /// Inspect a single intention by hash prefix
+    Intention {
+        /// Hash prefix (hex)
+        hash: String,
+    },
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -293,17 +295,18 @@ pub async fn handle_command(
             StoreSubcommand::Status { verbose: _ } => {
                 store_commands::cmd_store_status(backend, ctx.store_id, writer).await
             }
-            StoreSubcommand::Debug => {
-                store_commands::cmd_store_debug(backend, ctx.store_id, writer).await
+            StoreSubcommand::Debug { sub } => {
+                match sub {
+                    Some(DebugSubcommand::Intention { hash }) => {
+                        store_commands::cmd_store_debug_intention(backend, ctx.store_id, &hash, writer).await
+                    }
+                    None => {
+                        store_commands::cmd_store_debug(backend, ctx.store_id, writer).await
+                    }
+                }
             }
-            StoreSubcommand::OrphanCleanup => {
-                store_commands::cmd_orphan_cleanup(backend, ctx.store_id, writer).await
-            }
-            StoreSubcommand::History { key } => {
-                store_commands::cmd_history(backend, ctx.store_id, key.as_deref(), writer).await
-            }
-            StoreSubcommand::AuthorState { pubkey, all } => {
-                store_commands::cmd_author_state(backend, ctx.store_id, pubkey.as_deref(), all, writer).await
+            StoreSubcommand::History => {
+                store_commands::cmd_history(backend, ctx.store_id, writer).await
             }
             StoreSubcommand::Sync => {
                 store_commands::cmd_store_sync(backend, ctx.store_id, writer).await

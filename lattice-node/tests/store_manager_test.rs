@@ -401,3 +401,38 @@ async fn test_handle_peer_join_rejects_unauthorized() {
     let result = ctx.sm().handle_peer_join(root_id, stranger, &fake_secret).await;
     assert!(result.is_err(), "Unauthorized peer with fake secret should be rejected");
 }
+
+// ==================== Batch Atomicity ====================
+
+/// Verify that SystemBatch::commit() with multiple operations produces
+/// exactly ONE intention, not one per operation.
+#[tokio::test]
+async fn test_system_batch_produces_single_intention() {
+    let ctx = TestCtx::new();
+
+    let root_id = ctx.node.create_store(None, Some("batch-root".to_string()), STORE_TYPE_KVSTORE).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Snapshot intention count before batch
+    let handle = ctx.sm().get_handle(&root_id).expect("root handle");
+    let before = handle.as_inspector().intention_count().await;
+
+    // Commit a batch with TWO operations (add_child + set_child_status)
+    let child_id = lattice_model::Uuid::new_v4();
+    let system = handle.clone().as_system().expect("SystemStore");
+    lattice_systemstore::SystemBatch::new(system.as_ref())
+        .add_child(child_id, "batched-child".to_string(), STORE_TYPE_KVSTORE)
+        .set_child_status(child_id, lattice_model::store_info::ChildStatus::Active)
+        .commit().await.expect("batch commit");
+
+    // Wait for processing
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Intention count should have increased by exactly 1 (not 2)
+    let after = handle.as_inspector().intention_count().await;
+    assert_eq!(
+        after - before, 1,
+        "SystemBatch with 2 ops should produce exactly 1 intention, got {}",
+        after - before
+    );
+}

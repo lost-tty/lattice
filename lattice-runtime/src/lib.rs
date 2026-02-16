@@ -12,6 +12,8 @@ mod backend;
 mod backend_inprocess;
 mod backend_rpc;
 mod runtime;
+mod ops_summary;
+mod system_summary;
 
 // Re-export backend abstraction
 pub use backend::*;
@@ -22,6 +24,7 @@ pub use runtime::{Runtime, RuntimeBuilder, RuntimeError};
 // Re-export types consumers need
 pub use lattice_store_base::FieldFormat;
 pub use lattice_model::types::{PubKey, Hash};
+pub use lattice_model::SExpr;
 
 // Internal re-exports (not public API)
 pub(crate) use lattice_net::NetworkService;

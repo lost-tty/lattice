@@ -74,3 +74,58 @@ pub fn ansi_code(color: AnsiColors) -> u8 {
         _ => 37,
     }
 }
+
+/// Render an SExpr with ANSI colors and hex truncation.
+///
+/// "Modern IDE" color scheme:
+/// - Symbols: blue (keywords/verbs)
+/// - Strings: green (universal string literal color)
+/// - Numbers: yellow (distinct from strings, high contrast)
+/// - Raw hex: magenta (binary/magic data)
+/// - Parens: dimmed (structure fades, content pops)
+pub fn render_sexpr_colored(expr: &lattice_runtime::SExpr, max_hex_bytes: usize) -> String {
+    use lattice_runtime::SExpr;
+    use owo_colors::OwoColorize;
+    match expr {
+        SExpr::Symbol(s) => format!("{}", s.blue()),
+        SExpr::Str(s) => format!("\"{}\"", s.green()),
+        SExpr::Raw(b) => {
+            let h = if b.len() > max_hex_bytes {
+                format!("{}…", hex::encode(&b[..max_hex_bytes]))
+            } else {
+                hex::encode(b)
+            };
+            format!("{}", h.magenta())
+        }
+        SExpr::Num(n) => format!("{}", n.yellow()),
+        SExpr::List(items) => {
+            let inner: Vec<String> = items.iter()
+                .map(|i| render_sexpr_colored(i, max_hex_bytes))
+                .collect();
+            format!("{}{}{}", "(".dimmed(), inner.join(" "), ")".dimmed())
+        }
+    }
+}
+
+/// Render an SExpr with ANSI colors, hex truncation, and indentation.
+///
+/// Top-level list children get their own indented line (like `to_pretty()`).
+pub fn render_sexpr_pretty_colored(expr: &lattice_runtime::SExpr, max_hex_bytes: usize) -> String {
+    fmt_pretty_colored(expr, max_hex_bytes, 0)
+}
+
+fn fmt_pretty_colored(expr: &lattice_runtime::SExpr, max_hex_bytes: usize, indent: usize) -> String {
+    use lattice_runtime::SExpr;
+    use owo_colors::OwoColorize;
+    match expr {
+        SExpr::List(items) if items.len() > 1 && items.iter().any(|i| matches!(i, SExpr::List(_))) => {
+            let pad = "  ".repeat(indent + 1);
+            let head = render_sexpr_colored(&items[0], max_hex_bytes);
+            let children: Vec<String> = items[1..].iter()
+                .map(|item| format!("{}{}", pad, fmt_pretty_colored(item, max_hex_bytes, indent + 1)))
+                .collect();
+            format!("{}{}\n{}{}", "(".dimmed(), head, children.join("\n"), ")".dimmed())
+        }
+        _ => render_sexpr_colored(expr, max_hex_bytes),
+    }
+}

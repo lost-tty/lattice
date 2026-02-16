@@ -4,12 +4,14 @@
 //! Used by lattice-net for sync, gossip, and handlers.
 
 use lattice_kernel::SyncProvider;
-use lattice_kernel::store::{SyncState, StateError, GapInfo};
-use lattice_kernel::SignedEntry;
+use lattice_kernel::store::StateError;
 use lattice_model::{PeerProvider, PubKey};
+use lattice_model::types::Hash;
+use lattice_model::weaver::SignedIntention;
 use uuid::Uuid;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 /// Network layer's view of a replicated store.
 /// 
@@ -33,41 +35,31 @@ impl NetworkStore {
         self.id
     }
     
-    pub async fn sync_state(&self) -> Result<SyncState, StateError> {
-        self.sync.sync_state().await
+    pub async fn author_tips(&self) -> Result<HashMap<PubKey, Hash>, StateError> {
+        self.sync.author_tips().await
             .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
     
-    pub async fn ingest_entry(&self, entry: SignedEntry) -> Result<(), StateError> {
+    pub async fn ingest_intention(&self, intention: SignedIntention) -> Result<(), StateError> {
         // Check authorization first
-        if !self.peer.can_accept_entry(&entry.author_id) {
+        if !self.peer.can_accept_entry(&intention.intention.author) {
             return Err(StateError::Unauthorized(format!(
                 "Author {} not authorized", 
-                hex::encode(&entry.author_id)
+                hex::encode(&intention.intention.author.0)
             )));
         }
         
-        self.sync.ingest_entry(entry).await
+        self.sync.ingest_intention(intention).await
             .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
     
-    pub async fn stream_entries_in_range(
-        &self, 
-        author: &PubKey, 
-        from: u64, 
-        to: u64
-    ) -> Result<mpsc::Receiver<SignedEntry>, StateError> {
-        self.sync.stream_entries_in_range(*author, from, to).await
+    pub async fn fetch_intentions(&self, hashes: Vec<Hash>) -> Result<Vec<SignedIntention>, StateError> {
+        self.sync.fetch_intentions(hashes).await
             .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
     
-    pub fn subscribe_entries(&self) -> broadcast::Receiver<SignedEntry> {
-        self.sync.subscribe_entries()
-    }
-    
-    pub async fn subscribe_gaps(&self) -> Result<broadcast::Receiver<GapInfo>, StateError> {
-        self.sync.subscribe_gaps().await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    pub fn subscribe_intentions(&self) -> broadcast::Receiver<SignedIntention> {
+        self.sync.subscribe_intentions()
     }
     
     // ==================== PeerProvider delegation ====================

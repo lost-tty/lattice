@@ -10,7 +10,7 @@ use crate::{
 // Removed unused imports: PersistentState, KvState
 use lattice_kernel::{
     NodeIdentity, NodeError as IdentityError, PeerStatus,
-    store::{StateError, LogError},
+    store::StateError,
 };
 
 use lattice_model::NetEvent;
@@ -30,9 +30,6 @@ pub enum NodeError {
     
     #[error("MetaStore error: {0}")]
     MetaStore(#[from] MetaStoreError),
-    
-    #[error("Log error: {0}")]
-    Log(#[from] LogError),
     
     #[error("Node error: {0}")]
     Node(#[from] IdentityError),
