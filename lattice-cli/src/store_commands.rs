@@ -375,7 +375,7 @@ pub async fn cmd_store_debug(backend: &dyn LatticeBackend, store_id: Option<Uuid
                 let fields = vec![
                     SExpr::num(entry.seq),
                     SExpr::sym(":hash"),
-                    SExpr::raw(entry.hash.clone()),
+                    SExpr::raw(entry.content_hash.to_vec()),
                     SExpr::sym(":intention"),
                     SExpr::raw(content.intention_hash.clone()),
                     SExpr::sym(":wall"),

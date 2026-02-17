@@ -5,7 +5,7 @@
 use crate::backend::*;
 use crate::StoreHandle;
 use lattice_api::proto::{StoreMeta, StoreRef};
-use lattice_model::weaver::FloatingIntention;
+use lattice_model::weaver::{FloatingIntention, WitnessEntry};
 use lattice_model::types::PubKey;
 use lattice_net::NetworkService;
 use lattice_node::Node;
@@ -329,20 +329,11 @@ impl LatticeBackend for InProcessBackend {
         })
     }
     
-    fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessLogEntry>> {
+    fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessEntry>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
-            let log = inspector.witness_log().await;
-            
-            Ok(log.into_iter()
-                .map(|(seq, hash, record)| WitnessLogEntry {
-                    seq,
-                    hash: hash.to_vec(),
-                    content: record.content,
-                    signature: record.signature,
-                })
-                .collect())
+            Ok(inspector.witness_log().await)
         })
     }
     

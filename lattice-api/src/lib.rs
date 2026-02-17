@@ -179,6 +179,30 @@ impl From<lattice_model::weaver::FloatingIntention> for proto::FloatingIntention
     }
 }
 
+impl From<lattice_model::weaver::WitnessEntry> for proto::WitnessLogEntry {
+    fn from(e: lattice_model::weaver::WitnessEntry) -> Self {
+        proto::WitnessLogEntry {
+            seq: e.seq,
+            hash: e.content_hash.to_vec(),
+            content: e.content,
+            signature: e.signature,
+        }
+    }
+}
+
+impl From<proto::WitnessLogEntry> for lattice_model::weaver::WitnessEntry {
+    fn from(e: proto::WitnessLogEntry) -> Self {
+        let content_hash = lattice_model::types::Hash::try_from(e.hash.as_slice())
+            .unwrap_or(lattice_model::types::Hash::ZERO);
+        lattice_model::weaver::WitnessEntry {
+            seq: e.seq,
+            content_hash,
+            content: e.content,
+            signature: e.signature,
+        }
+    }
+}
+
 pub mod backend;
 
 #[cfg(feature = "server")]

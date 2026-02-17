@@ -5,8 +5,8 @@ use super::error::StoreError;
 use crate::weaver::intention_store::IntentionStore;
 use lattice_model::Uuid;
 use lattice_model::types::{Hash, PubKey};
-use lattice_model::weaver::{Condition, FloatingIntention, SignedIntention};
-use lattice_proto::weaver::WitnessRecord;
+use lattice_model::weaver::{Condition, FloatingIntention, SignedIntention, WitnessEntry};
+
 use lattice_model::NodeIdentity;
 use lattice_model::{StateMachine, Op};
 use std::collections::HashMap;
@@ -318,7 +318,7 @@ impl<S: StateMachine> Store<S> {
     }
 
     /// Get raw witness log entries
-    pub async fn witness_log(&self) -> Vec<(u64, Hash, WitnessRecord)> {
+    pub async fn witness_log(&self) -> Vec<WitnessEntry> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
@@ -433,7 +433,7 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
 
     fn witness_log(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Vec<(u64, Hash, WitnessRecord)>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Vec<WitnessEntry>> + Send + '_>> {
         Box::pin(Store::witness_log(self))
     }
 

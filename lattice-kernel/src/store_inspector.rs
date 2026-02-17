@@ -5,8 +5,8 @@
 
 use crate::store::StoreError;
 use lattice_model::types::{Hash, PubKey};
-use lattice_model::weaver::{FloatingIntention, SignedIntention};
-use lattice_proto::weaver::WitnessRecord;
+use lattice_model::weaver::{FloatingIntention, SignedIntention, WitnessEntry};
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -30,10 +30,10 @@ pub trait StoreInspector: Send + Sync {
     /// Get number of witness log entries in the store
     fn witness_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>>;
 
-    /// Get raw witness log entries (seq, content_hash, WitnessRecord)
+    /// Get raw witness log entries
     fn witness_log(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Vec<(u64, Hash, WitnessRecord)>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Vec<WitnessEntry>> + Send + '_>>;
 
     /// Get floating (unwitnessed) intentions with metadata
     fn floating_intentions(

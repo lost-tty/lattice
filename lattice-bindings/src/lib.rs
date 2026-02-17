@@ -316,6 +316,7 @@ impl Lattice {
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid { reason: e.to_string() })?;
         self.rt.block_on(r.backend().store_witness_log(id))
+            .map(|entries| entries.into_iter().map(Into::into).collect())
             .map_err(|e| LatticeError::from_backend(e))
     }
 

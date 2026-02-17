@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
-use lattice_model::weaver::FloatingIntention;
+use lattice_model::weaver::{FloatingIntention, WitnessEntry};
 
 // Re-export proto types as the canonical backend types
 pub use crate::proto::{
@@ -69,7 +69,7 @@ pub trait LatticeBackend: Send + Sync {
     fn store_get_name(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>>;
     fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
     fn store_debug(&self, store_id: Uuid) -> AsyncResult<'_, Vec<AuthorState>>;
-    fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessLogEntry>>;
+    fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessEntry>>;
     fn store_floating(&self, store_id: Uuid) -> AsyncResult<'_, Vec<FloatingIntention>>;
     fn store_get_intention(&self, store_id: Uuid, hash_prefix: &[u8]) -> AsyncResult<'_, Vec<IntentionDetail>>;
     fn store_system_list(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, Vec<u8>)>>;

@@ -109,7 +109,9 @@ impl StoreService for StoreServiceImpl {
         let req = request.into_inner();
         let store_id = Self::parse_uuid(&req.store_id)?;
         self.backend.store_witness_log(store_id).await
-            .map(|entries| Response::new(WitnessLogResponse { entries }))
+            .map(|entries| Response::new(WitnessLogResponse {
+                entries: entries.into_iter().map(Into::into).collect(),
+            }))
             .map_err(|e| Status::internal(e.to_string()))
     }
 

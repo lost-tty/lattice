@@ -22,3 +22,6 @@ pub use lattice_api::proto::{
 
 // Re-export weaver proto types for CLI access (avoids lattice-proto dependency)
 pub use lattice_proto::weaver::WitnessContent;
+
+// Re-export model type used in backend trait
+pub use lattice_model::weaver::WitnessEntry;

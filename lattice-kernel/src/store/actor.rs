@@ -8,8 +8,8 @@ use crate::weaver::intention_store::{IntentionStore, IntentionStoreError};
 use crate::store::StateError;
 use lattice_model::types::Hash;
 use lattice_model::types::PubKey;
-use lattice_model::weaver::{Condition, FloatingIntention, Intention, SignedIntention};
-use lattice_proto::weaver::WitnessRecord;
+use lattice_model::weaver::{Condition, FloatingIntention, Intention, SignedIntention, WitnessEntry};
+
 use lattice_model::{NodeIdentity, StateMachine};
 use uuid::Uuid;
 
@@ -53,7 +53,7 @@ pub enum ReplicationControllerCmd {
     },
     /// Get raw witness log entries
     WitnessLog {
-        resp: oneshot::Sender<Vec<(u64, Hash, WitnessRecord)>>,
+        resp: oneshot::Sender<Vec<WitnessEntry>>,
     },
     /// Get floating (unwitnessed) intentions with metadata
     FloatingIntentions {
@@ -239,10 +239,12 @@ impl<S: StateMachine> ReplicationController<S> {
         })?;
 
         let hash = self.intention_store.insert(&signed)?;
-        self.apply_intention_to_state(&signed)?;
 
         // Broadcast to listeners
         let _ = self.intention_tx.send(signed);
+
+        // Apply through the same path as ingested intentions
+        self.apply_ready_intentions()?;
 
         Ok(hash)
     }
@@ -279,105 +281,59 @@ impl<S: StateMachine> ReplicationController<S> {
         // Store it
         self.intention_store.insert(signed)?;
 
-        // Broadcast to listeners
-        let _ = self.intention_tx.send(signed.clone());
-
         // Try to apply this and any other pending intentions that may
         // now be unblocked by having their causal deps satisfied.
-        self.try_apply_all_pending()?;
+        self.apply_ready_intentions()?;
 
         Ok(())
     }
+    /// Apply floating intentions that are ready (store_prev matches a tip and conditions met).
+    ///
+    /// Uses the `floating_by_prev` index to find candidates efficiently,
+    /// then loops until no more can be applied.
+    fn apply_ready_intentions(&mut self) -> Result<(), ReplicationControllerError> {
+        loop {
+            let mut applied_any = false;
 
-    /// Build a dependency graph over floating intentions.
-    /// Returns (in_degree per hash, reverse map: dep → dependents).
-    /// Deps outside the floating set are checked against the store —
-    /// if missing entirely, the intention is permanently blocked.
-    fn build_dep_graph(
-        unapplied: &HashMap<Hash, SignedIntention>,
-        store: &IntentionStore,
-    ) -> (HashMap<Hash, usize>, HashMap<Hash, Vec<Hash>>) {
-        let unapplied_set: std::collections::HashSet<Hash> = unapplied.keys().copied().collect();
-        let mut in_degree: HashMap<Hash, usize> = HashMap::new();
-        let mut dependents: HashMap<Hash, Vec<Hash>> = HashMap::new();
+            // Collect current tips + Hash::ZERO (for new authors)
+            let prevs: Vec<Hash> = self.intention_store.all_author_tips()
+                .values()
+                .copied()
+                .chain(std::iter::once(Hash::ZERO))
+                .collect();
 
-        for (hash, signed) in unapplied {
-            let mut deg = 0;
+            for prev in prevs {
+                let candidates = self.intention_store.floating_by_prev(&prev)
+                    .map_err(ReplicationControllerError::IntentionStore)?;
 
-            // Chain dependency
-            let prev = signed.intention.store_prev;
-            if prev != Hash::ZERO {
-                if unapplied_set.contains(&prev) {
-                    deg += 1;
-                    dependents.entry(prev).or_default().push(*hash);
-                } else if !store.contains(&prev).unwrap_or(false) {
-                    // Predecessor missing entirely — permanently blocked
-                    deg += 1;
-                }
-            }
-
-            // Causal deps
-            match &signed.intention.condition {
-                Condition::V1(deps) => {
-                    for dep in deps {
-                        if *dep == Hash::ZERO {
-                            continue;
-                        }
-                        if unapplied_set.contains(dep) {
-                            deg += 1;
-                            dependents.entry(*dep).or_default().push(*hash);
-                        } else if !store.contains(dep).unwrap_or(false) {
-                            // External dep missing — permanently blocked
-                            deg += 1;
-                        }
-                        // else: dep exists in store and is already applied → satisfied
+                for signed in &candidates {
+                    // Check causal conditions — deps must be witnessed, not just stored
+                    let deps_met = match &signed.intention.condition {
+                        Condition::V1(deps) => {
+                            let mut met = true;
+                            for dep in deps {
+                                if !self.intention_store.is_witnessed(dep)
+                                    .map_err(ReplicationControllerError::IntentionStore)? {
+                                    met = false;
+                                    break;
+                                }
+                            }
+                            met
+                        },
+                    };
+                    if !deps_met {
+                        continue;
                     }
+
+                    self.apply_intention_to_state(signed)?;
+                    applied_any = true;
                 }
             }
 
-            in_degree.insert(*hash, deg);
-        }
-
-        (in_degree, dependents)
-    }
-
-    /// Apply all pending (floating) intentions in topological order.
-    fn try_apply_all_pending(&mut self) -> Result<(), ReplicationControllerError> {
-        let floating_list = self.intention_store.floating()
-            .map_err(ReplicationControllerError::IntentionStore)?;
-        if floating_list.is_empty() {
-            return Ok(());
-        }
-
-        let unapplied: HashMap<Hash, SignedIntention> = floating_list
-            .into_iter()
-            .map(|fi| (fi.signed.intention.hash(), fi.signed))
-            .collect();
-
-        let (mut in_degree, dependents) = Self::build_dep_graph(&unapplied, &self.intention_store);
-
-        let mut queue: std::collections::VecDeque<Hash> = in_degree.iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(h, _)| *h)
-            .collect();
-
-        while let Some(hash) = queue.pop_front() {
-            if let Some(signed) = unapplied.get(&hash) {
-                let _ = self.apply_intention_to_state(signed);
-            }
-            
-            if let Some(deps) = dependents.get(&hash) {
-                for dependent_hash in deps {
-                    if let Some(deg) = in_degree.get_mut(dependent_hash) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push_back(*dependent_hash);
-                        }
-                    }
-                }
+            if !applied_any {
+                break;
             }
         }
-
         Ok(())
     }
 
@@ -881,9 +837,9 @@ mod tests {
         let log = handle.witness_log().await;
         assert_eq!(log.len(), 1);
 
-        let (seq, record) = &log[0];
-        assert_eq!(*seq, 1);
-        let content = lattice_proto::weaver::WitnessContent::decode(record.content.as_slice()).unwrap();
+        let entry = &log[0];
+        assert_eq!(entry.seq, 1);
+        let content = lattice_proto::weaver::WitnessContent::decode(entry.content.as_slice()).unwrap();
         assert!(content.wall_time > 0);
         assert_eq!(content.intention_hash, hash.as_bytes());
 
@@ -905,14 +861,14 @@ mod tests {
         assert_eq!(log.len(), 3);
 
         // Sequence numbers are monotonic
-        assert_eq!(log[0].0, 1);
-        assert_eq!(log[1].0, 2);
-        assert_eq!(log[2].0, 3);
+        assert_eq!(log[0].seq, 1);
+        assert_eq!(log[1].seq, 2);
+        assert_eq!(log[2].seq, 3);
 
         // Order matches submit order (decode intention hashes)
-        let c0 = lattice_proto::weaver::WitnessContent::decode(log[0].1.content.as_slice()).unwrap();
-        let c1 = lattice_proto::weaver::WitnessContent::decode(log[1].1.content.as_slice()).unwrap();
-        let c2 = lattice_proto::weaver::WitnessContent::decode(log[2].1.content.as_slice()).unwrap();
+        let c0 = lattice_proto::weaver::WitnessContent::decode(log[0].content.as_slice()).unwrap();
+        let c1 = lattice_proto::weaver::WitnessContent::decode(log[1].content.as_slice()).unwrap();
+        let c2 = lattice_proto::weaver::WitnessContent::decode(log[2].content.as_slice()).unwrap();
         assert_eq!(c0.intention_hash, h1.as_bytes());
         assert_eq!(c1.intention_hash, h2.as_bytes());
         assert_eq!(c2.intention_hash, h3.as_bytes());
@@ -949,7 +905,7 @@ mod tests {
 
         let log = handle.witness_log().await;
         assert_eq!(log.len(), 1);
-        let c = lattice_proto::weaver::WitnessContent::decode(log[0].1.content.as_slice()).unwrap();
+        let c = lattice_proto::weaver::WitnessContent::decode(log[0].content.as_slice()).unwrap();
         assert_eq!(c.intention_hash, hash.as_bytes());
 
         handle.close().await;
@@ -1010,16 +966,16 @@ mod tests {
         assert_eq!(log.len(), 3);
 
         // Apply order should be: root -> middle -> tip (causal order)
-        let c0 = lattice_proto::weaver::WitnessContent::decode(log[0].1.content.as_slice()).unwrap();
-        let c1 = lattice_proto::weaver::WitnessContent::decode(log[1].1.content.as_slice()).unwrap();
-        let c2 = lattice_proto::weaver::WitnessContent::decode(log[2].1.content.as_slice()).unwrap();
+        let c0 = lattice_proto::weaver::WitnessContent::decode(log[0].content.as_slice()).unwrap();
+        let c1 = lattice_proto::weaver::WitnessContent::decode(log[1].content.as_slice()).unwrap();
+        let c2 = lattice_proto::weaver::WitnessContent::decode(log[2].content.as_slice()).unwrap();
         assert_eq!(c0.intention_hash, h1.as_bytes());
         assert_eq!(c1.intention_hash, h2.as_bytes());
         assert_eq!(c2.intention_hash, h3.as_bytes());
 
         // Sequence numbers should be monotonic
-        assert!(log[0].0 < log[1].0);
-        assert!(log[1].0 < log[2].0);
+        assert!(log[0].seq < log[1].seq);
+        assert!(log[1].seq < log[2].seq);
 
         handle.close().await;
     }

@@ -51,12 +51,7 @@ This document outlines the development plan for Lattice.
 - [x] **Witness Log Hash Chaining:** Add `prev_hash` to `WitnessContent`.
     - Enables verifying the integrity of the witness log sequence itself.
     - Requires caching `last_witness_hash` in `IntentionStore`.
-- [ ] **Dependency Tracking & Execution Order:** 
-    - **Problem:** Efficiently scheduling intentions when dependencies (parents or conditions) are missing or arrive out-of-order.
-    - **Linear Progress:** `pending_children` (Map<ParentHash, Children>) for linear history (waiting for `store_prev`).
-    - **Causal Progress:** `deferred_conditions` (Map<ConditionHash, Waiters>) for cross-author dependencies.
-    - **Ordering Strategy:** Evaluate if a Min-Heap (HLC-ordered) is strictly necessary for fairness/determinism or if a simpler FIFO/Round-Robin approach suffices for concurrent authors.
-    - **Goal:** Strict causal consistency without O(N) scanning.
+- [x] **Dependency Tracking & Execution Order:** `TABLE_FLOATING_BY_PREV` for linear progress, O(1) `is_witnessed` via `TABLE_WITNESS_INDEX` for causal deps. Round-robin across authors (FIFO per-author). No O(N) scanning.
 
 ### 11B½: Validation Hardening & Test Coverage
 - [x] Reject ingested intentions with invalid signature (actor-level enforcement + test)
@@ -114,9 +109,9 @@ This document outlines the development plan for Lattice.
 - [ ] Signed checkpoint entries in sigchain
 - [ ] Nodes reject entries that contradict finalized checkpoints
 
-### 13D: Hash Index Optimization
-- [ ] Replace in-memory `HashSet<Hash>` with on-disk index (redb) or Bloom Filter
-- [ ] Support 100M+ entries without excessive RAM
+### 13D: Hash Index Optimization ✅
+- [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
+- [x] Support 100M+ entries without excessive RAM
 
 ---
 

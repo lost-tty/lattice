@@ -60,9 +60,9 @@ async fn sync_stores(src: &Arc<dyn StoreHandle>, dst: &Arc<dyn StoreHandle>, _de
     // Get all executed intentions from source log
     let log = src_inspector.witness_log().await;
 
-    for (_, record) in log {
-        // Fetch full intention content - record.content is WitnessContent protobuf
-        let content = lattice_proto::weaver::WitnessContent::decode(record.content.as_slice())
+    for entry in log {
+        // Fetch full intention content - entry.content is WitnessContent protobuf
+        let content = lattice_proto::weaver::WitnessContent::decode(entry.content.as_slice())
             .expect("decode witness content");
         
         let intents = src_inspector.get_intention(content.intention_hash).await.expect("fetch intention");

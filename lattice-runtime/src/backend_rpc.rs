@@ -8,7 +8,7 @@ use lattice_api::proto::{
     SetStoreNameRequest, WitnessLogRequest, ExecRequest, GetIntentionRequest,
 };
 use lattice_api::RpcClient;
-use lattice_model::weaver::FloatingIntention;
+use lattice_model::weaver::{FloatingIntention, WitnessEntry};
 use uuid::Uuid;
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
@@ -204,13 +204,13 @@ impl LatticeBackend for RpcBackend {
         })
     }
     
-    fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessLogEntry>> {
+    fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessEntry>> {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.store.witness_log(WitnessLogRequest {
                 store_id: store_id.as_bytes().to_vec(),
             }).await?;
-            Ok(resp.into_inner().entries)
+            Ok(resp.into_inner().entries.into_iter().map(Into::into).collect())
         })
     }
     
