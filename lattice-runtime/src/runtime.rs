@@ -2,7 +2,7 @@
 
 use crate::backend_inprocess::InProcessBackend;
 use crate::{LatticeBackend, NetworkService, Node, NodeBuilder, RpcServer};
-use lattice_node::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, STORE_TYPE_KVSTORE_LEGACY, STORE_TYPE_LOGSTORE_LEGACY, direct_opener};
+use lattice_node::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, direct_opener};
 use lattice_storage::PersistentState;
 use lattice_systemstore::SystemLayer;
 use lattice_kvstore::KvState;
@@ -108,13 +108,6 @@ impl RuntimeBuilder {
                 direct_opener::<SystemLayer<PersistentState<KvState>>>(registry)
             })
             .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-                direct_opener::<SystemLayer<PersistentState<LogState>>>(registry)
-            })
-            // Legacy aliases for existing stores on disk
-            .with_opener(STORE_TYPE_KVSTORE_LEGACY, |registry| {
-                direct_opener::<SystemLayer<PersistentState<KvState>>>(registry)
-            })
-            .with_opener(STORE_TYPE_LOGSTORE_LEGACY, |registry| {
                 direct_opener::<SystemLayer<PersistentState<LogState>>>(registry)
             });
         if let Some(name) = self.name {

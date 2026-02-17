@@ -7,7 +7,6 @@ use crate::{
     Uuid,
 };
 use lattice_model::{SystemEvent, store_info::ChildStatus};
-use lattice_systemstore::SystemBatch;
 use futures_util::StreamExt;
 use tracing::{info, warn, debug};
 
@@ -50,11 +49,6 @@ impl RecursiveWatcher {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         
         tokio::spawn(async move {
-            // 1. Backfill types if missing (repair System Table)
-            if let Err(e) = Self::backfill_child_types(&store_manager, &root_store).await {
-                warn!(error = %e, "Failed to backfill child types");
-            }
-
             // Get SystemStore capability
             let Some(system) = root_store.clone().as_system() else {
                  warn!("Root store does not support SystemStore - watcher disabled");
@@ -123,39 +117,6 @@ impl RecursiveWatcher {
         }
     }
 
-    /// Backfill store types for children that are "unknown" in System Table but exist locally.
-    async fn backfill_child_types(
-        store_manager: &Arc<StoreManager>,
-        root: &Arc<dyn StoreHandle>,
-    ) -> Result<(), String> {
-        let declarations = Self::list_declarations(root).await?;
-        
-        let unknown: Vec<_> = declarations.into_iter()
-            .filter(|d| d.store_type == "unknown" && !d.archived)
-            .collect();
-            
-        if unknown.is_empty() { return Ok(()); }
-        
-        let system = root.clone().as_system()
-             .ok_or_else(|| "Root store must support SystemStore".to_string())?;
-        let mut batch = SystemBatch::new(system.as_ref());
-        let mut count = 0;
-
-        for decl in unknown {
-            if let Ok((_, t, _)) = store_manager.registry().peek_store_info(decl.id) {
-                let alias = decl.name.unwrap_or_default();
-                batch = batch.add_child(decl.id, alias, &t);
-                count += 1;
-            }
-        }
-        
-        if count > 0 {
-            info!(count = count, "Backfilling missing store types to System Table");
-            batch.commit().await.map_err(|e| e.to_string())?;
-        }
-        
-        Ok(())
-    }
     
     async fn reconcile_stores(
         store_manager: &Arc<StoreManager>, 

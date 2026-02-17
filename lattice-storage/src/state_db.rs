@@ -107,8 +107,6 @@ impl StateBackend {
     }
 
     /// Open or create a store at the given path.
-    /// 
-    /// Performs standard cleanup (renaming log.db -> state.db) and verifies the store ID and Type.
     pub fn open(
         id: Uuid, 
         state_dir: impl AsRef<Path>, 
@@ -120,49 +118,8 @@ impl StateBackend {
             std::fs::create_dir_all(dir)?;
         }
     
-        // Legacy Migration: Rename log.db to state.db if needed (standardize on state.db)
-        let log_db_path = dir.join("log.db");
         let state_db_path = dir.join("state.db");
-        
-        if log_db_path.exists() && !state_db_path.exists() {
-            std::fs::rename(&log_db_path, &state_db_path)?;
-        }
-    
         let db = Database::builder().create(&state_db_path)?;
-        
-        // Legacy Migration: Handle table renaming ("kv" or "log" -> "data")
-        let write_txn = db.begin_write()?;
-        {
-            let mut has_kv = false;
-            let mut has_log = false;
-            let mut has_data = false;
-
-            for table in write_txn.list_tables()? {
-                match table.name() {
-                    "kv" => has_kv = true,
-                    "log" => has_log = true,
-                    "data" => has_data = true,
-                    _ => {}
-                }
-            }
-
-            if has_kv && has_log {
-                panic!("Invalid Storage State: Both 'kv' and 'log' tables exist. Store type is ambiguous.");
-            }
-
-            if (has_kv || has_log) && has_data {
-                panic!("Invalid Storage State: Legacy table ('kv' or 'log') exists alongside new 'data' table. Partial migration detected.");
-            }
-
-            if has_kv {
-                 let legacy_def = TableDefinition::<&[u8], &[u8]>::new("kv");
-                 write_txn.rename_table(legacy_def, TABLE_DATA)?;
-            } else if has_log {
-                 let legacy_def = TableDefinition::<&[u8], &[u8]>::new("log");
-                 write_txn.rename_table(legacy_def, TABLE_DATA)?;
-            }
-        }
-        write_txn.commit()?;
         
         // Verify Store ID & Type
         let write_txn = db.begin_write()?;

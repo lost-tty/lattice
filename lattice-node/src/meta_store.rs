@@ -2,10 +2,10 @@
 //!
 //! Tables:
 //! - stores: UUID → StoreRecord protobuf (store_id, created_at)
-//! - meshes: UUID → RootStoreRecord protobuf
+//! - rootstores: UUID → RootStoreRecord protobuf
 //! - meta: key → value bytes
 
-use redb::{Database, ReadableTable, TableDefinition, ReadableTableMetadata};
+use redb::{Database, ReadableTable, TableDefinition};
 use std::path::Path;
 use thiserror::Error;
 use uuid::Uuid;
@@ -14,7 +14,6 @@ use lattice_kernel::proto::storage::{RootStoreRecord, StoreRecord};
 
 const STORES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("stores");
 const ROOTSTORES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rootstores");
-const LEGACY_MESHES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meshes");
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
 const META_NAME: &str = "name";
@@ -47,51 +46,12 @@ impl MetaStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MetaStoreError> {
         let db = Database::create(path)?;
         
-        // Ensure tables exist and run migrations
+        // Ensure tables exist
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(STORES_TABLE)?;
             let _ = write_txn.open_table(ROOTSTORES_TABLE)?;
             let _ = write_txn.open_table(META_TABLE)?;
-
-            // Migration: meshes -> rootstores
-            // We verify if "meshes" table exists and has data, and "rootstores" is empty (or we merge?)
-            // For simplicity, we copy everything from meshes to rootstores if meshes exists.
-            if let Ok(legacy_table) = write_txn.open_table(LEGACY_MESHES_TABLE) {
-                if !legacy_table.is_empty()? {
-                     let mut new_table = write_txn.open_table(ROOTSTORES_TABLE)?;
-                     let mut to_copy = Vec::new();
-                     
-                     for result in legacy_table.iter()? {
-                         let (k, v) = result?;
-                         to_copy.push((k.value().to_vec(), v.value().to_vec()));
-                     }
-                     
-                     if !to_copy.is_empty() {
-                         tracing::info!("Migrating {} entries from 'meshes' to 'rootstores'", to_copy.len());
-                         for (k, v) in to_copy {
-                             new_table.insert(k.as_slice(), v.as_slice())?;
-                         }
-                     }
-                     // We could remove the legacy table, but explicitly deleting a table in redb 
-                     // deletes definitions. For now we assume we just copied. 
-                     // To properly delete it we would verify `legacy_table.range(..).count()` then delete table?
-                     // redb::TableDefinition::new("meshes") is just a handle. 
-                     // We can clear it.
-                     // output_table.delete_table(LEGACY_MESHES_TABLE)?; <- Not available on WriteTransaction?
-                }
-                // We can drop the table from the transaction?
-                // write_txn.delete_table(LEGACY_MESHES_TABLE)?;
-            }
-        }
-        write_txn.commit()?;
-        
-        // Separate transaction to delete legacy table if it was migrated?
-        // For safety, let's keep it but never read it again. 
-        // Or cleaner: delete it.
-        let write_txn = db.begin_write()?;
-        if let Ok(true) = write_txn.delete_table(LEGACY_MESHES_TABLE) {
-            tracing::info!("Deleted legacy 'meshes' table");
         }
         write_txn.commit()?;
 

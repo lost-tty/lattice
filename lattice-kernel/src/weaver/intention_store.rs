@@ -72,8 +72,7 @@ pub struct IntentionStore {
 impl IntentionStore {
     /// Open or create a `log.db` at the given directory.
     ///
-    /// On open, migrates any legacy witness records and rebuilds
-    /// the in-memory indexes.
+    /// On open, rebuilds the in-memory indexes from the witness log.
     pub fn open(
         store_dir: impl AsRef<Path>,
         store_id: Uuid,
@@ -102,7 +101,6 @@ impl IntentionStore {
             signing_key: signing_key.clone(),
         };
 
-        store.migrate_log()?;
         store.rebuild_indexes()?;
         Ok(store)
     }
@@ -179,96 +177,6 @@ impl IntentionStore {
         self.last_witness_hash = expected_prev;
 
         Ok(())
-    }
-
-    /// Rebuild the witness log from scratch by re-witnessing all intentions in their original order.
-    /// This generates valid timestamps and a strict hash chain, discarding legacy signatures.
-    /// No-op if the chain is already valid (no legacy records).
-    pub fn migrate_log(&mut self) -> Result<u64, IntentionStoreError> {
-        // Quick scan: is migration needed?
-        let needs_migration = {
-            let read_txn = self.db.begin_read()?;
-            let table = read_txn.open_table(TABLE_WITNESS)?;
-            let mut found_legacy = false;
-            for entry in table.iter()? {
-                let (_, v) = entry?;
-                let record = WitnessRecord::decode(v.value())
-                    .map_err(|e| IntentionStoreError::InvalidData(format!("witness proto: {e}")))?;
-                let content = WitnessContent::decode(record.content.as_slice())
-                    .map_err(|e| IntentionStoreError::InvalidData(format!("witness content: {e}")))?;
-                if content.prev_hash.len() != 32 {
-                    found_legacy = true;
-                    break;
-                }
-            }
-            found_legacy
-        };
-
-        if !needs_migration {
-            return Ok(0);
-        }
-
-        let mut intention_hashes = Vec::new();
-
-        // 1. Read existing order
-        let read_txn = self.db.begin_read()?;
-        {
-            let table = read_txn.open_table(TABLE_WITNESS)?;
-            let len = table.len()?;
-            for seq in 1..=len {
-                 let record = WitnessRecord::decode(table.get(seq.to_be_bytes().as_slice())?.unwrap().value())
-                     .map_err(|e| IntentionStoreError::InvalidData(e.to_string()))?;
-                 let content = WitnessContent::decode(record.content.as_slice())
-                     .map_err(|e| IntentionStoreError::InvalidData(e.to_string()))?;
-                 intention_hashes.push(content.intention_hash);
-            }
-        }
-
-        // 2. Clear table and reset
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut table = write_txn.open_table(TABLE_WITNESS)?;
-            let len = table.len()?;
-            for seq in 1..=len {
-                table.remove(seq.to_be_bytes().as_slice())?;
-            }
-        }
-        write_txn.commit()?;
-        
-        // Reset in-memory state
-        self.witness_seq = 0;
-        self.last_witness_hash = Hash::ZERO;
-        
-        // 3. Re-witness
-        let mut count = 0;
-        let mut now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64;
-            
-        for hash_bytes in intention_hashes {
-            // Fetch full intention
-            let read_txn = self.db.begin_read()?;
-            let table = read_txn.open_table(TABLE_INTENTIONS)?;
-            let intent_bytes = table.get(hash_bytes.as_slice())?
-                .ok_or(IntentionStoreError::InvalidData("Missing intention".into()))?
-                .value()
-                .to_vec();
-            drop(read_txn);
-            
-            let signed = lattice_proto::weaver::SignedIntention::decode(intent_bytes.as_slice())
-                .map_err(|e| IntentionStoreError::InvalidData(e.to_string()))?;
-            let intention = Intention::from_borsh(&signed.intention_borsh)
-                .map_err(|e| IntentionStoreError::InvalidData(e.to_string()))?;
-            
-            // Re-witness (this increments witness_seq and last_witness_hash)
-            self.witness(&intention, now)?;
-            
-            count += 1;
-            now += 1; // Ensure monotonic if fast enough
-        }
-        
-        Ok(count)
     }
 
     /// Insert a signed intention into the store.

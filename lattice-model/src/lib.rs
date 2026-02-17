@@ -39,7 +39,7 @@ pub use node_identity::{NodeIdentity, NodeError, PeerStatus, PeerInfo, InviteSta
 pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream, GossipPeer};
 pub use net_event::NetEvent;
 pub use node_provider::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
-pub use store_type::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, STORE_TYPE_KVSTORE_LEGACY, STORE_TYPE_LOGSTORE_LEGACY, CORE_STORE_TYPES, StoreTypeProvider};
+pub use store_type::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, CORE_STORE_TYPES, StoreTypeProvider};
 pub use openable::{Openable, OpenError};
 pub use store_info::{StoreInfo, StoreMeta, StoreLink, SystemEvent};
 pub use head::{Head, HeadError};

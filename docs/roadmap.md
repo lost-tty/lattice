@@ -48,6 +48,15 @@ This document outlines the development plan for Lattice.
 - [x] Composable `From` impls (kernel → proto) for `HLC`, `Condition`, `SignedIntention`
 - [x] Remove legacy `Entry`/`SignedEntry`/`LogRecord` from storage proto
 - [x] Delete sigchain module + entry.rs + log_traits.rs
+- [x] **Witness Log Hash Chaining:** Add `prev_hash` to `WitnessContent`.
+    - Enables verifying the integrity of the witness log sequence itself.
+    - Requires caching `last_witness_hash` in `IntentionStore`.
+- [ ] **Dependency Tracking & Execution Order:** 
+    - **Problem:** Efficiently scheduling intentions when dependencies (parents or conditions) are missing or arrive out-of-order.
+    - **Linear Progress:** `pending_children` (Map<ParentHash, Children>) for linear history (waiting for `store_prev`).
+    - **Causal Progress:** `deferred_conditions` (Map<ConditionHash, Waiters>) for cross-author dependencies.
+    - **Ordering Strategy:** Evaluate if a Min-Heap (HLC-ordered) is strictly necessary for fairness/determinism or if a simpler FIFO/Round-Robin approach suffices for concurrent authors.
+    - **Goal:** Strict causal consistency without O(N) scanning.
 
 ### 11B½: Validation Hardening & Test Coverage
 - [x] Reject ingested intentions with invalid signature (actor-level enforcement + test)

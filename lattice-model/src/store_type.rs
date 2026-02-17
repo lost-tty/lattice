@@ -9,10 +9,6 @@ pub const STORE_TYPE_KVSTORE: &str = "core:kvstore";
 /// Store type identifier for LogStore  
 pub const STORE_TYPE_LOGSTORE: &str = "core:logstore";
 
-/// Legacy aliases for backward compatibility with existing stores on disk
-pub const STORE_TYPE_KVSTORE_LEGACY: &str = "kvstore";
-pub const STORE_TYPE_LOGSTORE_LEGACY: &str = "logstore";
-
 /// List of core store types
 pub const CORE_STORE_TYPES: &[&str] = &[STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE];
 

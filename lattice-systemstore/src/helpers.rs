@@ -386,25 +386,3 @@ where
         }
     }))
 }
-
-use crate::SystemStore;
-
-/// Migration hook for root stores.
-/// 
-/// Call this after opening a root store to run any pending migrations.
-/// Currently handles:
-/// - (Future) Legacy peer list migration from metadata to system table
-/// 
-/// This is a no-op if no migrations are needed.
-pub fn run_root_store_migrations<S: SystemStore + ?Sized>(store: &S) -> Result<(), String> {
-    // Placeholder for migration logic
-    // Future migrations can be added here as conditional checks
-    
-    // Example migration structure:
-    // if needs_peer_migration(store) {
-    //     migrate_legacy_peers(store)?;
-    // }
-    
-    let _ = store; // Silence unused warning for now
-    Ok(())
-}
