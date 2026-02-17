@@ -372,15 +372,20 @@ pub async fn cmd_store_debug(backend: &dyn LatticeBackend, store_id: Option<Uuid
         let mut log = vec![SExpr::sym("witness-log")];
         for entry in &witness_entries {
             if let Ok(content) = lattice_runtime::WitnessContent::decode(entry.content.as_slice()) {
-                log.push(SExpr::list(vec![
+                let fields = vec![
                     SExpr::num(entry.seq),
                     SExpr::sym(":hash"),
+                    SExpr::raw(entry.hash.clone()),
+                    SExpr::sym(":intention"),
                     SExpr::raw(content.intention_hash.clone()),
                     SExpr::sym(":wall"),
                     SExpr::num(content.wall_time),
+                    SExpr::sym(":prev"),
+                    SExpr::raw(content.prev_hash.clone()),
                     SExpr::sym(":sig"),
                     SExpr::raw(entry.signature.clone()),
-                ]));
+                ];
+                log.push(SExpr::list(fields));
             }
         }
         sections.push(SExpr::list(log));

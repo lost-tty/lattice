@@ -53,7 +53,7 @@ pub enum ReplicationControllerCmd {
     },
     /// Get raw witness log entries
     WitnessLog {
-        resp: oneshot::Sender<Vec<(u64, WitnessRecord)>>,
+        resp: oneshot::Sender<Vec<(u64, Hash, WitnessRecord)>>,
     },
     /// Get floating (unapplied) intentions
     FloatingIntentions {
@@ -152,7 +152,7 @@ impl<S: StateMachine> ReplicationController<S> {
     fn handle_command(&mut self, cmd: ReplicationControllerCmd) {
         match cmd {
             ReplicationControllerCmd::AuthorTips { resp } => {
-                let tips = self.intention_store.all_author_tips();
+                let tips = self.intention_store.all_author_tips().clone();
                 let _ = resp.send(Ok(tips));
             }
             ReplicationControllerCmd::IngestIntention { intention, resp } => {
@@ -297,7 +297,7 @@ impl<S: StateMachine> ReplicationController<S> {
         let applied_map: HashMap<PubKey, Hash> = applied_tips.into_iter().collect();
 
         let mut unapplied = HashMap::new();
-        for (author, store_tip) in self.intention_store.all_author_tips() {
+        for (&author, &store_tip) in self.intention_store.all_author_tips() {
             let applied_tip = applied_map.get(&author).copied().unwrap_or(Hash::ZERO);
             if store_tip == applied_tip {
                 continue;
@@ -371,7 +371,7 @@ impl<S: StateMachine> ReplicationController<S> {
     }
 
     /// Apply all pending intentions in topological order.
-    fn try_apply_all_pending(&self) -> Result<(), ReplicationControllerError> {
+    fn try_apply_all_pending(&mut self) -> Result<(), ReplicationControllerError> {
         let unapplied = self.collect_unapplied()?;
         if unapplied.is_empty() {
             return Ok(());
@@ -406,7 +406,7 @@ impl<S: StateMachine> ReplicationController<S> {
 
     /// Apply a single intention's ops to the state machine
     fn apply_intention_to_state(
-        &self,
+        &mut self,
         signed: &SignedIntention,
     ) -> Result<(), ReplicationControllerError> {
         let intention = &signed.intention;
@@ -442,9 +442,8 @@ impl<S: StateMachine> ReplicationController<S> {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let _ = self.intention_store.witness(
-            hash,
+            &intention,
             wall_time,
-            self.node.signing_key(),
         );
 
         Ok(())
@@ -533,7 +532,7 @@ mod tests {
         crate::store::StateError,
     > {
         let state = Arc::new(MockStateMachine::new());
-        let opened = crate::store::OpenedStore::new(store_id, store_dir.clone(), state.clone())?;
+        let opened = crate::store::OpenedStore::new(store_id, store_dir.clone(), state.clone(), node.signing_key())?;
         let (handle, info, runner) = opened.into_handle(node)?;
         let join_handle = tokio::spawn(async move { runner.run().await });
         Ok((handle, info, join_handle))

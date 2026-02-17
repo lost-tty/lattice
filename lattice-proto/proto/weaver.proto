@@ -19,6 +19,7 @@ message WitnessContent {
   bytes store_id = 1;         // Store UUID this witness belongs to (16 bytes)
   bytes intention_hash = 2;   // blake3 hash of the witnessed intention (32 bytes)
   uint64 wall_time = 3;       // Wall-clock time when witnessed (Unix ms)
+  bytes prev_hash = 4;        // blake3 hash of previous WitnessRecord.content (32 bytes, all-zeros for first)
 }
 
 // Signed witness envelope — stored in TABLE_WITNESS.

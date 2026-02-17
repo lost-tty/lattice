@@ -197,6 +197,7 @@ message SignedIntention {
 // content/signature fields mirror weaver.proto WitnessRecord exactly.
 message WitnessLogEntry {
   uint64 seq = 1;               // Witness sequence (apply order)
+  bytes hash = 4;               // blake3(content) — the chain hash
   bytes content = 2;            // protobuf-encoded WitnessContent
   bytes signature = 3;          // Ed25519 signature over blake3(content)
 }

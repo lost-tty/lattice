@@ -62,7 +62,7 @@ impl StoreRegistry {
         
         // Open Initial State (creates db) using provided function
         let state = Arc::new(open_fn(&state_dir)?);
-        let _ = OpenedStore::new(store_id, intentions_dir, state)?;
+        let _ = OpenedStore::new(store_id, intentions_dir, state, self.node.signing_key())?;
         
         // Register in meta
         self.meta.add_store(store_id, Uuid::nil()).map_err(|e| StateError::Io(std::io::Error::new(
@@ -100,7 +100,7 @@ impl StoreRegistry {
         std::fs::create_dir_all(&intentions_dir)?;
         
         let state = Arc::new(open_fn(&state_dir)?);
-        let opened = OpenedStore::new(store_id, intentions_dir, state)?;
+        let opened = OpenedStore::new(store_id, intentions_dir, state, self.node.signing_key())?;
         let (store_handle, info, runner) = opened.into_handle((*self.node).clone())?;
         
         // Spawn the actor runner as tokio task

@@ -134,10 +134,11 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
         store_id: Uuid,
         store_dir: PathBuf,
         state: Arc<S>,
+        signing_key: &ed25519_dalek::SigningKey,
     ) -> Result<Self, super::StateError> {
         std::fs::create_dir_all(&store_dir)?;
 
-        let intention_store = IntentionStore::open(&store_dir, store_id)?;
+        let intention_store = IntentionStore::open(&store_dir, store_id, signing_key)?;
         let entries_replayed = replay_intentions(&intention_store, &state)?;
 
         Ok(Self {
@@ -317,7 +318,7 @@ impl<S: StateMachine> Store<S> {
     }
 
     /// Get raw witness log entries
-    pub async fn witness_log(&self) -> Vec<(u64, WitnessRecord)> {
+    pub async fn witness_log(&self) -> Vec<(u64, Hash, WitnessRecord)> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
@@ -432,7 +433,7 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
 
     fn witness_log(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Vec<(u64, WitnessRecord)>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Vec<(u64, Hash, WitnessRecord)>> + Send + '_>> {
         Box::pin(Store::witness_log(self))
     }
 
@@ -505,7 +506,7 @@ fn replay_intentions<S: StateMachine>(
     let applied_map: HashMap<PubKey, Hash> = applied_tips.into_iter().collect();
 
     // Get all stored intentions and compare tips
-    let store_tips = store.all_author_tips();
+    let store_tips = store.all_author_tips().clone();
     let mut entries_replayed = 0u64;
 
     for (author, store_tip) in &store_tips {

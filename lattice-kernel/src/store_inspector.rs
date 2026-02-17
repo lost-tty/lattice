@@ -30,10 +30,10 @@ pub trait StoreInspector: Send + Sync {
     /// Get number of witness log entries in the store
     fn witness_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>>;
 
-    /// Get raw witness log entries (seq → WitnessRecord)
+    /// Get raw witness log entries (seq, content_hash, WitnessRecord)
     fn witness_log(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Vec<(u64, WitnessRecord)>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Vec<(u64, Hash, WitnessRecord)>> + Send + '_>>;
 
     /// Get floating (unapplied) intentions
     fn floating_intentions(

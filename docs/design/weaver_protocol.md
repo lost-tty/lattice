@@ -154,6 +154,7 @@ message WitnessContent {
     bytes store_id = 1;          // UUID of the store
     bytes intention_hash = 2;    // blake3 hash of the applied intention
     uint64 wall_time = 3;        // Wall-clock time when witnessed (Unix ms)
+    bytes prev_hash = 4;         // blake3 hash of previous WitnessRecord.content (32 bytes, all-zeros for first)
 }
 
 message WitnessRecord {
@@ -162,7 +163,16 @@ message WitnessRecord {
 }
 ```
 
-### 5.1 Signing and Verification
+### 5.1 Hash Chain Integrity
+
+The `prev_hash` field creates a tamper-evident chain across the witness log:
+- The first witness record has `prev_hash = [0u8; 32]` (genesis sentinel).
+- Each subsequent record sets `prev_hash = blake3(previous_record.content)`.
+- On startup, `IntentionStore::rebuild_indexes()` verifies the entire chain. Any break is a hard corruption error.
+
+The `IntentionStore` caches `last_witness_hash` in memory for O(1) chain extension.
+
+### 5.2 Signing and Verification
 
 Witness records use the same **content + envelope** pattern as `SignedIntention`.
 
@@ -170,9 +180,3 @@ Witness records use the same **content + envelope** pattern as `SignedIntention`
 **Verification:** `Ed25519.verify(node_pubkey, blake3(content), signature)`
 
 Helpers: `sign_witness()` and `verify_witness()` in `lattice-kernel/src/weaver/witness.rs`.
-
-### 5.2 Locality
-
-Witness records do **not** carry an origin field. Whether an intention was authored locally or received via sync can always be derived by comparing `intention.author` to the node's own public key.
-
-The witness log provides a monotonic sequence number for each applied intention, establishing the **total apply order** for the store on this node.

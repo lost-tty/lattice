@@ -335,8 +335,9 @@ impl LatticeBackend for InProcessBackend {
             let log = inspector.witness_log().await;
             
             Ok(log.into_iter()
-                .map(|(seq, record)| WitnessLogEntry {
+                .map(|(seq, hash, record)| WitnessLogEntry {
                     seq,
+                    hash: hash.to_vec(),
                     content: record.content,
                     signature: record.signature,
                 })

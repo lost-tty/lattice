@@ -11,7 +11,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{Intention, SignedIntention};
@@ -50,23 +49,35 @@ pub enum IntentionStoreError {
 
 pub struct IntentionStore {
     db: Database,
+    
     /// The UUID of the store this IntentionStore belongs to.
     store_id: Uuid,
+
     /// In-memory index: author → hash of their latest intention in this store.
     /// Derived from `store_prev` linkage — only tracks heads of complete chains.
-    author_tips: std::sync::RwLock<HashMap<PubKey, Hash>>,
+    author_tips: HashMap<PubKey, Hash>,
+
     /// Next witness sequence number (monotonically increasing).
-    witness_seq: AtomicU64,
+    witness_seq: u64,
+
+    /// blake3 hash of the last WitnessRecord.content bytes.
+    /// Used to populate `prev_hash` in the next WitnessContent.
+    /// `Hash::ZERO` when the witness log is empty (genesis sentinel).
+    last_witness_hash: Hash,
+
+    /// Key used to sign witness records.
+    signing_key: ed25519_dalek::SigningKey,
 }
 
 impl IntentionStore {
     /// Open or create a `log.db` at the given directory.
     ///
-    /// On open, rebuilds the in-memory `author_tips` index by scanning
-    /// the intentions table.
+    /// On open, migrates any legacy witness records and rebuilds
+    /// the in-memory indexes.
     pub fn open(
         store_dir: impl AsRef<Path>,
         store_id: Uuid,
+        signing_key: &ed25519_dalek::SigningKey,
     ) -> Result<Self, IntentionStoreError> {
         let dir = store_dir.as_ref();
         std::fs::create_dir_all(dir)
@@ -82,36 +93,74 @@ impl IntentionStore {
             write_txn.commit()?;
         }
 
-        let store = Self {
+        let mut store = Self {
             db,
             store_id,
-            author_tips: std::sync::RwLock::new(HashMap::new()),
-            witness_seq: AtomicU64::new(0),
+            author_tips: HashMap::new(),
+            witness_seq: 0,
+            last_witness_hash: Hash::ZERO,
+            signing_key: signing_key.clone(),
         };
 
+        store.migrate_log()?;
         store.rebuild_indexes()?;
         Ok(store)
     }
 
-    /// Rebuild the in-memory `author_tips` index and `witness_seq` from disk.
-    fn rebuild_indexes(&self) -> Result<(), IntentionStoreError> {
+    /// Rebuild in-memory state from disk.
+    ///
+    /// Derives `author_tips` from the witness log (only witnessed intentions
+    /// are considered). Verifies the witness hash chain strictly.
+    fn rebuild_indexes(&mut self) -> Result<(), IntentionStoreError> {
         let read_txn = self.db.begin_read()?;
+        let intention_table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let witness_table = read_txn.open_table(TABLE_WITNESS)?;
 
-        // Single pass: collect all hashes per author and all referenced store_prevs.
-        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let mut max_seq = 0;
+        let mut expected_prev = Hash::ZERO;
         let mut per_author: HashMap<PubKey, Vec<Hash>> = HashMap::new();
         let mut referenced: std::collections::HashSet<Hash> = std::collections::HashSet::new();
 
-        for entry in table.iter()? {
+        for entry in witness_table.iter()? {
             let (k, v) = entry?;
-            let hash = Hash::try_from(k.value())
-                .map_err(|_| IntentionStoreError::InvalidData("bad hash key".into()))?;
-            let proto = lattice_proto::weaver::SignedIntention::decode(v.value())?;
-            let intention = Intention::from_borsh(&proto.intention_borsh)?;
 
-            per_author.entry(intention.author).or_default().push(hash);
-            if intention.store_prev != Hash::ZERO {
-                referenced.insert(intention.store_prev);
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(k.value());
+            let seq = u64::from_be_bytes(buf);
+            if seq > max_seq {
+                max_seq = seq;
+            }
+
+            let record = WitnessRecord::decode(v.value())
+                .map_err(|e| IntentionStoreError::InvalidData(format!("witness proto: {e}")))?;
+            let content = WitnessContent::decode(record.content.as_slice())
+                .map_err(|e| IntentionStoreError::InvalidData(format!("witness content: {e}")))?;
+
+            // Verify hash chain
+            let actual_prev = Hash::try_from(content.prev_hash.as_slice())
+                .map_err(|_| IntentionStoreError::InvalidData(format!(
+                    "CORRUPTION: Witness seq {} has invalid prev_hash length ({})",
+                    seq, content.prev_hash.len()
+                )))?;
+            if actual_prev != expected_prev {
+                return Err(IntentionStoreError::InvalidData(format!(
+                    "CORRUPTION: Witness chain broken at seq {}: prev_hash {} != expected {}",
+                    seq, actual_prev, expected_prev,
+                )));
+            }
+            expected_prev = Hash(*blake3::hash(&record.content).as_bytes());
+
+            // Rebuild author_tips from witnessed intentions
+            let intention_hash = Hash::try_from(content.intention_hash.as_slice())
+                .map_err(|_| IntentionStoreError::InvalidData("bad intention_hash in witness".into()))?;
+
+            if let Some(intent_val) = intention_table.get(intention_hash.as_bytes().as_slice())? {
+                let proto = lattice_proto::weaver::SignedIntention::decode(intent_val.value())?;
+                let intention = Intention::from_borsh(&proto.intention_borsh)?;
+                per_author.entry(intention.author).or_default().push(intention_hash);
+                if intention.store_prev != Hash::ZERO {
+                    referenced.insert(intention.store_prev);
+                }
             }
         }
 
@@ -125,23 +174,101 @@ impl IntentionStore {
                 }
             }
         }
-        *self.author_tips.write().unwrap() = tips;
-
-        // Witness seq: highest key in the witness table.
-        let witness_table = read_txn.open_table(TABLE_WITNESS)?;
-        let max_seq = witness_table
-            .iter()?
-            .last()
-            .transpose()?
-            .map(|(k, _)| {
-                let mut buf = [0u8; 8];
-                buf.copy_from_slice(k.value());
-                u64::from_be_bytes(buf)
-            })
-            .unwrap_or(0);
-        self.witness_seq.store(max_seq, Ordering::Relaxed);
+        self.author_tips = tips;
+        self.witness_seq = max_seq;
+        self.last_witness_hash = expected_prev;
 
         Ok(())
+    }
+
+    /// Rebuild the witness log from scratch by re-witnessing all intentions in their original order.
+    /// This generates valid timestamps and a strict hash chain, discarding legacy signatures.
+    /// No-op if the chain is already valid (no legacy records).
+    pub fn migrate_log(&mut self) -> Result<u64, IntentionStoreError> {
+        // Quick scan: is migration needed?
+        let needs_migration = {
+            let read_txn = self.db.begin_read()?;
+            let table = read_txn.open_table(TABLE_WITNESS)?;
+            let mut found_legacy = false;
+            for entry in table.iter()? {
+                let (_, v) = entry?;
+                let record = WitnessRecord::decode(v.value())
+                    .map_err(|e| IntentionStoreError::InvalidData(format!("witness proto: {e}")))?;
+                let content = WitnessContent::decode(record.content.as_slice())
+                    .map_err(|e| IntentionStoreError::InvalidData(format!("witness content: {e}")))?;
+                if content.prev_hash.len() != 32 {
+                    found_legacy = true;
+                    break;
+                }
+            }
+            found_legacy
+        };
+
+        if !needs_migration {
+            return Ok(0);
+        }
+
+        let mut intention_hashes = Vec::new();
+
+        // 1. Read existing order
+        let read_txn = self.db.begin_read()?;
+        {
+            let table = read_txn.open_table(TABLE_WITNESS)?;
+            let len = table.len()?;
+            for seq in 1..=len {
+                 let record = WitnessRecord::decode(table.get(seq.to_be_bytes().as_slice())?.unwrap().value())
+                     .map_err(|e| IntentionStoreError::InvalidData(e.to_string()))?;
+                 let content = WitnessContent::decode(record.content.as_slice())
+                     .map_err(|e| IntentionStoreError::InvalidData(e.to_string()))?;
+                 intention_hashes.push(content.intention_hash);
+            }
+        }
+
+        // 2. Clear table and reset
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TABLE_WITNESS)?;
+            let len = table.len()?;
+            for seq in 1..=len {
+                table.remove(seq.to_be_bytes().as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+        
+        // Reset in-memory state
+        self.witness_seq = 0;
+        self.last_witness_hash = Hash::ZERO;
+        
+        // 3. Re-witness
+        let mut count = 0;
+        let mut now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+            
+        for hash_bytes in intention_hashes {
+            // Fetch full intention
+            let read_txn = self.db.begin_read()?;
+            let table = read_txn.open_table(TABLE_INTENTIONS)?;
+            let intent_bytes = table.get(hash_bytes.as_slice())?
+                .ok_or(IntentionStoreError::InvalidData("Missing intention".into()))?
+                .value()
+                .to_vec();
+            drop(read_txn);
+            
+            let signed = lattice_proto::weaver::SignedIntention::decode(intent_bytes.as_slice())
+                .map_err(|e| IntentionStoreError::InvalidData(e.to_string()))?;
+            let intention = Intention::from_borsh(&signed.intention_borsh)
+                .map_err(|e| IntentionStoreError::InvalidData(e.to_string()))?;
+            
+            // Re-witness (this increments witness_seq and last_witness_hash)
+            self.witness(&intention, now)?;
+            
+            count += 1;
+            now += 1; // Ensure monotonic if fast enough
+        }
+        
+        Ok(count)
     }
 
     /// Insert a signed intention into the store.
@@ -149,7 +276,7 @@ impl IntentionStore {
     /// Idempotent — inserting the same intention twice returns its hash
     /// without error. Does NOT validate linearity or authorization;
     /// those are the actor's responsibility.
-    pub fn insert(&self, signed: &SignedIntention) -> Result<Hash, IntentionStoreError> {
+    pub fn insert(&mut self, signed: &SignedIntention) -> Result<Hash, IntentionStoreError> {
         let intention = &signed.intention;
         let hash = intention.hash();
 
@@ -168,10 +295,6 @@ impl IntentionStore {
             table.insert(hash.as_bytes().as_slice(), proto_bytes.as_slice())?;
         }
         write_txn.commit()?;
-
-        // Rebuild tips — simpler than incremental updates when out-of-order
-        // insertions can change who the tip is.
-        self.rebuild_indexes()?;
 
         Ok(hash)
     }
@@ -197,27 +320,28 @@ impl IntentionStore {
     }
 
     /// Encode a `WitnessContent` proto and return the raw bytes.
-    fn encode_witness_content(intention_hash: &Hash, wall_time: u64, store_id: &Uuid) -> Vec<u8> {
+    fn encode_witness_content(intention_hash: &Hash, wall_time: u64, store_id: &Uuid, prev_hash: &Hash) -> Vec<u8> {
         let content = WitnessContent {
             intention_hash: intention_hash.as_bytes().to_vec(),
             wall_time,
             store_id: store_id.as_bytes().to_vec(),
+            prev_hash: prev_hash.as_bytes().to_vec(),
         };
         content.encode_to_vec()
     }
 
     /// Record a witness entry for an intention.
     pub fn witness(
-        &self,
-        intention_hash: Hash,
+        &mut self,
+        intention: &Intention,
         wall_time: u64,
-        signing_key: &ed25519_dalek::SigningKey,
     ) -> Result<WitnessRecord, IntentionStoreError> {
-        let content_bytes = Self::encode_witness_content(&intention_hash, wall_time, &self.store_id);
-        let record = sign_witness(content_bytes, signing_key);
+        let hash = intention.hash();
+        let content_bytes = Self::encode_witness_content(&hash, wall_time, &self.store_id, &self.last_witness_hash);
+        let record = sign_witness(content_bytes.clone(), &self.signing_key);
         let proto_bytes = record.encode_to_vec();
 
-        let seq = self.witness_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let seq = self.witness_seq + 1;
         let seq_key = seq.to_be_bytes();
 
         let write_txn = self.db.begin_write()?;
@@ -227,22 +351,25 @@ impl IntentionStore {
         }
         write_txn.commit()?;
 
+        // All in-memory updates after successful commit
+        self.witness_seq = seq;
+        self.last_witness_hash = Hash(*blake3::hash(&content_bytes).as_bytes());
+        self.author_tips.insert(intention.author, hash);
+
         Ok(record)
     }
 
     /// Get the current tip hash for an author, or `Hash::ZERO` if none.
     pub fn author_tip(&self, author: &PubKey) -> Hash {
         self.author_tips
-            .read()
-            .unwrap()
             .get(author)
             .copied()
             .unwrap_or(Hash::ZERO)
     }
 
     /// Get all current author tips.
-    pub fn all_author_tips(&self) -> HashMap<PubKey, Hash> {
-        self.author_tips.read().unwrap().clone()
+    pub fn all_author_tips(&self) -> &HashMap<PubKey, Hash> {
+        &self.author_tips
     }
 
     /// Number of intentions in the store.
@@ -260,7 +387,8 @@ impl IntentionStore {
     }
 
     /// Iterate all witness records in sequence order.
-    pub fn witness_log(&self) -> Result<Vec<(u64, WitnessRecord)>, IntentionStoreError> {
+    /// Returns (seq, content_hash, record) tuples.
+    pub fn witness_log(&self) -> Result<Vec<(u64, Hash, WitnessRecord)>, IntentionStoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_WITNESS)?;
         let mut results = Vec::new();
@@ -271,7 +399,8 @@ impl IntentionStore {
             })?);
             let record = WitnessRecord::decode(value.value())
                 .map_err(|e| IntentionStoreError::InvalidData(format!("proto: {e}")))?;
-            results.push((seq, record));
+            let hash = Hash(*blake3::hash(&record.content).as_bytes());
+            results.push((seq, hash, record));
         }
         Ok(results)
     }
@@ -329,7 +458,7 @@ impl IntentionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::witness::verify_witness;
+    use super::super::witness::{sign_witness, verify_witness};
     use lattice_model::hlc::HLC;
     use lattice_model::weaver::Condition;
 

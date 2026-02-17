@@ -54,7 +54,7 @@ mod tests {
         // Phase 1: Create store and write data
         {
             let state = Arc::new(TestStateMachine::new());
-            let opened = OpenedStore::new(store_id, store_dir.clone(), state).unwrap();
+            let opened = OpenedStore::new(store_id, store_dir.clone(), state, node.signing_key()).unwrap();
             let (handle, _info, runner) = opened.into_handle(node.clone()).unwrap();
             let _actor = tokio::spawn(async move { runner.run().await });
 
@@ -82,7 +82,7 @@ mod tests {
 
         // Phase 3: Reopen — redb should detect corruption
         let state = Arc::new(TestStateMachine::new());
-        let result = OpenedStore::new(store_id, store_dir, state.clone());
+        let result = OpenedStore::new(store_id, store_dir, state.clone(), node.signing_key());
 
         match result {
             Err(e) => {
@@ -121,7 +121,7 @@ mod tests {
         // Phase 1: Create and populate store
         {
             let state = Arc::new(TestStateMachine::new());
-            let opened = OpenedStore::new(store_id, store_dir.clone(), state).unwrap();
+            let opened = OpenedStore::new(store_id, store_dir.clone(), state, node.signing_key()).unwrap();
             let (handle, _info, runner) = opened.into_handle(node.clone()).unwrap();
             let _actor = tokio::spawn(async move { runner.run().await });
 
@@ -135,7 +135,7 @@ mod tests {
 
         // Phase 3: Reopen — should start fresh
         let state = Arc::new(TestStateMachine::new());
-        let opened = OpenedStore::new(store_id, store_dir, state.clone())
+        let opened = OpenedStore::new(store_id, store_dir, state.clone(), node.signing_key())
             .expect("Should create fresh store when db is missing");
         let (handle, _info, runner) = opened.into_handle(node.clone()).unwrap();
         let _actor = tokio::spawn(async move { runner.run().await });
