@@ -5,4 +5,4 @@
 
 pub mod intention;
 
-pub use intention::{Condition, Intention, SignedIntention};
+pub use intention::{Condition, FloatingIntention, Intention, SignedIntention};

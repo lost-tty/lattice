@@ -221,8 +221,13 @@ message WitnessLogResponse {
   repeated WitnessLogEntry entries = 1;
 }
 
+message FloatingIntention {
+  SignedIntention intention = 1;
+  uint64 received_at = 2;   // Wall-clock time when received (Unix ms)
+}
+
 message FloatingIntentionsResponse {
-  repeated SignedIntention intentions = 1;
+  repeated FloatingIntention intentions = 1;
 }
 
 message GetIntentionRequest {

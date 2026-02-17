@@ -28,3 +28,8 @@ message WitnessRecord {
   bytes content = 1;          // protobuf-encoded WitnessContent
   bytes signature = 2;        // Ed25519 sign(node_key, blake3(content))
 }
+
+// Metadata for a floating (unwitnessed) intention — stored in TABLE_FLOATING.
+message FloatingMeta {
+  uint64 received_at = 1;     // Wall-clock time when received (Unix ms)
+}

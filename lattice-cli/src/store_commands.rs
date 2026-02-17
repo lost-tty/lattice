@@ -410,7 +410,8 @@ pub async fn cmd_store_debug(backend: &dyn LatticeBackend, store_id: Option<Uuid
     {
         let mut floats = vec![SExpr::sym("floating")];
         for f in &floating {
-            let details = backend.store_get_intention(store_id, &f.hash).await.unwrap_or_default();
+            let hash = f.signed.intention.hash();
+            let details = backend.store_get_intention(store_id, hash.as_bytes()).await.unwrap_or_default();
             if let Some(detail) = details.into_iter().next() {
                 floats.push(detail_to_sexpr(&detail));
             }

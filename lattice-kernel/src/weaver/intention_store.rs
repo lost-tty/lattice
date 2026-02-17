@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use lattice_model::types::{Hash, PubKey};
-use lattice_model::weaver::{Intention, SignedIntention};
-use lattice_proto::weaver::{WitnessContent, WitnessRecord};
+use lattice_model::weaver::{FloatingIntention, Intention, SignedIntention};
+use lattice_proto::weaver::{FloatingMeta, WitnessContent, WitnessRecord};
 use super::witness::sign_witness;
 use prost::Message;
 use redb::{Database, TableDefinition, ReadableTable, ReadableTableMetadata};
@@ -26,6 +26,9 @@ const TABLE_INTENTIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("in
 
 /// Witness table: monotonic u64 (big-endian) → protobuf WitnessRecord bytes
 const TABLE_WITNESS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("witness");
+
+/// Floating index: intention hash → protobuf FloatingMeta
+const TABLE_FLOATING: TableDefinition<&[u8], &[u8]> = TableDefinition::new("floating");
 
 #[derive(Debug, Error)]
 pub enum IntentionStoreError {
@@ -89,6 +92,7 @@ impl IntentionStore {
             let write_txn = db.begin_write()?;
             let _ = write_txn.open_table(TABLE_INTENTIONS)?;
             let _ = write_txn.open_table(TABLE_WITNESS)?;
+            let _ = write_txn.open_table(TABLE_FLOATING)?;
             write_txn.commit()?;
         }
 
@@ -102,7 +106,65 @@ impl IntentionStore {
         };
 
         store.rebuild_indexes()?;
+        store.backfill_floating_index()?;
         Ok(store)
+    }
+
+    /// One-off migration: populate TABLE_FLOATING for existing databases.
+    ///
+    /// If the floating table is empty but there are intentions not covered by
+    /// the witness log, this inserts them with `received_at = 0` (unknown).
+    /// Once populated, `insert()` and `witness()` keep the table in sync.
+    fn backfill_floating_index(&self) -> Result<(), IntentionStoreError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let floating_table = write_txn.open_table(TABLE_FLOATING)?;
+            if floating_table.len()? > 0 {
+                return Ok(()); // already populated
+            }
+            drop(floating_table);
+
+            let intention_table = write_txn.open_table(TABLE_INTENTIONS)?;
+            if intention_table.len()? == 0 {
+                return Ok(()); // empty store
+            }
+            drop(intention_table);
+
+            // Build witnessed set from witness log
+            let witness_table = write_txn.open_table(TABLE_WITNESS)?;
+            let mut witnessed: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+            for entry in witness_table.iter()? {
+                let (_, v) = entry?;
+                let record = WitnessRecord::decode(v.value())
+                    .map_err(|e| IntentionStoreError::InvalidData(format!("witness proto: {e}")))?;
+                let content = WitnessContent::decode(record.content.as_slice())
+                    .map_err(|e| IntentionStoreError::InvalidData(format!("witness content: {e}")))?;
+                let h = Hash::try_from(content.intention_hash.as_slice())
+                    .map_err(|_| IntentionStoreError::InvalidData("bad intention_hash".into()))?;
+                witnessed.insert(h);
+            }
+            drop(witness_table);
+
+            // Insert all unwitnessed intentions
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let meta = FloatingMeta { received_at: now };
+            let meta_bytes = meta.encode_to_vec();
+            let mut floating = write_txn.open_table(TABLE_FLOATING)?;
+            let intention_table = write_txn.open_table(TABLE_INTENTIONS)?;
+            for entry in intention_table.iter()? {
+                let (k, _) = entry?;
+                let hash = Hash::try_from(k.value())
+                    .map_err(|_| IntentionStoreError::InvalidData("bad intention hash key".into()))?;
+                if !witnessed.contains(&hash) {
+                    floating.insert(k.value(), meta_bytes.as_slice())?;
+                }
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
     }
 
     /// Rebuild in-memory state from disk.
@@ -201,6 +263,16 @@ impl IntentionStore {
                 return Ok(hash); // idempotent
             }
             table.insert(hash.as_bytes().as_slice(), proto_bytes.as_slice())?;
+
+            // Track as floating until witnessed
+            let mut floating = write_txn.open_table(TABLE_FLOATING)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let meta = FloatingMeta { received_at: now };
+            let meta_bytes = meta.encode_to_vec();
+            floating.insert(hash.as_bytes().as_slice(), meta_bytes.as_slice())?;
         }
         write_txn.commit()?;
 
@@ -256,6 +328,10 @@ impl IntentionStore {
         {
             let mut table = write_txn.open_table(TABLE_WITNESS)?;
             table.insert(seq_key.as_slice(), proto_bytes.as_slice())?;
+
+            // Remove from floating index
+            let mut floating = write_txn.open_table(TABLE_FLOATING)?;
+            floating.remove(hash.as_bytes().as_slice())?;
         }
         write_txn.commit()?;
 
@@ -278,6 +354,33 @@ impl IntentionStore {
     /// Get all current author tips.
     pub fn all_author_tips(&self) -> &HashMap<PubKey, Hash> {
         &self.author_tips
+    }
+
+    /// Get all floating (unwitnessed) intentions with metadata.
+    pub fn floating(&self) -> Result<Vec<FloatingIntention>, IntentionStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let floating_table = read_txn.open_table(TABLE_FLOATING)?;
+        let intention_table = read_txn.open_table(TABLE_INTENTIONS)?;
+
+        let mut results = Vec::new();
+        for entry in floating_table.iter()? {
+            let (k, v) = entry?;
+            let meta = FloatingMeta::decode(v.value())?;
+            if let Some(iv) = intention_table.get(k.value())? {
+                let proto = lattice_proto::weaver::SignedIntention::decode(iv.value())?;
+                let intention = Intention::from_borsh(&proto.intention_borsh)?;
+                let sig_bytes: [u8; 64] = proto.signature.try_into()
+                    .map_err(|_| IntentionStoreError::InvalidData("bad signature length".into()))?;
+                results.push(FloatingIntention {
+                    signed: SignedIntention {
+                        intention,
+                        signature: lattice_model::types::Signature(sig_bytes),
+                    },
+                    received_at: meta.received_at,
+                });
+            }
+        }
+        Ok(results)
     }
 
     /// Number of intentions in the store.
@@ -390,7 +493,7 @@ mod tests {
     #[test]
     fn insert_and_get() {
         let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
+        let mut store = open_store(dir.path());
         let (key, pk) = make_key();
 
         let intention = make_intention(pk, Hash::ZERO, vec![1, 2, 3]);
@@ -405,7 +508,7 @@ mod tests {
     #[test]
     fn duplicate_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
+        let mut store = open_store(dir.path());
         let (key, pk) = make_key();
 
         let signed = SignedIntention::sign(make_intention(pk, Hash::ZERO, vec![1]), &key);
@@ -418,43 +521,55 @@ mod tests {
     #[test]
     fn out_of_order_insertion() {
         let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
+        let mut store = open_store(dir.path());
         let (key, pk) = make_key();
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
-        let s1 = SignedIntention::sign(i1, &key);
+        let s1 = SignedIntention::sign(i1.clone(), &key);
         let h1 = s1.intention.hash();
 
         let i2 = make_intention(pk, h1, vec![2]);
-        let s2 = SignedIntention::sign(i2, &key);
+        let s2 = SignedIntention::sign(i2.clone(), &key);
         let h2 = s2.intention.hash();
 
-        // Insert i2 first (out of order) — should succeed
+        // Insert i2 first (out of order) — tip is h2 (only unreferenced hash)
         store.insert(&s2).unwrap();
-        // Tip is dangling — no complete chain yet
         assert_eq!(store.author_tip(&pk), h2);
 
-        // Insert i1 — completes the chain
+        // Insert i1 — now h1 is referenced by i2's store_prev, so tip stays h2
         store.insert(&s1).unwrap();
-        // Tip should still be h2 (head of chain)
         assert_eq!(store.author_tip(&pk), h2);
+
+        // Witness them
+        store.witness(&i1, 100).unwrap();
+        store.witness(&i2, 200).unwrap();
+        
         assert_eq!(store.intention_count().unwrap(), 2);
     }
 
     #[test]
     fn author_tip_tracking() {
         let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
+        let mut store = open_store(dir.path());
         let (key, pk) = make_key();
 
         assert_eq!(store.author_tip(&pk), Hash::ZERO);
 
-        let s1 = SignedIntention::sign(make_intention(pk, Hash::ZERO, vec![1]), &key);
+        let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+        let s1 = SignedIntention::sign(i1.clone(), &key);
         let h1 = store.insert(&s1).unwrap();
+        // Tip updated immediately on insert (derived from store_prev linkage)
+        assert_eq!(store.author_tip(&pk), h1);
+        
+        // Witness it
+        store.witness(&i1, 100).unwrap();
         assert_eq!(store.author_tip(&pk), h1);
 
-        let s2 = SignedIntention::sign(make_intention(pk, h1, vec![2]), &key);
+        let i2 = make_intention(pk, h1, vec![2]);
+        let s2 = SignedIntention::sign(i2.clone(), &key);
         let h2 = store.insert(&s2).unwrap();
+        assert_eq!(store.author_tip(&pk), h2);
+        store.witness(&i2, 200).unwrap();
         assert_eq!(store.author_tip(&pk), h2);
     }
 
@@ -462,40 +577,112 @@ mod tests {
         Uuid::from_bytes([0xAA; 16])
     }
 
+    fn test_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[0xBB; 32])
+    }
+
     fn open_store(dir: &Path) -> IntentionStore {
-        IntentionStore::open(dir, test_store_id()).unwrap()
+        IntentionStore::open(dir, test_store_id(), &test_signing_key()).unwrap()
     }
 
     #[test]
     fn witness_record() {
         let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
-        let (key, _pk) = make_key();
+        let mut store = open_store(dir.path());
+        let (key, pk) = make_key();
 
-        let hash = Hash([0xBB; 32]);
-        let record = store.witness(hash, 1_700_000_000_000, &key).unwrap();
+        let i = make_intention(pk, Hash::ZERO, vec![1, 2]);
+        let h = i.hash();
+        let s = SignedIntention::sign(i.clone(), &key);
+        store.insert(&s).unwrap();
+        
+        let record = store.witness(&i, 1_700_000_000_000).unwrap();
+        // Tip is set by insert, not witness
+        assert_eq!(store.author_tip(&pk), h);
+        
         let content = verify_witness(&record, &key.verifying_key()).unwrap();
         assert_eq!(Uuid::from_slice(&content.store_id).unwrap(), test_store_id());
+        // First witness in log: prev_hash must be all-zeros (genesis)
+        assert_eq!(content.prev_hash, Hash::ZERO.as_bytes().to_vec());
     }
 
     #[test]
     fn witness_log_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
-        let (key, _pk) = make_key();
+        let mut store = open_store(dir.path());
+        let (key, pk) = make_key();
 
-        let hash = Hash([0xCC; 32]);
-        store.witness(hash, 42_000, &key).unwrap();
+        let i = make_intention(pk, Hash::ZERO, vec![1]);
+        let h = i.hash();
+        store.witness(&i, 42_000).unwrap();
 
         let log = store.witness_log().unwrap();
         assert_eq!(log.len(), 1);
         let (seq, record) = &log[0];
         assert_eq!(*seq, 1);
         let content = verify_witness(record, &key.verifying_key()).unwrap();
-        assert_eq!(Hash::try_from(content.intention_hash.as_slice()).unwrap(), hash);
+        assert_eq!(Hash::try_from(content.intention_hash.as_slice()).unwrap(), h);
         assert_eq!(content.wall_time, 42_000);
         assert_eq!(Uuid::from_slice(&content.store_id).unwrap(), test_store_id());
+        assert_eq!(content.prev_hash, Hash::ZERO.as_bytes().to_vec());
     }
+
+    #[test]
+    fn witness_chain_integrity() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, pk) = make_key();
+
+        {
+            let mut store = open_store(dir.path());
+
+            let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+            let s1 = SignedIntention::sign(i1.clone(), &key);
+            store.insert(&s1).unwrap();
+            store.witness(&i1, 100).unwrap();
+
+            let i2 = make_intention(pk, i1.hash(), vec![2]);
+            let s2 = SignedIntention::sign(i2.clone(), &key);
+            store.insert(&s2).unwrap();
+            store.witness(&i2, 200).unwrap();
+
+            let i3 = make_intention(pk, i2.hash(), vec![3]);
+            let s3 = SignedIntention::sign(i3.clone(), &key);
+            store.insert(&s3).unwrap();
+            store.witness(&i3, 300).unwrap();
+
+            // Verify chain: each record's prev_hash == blake3(previous record.content)
+            let log = store.witness_log().unwrap();
+            assert_eq!(log.len(), 3);
+
+            let c0 = WitnessContent::decode(log[0].1.content.as_slice()).unwrap();
+            let c1 = WitnessContent::decode(log[1].1.content.as_slice()).unwrap();
+            let c2 = WitnessContent::decode(log[2].1.content.as_slice()).unwrap();
+
+            // First entry: prev_hash is genesis zero
+            assert_eq!(c0.prev_hash, Hash::ZERO.as_bytes().to_vec());
+            // Second entry: prev_hash == blake3(first record's content)
+            assert_eq!(c1.prev_hash, blake3::hash(&log[0].1.content).as_bytes().to_vec());
+            // Third entry: prev_hash == blake3(second record's content)
+            assert_eq!(c2.prev_hash, blake3::hash(&log[1].1.content).as_bytes().to_vec());
+        }
+
+        // Reopen and verify chain verification passes + last_witness_hash is correct
+        let mut store = open_store(dir.path());
+        assert_eq!(store.witness_count().unwrap(), 3);
+
+        // Can continue the chain after reopen
+        let i4 = make_intention(pk, make_intention(pk, make_intention(pk, Hash::ZERO, vec![1]).hash(), vec![2]).hash(), vec![4]);
+        let s4 = SignedIntention::sign(i4.clone(), &key);
+        store.insert(&s4).unwrap();
+        store.witness(&i4, 400).unwrap();
+
+        // Verify the 4th entry chains to the 3rd
+        let log = store.witness_log().unwrap();
+        assert_eq!(log.len(), 4);
+        let c3 = WitnessContent::decode(log[3].1.content.as_slice()).unwrap();
+        assert_eq!(c3.prev_hash, blake3::hash(&log[2].1.content).as_bytes().to_vec());
+    }
+
 
     #[test]
     fn rebuild_after_reopen() {
@@ -504,21 +691,27 @@ mod tests {
 
         let h2;
         {
-            let store = open_store(dir.path());
-            let s1 = SignedIntention::sign(make_intention(pk, Hash::ZERO, vec![1]), &key);
+            let mut store = open_store(dir.path());
+            let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+            let s1 = SignedIntention::sign(i1.clone(), &key);
             let h1 = store.insert(&s1).unwrap();
+            store.witness(&i1, 100).unwrap();
 
-            let s2 = SignedIntention::sign(make_intention(pk, h1, vec![2]), &key);
+            let i2 = make_intention(pk, h1, vec![2]);
+            let s2 = SignedIntention::sign(i2.clone(), &key);
             h2 = store.insert(&s2).unwrap();
+            store.witness(&i2, 200).unwrap();
         }
 
-        let store = open_store(dir.path());
+        let mut store = open_store(dir.path());
         assert_eq!(store.author_tip(&pk), h2);
         assert_eq!(store.intention_count().unwrap(), 2);
 
         // Can continue the chain
-        let s3 = SignedIntention::sign(make_intention(pk, h2, vec![3]), &key);
-        store.insert(&s3).unwrap();
+        let i3 = make_intention(pk, h2, vec![3]);
+        let s3 = SignedIntention::sign(i3.clone(), &key);
+        let _h3 = store.insert(&s3).unwrap();
+        store.witness(&i3, 300).unwrap();
         assert_eq!(store.intention_count().unwrap(), 3);
     }
 }

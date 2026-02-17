@@ -5,7 +5,7 @@ use super::error::StoreError;
 use crate::weaver::intention_store::IntentionStore;
 use lattice_model::Uuid;
 use lattice_model::types::{Hash, PubKey};
-use lattice_model::weaver::{Condition, SignedIntention};
+use lattice_model::weaver::{Condition, FloatingIntention, SignedIntention};
 use lattice_proto::weaver::WitnessRecord;
 use lattice_model::NodeIdentity;
 use lattice_model::{StateMachine, Op};
@@ -327,8 +327,8 @@ impl<S: StateMachine> Store<S> {
         resp_rx.await.unwrap_or_default()
     }
 
-    /// Get floating (unapplied) intentions
-    pub async fn floating_intentions(&self) -> Vec<SignedIntention> {
+    /// Get floating (unwitnessed) intentions with metadata
+    pub async fn floating_intentions(&self) -> Vec<FloatingIntention> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
@@ -439,7 +439,7 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
 
     fn floating_intentions(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Vec<SignedIntention>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Vec<FloatingIntention>> + Send + '_>> {
         Box::pin(Store::floating_intentions(self))
     }
 

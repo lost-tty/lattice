@@ -99,6 +99,86 @@ impl From<proto::SExpr> for lattice_model::SExpr {
     }
 }
 
+impl From<proto::Hlc> for lattice_model::hlc::HLC {
+    fn from(p: proto::Hlc) -> Self {
+        lattice_model::hlc::HLC::new(p.wall_time, p.counter)
+    }
+}
+
+impl From<proto::Condition> for lattice_model::weaver::Condition {
+    fn from(p: proto::Condition) -> Self {
+        match p.condition {
+            Some(proto::condition::Condition::V1(deps)) => {
+                let hashes = deps.hashes.into_iter().filter_map(|h| {
+                    lattice_model::types::Hash::try_from(h.as_slice()).ok()
+                }).collect();
+                lattice_model::weaver::Condition::V1(hashes)
+            }
+            None => lattice_model::weaver::Condition::V1(vec![]),
+        }
+    }
+}
+
+impl From<proto::SignedIntention> for lattice_model::weaver::SignedIntention {
+    fn from(p: proto::SignedIntention) -> Self {
+        let author = lattice_model::types::PubKey(
+            p.author.try_into().unwrap_or([0u8; 32])
+        );
+        let timestamp = p.timestamp
+            .map(Into::into)
+            .unwrap_or(lattice_model::hlc::HLC::new(0, 0));
+        let store_id = uuid::Uuid::from_slice(&p.store_id).unwrap_or_default();
+        let store_prev = lattice_model::types::Hash::try_from(p.store_prev.as_slice())
+            .unwrap_or(lattice_model::types::Hash::ZERO);
+        let condition = p.condition
+            .map(Into::into)
+            .unwrap_or(lattice_model::weaver::Condition::V1(vec![]));
+        let sig_bytes: [u8; 64] = p.signature.try_into().unwrap_or([0u8; 64]);
+
+        lattice_model::weaver::SignedIntention {
+            intention: lattice_model::weaver::Intention {
+                author,
+                timestamp,
+                store_id,
+                store_prev,
+                condition,
+                ops: p.ops,
+            },
+            signature: lattice_model::types::Signature(sig_bytes),
+        }
+    }
+}
+
+impl From<proto::FloatingIntention> for lattice_model::weaver::FloatingIntention {
+    fn from(p: proto::FloatingIntention) -> Self {
+        lattice_model::weaver::FloatingIntention {
+            signed: p.intention
+                .map(Into::into)
+                .unwrap_or_else(|| lattice_model::weaver::SignedIntention {
+                    intention: lattice_model::weaver::Intention {
+                        author: lattice_model::types::PubKey([0u8; 32]),
+                        timestamp: lattice_model::hlc::HLC::new(0, 0),
+                        store_id: uuid::Uuid::nil(),
+                        store_prev: lattice_model::types::Hash::ZERO,
+                        condition: lattice_model::weaver::Condition::V1(vec![]),
+                        ops: vec![],
+                    },
+                    signature: lattice_model::types::Signature([0u8; 64]),
+                }),
+            received_at: p.received_at,
+        }
+    }
+}
+
+impl From<lattice_model::weaver::FloatingIntention> for proto::FloatingIntention {
+    fn from(fi: lattice_model::weaver::FloatingIntention) -> Self {
+        proto::FloatingIntention {
+            intention: Some(fi.signed.into()),
+            received_at: fi.received_at,
+        }
+    }
+}
+
 pub mod backend;
 
 #[cfg(feature = "server")]

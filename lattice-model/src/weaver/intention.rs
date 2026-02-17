@@ -154,6 +154,14 @@ impl SignedIntention {
     }
 }
 
+/// An intention that has not yet been witnessed, paired with reception metadata.
+#[derive(Debug, Clone)]
+pub struct FloatingIntention {
+    pub signed: SignedIntention,
+    /// Wall-clock time when this intention was received (Unix ms).
+    pub received_at: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

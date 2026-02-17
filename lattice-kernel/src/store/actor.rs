@@ -8,7 +8,7 @@ use crate::weaver::intention_store::{IntentionStore, IntentionStoreError};
 use crate::store::StateError;
 use lattice_model::types::Hash;
 use lattice_model::types::PubKey;
-use lattice_model::weaver::{Condition, Intention, SignedIntention};
+use lattice_model::weaver::{Condition, FloatingIntention, Intention, SignedIntention};
 use lattice_proto::weaver::WitnessRecord;
 use lattice_model::{NodeIdentity, StateMachine};
 use uuid::Uuid;
@@ -55,9 +55,9 @@ pub enum ReplicationControllerCmd {
     WitnessLog {
         resp: oneshot::Sender<Vec<(u64, Hash, WitnessRecord)>>,
     },
-    /// Get floating (unapplied) intentions
+    /// Get floating (unwitnessed) intentions with metadata
     FloatingIntentions {
-        resp: oneshot::Sender<Vec<SignedIntention>>,
+        resp: oneshot::Sender<Vec<FloatingIntention>>,
     },
     /// Shutdown the actor
     Shutdown,
@@ -201,8 +201,7 @@ impl<S: StateMachine> ReplicationController<S> {
                 let _ = resp.send(log);
             }
             ReplicationControllerCmd::FloatingIntentions { resp } => {
-                let floating = self.collect_unapplied()
-                    .map(|m| m.into_values().collect())
+                let floating = self.intention_store.floating()
                     .unwrap_or_default();
                 let _ = resp.send(floating);
             }
@@ -290,37 +289,9 @@ impl<S: StateMachine> ReplicationController<S> {
         Ok(())
     }
 
-    /// Collect all intentions stored but not yet applied to state.
-    fn collect_unapplied(&self) -> Result<HashMap<Hash, SignedIntention>, ReplicationControllerError> {
-        let applied_tips = self.state.applied_chaintips()
-            .map_err(|e| ReplicationControllerError::State(StateError::Backend(e.to_string())))?;
-        let applied_map: HashMap<PubKey, Hash> = applied_tips.into_iter().collect();
-
-        let mut unapplied = HashMap::new();
-        for (&author, &store_tip) in self.intention_store.all_author_tips() {
-            let applied_tip = applied_map.get(&author).copied().unwrap_or(Hash::ZERO);
-            if store_tip == applied_tip {
-                continue;
-            }
-            let mut current = store_tip;
-            while current != applied_tip && current != Hash::ZERO {
-                if let Some(signed) = self.intention_store.get(&current)
-                    .map_err(ReplicationControllerError::IntentionStore)?
-                {
-                    let prev = signed.intention.store_prev;
-                    unapplied.insert(current, signed);
-                    current = prev;
-                } else {
-                    break;
-                }
-            }
-        }
-        Ok(unapplied)
-    }
-
-    /// Build a dependency graph over unapplied intentions.
+    /// Build a dependency graph over floating intentions.
     /// Returns (in_degree per hash, reverse map: dep → dependents).
-    /// Deps outside the unapplied set are checked against the store —
+    /// Deps outside the floating set are checked against the store —
     /// if missing entirely, the intention is permanently blocked.
     fn build_dep_graph(
         unapplied: &HashMap<Hash, SignedIntention>,
@@ -370,12 +341,18 @@ impl<S: StateMachine> ReplicationController<S> {
         (in_degree, dependents)
     }
 
-    /// Apply all pending intentions in topological order.
+    /// Apply all pending (floating) intentions in topological order.
     fn try_apply_all_pending(&mut self) -> Result<(), ReplicationControllerError> {
-        let unapplied = self.collect_unapplied()?;
-        if unapplied.is_empty() {
+        let floating_list = self.intention_store.floating()
+            .map_err(ReplicationControllerError::IntentionStore)?;
+        if floating_list.is_empty() {
             return Ok(());
         }
+
+        let unapplied: HashMap<Hash, SignedIntention> = floating_list
+            .into_iter()
+            .map(|fi| (fi.signed.intention.hash(), fi.signed))
+            .collect();
 
         let (mut in_degree, dependents) = Self::build_dep_graph(&unapplied, &self.intention_store);
 

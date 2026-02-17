@@ -5,6 +5,7 @@
 use crate::backend::*;
 use crate::StoreHandle;
 use lattice_api::proto::{StoreMeta, StoreRef};
+use lattice_model::weaver::FloatingIntention;
 use lattice_model::types::PubKey;
 use lattice_net::NetworkService;
 use lattice_node::Node;
@@ -345,12 +346,10 @@ impl LatticeBackend for InProcessBackend {
         })
     }
     
-    fn store_floating(&self, store_id: Uuid) -> AsyncResult<'_, Vec<SignedIntention>> {
+    fn store_floating(&self, store_id: Uuid) -> AsyncResult<'_, Vec<FloatingIntention>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
-            let inspector = store.as_inspector();
-            let floating = inspector.floating_intentions().await;
-            Ok(floating.into_iter().map(Into::into).collect())
+            Ok(store.as_inspector().floating_intentions().await)
         })
     }
 

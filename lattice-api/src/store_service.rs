@@ -116,7 +116,11 @@ impl StoreService for StoreServiceImpl {
     async fn floating_intentions(&self, request: Request<StoreId>) -> Result<Response<FloatingIntentionsResponse>, Status> {
         let store_id = Self::parse_uuid(&request.into_inner().id)?;
         self.backend.store_floating(store_id).await
-            .map(|intentions| Response::new(FloatingIntentionsResponse { intentions }))
+            .map(|intentions| {
+                Response::new(FloatingIntentionsResponse {
+                    intentions: intentions.into_iter().map(Into::into).collect(),
+                })
+            })
             .map_err(|e| Status::internal(e.to_string()))
     }
 
