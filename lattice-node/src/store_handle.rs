@@ -53,12 +53,7 @@ pub trait StoreHandle: Send + Sync {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<lattice_model::weaver::WitnessEntry>> + Send + '_>>;
 
-    /// Scan witness log entries from start_seq
-    fn scan_witness_log(
-        &self,
-        start_seq: u64,
-        limit: usize,
-    ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, lattice_kernel::store::StoreError>> + Send + '_>>;
+
 }
 
 // Re-export HandleWithWriter from lattice_store_base for backward compat
@@ -114,14 +109,7 @@ where
         Box::pin(lattice_kernel::StoreInspector::witness_log(self))
     }
 
-    fn scan_witness_log(
-        &self,
-        start_seq: u64,
-        limit: usize,
-    ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, lattice_kernel::store::StoreError>> + Send + '_>> {
-        // Direct call to Store's inherent method (SyncProvider impl does the same via crate-internal helper)
-        Box::pin(lattice_kernel::SyncProvider::scan_witness_log(self, start_seq, limit))
-    }
+
 }
 
 // =============================================================================

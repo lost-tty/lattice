@@ -4,10 +4,8 @@
 //! Implemented by Store<S> for any StateMachine S.
 
 use crate::store::StoreError;
-use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, SignedIntention, WitnessEntry};
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -15,14 +13,14 @@ use std::pin::Pin;
 ///
 /// Provides async methods matching Store<S>'s inherent methods.
 /// Used by StoreHandle::as_inspector() for type-erased access.
-pub trait StoreInspector: Send + Sync {
-    /// Get the store's unique identifier
-    fn id(&self) -> lattice_model::Uuid;
+use crate::sync_provider::SyncProvider;
 
-    /// Get author tips (PubKey → latest intention hash)
-    fn author_tips(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, StoreError>> + Send + '_>>;
+/// Store inspection trait for CLI usage.
+///
+/// Provides async methods matching Store<S>'s inherent methods.
+/// Used by StoreHandle::as_inspector() for type-erased access.
+pub trait StoreInspector: SyncProvider {
+    // id() and author_tips() are inherited from SyncProvider
 
     /// Get number of intentions in the store
     fn intention_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>>;
@@ -35,12 +33,7 @@ pub trait StoreInspector: Send + Sync {
         &self,
     ) -> Pin<Box<dyn Future<Output = Vec<WitnessEntry>> + Send + '_>>;
 
-    /// Scan witness log entries from start_seq
-    fn scan_witness_log(
-        &self,
-        start_seq: u64,
-        limit: usize,
-    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<WitnessEntry, StoreError>> + Send>>;
+
 
     /// Get floating (unwitnessed) intentions with metadata
     fn floating_intentions(

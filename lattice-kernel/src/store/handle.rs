@@ -525,16 +525,6 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
 use crate::store_inspector::StoreInspector;
 
 impl<S: StateMachine + 'static> StoreInspector for Store<S> {
-    fn id(&self) -> Uuid {
-        self.store_id
-    }
-
-    fn author_tips(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, StoreError>> + Send + '_>> {
-        Box::pin(Store::author_tips(self))
-    }
-
     fn intention_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>> {
         Box::pin(Store::intention_count(self))
     }
@@ -549,14 +539,7 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
         Box::pin(Store::witness_log(self))
     }
 
-    fn scan_witness_log(
-        &self,
-        start_seq: u64,
-        limit: usize,
-    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<WitnessEntry, StoreError>> + Send>> {
-        // Use the SyncProvider implementation which contains the logic
-        SyncProvider::scan_witness_log(self, start_seq, limit)
-    }
+
 
     fn floating_intentions(
         &self,
