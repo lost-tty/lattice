@@ -236,17 +236,21 @@ async fn handle_fetch_chain(
     let target = Hash::try_from(req.target_hash.as_slice())
         .map_err(|_| LatticeNetError::Connection("Invalid target_hash".into()))?;
     
-    // We strictly require a non-zero 'since' hash.
-    // If the hash is invalid (wrong length), it's a connection error.
-    let since = Hash::try_from(req.since_hash.as_slice())
-        .map_err(|_| LatticeNetError::Connection("Invalid since_hash".into()))?;
-
-    if since == Hash::ZERO {
-        return Err(LatticeNetError::Sync("fetch_chain requires a non-zero 'since' hash".into()));
-    }
+    // Parse 'since' hash (optional). Empty bytes or Zero hash means fetch from Genesis (None).
+    let since = if req.since_hash.is_empty() {
+        None
+    } else {
+        let h = Hash::try_from(req.since_hash.as_slice())
+            .map_err(|_| LatticeNetError::Connection("Invalid since_hash".into()))?;
+        if h == Hash::ZERO {
+            None
+        } else {
+            Some(h)
+        }
+    };
 
     // Walk back the chain
-    let chain = authorized_store.walk_back_until(target, Some(since), MAX_FETCH_CHAIN_ITEMS).await
+    let chain = authorized_store.walk_back_until(target, since, MAX_FETCH_CHAIN_ITEMS).await
         .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
 
     let proto_intentions: Vec<_> = chain

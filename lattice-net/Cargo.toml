@@ -36,3 +36,4 @@ lattice-systemstore = { workspace = true }
 lattice-node = { workspace = true }
 rand = { workspace = true }
 async-trait = "0.1"
+lattice-store-base = { workspace = true }

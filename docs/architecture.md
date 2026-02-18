@@ -321,6 +321,60 @@ Networking modes:
 - Active (servers/laptops on power): Frequent gossip broadcasts, proactive sync.
 - Low-power (mobile/battery): Pull-based sync on wake. Query peers instead of relying on push gossip.
 
+### Smart Chain Fetch
+
+When a node receives an intention whose `store_prev` is unknown (a gap in the linear chain), it triggers the **Smart Chain Fetch** protocol to recover the missing history.
+
+**Protocol:** `FetchChain { store_id, target_hash, since_hash }`
+
+```
+  Node B (gap detected)              Node A (has the chain)
+  ─────────────────────              ─────────────────────
+  Receives H5, but only has H2
+  Gap: H3, H4 missing
+          │
+          │  FetchChain(target=H4, since=H2)
+          │──────────────────────────────────▶│
+          │                                   │ walk_back_until(H4, Some(H2), limit=32)
+          │                                   │ Returns [H4, H3] (reverse chronological)
+          │◀──────────────────────────────────│
+          │  IntentionResponse([H4, H3])      │
+          │
+  ingest_batch([H4, H3])
+  → H3 applied (prev=H2 ✓)
+  → H4 applied (prev=H3 ✓)
+  → H5 applied (prev=H4 ✓, was floating)
+```
+
+**Key design decisions:**
+
+- **1-RTT:** A single round-trip fills any linear gap up to `MAX_FETCH_CHAIN_ITEMS` (32). The responder walks the chain backwards from `target` to `since` and returns the full sequence.
+- **`since` semantics:** If `since` is `Hash::ZERO` (unknown author / genesis), the responder walks all the way to the chain root.
+- **Reuses `IntentionResponse`:** The response uses the existing message type (ID 4) with a `done` flag, supporting future streaming for chains exceeding the limit.
+- **Batch ingestion handles ordering:** `ingest_batch` stores all intentions first, then cascades application via the floating intention mechanism — reverse-ordered batches are handled correctly.
+
+**Cascading Fallback (`handle_missing_dep`):**
+
+```
+  1. Smart Fetch     → fetch_chain(target, since) to the original peer
+       │ success? → done
+       │ fail? ↓
+  2. Targeted Sync   → sync_with_peer(peer_id) — full Negentropy reconciliation with the same peer
+       │ success? → done
+       │ fail? ↓
+  3. Full Sync       → sync_all() — reconcile with ALL online peers for this store
+```
+
+This cascade handles three scenarios:
+- **Normal gap** (peer online, chain intact): Resolved in step 1, 1 RTT.
+- **Peer has partial data** (e.g., pruned): Falls to step 2, Negentropy finds what's available.
+- **Original peer offline**: Falls to step 3, discovers the data from any other peer.
+
+**Implementation:**
+- `NetworkService::handle_missing_dep()` — orchestrates the cascade (`lattice-net/src/network/service.rs`)
+- `handle_fetch_chain()` — server-side handler, walks chain via `walk_back_until` (`lattice-net/src/network/handlers.rs`)
+- `IntentionStore::walk_back_until()` — chain traversal following `store_prev` links (`lattice-kernel/src/weaver/intention_store.rs`)
+
 ### Store/Network Boundary
 
 The store module exposes `StoreHandle` to the network layer. Internal types (`KvState`, `SigChain`, `StoreActor`, `Entry`) are hidden.

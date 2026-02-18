@@ -54,6 +54,10 @@ async fn setup_pair(name_a: &str, name_b: &str) -> (Arc<Node>, Arc<Node>, Arc<Ne
     let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
     let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
 
+    // Disable gossip to prevent interference
+    server_a.set_global_gossip_enabled(false);
+    server_b.set_global_gossip_enabled(false);
+
     let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store a");
     let store_a = node_a.store_manager().get_handle(&store_id).expect("get store a");
 
@@ -86,26 +90,21 @@ async fn test_chain_fetch_linear_gap() {
         hashes.push(h);
     }
     
-    // NOTE: This test relies on exposing `fetch_chain` via NetworkService client API
-    // which we haven't added yet! We added `handle_fetch_chain` (server side), 
-    // but not `send_fetch_chain` or similar.
-    // For now, I will comment out the actual call and assert true to verify compilation of the setup.
-    // I need to add `fetch_chain_with_peer` to NetworkService next.
-    
+    // Transfer 0..=4 to B so B has 'since' (hashes[4])
+    for i in 0..=4 {
+        // Since authors differ if setup_pair uses different nodes, we must sync the exact signed intentions.
+        let intentions = store_a.as_sync_provider().fetch_intentions(vec![hashes[i]]).await.unwrap();
+        store_b.as_sync_provider().ingest_batch(intentions).await.unwrap();
+    }
+
     let target = hashes[9];
     let since = hashes[4];
     
-    // TODO: Client-side fetch_chain
-    // We use PubKey wrapper for convenience as Service API expects it (for now) to avoid adding Hash to public API if not needed.
-    // Wait, Hash is [u8;32] and PubKey is [u8;32]. They are compatible byte-wise.
-    let target_pub = PubKey::from(target.0);
-    let since_pub = PubKey::from(since.0);
-
     let result = server_b.fetch_chain(
         store_b.id(), 
         _server_a.endpoint().public_key(), 
-        target_pub, 
-        Some(since_pub)
+        target, 
+        Some(since)
     ).await;
     
     assert!(result.is_ok(), "Fetch chain failed: {:?}", result.err());
@@ -135,13 +134,12 @@ async fn test_chain_fetch_invalid_since() {
     }
     
     let target = hashes[4];
-    let target_pub = PubKey::from(target.0);
     
     // Request with since=None
     let result = server_b.fetch_chain(
         store_b.id(), 
         _server_a.endpoint().public_key(), 
-        target_pub, 
+        target, 
         None
     ).await;
     
@@ -172,7 +170,7 @@ async fn test_chain_fetch_fork_detect() {
     // if 'since' is not found. This effectively "resyncs" the author from scratch, 
     // which is a valid (though expensive) recovery strategy for small chains.
     // -----------------------------------------------------------------------
-    let (_node_a, _node_b, _server_a, server_b, store_a, store_b) = setup_pair("chain_fork_a", "chain_fork_b").await;
+    let (_node_a, _node_b, server_a, server_b, store_a, store_b) = setup_pair("chain_fork_a", "chain_fork_b").await;
     
     // A creates Chain X: 0->1->2->3->4
     let mut hashes_a = Vec::new();
@@ -184,17 +182,15 @@ async fn test_chain_fetch_fork_detect() {
     // Simulate B having a "fake" history or just a random hash as `since`.
     // We'll just define a random hash for `since`.
     let fake_since = Hash::from([0xAA; 32]);
-    let fake_since_pub = PubKey::from(fake_since.0);
 
     let target = hashes_a[4];
-    let target_pub = PubKey::from(target.0);
     
     // B requests fetch_chain(target=4, since=fake_since)
     let result = server_b.fetch_chain(
         store_b.id(), 
-        _server_a.endpoint().public_key(), 
-        target_pub, 
-        Some(fake_since_pub)
+        server_a.endpoint().public_key(), 
+        target, 
+        Some(fake_since)
     ).await;
 
     // Expectation: walk_back_until should fail because it never finds `fake_since` before hitting Genesis.
@@ -219,7 +215,7 @@ async fn test_chain_fetch_limit_exceeded() {
     // Expectation: Failure. We strictly require finding 'since'.
     // If the gap is too large, we fallback to full sync.
     // -----------------------------------------------------------------------
-    let (_node_a, _node_b, _server_a, server_b, store_a, store_b) = setup_pair("chain_lim_a", "chain_lim_b").await;
+    let (_node_a, _node_b, server_a, server_b, store_a, store_b) = setup_pair("chain_lim_a", "chain_lim_b").await;
     
     let mut hashes = Vec::new();
     for i in 0..40 {
@@ -230,14 +226,11 @@ async fn test_chain_fetch_limit_exceeded() {
     let target = hashes[39]; // Index 39 is the 40th item
     let since = hashes[0];   // Index 0 is the 1st item
     
-    let target_pub = PubKey::from(target.0);
-    let since_pub = PubKey::from(since.0);
-
     let result = server_b.fetch_chain(
         store_b.id(), 
-        _server_a.endpoint().public_key(), 
-        target_pub, 
-        Some(since_pub)
+        server_a.endpoint().public_key(), 
+        target, 
+        Some(since)
     ).await;
     
     match result {
@@ -256,7 +249,7 @@ async fn test_chain_fetch_future_since() {
     // B requests fetch_chain(Hash(2), since=Hash(4)).
     // Expectation: Failure. walk_back_until(2) will hit Genesis without finding 4.
     // -----------------------------------------------------------------------
-    let (_node_a, _node_b, _server_a, server_b, store_a, store_b) = setup_pair("chain_fut_a", "chain_fut_b").await;
+    let (_node_a, _node_b, server_a, server_b, store_a, store_b) = setup_pair("chain_fut_a", "chain_fut_b").await;
     
     let mut hashes = Vec::new();
     for i in 0..5 {
@@ -267,14 +260,11 @@ async fn test_chain_fetch_future_since() {
     let target = hashes[2]; 
     let since = hashes[4];   
     
-    let target_pub = PubKey::from(target.0);
-    let since_pub = PubKey::from(since.0);
-
     let result = server_b.fetch_chain(
         store_b.id(), 
-        _server_a.endpoint().public_key(), 
-        target_pub, 
-        Some(since_pub)
+        server_a.endpoint().public_key(), 
+        target, 
+        Some(since)
     ).await;
     
     match result {

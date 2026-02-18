@@ -2,6 +2,7 @@
 
 use super::actor::{ReplicationController, ReplicationControllerCmd};
 use super::error::StoreError;
+use super::IngestResult;
 use crate::weaver::intention_store::IntentionStore;
 use lattice_model::Uuid;
 use lattice_model::types::{Hash, PubKey};
@@ -266,11 +267,27 @@ impl<S: StateMachine> Store<S> {
     }
 
     /// Ingest a signed intention from a peer
-    pub async fn ingest_intention(&self, intention: SignedIntention) -> Result<(), StoreError> {
+    pub async fn ingest_intention(&self, intention: SignedIntention) -> Result<IngestResult, StoreError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
-            .send(ReplicationControllerCmd::IngestIntention {
-                intention,
+            .send(ReplicationControllerCmd::IngestBatch {
+                intentions: vec![intention],
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?;
+        resp_rx
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?
+            .map_err(StoreError::Store)
+    }
+
+    /// Ingest a batch of signed intentions from a peer
+    pub async fn ingest_batch(&self, intentions: Vec<SignedIntention>) -> Result<IngestResult, StoreError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ReplicationControllerCmd::IngestBatch {
+                intentions,
                 resp: resp_tx,
             })
             .await
@@ -395,8 +412,15 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
     fn ingest_intention(
         &self,
         intention: SignedIntention,
-    ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<IngestResult, StoreError>> + Send + '_>> {
         Box::pin(Store::ingest_intention(self, intention))
+    }
+
+    fn ingest_batch(
+        &self,
+        intentions: Vec<SignedIntention>,
+    ) -> Pin<Box<dyn Future<Output = Result<IngestResult, StoreError>> + Send + '_>> {
+        Box::pin(Store::ingest_batch(self, intentions))
     }
 
     fn fetch_intentions(

@@ -5,7 +5,7 @@
 //! authorization and applies intentions to the state machine.
 
 use crate::weaver::intention_store::{IntentionStore, IntentionStoreError};
-use crate::store::StateError;
+use crate::store::{StateError, IngestResult};
 use lattice_model::types::Hash;
 use lattice_model::types::PubKey;
 use lattice_model::weaver::{Condition, FloatingIntention, Intention, SignedIntention, WitnessEntry};
@@ -22,10 +22,10 @@ pub enum ReplicationControllerCmd {
     AuthorTips {
         resp: oneshot::Sender<Result<HashMap<PubKey, Hash>, StateError>>,
     },
-    /// Ingest a signed intention from network
-    IngestIntention {
-        intention: SignedIntention,
-        resp: oneshot::Sender<Result<(), StateError>>,
+    /// Ingest a batch of signed intentions from network (replaces single ingest)
+    IngestBatch {
+        intentions: Vec<SignedIntention>,
+        resp: oneshot::Sender<Result<IngestResult, StateError>>,
     },
     /// Fetch intentions by hash (for sync)
     FetchIntentions {
@@ -157,10 +157,11 @@ impl<S: StateMachine> ReplicationController<S> {
                 let _ = resp.send(result);
             }
 
-            ReplicationControllerCmd::IngestIntention { intention, resp } => {
+            ReplicationControllerCmd::IngestBatch { intentions, resp } => {
                 let store_arc = self.intention_store.clone();
                 let mut store = store_arc.write().expect("Lock poisoned");
-                let result = self.apply_ingested_intention(&mut store, &intention).map_err(|e| match e {
+                
+                let result = self.apply_ingested_batch(&mut store, intentions).map_err(|e| match e {
                     ReplicationControllerError::IntentionStore(e) => {
                         StateError::Backend(e.to_string())
                     }
@@ -257,64 +258,93 @@ impl<S: StateMachine> ReplicationController<S> {
             ))
         })?;
 
-        let hash = store.insert(&signed)?;
+        let hash = signed.intention.hash();
+
+        // Use helper (inserts + applies + checks gaps)
+        let _ = self.process_intention(store, &signed)?;
 
         // Broadcast to listeners
         let _ = self.intention_tx.send(signed);
 
-        // Apply through the same path as ingested intentions
-        self.apply_ready_intentions(store)?;
-
         Ok(hash)
     }
 
-    /// Ingest a signed intention from network/peer
-    fn apply_ingested_intention(
+    /// Ingest a batch of signed intentions from network (replacing single ingest)
+    fn apply_ingested_batch(
         &mut self,
         store: &mut IntentionStore,
-        signed: &SignedIntention,
-    ) -> Result<(), ReplicationControllerError> {
-        // Verify signature
-        signed.verify().map_err(|_| {
-            ReplicationControllerError::State(StateError::Unauthorized(
-                "Invalid signature".to_string(),
-            ))
-        })?;
+        intentions: Vec<SignedIntention>,
+    ) -> Result<IngestResult, ReplicationControllerError> {
+        let mut missing_deps = Vec::new();
 
-        // Reject intentions not addressed to this store
-        if signed.intention.store_id != self.store_id {
-            return Err(ReplicationControllerError::State(StateError::Unauthorized(
-                format!(
-                    "Intention store_id {} does not match this store {}",
-                    signed.intention.store_id, self.store_id,
-                ),
-            )));
+        for signed in intentions {
+             // Verify signature
+             signed.verify().map_err(|_| {
+                 ReplicationControllerError::State(StateError::Unauthorized("Invalid signature".to_string()))
+             })?;
+
+            // Reject intentions not addressed to this store
+            if signed.intention.store_id != self.store_id {
+                return Err(ReplicationControllerError::State(StateError::Unauthorized(
+                    format!(
+                        "Intention store_id {} does not match this store {}",
+                        signed.intention.store_id, self.store_id,
+                    ),
+                )));
+            }
+             
+             // Idempotency
+             if store.contains(&signed.intention.hash())? {
+                 continue;
+             }
+
+             // Use helper
+             match self.process_intention(store, &signed)? {
+                 IngestResult::Applied => {},
+                 IngestResult::MissingDeps(mut m) => {
+                     missing_deps.append(&mut m);
+                 }
+             }
         }
-
-        let hash = signed.intention.hash();
-
-        // Idempotent — skip if already stored
-        if store.contains(&hash)? {
-            return Ok(());
+        
+        // Filter out resolved deps and deduplicate
+        missing_deps.sort_by(|a, b| a.prev.0.cmp(&b.prev.0)
+            .then_with(|| a.since.0.cmp(&b.since.0))
+            .then_with(|| a.author.0.cmp(&b.author.0)));
+        missing_deps.dedup();
+        
+        missing_deps.retain(|d| {
+            !store.contains(&d.prev).unwrap_or(false)
+        });
+        
+        if missing_deps.is_empty() {
+            Ok(IngestResult::Applied)
+        } else {
+            Ok(IngestResult::MissingDeps(missing_deps))
         }
+    }
 
-        // Store it
+
+    fn process_intention(&mut self, store: &mut crate::weaver::IntentionStore, signed: &SignedIntention) -> Result<IngestResult, ReplicationControllerError> {
+        // Store it 
         store.insert(signed)?;
 
-        // Try to apply this and any other pending intentions that may
-        // now be unblocked by having their causal deps satisfied.
-        self.apply_ready_intentions(store)?;
-
-        Ok(())
+        // Try to apply, checking for gaps relative to this candidate
+        let missing_opt = self.apply_ready_intentions(store, Some(signed))?;
+        
+        match missing_opt {
+            Some(missing) => Ok(IngestResult::MissingDeps(vec![missing])),
+            None => Ok(IngestResult::Applied),
+        }
     }
+
     /// Apply floating intentions that are ready (store_prev matches a tip and conditions met).
-    ///
-    /// Uses the `floating_by_prev` index to find candidates efficiently,
-    /// then loops until no more can be applied.
+    /// Returns a MissingDep if the optionally provided candidate is still stuck on a missing parent.
     fn apply_ready_intentions(
         &mut self,
-        store: &mut IntentionStore,
-    ) -> Result<(), ReplicationControllerError> {
+        store: &mut crate::weaver::IntentionStore,
+        candidate: Option<&SignedIntention>,
+    ) -> Result<Option<crate::store::ingest_result::MissingDep>, ReplicationControllerError> {
         loop {
             let mut applied_any = false;
 
@@ -357,7 +387,22 @@ impl<S: StateMachine> ReplicationController<S> {
                 break;
             }
         }
-        Ok(())
+
+        // GAP DETECTION: Check if candidate is stuck on a missing parent
+        if let Some(signed) = candidate {
+            let prev = signed.intention.store_prev;
+            if prev != Hash::ZERO && !store.contains(&prev)? {
+                 let author = signed.intention.author;
+                 let since = store.author_tip(&author);
+                 return Ok(Some(crate::store::ingest_result::MissingDep {
+                     prev,
+                     since,
+                     author,
+                 }));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Apply a single intention's ops to the state machine

@@ -12,6 +12,9 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use prost::Message;
+use lattice_kernel::store::{IngestResult, MissingDep};
+
+pub type GapHandler = Arc<dyn Fn(MissingDep, Option<iroh::PublicKey>) + Send + Sync>;
 
 /// Generate a deterministic TopicId for a store
 pub fn topic_for_store(store_id: Uuid) -> iroh_gossip::TopicId {
@@ -67,12 +70,13 @@ impl GossipManager {
     }
     
     /// Setup gossip for a store - uses supplied PeerProvider trait for auth and SessionTracker for online state
-    #[tracing::instrument(skip(self, pm, sessions, store), fields(store_id = %store.id()))]
+    #[tracing::instrument(skip(self, pm, sessions, store, gap_handler), fields(store_id = %store.id()))]
     pub async fn setup_for_store(
         &self,
         pm: std::sync::Arc<dyn PeerProvider>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
         store: NetworkStore,
+        gap_handler: GapHandler,
     ) -> Result<(), GossipError> {
         let store_id = store.id();
         
@@ -110,7 +114,7 @@ impl GossipManager {
         self.store_tokens.write().await.insert(store_id, store_token.clone());
 
         // Spawn background tasks
-        self.spawn_receiver(store.clone(), receiver, pm.clone(), sessions, store_token.clone());
+        self.spawn_receiver(store.clone(), receiver, pm.clone(), sessions, store_token.clone(), gap_handler);
         self.spawn_forwarder(store.clone(), intention_rx, store_token.clone());
         self.spawn_peer_watcher(store_id, rx, store_token);
         
@@ -125,6 +129,7 @@ impl GossipManager {
         pm: std::sync::Arc<dyn PeerProvider>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
         token: tokio_util::sync::CancellationToken,
+        gap_handler: GapHandler,
     ) {
         let store_id = store.id();
         
@@ -152,7 +157,7 @@ impl GossipManager {
                 
                 Self::handle_gossip_event(
                     &store, store_id, event,
-                    &pm, &sessions,
+                    &pm, &sessions, &gap_handler,
                 ).await;
             }
             tracing::warn!(store_id = %store_id, "Gossip receiver ended");
@@ -165,6 +170,7 @@ impl GossipManager {
         event: iroh_gossip::api::Event,
         pm: &std::sync::Arc<dyn PeerProvider>,
         sessions: &std::sync::Arc<super::session::SessionTracker>,
+        gap_handler: &GapHandler,
     ) {
         match event {
             iroh_gossip::api::Event::Received(msg) => {
@@ -189,7 +195,16 @@ impl GossipManager {
                     Some(gossip_message::Content::Intention(proto_intention)) => {
                         tracing::debug!(store_id = %store_id, from = %msg.delivered_from.fmt_short(), "Gossip intention received");
                         if let Ok(signed) = intention_from_proto(&proto_intention) {
-                            let _ = store.ingest_intention(signed).await;
+                            match store.ingest_intention(signed).await {
+                                Ok(IngestResult::Applied) => {},
+                                Ok(IngestResult::MissingDeps(missing_deps)) => {
+                                    for missing in missing_deps {
+                                        tracing::info!(store_id = %store_id, missing = %missing.prev, "Gossip ingestion gap detected, triggering fetch");
+                                        gap_handler(missing, Some(msg.delivered_from));
+                                    }
+                                },
+                                Err(e) => tracing::warn!(store_id = %store_id, error = %e, "Failed to ingest gossip intention"),
+                            }
                         }
                     }
                     None => {

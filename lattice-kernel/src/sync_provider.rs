@@ -4,7 +4,7 @@
 //! to interact with any replica. It enables type erasure so NetworkService can
 //! hold replicas of different state machine types.
 
-use crate::store::StoreError;
+use crate::store::{StoreError, IngestResult};
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::SignedIntention;
 use lattice_model::Uuid;
@@ -29,7 +29,13 @@ pub trait SyncProvider: Send + Sync {
     fn ingest_intention(
         &self,
         intention: SignedIntention,
-    ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<IngestResult, StoreError>> + Send + '_>>;
+
+    /// Ingest a batch of signed intentions from a peer
+    fn ingest_batch(
+        &self,
+        intentions: Vec<SignedIntention>,
+    ) -> Pin<Box<dyn Future<Output = Result<IngestResult, StoreError>> + Send + '_>>;
 
     /// Fetch intentions by content hash
     fn fetch_intentions(

@@ -7,7 +7,8 @@ use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTIC
 use lattice_net_types::{NetworkStore, NodeProviderExt};
 use lattice_model::{NetEvent, Uuid, UserEvent};
 use lattice_kernel::proto::network::{JoinRequest, PeerMessage, peer_message};
-use lattice_model::types::PubKey;
+use lattice_model::types::{PubKey, Hash};
+use lattice_kernel::store::MissingDep;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
@@ -115,6 +116,7 @@ impl NetworkService {
             sessions: sessions.clone(),
             router,
             global_gossip_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+
         });
         
         // Subscribe to network events (NetEvent channel)
@@ -423,8 +425,8 @@ impl NetworkService {
         &self,
         store_id: Uuid,
         peer_id: iroh::PublicKey,
-        target_hash: PubKey,
-        since_hash: Option<PubKey>, 
+        target_hash: Hash,
+        since_hash: Option<Hash>, 
     ) -> Result<usize, LatticeNetError> {
          use lattice_kernel::proto::network::{FetchChain, PeerMessage, peer_message};
          
@@ -462,16 +464,28 @@ impl NetworkService {
                 let count = resp.intentions.len();
                 tracing::info!(count = count, "FetchChain: received items");
                 
-                // Ingest them
                 use lattice_kernel::weaver::convert::intention_from_proto;
-                for proto_intention in resp.intentions {
-                    if let Ok(signed) = intention_from_proto(&proto_intention) {
-                         if let Err(e) = store.ingest_intention(signed).await {
-                             tracing::warn!(error = %e, "Failed to ingest fetched intention");
-                         }
+                let mut valid_intentions = Vec::with_capacity(count);
+                for proto in resp.intentions {
+                    if let Ok(signed) = intention_from_proto(&proto) {
+                        valid_intentions.push(signed);
                     }
                 }
-                Ok(count)
+                
+                match store.ingest_batch(valid_intentions).await {
+                     Ok(lattice_kernel::store::IngestResult::Applied) => Ok(count),
+                     Ok(lattice_kernel::store::IngestResult::MissingDeps(missing)) => {
+                         tracing::warn!(count = missing.len(), "Fetch chain incomplete: still missing dependencies");
+                         if let Some(first) = missing.first() {
+                              tracing::warn!(first_missing = %first.prev, "First missing dep");
+                         }
+                         Err(LatticeNetError::Sync(format!("Fetch chain incomplete, missing {} dependencies", missing.len())))
+                     },
+                     Err(e) => {
+                         tracing::warn!(error = %e, "Failed to ingest fetched batch");
+                         Err(LatticeNetError::Sync(format!("Ingest failing during fetch_chain: {}", e)))
+                     }
+                }
             }
             _ => Err(LatticeNetError::Sync("Unexpected response to FetchChain".to_string())),
         }
@@ -601,10 +615,22 @@ impl NetworkService {
         let global_enabled = self.global_gossip_enabled.load(std::sync::atomic::Ordering::SeqCst);
         
         if global_enabled {
+            let weak_self = Arc::downgrade(self);
+            let store_id_captured = store_id;
+            // Define gap_handler closure
+            let gap_handler: super::gossip_manager::GapHandler = Arc::new(move |missing: MissingDep, peer: Option<iroh::PublicKey>| {
+                if let Some(service) = weak_self.upgrade() {
+                    tokio::spawn(async move {
+                        let _ = service.handle_missing_dep(store_id_captured, missing, peer).await;
+                    });
+                }
+            });
+
             if let Err(e) = self.gossip_manager.setup_for_store(
                 pm, 
                 self.sessions.clone(), 
                 network_store.clone(),
+                gap_handler,
             ).await {
                 tracing::error!(error = %e, "Gossip setup failed");
             }
@@ -637,6 +663,44 @@ impl NetworkService {
             }
         });
     }
+
+    /// Handle a missing dependency signal: trigger fetch chain or full sync
+
+    pub async fn handle_missing_dep(&self, store_id: Uuid, missing: lattice_kernel::store::MissingDep, peer_id: Option<iroh::PublicKey>) -> Result<(), LatticeNetError> {
+        tracing::debug!(store_id = %store_id, missing = ?missing, "Handling missing dependency");
+        
+        let Some(peer) = peer_id else {
+            tracing::warn!("Cannot handle missing dep without peer ID");
+            return Err(LatticeNetError::Sync("No peer ID provided".into()));
+        };
+        
+        let missing_hash = missing.prev;
+        
+        let iroh_peer = peer;
+
+        // Try smart fetch first
+        let since_hash = if missing.since == Hash::ZERO { None } else { Some(missing.since) };
+        match self.fetch_chain(store_id, iroh_peer, missing_hash, since_hash).await {
+            Ok(count) => {
+                tracing::info!(store_id = %store_id, count = %count, "Smart fetch filled gap");
+                if count == 0 {
+                    return Err(LatticeNetError::Sync("Smart fetch returned 0 items".into()));
+                }
+                Ok(())
+            },
+            Err(e) => {
+                tracing::warn!(store_id = %store_id, error = %e, "Smart fetch failed or incomplete, triggering targeted sync fallback");
+                // Explicitly sync with this peer first, as they likely have the data we need
+                if let Err(e) = self.sync_with_peer_by_id(store_id, iroh_peer, &[]).await {
+                    tracing::warn!("Fallback targeted sync failed: {}, trying sync_all", e);
+                    if let Err(e) = self.sync_all_by_id(store_id).await {
+                        tracing::warn!("Fallback network sync failed: {}", e);
+                        return Err(e);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
-// Handlers moved to super::handlers module

@@ -4,7 +4,7 @@
 //! Used by lattice-net for sync, gossip, and handlers.
 
 use lattice_kernel::SyncProvider;
-use lattice_kernel::store::StateError;
+use lattice_kernel::store::{StateError, IngestResult};
 use lattice_model::{PeerProvider, PubKey};
 use lattice_model::types::Hash;
 use lattice_model::weaver::SignedIntention;
@@ -42,7 +42,7 @@ impl NetworkStore {
             .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
     
-    pub async fn ingest_intention(&self, intention: SignedIntention) -> Result<(), StateError> {
+    pub async fn ingest_intention(&self, intention: SignedIntention) -> Result<IngestResult, StateError> {
         // Check authorization first
         if !self.peer.can_accept_entry(&intention.intention.author) {
             return Err(StateError::Unauthorized(format!(
@@ -52,6 +52,21 @@ impl NetworkStore {
         }
         
         self.sync.ingest_intention(intention).await
+            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    }
+
+    pub async fn ingest_batch(&self, intentions: Vec<SignedIntention>) -> Result<IngestResult, StateError> {
+        // Enforce authorization for all intentions in batch
+        for intention in &intentions {
+            if !self.peer.can_accept_entry(&intention.intention.author) {
+                return Err(StateError::Unauthorized(format!(
+                    "Author {} not authorized", 
+                    hex::encode(&intention.intention.author.0)
+                )));
+            }
+        }
+        
+        self.sync.ingest_batch(intentions).await
             .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
     

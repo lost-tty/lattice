@@ -64,19 +64,13 @@ This document outlines the development plan for Lattice.
 - [x] Port `negentropy` implementation to Rust (`lattice-sync`)
 - [x] Implement `sync_v2` protocol (Negentropy + Bulk Fetch; Phase 1 Skipped)
 - [x] Remove `OrphanStore` (replaced by `FloatingIntention` logic)
-- [ ] **Smart Chain Fetch (Linear Extension):**
-  - **Phase 1 (TDD):** Write integration tests for gap scenarios (linear, fork, new author).
-  - **Protocol:** `fetch_chain(target, since)`.
-  - **Target:** Always target the **Author** (1-RTT). They are the source of truth.
-  - **Messages:**
-    - **Request:** New `FetchChain` (ID 6) `{ store_id, target_hash, since_hash (optional) }`.
-    - **Response:** Reuse `IntentionResponse` (ID 4) with `done` flag (supports streaming).
-  - **Fallback:** If Author is offline (or `since` mismatch): **Trigger Full Sync** with available peers.
-  - **Logic:**
-    - If `since` matches Author's history: Send operations from `since` → `target`.
-    - If `since` is unknown (new author) or Author offline: Sync ensures we find the data *anywhere*.
-  - **Benefit:** Fills *any* size gap in a linear chain in 1 RTT without iterative fetching or full sync overhead.
-- [ ] **Gate:** 50-node simulation (M12) runs flawlessly before moving to M13
+- [x] **Smart Chain Fetch (Linear Extension):** `FetchChain(target, since)` protocol fills any linear gap in 1 RTT. Cascading fallback: smart fetch → targeted peer sync → full `sync_all`. Integration tests cover single gap, multi-gap, large gap detection, unresponsive peer fallback, and tip-zero (new author) recovery.
+
+### 11D: Bootstrap Sync (Clone)
+- [ ] **Witness Log Transfer on Join:** After `JoinResponse`, host streams its signed witness log + referenced intentions to the new peer. New peer verifies the host's witness chain signature, then re-witnesses each intention with its own key.
+- [ ] **Silent Ingestion Mode:** Bootstrap ingestion must **not** fire watchers, gossip broadcasts, or event subscriptions. This is a "clone" operation — the store is being seeded, not updated. Normal event flow resumes after bootstrap completes.
+- [ ] **Protocol Split:** Bootstrap (stream full history) for fresh peers; Negentropy for incremental sync between established peers.
+- [ ] **Post-Bootstrap Full Sync:** After bootstrap clone completes, run a Negentropy `sync_all` to catch any data the bootstrap peer was missing.
 
 ---
 
@@ -94,7 +88,7 @@ This document outlines the development plan for Lattice.
 ### 12B: In-Memory Simulation Harness
 - [ ] `ChannelTransport` + `BroadcastGossip`: In-memory implementations using mpsc channels
 - [ ] N-node simulator: configurable topology, round-based sync, convergence metrics
-- [ ] **Gate:** 20+ node simulation shows reliable convergence
+- [ ] **Gate:** 20+ node convergence simulation with metrics: rounds to convergence, message count, total bytes, gap recovery count. Runs as a standalone binary (like `weaver-hs`).
 
 ---
 
