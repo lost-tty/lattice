@@ -65,4 +65,12 @@ pub trait SyncProvider: Send + Sync {
 
     /// Global table fingerprint (XOR sum of all intentions)
     fn table_fingerprint(&self) -> Pin<Box<dyn Future<Output = Result<Hash, StoreError>> + Send + '_>>;
+
+    /// Walk back the chain from target until since (or genesis)
+    fn walk_back_until(
+        &self,
+        target: Hash,
+        since: Option<Hash>,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, StoreError>> + Send + '_>>;
 }

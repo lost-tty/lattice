@@ -32,6 +32,7 @@ message PeerMessage {
     FetchIntentions fetch_intentions = 3;
     IntentionResponse intention_response = 4;
     ReconcilePayload reconcile = 5;
+    FetchChain fetch_chain = 6;
   }
 }
 
@@ -41,6 +42,13 @@ message PeerMessage {
 message FetchIntentions {
   bytes store_id = 1;
   repeated bytes hashes = 2;   // List of content hashes to fetch
+}
+
+message FetchChain {
+  bytes store_id = 1;
+  bytes target_hash = 2; // The tip of the gap (hash we want)
+  bytes since_hash = 3;  // The base of the gap (what we last had from this author).
+                         // Empty if we have nothing (new author).
 }
 
 message IntentionResponse {

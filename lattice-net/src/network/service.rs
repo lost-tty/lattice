@@ -406,14 +406,75 @@ impl NetworkService {
     /// Sync with a specific peer (by store ID).
     /// Waits briefly for store registration if not immediately available.
     pub async fn sync_with_peer_by_id(
-        &self, 
-        store_id: Uuid, 
-        peer_id: iroh::PublicKey, 
+        &self,
+        store_id: Uuid,
+        peer_id: iroh::PublicKey,
         authors: &[PubKey]
     ) -> Result<SyncResult, LatticeNetError> {
         let store = self.wait_for_store(store_id).await
             .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
         self.sync_with_peer(&store, peer_id, authors).await
+    }
+
+
+    /// Real implementation of fetch_chain_with_peer
+    #[tracing::instrument(skip(self), fields(store_id = %store_id, peer = %peer_id.fmt_short()))]
+    pub async fn fetch_chain(
+        &self,
+        store_id: Uuid,
+        peer_id: iroh::PublicKey,
+        target_hash: PubKey,
+        since_hash: Option<PubKey>, 
+    ) -> Result<usize, LatticeNetError> {
+         use lattice_kernel::proto::network::{FetchChain, PeerMessage, peer_message};
+         
+         let store = self.wait_for_store(store_id).await
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
+
+         tracing::debug!("FetchChain: connecting to peer");
+         let conn = self.endpoint.connect(peer_id).await
+            .map_err(|e| LatticeNetError::Sync(format!("Connection failed: {}", e)))?;
+
+         let (send, recv) = conn.open_bi().await
+            .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
+
+         let mut sink = MessageSink::new(send);
+         let mut stream = MessageStream::new(recv);
+         
+         let req = PeerMessage {
+             message: Some(peer_message::Message::FetchChain(FetchChain {
+                 store_id: store_id.as_bytes().to_vec(),
+                 target_hash: target_hash.0.to_vec(),
+                 since_hash: since_hash.map(|h| h.0.to_vec()).unwrap_or_default(),
+             })),
+         };
+         
+         sink.send(&req).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+         sink.finish().await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+
+        // Expect IntentionResponse
+        let msg = stream.recv().await
+            .map_err(|e| LatticeNetError::Sync(e.to_string()))?
+            .ok_or_else(|| LatticeNetError::Sync("Peer closed stream without response".to_string()))?;
+
+        match msg.message {
+            Some(peer_message::Message::IntentionResponse(resp)) => {
+                let count = resp.intentions.len();
+                tracing::info!(count = count, "FetchChain: received items");
+                
+                // Ingest them
+                use lattice_kernel::weaver::convert::intention_from_proto;
+                for proto_intention in resp.intentions {
+                    if let Ok(signed) = intention_from_proto(&proto_intention) {
+                         if let Err(e) = store.ingest_intention(signed).await {
+                             tracing::warn!(error = %e, "Failed to ingest fetched intention");
+                         }
+                    }
+                }
+                Ok(count)
+            }
+            _ => Err(LatticeNetError::Sync("Unexpected response to FetchChain".to_string())),
+        }
     }
 
     // ==================== Event Handling & Lifecycle ====================

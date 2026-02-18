@@ -68,6 +68,9 @@ This document outlines the development plan for Lattice.
   - **Phase 1 (TDD):** Write integration tests for gap scenarios (linear, fork, new author).
   - **Protocol:** `fetch_chain(target, since)`.
   - **Target:** Always target the **Author** (1-RTT). They are the source of truth.
+  - **Messages:**
+    - **Request:** New `FetchChain` (ID 6) `{ store_id, target_hash, since_hash (optional) }`.
+    - **Response:** Reuse `IntentionResponse` (ID 4) with `done` flag (supports streaming).
   - **Fallback:** If Author is offline (or `since` mismatch): **Trigger Full Sync** with available peers.
   - **Logic:**
     - If `since` matches Author's history: Send operations from `since` → `target`.
@@ -86,6 +89,7 @@ This document outlines the development plan for Lattice.
 - [ ] Extract `GossipLayer` trait from `iroh_gossip::Gossip` (join/broadcast/subscribe)
 - [ ] `IrohTransport` + `IrohGossip`: Production implementations wrapping Iroh QUIC
 - [ ] `NetworkService` generic over `Transport` + `GossipLayer`
+- [ ] **Async Gossip Queue:** Decouple `IntentionStore` ingest from broadcast. Use a bounded channel with backpressure to prevent local ingest latency spikes during network congestion.
 
 ### 12B: In-Memory Simulation Harness
 - [ ] `ChannelTransport` + `BroadcastGossip`: In-memory implementations using mpsc channels

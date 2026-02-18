@@ -122,6 +122,18 @@ impl RangeStore for NetworkStore {
     }
 }
 
+impl NetworkStore {
+    pub async fn walk_back_until(
+        &self,
+        target: Hash,
+        since: Option<Hash>,
+        limit: usize,
+    ) -> Result<Vec<SignedIntention>, StateError> {
+        self.sync.walk_back_until(target, since, limit).await
+            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    }
+}
+
 /// Trait for looking up stores by ID.
 /// Implemented by StoreManager, used by the network layer.
 pub trait NetworkStoreRegistry: Send + Sync {

@@ -605,6 +605,67 @@ impl IntentionStore {
 
         Ok(results)
     }
+
+    /// Walk back the chain of intentions from `target` until `since` is found (exclusive).
+    ///
+    /// Returns a vector of intentions in *reverse chronological order* (target first).
+    /// If `since` is provided, stops when `store_prev` equals `since`.
+    /// If `since` is None, walks back until Genesis (Hash::ZERO).
+    ///
+    /// Returns error if:
+    /// - `target` is not found
+    /// - `since` is provided but not found in the chain (gap too large or fork)
+    /// - Logic limit exceeded (to prevent infinite loops)
+    pub fn walk_back_until(
+        &self,
+        target: &Hash,
+        since: Option<&Hash>,
+        limit: usize,
+    ) -> Result<Vec<SignedIntention>, IntentionStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+
+        // Pre-allocate memory to avoid resizing
+        let mut results = Vec::with_capacity(limit);
+        let mut current_hash = *target;
+
+        // since is strictly required for gap filling
+        let since_hash = since.ok_or_else(|| {
+            IntentionStoreError::InvalidData("walk_back_until requires a 'since' hash".into())
+        })?;
+
+        for _ in 0..limit {
+            match current_hash {
+                // Success: Found the ancestor (exclusive)
+                h if h == *since_hash => return Ok(results),
+                
+                // Failure: Hit Genesis without finding ancestor
+                Hash::ZERO => return Err(IntentionStoreError::InvalidData(format!(
+                    "Hit Genesis without finding ancestor {}", since_hash
+                ))),
+                
+                // Continue: Fetch and advance
+                hash => {
+                    let val = table.get(hash.as_bytes().as_slice())? 
+                        .ok_or_else(|| IntentionStoreError::InvalidData(
+                            format!("Missing link in chain: {}", hash)
+                        ))?;
+
+                    let signed = Self::decode_signed(val.value())?;
+                    
+                    // Advance
+                    current_hash = signed.intention.store_prev;
+                    results.push(signed);
+                }
+            }
+        }
+
+        // Failure: Hit limit without finding ancestor
+        Err(IntentionStoreError::InvalidData(format!(
+            "Failed to find ancestor {} from target {} within limit {}",
+            since_hash, target, limit
+        )))
+    }
 }
 
 #[cfg(test)]

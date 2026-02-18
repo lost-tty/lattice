@@ -447,6 +447,16 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         let store = self.intention_store.clone();
         run_store_read(store, move |guard| Ok(guard.table_fingerprint()))
     }
+
+    fn walk_back_until(
+        &self,
+        target: Hash,
+        since: Option<Hash>,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, StoreError>> + Send + '_>> {
+        let store = self.intention_store.clone();
+        run_store_read(store, move |guard| guard.walk_back_until(&target, since.as_ref(), limit))
+    }
 }
 
 // ==================== StoreInspector implementation ====================

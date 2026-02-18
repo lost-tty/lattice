@@ -91,6 +91,9 @@ async fn handle_stream(
             Some(peer_message::Message::FetchIntentions(req)) => {
                 handle_fetch_intentions(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
             }
+            Some(peer_message::Message::FetchChain(req)) => {
+                handle_fetch_chain(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
+            }
             _ => {
                 tracing::debug!("Unexpected message type");
             }
@@ -205,5 +208,61 @@ async fn handle_fetch_intentions(
     };
     sink.send(&msg).await?;
     
+    Ok(())
+}
+
+const MAX_FETCH_CHAIN_ITEMS: usize = 32;
+
+/// Handle a FetchChain request - walks back history and returns the chain.
+async fn handle_fetch_chain(
+    provider: &dyn NodeProviderExt,
+    remote_pubkey: &PubKey,
+    req: lattice_kernel::proto::network::FetchChain,
+    sink: &mut MessageSink,
+) -> Result<(), LatticeNetError> {
+    use lattice_model::types::Hash;
+
+    let store_id = Uuid::from_slice(&req.store_id)
+        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
+    
+    let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
+    
+    if !authorized_store.can_connect(remote_pubkey) {
+        return Err(LatticeNetError::Connection(format!(
+            "Peer {} not authorized", hex::encode(remote_pubkey)
+        )));
+    };
+
+    let target = Hash::try_from(req.target_hash.as_slice())
+        .map_err(|_| LatticeNetError::Connection("Invalid target_hash".into()))?;
+    
+    // We strictly require a non-zero 'since' hash.
+    // If the hash is invalid (wrong length), it's a connection error.
+    let since = Hash::try_from(req.since_hash.as_slice())
+        .map_err(|_| LatticeNetError::Connection("Invalid since_hash".into()))?;
+
+    if since == Hash::ZERO {
+        return Err(LatticeNetError::Sync("fetch_chain requires a non-zero 'since' hash".into()));
+    }
+
+    // Walk back the chain
+    let chain = authorized_store.walk_back_until(target, Some(since), MAX_FETCH_CHAIN_ITEMS).await
+        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+
+    let proto_intentions: Vec<_> = chain
+        .iter()
+        .map(intention_to_proto)
+        .collect();
+
+    // Reply with IntentionResponse (reused)
+    let msg = PeerMessage {
+        message: Some(peer_message::Message::IntentionResponse(IntentionResponse {
+            store_id: req.store_id,
+            done: true,
+            intentions: proto_intentions,
+        })),
+    };
+    sink.send(&msg).await?;
+
     Ok(())
 }
