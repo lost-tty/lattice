@@ -35,6 +35,13 @@ pub trait StoreInspector: Send + Sync {
         &self,
     ) -> Pin<Box<dyn Future<Output = Vec<WitnessEntry>> + Send + '_>>;
 
+    /// Scan witness log entries from start_seq
+    fn scan_witness_log(
+        &self,
+        start_seq: u64,
+        limit: usize,
+    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<WitnessEntry, StoreError>> + Send>>;
+
     /// Get floating (unwitnessed) intentions with metadata
     fn floating_intentions(
         &self,

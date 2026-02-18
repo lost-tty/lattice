@@ -5,6 +5,7 @@
 // Re-export storage and network modules from lattice-proto
 pub use lattice_proto::network;
 pub use lattice_proto::storage;
+pub use lattice_proto::weaver;
 
 #[cfg(test)]
 mod tests {

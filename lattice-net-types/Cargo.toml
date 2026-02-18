@@ -9,7 +9,13 @@ license.workspace = true
 lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+prost = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
 uuid = { workspace = true }
 hex = { workspace = true }
 lattice-sync = { workspace = true }
 async-trait = "0.1"
+futures-core = "0.3"
+futures-util = "0.3"

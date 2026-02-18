@@ -147,6 +147,20 @@ impl NetworkStore {
         self.sync.walk_back_until(target, since, limit).await
             .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
+
+
+
+    pub fn scan_witness_log(
+        &self,
+        start_seq: u64,
+        limit: usize,
+    ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, StateError>> + Send + '_>> {
+        // Map StoreError to StateError in the stream
+        let stream = self.sync.scan_witness_log(start_seq, limit);
+        Box::pin(futures_util::StreamExt::map(stream, |res| {
+            res.map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+        }))
+    }
 }
 
 /// Trait for looking up stores by ID.

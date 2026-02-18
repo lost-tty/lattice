@@ -531,12 +531,27 @@ impl IntentionStore {
 
     /// Iterate all witness records in sequence order.
     /// Returns (seq, content_hash, record) tuples.
+    /// Get the entire witness log (WARNING: O(N) memory usage)
     pub fn witness_log(&self) -> Result<Vec<WitnessEntry>, IntentionStoreError> {
+        self.scan_witness_log(0, usize::MAX)
+    }
+
+    /// Scan witness log from a given sequence number.
+    /// Returns a paginated vector (O(limit) memory).
+    pub fn scan_witness_log(
+        &self,
+        start_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<WitnessEntry>, IntentionStoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_WITNESS)?;
+        
         let mut results = Vec::new();
-        for entry in table.iter()? {
-            let (key, value) = entry?;
+        let start_bytes = start_seq.to_be_bytes();
+        
+        // Use range iterator: start_seq..
+        for res in table.range(start_bytes.as_slice()..)? {
+            let (key, value) = res?;
             let seq = u64::from_be_bytes(key.value().try_into().map_err(|_| {
                 IntentionStoreError::InvalidData("bad witness key".into())
             })?);
@@ -549,6 +564,10 @@ impl IntentionStore {
                 content: record.content,
                 signature: record.signature,
             });
+            
+            if results.len() >= limit {
+                break;
+            }
         }
         Ok(results)
     }

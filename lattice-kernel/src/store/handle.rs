@@ -456,6 +456,40 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         run_store_read(store, move |guard| guard.fingerprint_range(&start, &end))
     }
 
+    fn scan_witness_log(
+        &self,
+        start_seq: u64,
+        limit: usize,
+    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, StoreError>> + Send>> {
+        let store = self.intention_store.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        
+        tokio::task::spawn_blocking(move || {
+            let guard = match store.read() {
+                Ok(g) => g,
+                Err(_) => {
+                    let _ = tx.blocking_send(Err(StoreError::Store(crate::store::StateError::Backend("Lock poisoned".into()))));
+                    return;
+                }
+            };
+            
+            match guard.scan_witness_log(start_seq, limit) {
+                Ok(entries) => {
+                    for entry in entries {
+                        if tx.blocking_send(Ok(entry)).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(StoreError::Store(crate::store::StateError::Backend(e.to_string()))));
+                }
+            }
+        });
+        
+        Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))
+    }
+
     fn hashes_in_range(
         &self,
         start: &Hash,
@@ -481,6 +515,9 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         let store = self.intention_store.clone();
         run_store_read(store, move |guard| guard.walk_back_until(&target, since.as_ref(), limit))
     }
+
+    // We move scan_witness_log to SyncProvider primitive
+    // fn scan_witness_log - REMOVED to avoid ambiguity. Logic moved to SyncProvider impl.
 }
 
 // ==================== StoreInspector implementation ====================
@@ -510,6 +547,15 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
         &self,
     ) -> Pin<Box<dyn Future<Output = Vec<WitnessEntry>> + Send + '_>> {
         Box::pin(Store::witness_log(self))
+    }
+
+    fn scan_witness_log(
+        &self,
+        start_seq: u64,
+        limit: usize,
+    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<WitnessEntry, StoreError>> + Send>> {
+        // Use the SyncProvider implementation which contains the logic
+        SyncProvider::scan_witness_log(self, start_seq, limit)
     }
 
     fn floating_intentions(
@@ -633,6 +679,8 @@ fn replay_intentions<S: StateMachine>(
 
     Ok(entries_replayed)
 }
+
+
 
 /// Helper to run a read operation on the intention store in a blocking task
 fn run_store_read<F, R>(
