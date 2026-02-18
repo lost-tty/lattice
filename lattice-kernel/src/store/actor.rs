@@ -99,7 +99,7 @@ impl std::error::Error for ReplicationControllerError {}
 pub struct ReplicationController<S: StateMachine> {
     store_id: Uuid,
     state: std::sync::Arc<S>,
-    intention_store: IntentionStore,
+    intention_store: std::sync::Arc<std::sync::RwLock<IntentionStore>>,
     node: NodeIdentity,
 
     rx: mpsc::Receiver<ReplicationControllerCmd>,
@@ -112,7 +112,7 @@ impl<S: StateMachine> ReplicationController<S> {
     pub fn new(
         store_id: Uuid,
         state: std::sync::Arc<S>,
-        intention_store: IntentionStore,
+        intention_store: std::sync::Arc<std::sync::RwLock<IntentionStore>>,
         node: NodeIdentity,
         rx: mpsc::Receiver<ReplicationControllerCmd>,
         intention_tx: broadcast::Sender<SignedIntention>,
@@ -152,11 +152,15 @@ impl<S: StateMachine> ReplicationController<S> {
     fn handle_command(&mut self, cmd: ReplicationControllerCmd) {
         match cmd {
             ReplicationControllerCmd::AuthorTips { resp } => {
-                let tips = self.intention_store.all_author_tips().clone();
-                let _ = resp.send(Ok(tips));
+                let store = self.intention_store.read().expect("Lock poisoned");
+                let result = Ok(store.all_author_tips().clone());
+                let _ = resp.send(result);
             }
+
             ReplicationControllerCmd::IngestIntention { intention, resp } => {
-                let result = self.apply_ingested_intention(&intention).map_err(|e| match e {
+                let store_arc = self.intention_store.clone();
+                let mut store = store_arc.write().expect("Lock poisoned");
+                let result = self.apply_ingested_intention(&mut store, &intention).map_err(|e| match e {
                     ReplicationControllerError::IntentionStore(e) => {
                         StateError::Backend(e.to_string())
                     }
@@ -165,11 +169,19 @@ impl<S: StateMachine> ReplicationController<S> {
                 let _ = resp.send(result);
             }
             ReplicationControllerCmd::FetchIntentions { hashes, resp } => {
-                let result = self.do_fetch_intentions(&hashes);
+                let store = self.intention_store.read().expect("Lock poisoned");
+                let result = hashes
+                    .iter()
+                    .map(|h| store.get(h))
+                    .collect::<Result<Vec<Option<SignedIntention>>, _>>()
+                    .map(|opts| opts.into_iter().flatten().collect())
+                    .map_err(|e| StateError::Backend(e.to_string()));
                 let _ = resp.send(result);
             }
             ReplicationControllerCmd::FetchIntentionsByPrefix { prefix, resp } => {
-                let result = self.intention_store.get_by_prefix(&prefix)
+                let store = self.intention_store.read().expect("Lock poisoned");
+                let result = store
+                    .get_by_prefix(&prefix)
                     .map_err(|e| StateError::Backend(e.to_string()));
                 let _ = resp.send(result);
             }
@@ -178,30 +190,36 @@ impl<S: StateMachine> ReplicationController<S> {
                 causal_deps,
                 resp,
             } => {
-                let result = self
-                    .create_and_commit_local_intention(payload, causal_deps)
+                let store_arc = self.intention_store.clone();
+                let mut store = store_arc.write().expect("Lock poisoned");
+                
+                let result = self.create_and_commit_local_intention(&mut store, payload, causal_deps)
                     .map_err(|e| match e {
                         ReplicationControllerError::IntentionStore(e) => {
-                            StateError::Backend(e.to_string())
+                             StateError::Backend(e.to_string())
                         }
                         ReplicationControllerError::State(e) => e,
                     });
                 let _ = resp.send(result);
             }
             ReplicationControllerCmd::IntentionCount { resp } => {
-                let count = self.intention_store.intention_count().unwrap_or(0);
+                let store = self.intention_store.read().expect("Lock poisoned");
+                let count = store.intention_count().unwrap_or(0);
                 let _ = resp.send(count);
             }
             ReplicationControllerCmd::WitnessCount { resp } => {
-                let count = self.intention_store.witness_count().unwrap_or(0);
+                let store = self.intention_store.read().expect("Lock poisoned");
+                let count = store.witness_count().unwrap_or(0);
                 let _ = resp.send(count);
             }
             ReplicationControllerCmd::WitnessLog { resp } => {
-                let log = self.intention_store.witness_log().unwrap_or_default();
+                let store = self.intention_store.read().expect("Lock poisoned");
+                let log = store.witness_log().unwrap_or_default();
                 let _ = resp.send(log);
             }
             ReplicationControllerCmd::FloatingIntentions { resp } => {
-                let floating = self.intention_store.floating()
+                let store = self.intention_store.read().expect("Lock poisoned");
+                let floating = store.floating()
                     .unwrap_or_default();
                 let _ = resp.send(floating);
             }
@@ -214,11 +232,12 @@ impl<S: StateMachine> ReplicationController<S> {
     /// Create and commit a local intention from a payload
     fn create_and_commit_local_intention(
         &mut self,
+        store: &mut IntentionStore,
         payload: Vec<u8>,
         causal_deps: Vec<Hash>,
     ) -> Result<Hash, ReplicationControllerError> {
         let author = self.node.public_key();
-        let store_prev = self.intention_store.author_tip(&author);
+        let store_prev = store.author_tip(&author);
 
         let intention = Intention {
             author,
@@ -238,13 +257,13 @@ impl<S: StateMachine> ReplicationController<S> {
             ))
         })?;
 
-        let hash = self.intention_store.insert(&signed)?;
+        let hash = store.insert(&signed)?;
 
         // Broadcast to listeners
         let _ = self.intention_tx.send(signed);
 
         // Apply through the same path as ingested intentions
-        self.apply_ready_intentions()?;
+        self.apply_ready_intentions(store)?;
 
         Ok(hash)
     }
@@ -252,6 +271,7 @@ impl<S: StateMachine> ReplicationController<S> {
     /// Ingest a signed intention from network/peer
     fn apply_ingested_intention(
         &mut self,
+        store: &mut IntentionStore,
         signed: &SignedIntention,
     ) -> Result<(), ReplicationControllerError> {
         // Verify signature
@@ -274,16 +294,16 @@ impl<S: StateMachine> ReplicationController<S> {
         let hash = signed.intention.hash();
 
         // Idempotent — skip if already stored
-        if self.intention_store.contains(&hash)? {
+        if store.contains(&hash)? {
             return Ok(());
         }
 
         // Store it
-        self.intention_store.insert(signed)?;
+        store.insert(signed)?;
 
         // Try to apply this and any other pending intentions that may
         // now be unblocked by having their causal deps satisfied.
-        self.apply_ready_intentions()?;
+        self.apply_ready_intentions(store)?;
 
         Ok(())
     }
@@ -291,19 +311,22 @@ impl<S: StateMachine> ReplicationController<S> {
     ///
     /// Uses the `floating_by_prev` index to find candidates efficiently,
     /// then loops until no more can be applied.
-    fn apply_ready_intentions(&mut self) -> Result<(), ReplicationControllerError> {
+    fn apply_ready_intentions(
+        &mut self,
+        store: &mut IntentionStore,
+    ) -> Result<(), ReplicationControllerError> {
         loop {
             let mut applied_any = false;
 
             // Collect current tips + Hash::ZERO (for new authors)
-            let prevs: Vec<Hash> = self.intention_store.all_author_tips()
+            let prevs: Vec<Hash> = store.all_author_tips()
                 .values()
                 .copied()
                 .chain(std::iter::once(Hash::ZERO))
                 .collect();
 
             for prev in prevs {
-                let candidates = self.intention_store.floating_by_prev(&prev)
+                let candidates = store.floating_by_prev(&prev)
                     .map_err(ReplicationControllerError::IntentionStore)?;
 
                 for signed in &candidates {
@@ -312,7 +335,7 @@ impl<S: StateMachine> ReplicationController<S> {
                         Condition::V1(deps) => {
                             let mut met = true;
                             for dep in deps {
-                                if !self.intention_store.is_witnessed(dep)
+                                if !store.is_witnessed(dep)
                                     .map_err(ReplicationControllerError::IntentionStore)? {
                                     met = false;
                                     break;
@@ -325,7 +348,7 @@ impl<S: StateMachine> ReplicationController<S> {
                         continue;
                     }
 
-                    self.apply_intention_to_state(signed)?;
+                    self.apply_intention_to_state(store, signed)?;
                     applied_any = true;
                 }
             }
@@ -340,6 +363,7 @@ impl<S: StateMachine> ReplicationController<S> {
     /// Apply a single intention's ops to the state machine
     fn apply_intention_to_state(
         &mut self,
+        store: &mut IntentionStore,
         signed: &SignedIntention,
     ) -> Result<(), ReplicationControllerError> {
         let intention = &signed.intention;
@@ -374,27 +398,12 @@ impl<S: StateMachine> ReplicationController<S> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let _ = self.intention_store.witness(
+        let _ = store.witness(
             &intention,
             wall_time,
         );
 
         Ok(())
-    }
-
-    /// Fetch intentions by hash (for sync)
-    fn do_fetch_intentions(&self, hashes: &[Hash]) -> Result<Vec<SignedIntention>, StateError> {
-        let mut results = Vec::with_capacity(hashes.len());
-        for hash in hashes {
-            if let Some(signed) = self
-                .intention_store
-                .get(hash)
-                .map_err(|e| StateError::Backend(e.to_string()))?
-            {
-                results.push(signed);
-            }
-        }
-        Ok(results)
     }
 }
 

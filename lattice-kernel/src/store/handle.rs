@@ -96,6 +96,7 @@ pub struct Store<S> {
     tx: mpsc::Sender<ReplicationControllerCmd>,
     intention_tx: broadcast::Sender<SignedIntention>,
     shutdown_token: CancellationToken,
+    intention_store: std::sync::Arc<std::sync::RwLock<IntentionStore>>,
 }
 
 impl<S> Clone for Store<S> {
@@ -106,6 +107,7 @@ impl<S> Clone for Store<S> {
             tx: self.tx.clone(),
             intention_tx: self.intention_tx.clone(),
             shutdown_token: self.shutdown_token.clone(),
+            intention_store: self.intention_store.clone(),
         }
     }
 }
@@ -124,7 +126,7 @@ pub struct OpenedStore<S> {
     store_id: Uuid,
     state: Arc<S>,
     entries_replayed: u64,
-    intention_store: Option<IntentionStore>,
+    intention_store: Option<Arc<std::sync::RwLock<IntentionStore>>>,
 }
 
 impl<S: StateMachine + 'static> OpenedStore<S> {
@@ -145,7 +147,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
             store_id,
             state,
             entries_replayed,
-            intention_store: Some(intention_store),
+            intention_store: Some(Arc::new(std::sync::RwLock::new(intention_store))),
         })
     }
 
@@ -169,7 +171,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
         let actor = ReplicationController::new(
             self.store_id,
             self.state.clone(),
-            intention_store,
+            intention_store.clone(),
             node,
             rx,
             intention_tx.clone(),
@@ -186,6 +188,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
             tx,
             intention_tx,
             shutdown_token,
+            intention_store,
         };
         let info = StoreInfo {
             store_id: self.store_id,
@@ -406,6 +409,39 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
     fn subscribe_intentions(&self) -> broadcast::Receiver<SignedIntention> {
         Store::subscribe_intentions(self)
     }
+
+    fn count_range(
+        &self,
+        start: &Hash,
+        end: &Hash,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, StoreError>> + Send + '_>> {
+        let store = self.intention_store.clone();
+        let start = *start;
+        let end = *end;
+        run_store_read(store, move |guard| guard.count_range(&start, &end))
+    }
+
+    fn fingerprint_range(
+        &self,
+        start: &Hash,
+        end: &Hash,
+    ) -> Pin<Box<dyn Future<Output = Result<Hash, StoreError>> + Send + '_>> {
+        let store = self.intention_store.clone();
+        let start = *start;
+        let end = *end;
+        run_store_read(store, move |guard| guard.fingerprint_range(&start, &end))
+    }
+
+    fn hashes_in_range(
+        &self,
+        start: &Hash,
+        end: &Hash,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Hash>, StoreError>> + Send + '_>> {
+        let store = self.intention_store.clone();
+        let start = *start;
+        let end = *end;
+        run_store_read(store, move |guard| guard.hashes_in_range(&start, &end))
+    }
 }
 
 // ==================== StoreInspector implementation ====================
@@ -557,4 +593,25 @@ fn replay_intentions<S: StateMachine>(
     }
 
     Ok(entries_replayed)
+}
+
+/// Helper to run a read operation on the intention store in a blocking task
+fn run_store_read<F, R>(
+    store: Arc<std::sync::RwLock<IntentionStore>>,
+    f: F,
+) -> Pin<Box<dyn Future<Output = Result<R, StoreError>> + Send>>
+where
+    F: FnOnce(&IntentionStore) -> Result<R, crate::weaver::intention_store::IntentionStoreError>
+        + Send
+        + 'static,
+    R: Send + 'static,
+{
+    Box::pin(async move {
+        tokio::task::spawn_blocking(move || {
+            let guard = store.read().expect("Lock poisoned");
+            f(&guard).map_err(|e| StoreError::Store(super::StateError::Backend(e.to_string())))
+        })
+        .await
+        .map_err(|_| StoreError::ChannelClosed)?
+    })
 }

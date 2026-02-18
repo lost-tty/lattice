@@ -39,4 +39,27 @@ pub trait SyncProvider: Send + Sync {
 
     /// Subscribe to newly committed intentions
     fn subscribe_intentions(&self) -> broadcast::Receiver<SignedIntention>;
+
+    // --- Range Queries for Negentropy Sync ---
+
+    /// Count intentions in range [start, end)
+    fn count_range(
+        &self,
+        start: &Hash,
+        end: &Hash,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, StoreError>> + Send + '_>>;
+
+    /// Fingerprint (XOR sum) of intention hashes in range [start, end)
+    fn fingerprint_range(
+        &self,
+        start: &Hash,
+        end: &Hash,
+    ) -> Pin<Box<dyn Future<Output = Result<Hash, StoreError>> + Send + '_>>;
+
+    /// List intention hashes in range [start, end)
+    fn hashes_in_range(
+        &self,
+        start: &Hash,
+        end: &Hash,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Hash>, StoreError>> + Send + '_>>;
 }

@@ -40,6 +40,9 @@ const TABLE_FLOATING: TableDefinition<&[u8], &[u8]> = TableDefinition::new("floa
 /// Reverse index: store_prev hash → intention hash (multimap, multiple authors can share a prev)
 const TABLE_FLOATING_BY_PREV: MultimapTableDefinition<&[u8], &[u8]> = MultimapTableDefinition::new("floating_by_prev");
 
+/// Maximum number of hashes to return in `hashes_in_range` to prevent DoS.
+const MAX_RANGE_HASHES: usize = 2048;
+
 #[derive(Debug, Error)]
 pub enum IntentionStoreError {
     #[error("database error: {0}")]
@@ -82,6 +85,10 @@ pub struct IntentionStore {
 
     /// Key used to sign witness records.
     signing_key: ed25519_dalek::SigningKey,
+
+    /// XOR fingerprint of all intention hashes in TABLE_INTENTIONS.
+    /// Derived on startup, maintained incrementally on insert().
+    table_fingerprint: Hash,
 }
 
 impl IntentionStore {
@@ -121,6 +128,7 @@ impl IntentionStore {
             witness_seq: 0,
             last_witness_hash: Hash::ZERO,
             signing_key: signing_key.clone(),
+            table_fingerprint: Hash::ZERO,
         };
 
         // Fast path: load author tips and derive witness state from tables
@@ -136,6 +144,9 @@ impl IntentionStore {
             // First open or migration: replay witness log, persist author tips + witness index
             store.rebuild_indexes()?;
         }
+
+        // Derive table fingerprint from all intention keys
+        store.derive_table_fingerprint()?;
 
         Ok(store)
     }
@@ -297,6 +308,9 @@ impl IntentionStore {
         }
         write_txn.commit()?;
 
+        // Update in-memory fingerprint
+        self.xor_fingerprint(&hash);
+
         Ok(hash)
     }
 
@@ -424,11 +438,88 @@ impl IntentionStore {
         Ok(results)
     }
 
+    /// Derive table fingerprint by XOR-scanning all TABLE_INTENTIONS keys.
+    fn derive_table_fingerprint(&mut self) -> Result<(), IntentionStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let mut fp = [0u8; 32];
+        for entry in table.iter()? {
+            let (k, _) = entry?;
+            for (i, byte) in k.value().iter().enumerate() {
+                fp[i] ^= byte;
+            }
+        }
+        self.table_fingerprint = Hash(fp);
+        Ok(())
+    }
+
+    /// XOR a single hash into the running fingerprint.
+    fn xor_fingerprint(&mut self, hash: &Hash) {
+        for (i, byte) in hash.as_bytes().iter().enumerate() {
+            self.table_fingerprint.0[i] ^= byte;
+        }
+    }
+
+    /// XOR fingerprint of all stored intention hashes.
+    /// Two nodes with identical fingerprints have identical intention sets.
+    pub fn table_fingerprint(&self) -> Hash {
+        self.table_fingerprint
+    }
+
     /// Number of intentions in the store.
     pub fn intention_count(&self) -> Result<u64, IntentionStoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_INTENTIONS)?;
         Ok(table.len()?)
+    }
+
+    // --- Negentropy range query support ---
+
+    /// Count intention hashes in the range [start, end).
+    pub fn count_range(&self, start: &Hash, end: &Hash) -> Result<u64, IntentionStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let mut range = table.range(start.as_bytes().as_slice()..end.as_bytes().as_slice())?;
+        range.try_fold(0u64, |acc, item| item.map(|_| acc + 1).map_err(IntentionStoreError::from))
+    }
+
+    /// XOR fingerprint of all intention hashes in the range [start, end).
+    /// Returns `Hash::ZERO` for an empty range.
+    pub fn fingerprint_range(&self, start: &Hash, end: &Hash) -> Result<Hash, IntentionStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let mut fp = [0u8; 32];
+        for entry in table.range(start.as_bytes().as_slice()..end.as_bytes().as_slice())? {
+            let (k, _) = entry?;
+            let b = k.value();
+            for (i, byte) in b.iter().enumerate() {
+                fp[i] ^= byte;
+            }
+        }
+        Ok(Hash(fp))
+    }
+
+    /// List all intention hashes in the range [start, end).
+    /// Intended for small leaf ranges during Negentropy reconciliation.
+    /// Returns an error if the range contains more than `MAX_RANGE_HASHES` items to prevent DoS.
+    pub fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, IntentionStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let range = table.range(start.as_bytes().as_slice()..end.as_bytes().as_slice())?;
+        
+        let mut results = Vec::new();
+        for (i, entry) in range.enumerate() {
+            if i >= MAX_RANGE_HASHES {
+                return Err(IntentionStoreError::InvalidData(format!(
+                    "Range too large: >{} items. Use fingerprint_range/count_range first.",
+                    MAX_RANGE_HASHES
+                )));
+            }
+            let (k, _) = entry?;
+            results.push(Hash::try_from(k.value())
+                .map_err(|_| IntentionStoreError::InvalidData("bad hash key in intentions table".into()))?);
+        }
+        Ok(results)
     }
 
     /// Number of witness log entries in the store.
@@ -1183,5 +1274,275 @@ mod tests {
 
         // Log should have exactly one entry
         assert_eq!(store.witness_log().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn range_queries_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+
+        let lo = Hash([0x00; 32]);
+        let hi = Hash([0xFF; 32]);
+
+        assert_eq!(store.count_range(&lo, &hi).unwrap(), 0);
+        assert_eq!(store.fingerprint_range(&lo, &hi).unwrap(), Hash::ZERO);
+        assert!(store.hashes_in_range(&lo, &hi).unwrap().is_empty());
+    }
+
+    #[test]
+    fn range_queries_full_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, pk) = make_key();
+        let mut store = open_store(dir.path());
+
+        // Insert three intentions
+        let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+        let s1 = SignedIntention::sign(i1.clone(), &key);
+        store.insert(&s1).unwrap();
+
+        let i2 = make_intention(pk, i1.hash(), vec![2]);
+        let s2 = SignedIntention::sign(i2.clone(), &key);
+        store.insert(&s2).unwrap();
+
+        let i3 = make_intention(pk, i2.hash(), vec![3]);
+        let s3 = SignedIntention::sign(i3.clone(), &key);
+        store.insert(&s3).unwrap();
+
+        let lo = Hash([0x00; 32]);
+        let hi = Hash([0xFF; 32]);
+
+        // Count covers everything
+        assert_eq!(store.count_range(&lo, &hi).unwrap(), 3);
+
+        // hashes_in_range returns all three, sorted
+        let hashes = store.hashes_in_range(&lo, &hi).unwrap();
+        assert_eq!(hashes.len(), 3);
+        // Verify sorted order
+        for w in hashes.windows(2) {
+            assert!(w[0].as_bytes() < w[1].as_bytes(), "hashes should be sorted");
+        }
+
+        // All three hashes are present
+        let expected: std::collections::HashSet<Hash> = [i1.hash(), i2.hash(), i3.hash()].into();
+        let actual: std::collections::HashSet<Hash> = hashes.into_iter().collect();
+        assert_eq!(actual, expected);
+
+        // Fingerprint is XOR of all three
+        let mut expected_fp = [0u8; 32];
+        for h in &[i1.hash(), i2.hash(), i3.hash()] {
+            for i in 0..32 {
+                expected_fp[i] ^= h.as_bytes()[i];
+            }
+        }
+        assert_eq!(store.fingerprint_range(&lo, &hi).unwrap(), Hash(expected_fp));
+    }
+
+    #[test]
+    fn range_queries_partial_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, pk) = make_key();
+        let mut store = open_store(dir.path());
+
+        // Insert several intentions
+        let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+        store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+        let i2 = make_intention(pk, i1.hash(), vec![2]);
+        store.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+        let i3 = make_intention(pk, i2.hash(), vec![3]);
+        store.insert(&SignedIntention::sign(i3.clone(), &key)).unwrap();
+
+        // Collect and sort all hashes
+        let lo = Hash([0x00; 32]);
+        let hi = Hash([0xFF; 32]);
+        let all = store.hashes_in_range(&lo, &hi).unwrap();
+        assert_eq!(all.len(), 3);
+
+        // Use the middle hash as a boundary: [lo, mid) should exclude mid and above
+        let mid = all[1];
+        let below = store.hashes_in_range(&lo, &mid).unwrap();
+        assert_eq!(below.len(), 1);
+        assert_eq!(below[0], all[0]);
+
+        // [mid, hi) should include mid and above
+        let above = store.hashes_in_range(&mid, &hi).unwrap();
+        assert_eq!(above.len(), 2);
+        assert_eq!(above[0], all[1]);
+        assert_eq!(above[1], all[2]);
+
+        // Counts should match
+        assert_eq!(store.count_range(&lo, &mid).unwrap(), 1);
+        assert_eq!(store.count_range(&mid, &hi).unwrap(), 2);
+
+        // Fingerprints should partition correctly:
+        // xor(below) XOR xor(above) == xor(all)
+        let fp_below = store.fingerprint_range(&lo, &mid).unwrap();
+        let fp_above = store.fingerprint_range(&mid, &hi).unwrap();
+        let fp_all = store.fingerprint_range(&lo, &hi).unwrap();
+        let mut recombined = [0u8; 32];
+        for i in 0..32 {
+            recombined[i] = fp_below.as_bytes()[i] ^ fp_above.as_bytes()[i];
+        }
+        assert_eq!(Hash(recombined), fp_all, "XOR fingerprints should be additively composable");
+
+        // Gap probe: boundary key that doesn't exist but falls between items
+        let mut probe_bytes = all[0].0;
+        probe_bytes[31] = probe_bytes[31].wrapping_add(1);
+        let probe = Hash(probe_bytes);
+        assert!(!all.contains(&probe), "probe should not collide with any stored hash");
+
+        // [lo, probe) should contain only the first hash
+        assert_eq!(store.count_range(&lo, &probe).unwrap(), 1);
+        assert_eq!(store.hashes_in_range(&lo, &probe).unwrap(), vec![all[0]]);
+
+        // [probe, hi) should contain the remaining two
+        assert_eq!(store.count_range(&probe, &hi).unwrap(), 2);
+        assert_eq!(store.hashes_in_range(&probe, &hi).unwrap(), vec![all[1], all[2]]);
+    }
+
+    #[test]
+    fn range_queries_zero_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, pk) = make_key();
+        let mut store = open_store(dir.path());
+
+        let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+        store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+
+        let h = i1.hash();
+
+        // [h, h) is an empty set
+        assert_eq!(store.count_range(&h, &h).unwrap(), 0);
+        assert!(store.hashes_in_range(&h, &h).unwrap().is_empty());
+        assert_eq!(store.fingerprint_range(&h, &h).unwrap(), Hash::ZERO);
+    }
+
+    #[test]
+    fn range_queries_inverted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+
+        let lo = Hash([0x00; 32]);
+        let hi = Hash([0xFF; 32]);
+
+        // start > end → empty
+        assert_eq!(store.count_range(&hi, &lo).unwrap(), 0);
+        assert!(store.hashes_in_range(&hi, &lo).unwrap().is_empty());
+        assert_eq!(store.fingerprint_range(&hi, &lo).unwrap(), Hash::ZERO);
+    }
+
+    // --- table_fingerprint tests ---
+
+    #[test]
+    fn table_fingerprint_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        assert_eq!(store.table_fingerprint(), Hash::ZERO);
+    }
+
+    #[test]
+    fn table_fingerprint_incremental() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, pk) = make_key();
+        let mut store = open_store(dir.path());
+
+        // Insert first intention
+        let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+        store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+        assert_eq!(store.table_fingerprint(), i1.hash());
+
+        // Insert second — fingerprint is XOR of both
+        let i2 = make_intention(pk, i1.hash(), vec![2]);
+        store.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+
+        let mut expected = [0u8; 32];
+        for (i, byte) in i1.hash().as_bytes().iter().enumerate() {
+            expected[i] ^= byte;
+        }
+        for (i, byte) in i2.hash().as_bytes().iter().enumerate() {
+            expected[i] ^= byte;
+        }
+        assert_eq!(store.table_fingerprint(), Hash(expected));
+    }
+
+    #[test]
+    fn table_fingerprint_duplicate_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, pk) = make_key();
+        let mut store = open_store(dir.path());
+
+        let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+        let signed = SignedIntention::sign(i1.clone(), &key);
+        store.insert(&signed).unwrap();
+        let fp_after_first = store.table_fingerprint();
+
+        // Duplicate insert should not change the fingerprint
+        store.insert(&signed).unwrap();
+        assert_eq!(store.table_fingerprint(), fp_after_first);
+    }
+
+    #[test]
+    fn table_fingerprint_consistent_with_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, pk) = make_key();
+        let mut store = open_store(dir.path());
+
+        let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+        store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+        let i2 = make_intention(pk, i1.hash(), vec![2]);
+        store.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+
+        let lo = Hash([0x00; 32]);
+        let hi = Hash([0xFF; 32]);
+        let range_fp = store.fingerprint_range(&lo, &hi).unwrap();
+        assert_eq!(store.table_fingerprint(), range_fp);
+    }
+
+    #[test]
+    fn table_fingerprint_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, pk) = make_key();
+
+        let fp_before;
+        {
+            let mut store = open_store(dir.path());
+            let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+            store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+            store.witness(&i1, 100).unwrap();
+            let i2 = make_intention(pk, i1.hash(), vec![2]);
+            store.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+            // i2 is floating (not witnessed) — fingerprint still covers both
+            fp_before = store.table_fingerprint();
+            assert_ne!(fp_before, Hash::ZERO);
+        }
+
+        // Reopen — fingerprint is re-derived from TABLE_INTENTIONS
+        let store = open_store(dir.path());
+        assert_eq!(store.table_fingerprint(), fp_before);
+    }
+
+    #[test]
+    fn table_fingerprint_divergent_stores() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let (key, pk) = make_key();
+
+        let mut store_a = open_store(dir_a.path());
+        let mut store_b = open_store(dir_b.path());
+
+        // Same first intention
+        let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+        let signed1 = SignedIntention::sign(i1.clone(), &key);
+        store_a.insert(&signed1).unwrap();
+        store_b.insert(&signed1).unwrap();
+        assert_eq!(store_a.table_fingerprint(), store_b.table_fingerprint());
+
+        // Diverge: only store_a gets i2
+        let i2 = make_intention(pk, i1.hash(), vec![2]);
+        store_a.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+        assert_ne!(store_a.table_fingerprint(), store_b.table_fingerprint());
+
+        // Converge: store_b also gets i2
+        store_b.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+        assert_eq!(store_a.table_fingerprint(), store_b.table_fingerprint());
     }
 }
