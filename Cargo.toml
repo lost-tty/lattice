@@ -18,6 +18,7 @@ members = [
     "lattice-systemstore",
     "lattice-store-base",
     "lattice-mockkernel",
+    "lattice-sync",
 ]
 
 # lattice-bindings is excluded from default members to prevent slow linking (cdylib)
@@ -57,6 +58,7 @@ lattice-storage = { path = "lattice-storage" }
 lattice-systemstore = { path = "lattice-systemstore" }
 lattice-store-base = { path = "lattice-store-base" }
 lattice-mockkernel = { path = "lattice-mockkernel" }
+lattice-sync = { path = "lattice-sync" }
 lattice-net-types = { path = "lattice-net-types" }
 lattice-proto = { path = "lattice-proto" }
 lattice-api = { path = "lattice-api" }

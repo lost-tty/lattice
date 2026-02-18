@@ -15,13 +15,16 @@ use lattice_model::types::{Hash, PubKey};
 use lattice_net_types::NetworkStore;
 use lattice_kernel::proto::network::{
     FetchIntentions, IntentionResponse,
-    PeerMessage, StatusRequest, StatusResponse, peer_message,
+    PeerMessage, peer_message,
 };
 use lattice_kernel::weaver::convert::{
     intention_to_proto, intention_from_proto,
-    tips_to_proto, tips_from_proto,
 };
-use std::collections::HashMap;
+use lattice_sync::{Reconciler, ReconcileMessage};
+use lattice_kernel::proto::network::{
+    reconcile_message::Content as ReconcileContent,
+    ReconcilePayload,
+};
 
 /// Result of a sync session
 #[derive(Debug, Default)]
@@ -49,126 +52,130 @@ impl<'a> SyncSession<'a> {
         Self { store, sink, stream }
     }
     
-    /// Run as initiator - sends StatusRequest first, receives StatusResponse
-    pub async fn run_as_initiator(&mut self) -> Result<SyncResult, LatticeNetError> {
-        let my_tips = self.store.author_tips().await?;
-        
-        // Send StatusRequest with our tips
-        self.send_status_request(&my_tips).await?;
-        
-        // Receive StatusResponse with peer's tips
-        let peer_tips = self.recv_status_response().await?;
-        
-        // Run common exchange logic
-        self.run_exchange(my_tips, peer_tips).await
-    }
-    
-    /// Run as responder - receives StatusRequest first, sends StatusResponse
-    pub async fn run_as_responder(&mut self, peer_tips: HashMap<PubKey, Hash>) -> Result<SyncResult, LatticeNetError> {
-        let my_tips = self.store.author_tips().await?;
-        
-        // Send StatusResponse with our tips
-        self.send_status_response(&my_tips).await?;
-        
-        // Run common exchange logic
-        self.run_exchange(my_tips, peer_tips).await
-    }
-    
-    /// Common exchange logic - identical on both sides
-    async fn run_exchange(&mut self, my_tips: HashMap<PubKey, Hash>, peer_tips: HashMap<PubKey, Hash>) -> Result<SyncResult, LatticeNetError> {
-        // Compute what I need from peer: authors where peer tip differs from mine
-        let mut need_hashes = Vec::new();
-        for (author, peer_tip) in &peer_tips {
-            let my_tip = my_tips.get(author).cloned().unwrap_or(Hash::ZERO);
-            if *peer_tip != my_tip && *peer_tip != Hash::ZERO {
-                need_hashes.push(*peer_tip);
-            }
-        }
-        
-        self.exchange_intentions(need_hashes).await
-    }
-    
-    async fn send_status_request(&mut self, tips: &HashMap<PubKey, Hash>) -> Result<(), LatticeNetError> {
-        let msg = PeerMessage {
-            message: Some(peer_message::Message::StatusRequest(StatusRequest {
-                store_id: self.store.id().as_bytes().to_vec(),
-                author_tips: tips_to_proto(tips),
-            })),
-        };
-        self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))
-    }
-    
-    async fn send_status_response(&mut self, tips: &HashMap<PubKey, Hash>) -> Result<(), LatticeNetError> {
-        let msg = PeerMessage {
-            message: Some(peer_message::Message::StatusResponse(StatusResponse {
-                store_id: self.store.id().as_bytes().to_vec(),
-                author_tips: tips_to_proto(tips),
-            })),
-        };
-        self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))
-    }
-    
-    async fn recv_status_response(&mut self) -> Result<HashMap<PubKey, Hash>, LatticeNetError> {
-        let msg = tokio::time::timeout(PROTOCOL_TIMEOUT, self.stream.recv()).await
-            .map_err(|_| LatticeNetError::Sync("Timeout receiving StatusResponse".into()))?
-            .map_err(|e| LatticeNetError::Sync(e.to_string()))?
-            .ok_or_else(|| LatticeNetError::Sync("Stream closed".into()))?;
-        
-        match msg.message {
-            Some(peer_message::Message::StatusResponse(resp)) => {
-                Ok(tips_from_proto(&resp.author_tips))
-            }
-            _ => Err(LatticeNetError::Sync("Expected StatusResponse".into())),
-        }
-    }
-    
-    async fn exchange_intentions(&mut self, need_hashes: Vec<Hash>) -> Result<SyncResult, LatticeNetError> {
+    /// Run the sync protocol (symmetric)
+    /// 
+    /// If `initial_message` is provided, we are the responder and this is the first message.
+    /// If `initial_message` is None, we are the initiator and should send the first message.
+    pub async fn run(&mut self, initial_message: Option<ReconcilePayload>) -> Result<SyncResult, LatticeNetError> {
         let mut intentions_received: u64 = 0;
         let mut intentions_sent: u64 = 0;
-        
-        // Send FetchIntentions if I need anything
-        if !need_hashes.is_empty() {
-            self.send_fetch_intentions(&need_hashes).await?;
+
+        let reconciler = Reconciler::new(self.store);
+
+        // Track "Message Balance" to detect termination.
+        // +1 for every message sent (that expects a reply/process)
+        // -1 for every message received
+        // We start with 0.
+        let mut reconcile_load: i32 = 0;
+        let mut active_fetches: i32 = 0;
+
+        // If initiator, start the process
+        if initial_message.is_none() {
+            let init_msg = reconciler.initiate().await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            self.send_reconcile(&init_msg).await?;
+            reconcile_load += 1;
+        } else {
+            // If responder, we received one message "for free" (handled below)
+            // But we don't increment load yet because we haven't sent anything.
+            // The loop will process it.
         }
-        
-        let mut my_fetch_done = need_hashes.is_empty();
-        let mut peer_fetch_done = false;
-        
-        while !my_fetch_done || !peer_fetch_done {
-            let msg = match tokio::time::timeout(
-                PROTOCOL_TIMEOUT,
-                self.stream.recv()
-            ).await {
-                Ok(Ok(Some(m))) => m,
-                _ => break,
+
+        let mut next_msg = initial_message.map(|p| peer_message::Message::Reconcile(p));
+
+        loop {
+            // Check termination
+            if reconcile_load == 0 && active_fetches == 0 && next_msg.is_none() {
+                break;
+            }
+
+            let msg = if let Some(m) = next_msg.take() {
+                // Process the peeked message
+                PeerMessage { message: Some(m) }
+            } else {
+                // Recv with timeout
+                match tokio::time::timeout(PROTOCOL_TIMEOUT, self.stream.recv()).await {
+                    Ok(Ok(Some(m))) => m,
+                    Ok(Ok(None)) => {
+                        // Stream closed by peer.
+                        // If we have no pending work, this is a clean exit.
+                        if reconcile_load == 0 && active_fetches == 0 {
+                            break;
+                        } else {
+                            return Err(LatticeNetError::Sync("Stream closed unexpectedly".into()));
+                        }
+                    },
+                    Ok(Err(e)) => return Err(LatticeNetError::Sync(e.to_string())),
+                    Err(_) => return Err(LatticeNetError::Sync("Timeout during sync".into())),
+                }
             };
-            
+
             match msg.message {
+                Some(peer_message::Message::Reconcile(payload)) => {
+                    // Logic: If we are responder processing initial message, reconcile_load is 0.
+                    // But we are processing an incoming message.
+                    // If we are initiator, we sent 1, now recv 1 -> load 0.
+                    // But we might send more.
+                    // We should decrement load on RECV, increment on SEND.
+                    // Except for initial message (responder), where we didn't send anything.
+                    // So we treat initial message as "pending work".
+                    
+                    if reconcile_load > 0 {
+                        reconcile_load -= 1;
+                    }
+                    
+                    let r_msg = payload.message.ok_or_else(|| LatticeNetError::Sync("Missing reconcile message".into()))?;
+                        
+                    let result = reconciler.process(&r_msg).await
+                        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+                        
+                    for out_msg in result.send {
+                        self.send_reconcile(&out_msg).await?;
+                        if !matches!(out_msg.content, Some(ReconcileContent::Done(_))) {
+                            reconcile_load += 1;
+                        }
+                    }
+                    
+                    if !result.need.is_empty() {
+                        self.send_fetch_intentions(&result.need).await?;
+                        active_fetches += 1;
+                    }
+                }
                 Some(peer_message::Message::FetchIntentions(req)) => {
                     intentions_sent += self.handle_fetch_intentions(&req).await?;
-                    peer_fetch_done = true;
                 }
                 Some(peer_message::Message::IntentionResponse(resp)) => {
                     for proto_intention in &resp.intentions {
-                        match intention_from_proto(proto_intention) {
-                            Ok(signed) => {
-                                if self.store.ingest_intention(signed).await.is_ok() {
-                                    intentions_received += 1;
-                                }
+                        if let Ok(signed) = intention_from_proto(proto_intention) {
+                            if self.store.ingest_intention(signed).await.is_ok() {
+                                intentions_received += 1;
                             }
-                            Err(_) => continue,
                         }
                     }
+                    
                     if resp.done {
-                        my_fetch_done = true;
+                        if active_fetches > 0 {
+                            active_fetches -= 1;
+                        }
                     }
                 }
-                _ => break,
+                _ => {}
             }
         }
         
         Ok(SyncResult { entries_received: intentions_received, entries_sent: intentions_sent })
     }
+    
+    async fn send_reconcile(&mut self, msg: &ReconcileMessage) -> Result<(), LatticeNetError> {
+        let wrapper = PeerMessage {
+            message: Some(peer_message::Message::Reconcile(ReconcilePayload {
+                store_id: self.store.id().as_bytes().to_vec(),
+                message: Some(msg.clone()),
+            })),
+        };
+        self.sink.send(&wrapper).await.map_err(|e| LatticeNetError::Sync(e.to_string()))
+    }
+    
+    // StatusRequest/Response methods removed
     
     async fn send_fetch_intentions(&mut self, hashes: &[Hash]) -> Result<(), LatticeNetError> {
         let msg = PeerMessage {
@@ -181,50 +188,41 @@ impl<'a> SyncSession<'a> {
     }
     
     async fn handle_fetch_intentions(&mut self, req: &FetchIntentions) -> Result<u64, LatticeNetError> {
-        const CHUNK_SIZE: usize = 100;
-        const MAX_CHAIN_DEPTH: usize = 10_000;
+        // Chunk processing to avoid OOM
+        const BATCH_SIZE: usize = 50; 
 
-        // Parse requested hashes (these are tip hashes)
-        let hashes: Vec<Hash> = req.hashes.iter()
+        let all_hashes: Vec<Hash> = req.hashes.iter()
             .filter_map(|h| Hash::try_from(h.as_slice()).ok())
             .collect();
     
-        // For each requested tip, walk backwards through store_prev to build
-        // the full chain, then reverse to send in forward (oldest-first) order.
-        // This ensures the receiver can apply them in chain order.
-        let mut all_intentions = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-    
-        for tip_hash in &hashes {
-            let mut chain = Vec::new();
-            let mut current = *tip_hash;
-            let mut depth = 0;
-            while current != Hash::ZERO && !seen.contains(&current) && depth < MAX_CHAIN_DEPTH {
-                match self.store.fetch_intentions(vec![current]).await {
-                    Ok(mut found) if !found.is_empty() => {
-                        let signed = found.remove(0);
-                        let prev = signed.intention.store_prev;
-                        seen.insert(current);
-                        chain.push(signed);
-                        current = prev;
-                        depth += 1;
-                    }
-                    _ => break,
-                }
-            }
-            chain.reverse(); // oldest first
-            all_intentions.extend(chain);
-        }
-    
-        let sent = all_intentions.len() as u64;
+        let total_requested = all_hashes.len();
+        let mut total_sent = 0;
 
-        // Send in bounded chunks to avoid building a massive protobuf message
-        let chunks: Vec<_> = all_intentions.chunks(CHUNK_SIZE).collect();
-        let num_chunks = chunks.len().max(1); // at least one message even if empty
-        
+        if total_requested == 0 {
+             let msg = PeerMessage {
+                message: Some(peer_message::Message::IntentionResponse(IntentionResponse {
+                    store_id: req.store_id.clone(),
+                    done: true,
+                    intentions: vec![],
+                })),
+            };
+            self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            return Ok(0);
+        }
+
+        let chunks: Vec<_> = all_hashes.chunks(BATCH_SIZE).collect();
+        let num_chunks = chunks.len();
+
         for (i, chunk) in chunks.iter().enumerate() {
-            let proto_intentions: Vec<_> = chunk.iter().map(intention_to_proto).collect();
+            // Fetch only this batch from store
+            let intentions = self.store.fetch_intentions(chunk.to_vec()).await
+                .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            
+            total_sent += intentions.len() as u64;
+
+            let proto_intentions: Vec<_> = intentions.iter().map(intention_to_proto).collect();
             let is_last = i == num_chunks - 1;
+            
             let msg = PeerMessage {
                 message: Some(peer_message::Message::IntentionResponse(IntentionResponse {
                     store_id: req.store_id.clone(),
@@ -235,18 +233,6 @@ impl<'a> SyncSession<'a> {
             self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
         }
 
-        if all_intentions.is_empty() {
-            // Send empty done message
-            let msg = PeerMessage {
-                message: Some(peer_message::Message::IntentionResponse(IntentionResponse {
-                    store_id: req.store_id.clone(),
-                    done: true,
-                    intentions: vec![],
-                })),
-            };
-            self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-        }
-
-        Ok(sent)
+        Ok(total_sent)
     }
 }

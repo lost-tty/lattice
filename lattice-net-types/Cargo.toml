@@ -11,4 +11,5 @@ lattice-model = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 uuid = { workspace = true }
 hex = { workspace = true }
+lattice-sync = { workspace = true }
 async-trait = "0.1"

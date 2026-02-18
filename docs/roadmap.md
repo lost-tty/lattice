@@ -61,12 +61,18 @@ This document outlines the development plan for Lattice.
 - [x] HLC monotonicity across sequential submits at actor level
 
 ### 11C: Negentropy Sync
-- [ ] Port `negentropy` implementation to Rust (no-std compatible)
-- [ ] Implement `sync_v2` protocol:
-  - Phase 1: Exchange author timestamps (fast-path check) + Acks
-  - Phase 2: Negentropy reconciliation over `Intention` hashes
-  - Phase 3: Bulk fetch of missing Intentions
-- [ ] Remove `OrphanStore` (reconciliation handles gaps automatically)
+- [x] Port `negentropy` implementation to Rust (`lattice-sync`)
+- [x] Implement `sync_v2` protocol (Negentropy + Bulk Fetch; Phase 1 Skipped)
+- [x] Remove `OrphanStore` (replaced by `FloatingIntention` logic)
+- [ ] **Smart Chain Fetch (Linear Extension):**
+  - **Phase 1 (TDD):** Write integration tests for gap scenarios (linear, fork, new author).
+  - **Protocol:** `fetch_chain(target, since)`.
+  - **Target:** Always target the **Author** (1-RTT). They are the source of truth.
+  - **Fallback:** If Author is offline (or `since` mismatch): **Trigger Full Sync** with available peers.
+  - **Logic:**
+    - If `since` matches Author's history: Send operations from `since` → `target`.
+    - If `since` is unknown (new author) or Author offline: Sync ensures we find the data *anywhere*.
+  - **Benefit:** Fills *any* size gap in a linear chain in 1 RTT without iterative fetching or full sync overhead.
 - [ ] **Gate:** 50-node simulation (M12) runs flawlessly before moving to M13
 
 ---
@@ -112,6 +118,14 @@ This document outlines the development plan for Lattice.
 ### 13D: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
 - [x] Support 100M+ entries without excessive RAM
+
+### 13E: Advanced Sync Optimization (Future)
+- [ ] **Persistent Merkle Index / Range Accumulator:**
+  - Avoid O(N) scans for range fingerprints (currently linear)
+  - Pre-compute internal node hashes in a B-Tree or Merkle Tree structure
+- [ ] **High-Radix Splitting:**
+  - Increase branching factor (e.g., 16-32 children) to reduce sync rounds (log32 vs log2)
+  - Parallelize range queries
 
 ---
 

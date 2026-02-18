@@ -6,8 +6,8 @@
 use crate::{MessageSink, MessageStream, LatticeNetError};
 use super::service::PeerStoreRegistry;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore, NodeProviderExt};
-use lattice_kernel::proto::network::{peer_message, StatusRequest, JoinResponse, PeerMessage, FetchIntentions, IntentionResponse};
-use lattice_kernel::weaver::convert::{intention_to_proto, tips_from_proto};
+use lattice_kernel::proto::network::{peer_message, JoinResponse, PeerMessage, FetchIntentions, IntentionResponse};
+use lattice_kernel::weaver::convert::{intention_to_proto};
 use lattice_model::{Uuid, types::PubKey};
 use iroh::endpoint::Connection;
 use std::sync::Arc;
@@ -85,8 +85,8 @@ async fn handle_stream(
                 handle_join_request(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
                 break;
             }
-            Some(peer_message::Message::StatusRequest(req)) => {
-                handle_status_request(provider.as_ref(), peer_stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
+            Some(peer_message::Message::Reconcile(req)) => {
+                handle_reconcile_start(provider.as_ref(), peer_stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
             }
             Some(peer_message::Message::FetchIntentions(req)) => {
                 handle_fetch_intentions(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
@@ -135,19 +135,19 @@ async fn handle_join_request(
     Ok(())
 }
 
-/// Handle an incoming status request using symmetric SyncSession
-async fn handle_status_request(
+/// Handle an incoming reconcile start message
+async fn handle_reconcile_start(
     provider: &dyn NodeProviderExt,
     _peer_stores: PeerStoreRegistry,
     remote_pubkey: &PubKey,
-    req: StatusRequest,
+    req: lattice_kernel::proto::network::ReconcilePayload,
     sink: &mut MessageSink,
     stream: &mut MessageStream,
 ) -> Result<(), LatticeNetError> {
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
-    tracing::debug!("[Status] Received status request for store {}", store_id);
+    tracing::debug!("[Sync] Received reconcile start for store {}", store_id);
     
     let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
     
@@ -157,11 +157,8 @@ async fn handle_status_request(
         )));
     };
     
-    // Parse incoming peer tips
-    let peer_tips = tips_from_proto(&req.author_tips);
-    
     let mut session = crate::network::sync_session::SyncSession::new(&authorized_store, sink, stream, *remote_pubkey);
-    let _ = session.run_as_responder(peer_tips).await?;
+    let _ = session.run(Some(req)).await?;
     
     Ok(())
 }

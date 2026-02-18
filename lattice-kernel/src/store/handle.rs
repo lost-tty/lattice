@@ -442,6 +442,11 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         let end = *end;
         run_store_read(store, move |guard| guard.hashes_in_range(&start, &end))
     }
+
+    fn table_fingerprint(&self) -> Pin<Box<dyn Future<Output = Result<Hash, StoreError>> + Send + '_>> {
+        let store = self.intention_store.clone();
+        run_store_read(store, move |guard| Ok(guard.table_fingerprint()))
+    }
 }
 
 // ==================== StoreInspector implementation ====================

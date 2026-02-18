@@ -15,7 +15,10 @@ pub mod network;
 pub use endpoint::{LatticeEndpoint, PublicKey, LATTICE_ALPN};
 pub use error::LatticeNetError;
 pub use framing::{MessageSink, MessageStream};
-pub use lattice_kernel::proto::network::{StatusRequest, StatusResponse, FetchIntentions, IntentionResponse, AuthorTip};
+pub use lattice_kernel::proto::network::{
+    JoinRequest, JoinResponse, 
+    FetchIntentions, IntentionResponse
+};
 pub use network::{NetworkService, SyncResult};
 pub use lattice_model::types::PubKey;
 

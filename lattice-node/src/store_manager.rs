@@ -170,7 +170,6 @@ impl StoreManager {
         }
         
         // Emit events (outside lock)
-        // Emit events (outside lock)
         let _ = self.event_tx.send(NodeEvent::StoreReady { store_id });
         let _ = self.net_tx.send(NetEvent::StoreReady { store_id });
         
@@ -262,6 +261,7 @@ impl StoreManager {
             }
         }
     }
+
     
     /// Shutdown the entire StoreManager: stop all watchers, close all stores, release all handles.
     pub async fn shutdown(&self) {
@@ -489,7 +489,6 @@ impl StoreManager {
         let _ = self.close(&store_id);
     }
 }
-
 
 impl NetworkStoreRegistry for StoreManager {
     fn get_network_store(&self, id: &Uuid) -> Option<NetworkStore> {

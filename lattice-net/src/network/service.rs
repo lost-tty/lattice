@@ -6,12 +6,11 @@
 use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
 use lattice_net_types::{NetworkStore, NodeProviderExt};
 use lattice_model::{NetEvent, Uuid, UserEvent};
-use lattice_kernel::proto::network::{PeerMessage, peer_message, JoinRequest, StatusRequest, AuthorTip};
+use lattice_kernel::proto::network::{JoinRequest, PeerMessage, peer_message};
 use lattice_model::types::PubKey;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
-use std::collections::HashMap;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 
@@ -35,6 +34,7 @@ pub struct NetworkService {
     peer_stores: PeerStoreRegistry,
     sessions: Arc<super::session::SessionTracker>,
     router: Router,
+    global_gossip_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Protocol handler for the main LATTICE_ALPN protocol.
@@ -114,6 +114,7 @@ impl NetworkService {
             peer_stores,
             sessions: sessions.clone(),
             router,
+            global_gossip_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         });
         
         // Subscribe to network events (NetEvent channel)
@@ -122,36 +123,6 @@ impl NetworkService {
             Self::run_net_event_handler(service_clone, event_rx).await;
         });
 
-        // Consume gossip-triggered sync requests (tip divergence)
-        if let Some(mut sync_rx) = gossip_manager.take_sync_request_rx().await {
-            let service_clone = service.clone();
-            tokio::spawn(async move {
-                while let Some((store_id, peer)) = sync_rx.recv().await {
-                    let Ok(iroh_peer) = iroh::PublicKey::from_bytes(&peer.0) else { continue };
-                    tracing::info!(
-                        store_id = %store_id,
-                        peer = %iroh_peer.fmt_short(),
-                        "Gossip tip divergence → triggering sync"
-                    );
-                    let svc = service_clone.clone();
-                    tokio::spawn(async move {
-                        match svc.sync_with_peer_by_id(store_id, iroh_peer, &[]).await {
-                            Ok(r) => tracing::info!(
-                                store_id = %store_id,
-                                entries = r.entries_received,
-                                "Gossip-triggered sync complete"
-                            ),
-                            Err(e) => tracing::debug!(
-                                store_id = %store_id,
-                                error = %e,
-                                "Gossip-triggered sync failed (may retry)"
-                            ),
-                        }
-                    });
-                }
-            });
-        }
-        
         Ok(service)
     }
     
@@ -187,8 +158,14 @@ impl NetworkService {
     
     /// Gracefully shut down the network router
     pub async fn shutdown(&self) -> Result<(), String> {
-        self.gossip_manager.shutdown();
+        self.gossip_manager.shutdown().await;
         self.router.shutdown().await.map_err(|e| e.to_string())
+    }
+
+    /// Set global gossip enabled flag.
+    /// If disabled, new stores will not start gossip.
+    pub fn set_global_gossip_enabled(&self, enabled: bool) {
+        self.global_gossip_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     // ==================== Store Registry ====================
@@ -310,76 +287,6 @@ impl NetworkService {
 
     // ==================== Status Operations ====================
 
-    /// Request status (author_tips) from a single peer
-    pub async fn status_peer(
-        &self, 
-        peer_id: iroh::PublicKey, 
-        store_id: Uuid, 
-        our_tips: Option<Vec<AuthorTip>>,
-    ) -> Result<(u64, Vec<AuthorTip>), LatticeNetError> {
-        let start = std::time::Instant::now();
-        
-        let conn = self.endpoint.connect(peer_id).await
-            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
-        let (send, recv) = conn.open_bi().await
-            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
-        
-        let mut sink = MessageSink::new(send);
-        let mut stream = MessageStream::new(recv);
-        
-        let req = PeerMessage {
-            message: Some(peer_message::Message::StatusRequest(StatusRequest {
-                store_id: store_id.as_bytes().to_vec(),
-                author_tips: our_tips.unwrap_or_default(),
-            })),
-        };
-        sink.send(&req).await?;
-        
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            stream.recv()
-        ).await
-            .map_err(|_| LatticeNetError::Connection("Status request timed out".into()))?
-            ?
-            .ok_or_else(|| LatticeNetError::Connection("No status response".into()))?;
-        
-        let peer_tips = match resp.message {
-            Some(peer_message::Message::StatusResponse(res)) => res.author_tips,
-            _ => return Err(LatticeNetError::Connection("Expected StatusResponse".into())),
-        };
-        
-        let rtt_ms = start.elapsed().as_millis() as u64;
-        Ok((rtt_ms, peer_tips))
-    }
-    
-    /// Request status from all active peers
-    pub async fn status_all(
-        &self, 
-        store_id: Uuid, 
-        our_tips: Option<Vec<AuthorTip>>,
-    ) -> HashMap<iroh::PublicKey, Result<(u64, Vec<AuthorTip>), String>> {
-        use futures_util::StreamExt;
-        
-        let peer_ids = match self.active_peer_ids().await {
-            Ok(ids) => ids,
-            Err(_) => return HashMap::new(),
-        };
-        
-        let futures = peer_ids.into_iter().map(|peer_id| {
-            let tips = our_tips.clone();
-            async move {
-                let result = self.status_peer(peer_id, store_id, tips).await
-                    .map_err(|e| e.to_string());
-                (peer_id, result)
-            }
-        });
-        
-        futures_util::stream::iter(futures)
-            .buffer_unordered(10)
-            .collect()
-            .await
-    }
-
     // ==================== Sync Operations ====================
     
     /// Sync with a peer using symmetric SyncSession protocol
@@ -406,7 +313,7 @@ impl NetworkService {
         let peer_pubkey: PubKey = peer_id.to_lattice();
         
         let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_pubkey);
-        let result = session.run_as_initiator().await?;
+        let result = session.run(None).await?;
         
         sink.finish().await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
         
@@ -629,12 +536,19 @@ impl NetworkService {
         // Mark as registered
         self.peer_stores.write().await.insert(store_id);
         
-        if let Err(e) = self.gossip_manager.setup_for_store(
-            pm, 
-            self.sessions.clone(), 
-            network_store.clone(),
-        ).await {
-            tracing::error!(error = %e, "Gossip setup failed");
+        // Check global flag
+        let global_enabled = self.global_gossip_enabled.load(std::sync::atomic::Ordering::SeqCst);
+        
+        if global_enabled {
+            if let Err(e) = self.gossip_manager.setup_for_store(
+                pm, 
+                self.sessions.clone(), 
+                network_store.clone(),
+            ).await {
+                tracing::error!(error = %e, "Gossip setup failed");
+            }
+        } else {
+            tracing::info!(store_id = %store_id, "Gossip disabled globally");
         }
 
         // Boot Sync: Spawn a task to wait for active peers and trigger initial sync

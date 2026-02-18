@@ -3,10 +3,8 @@
 //! Standalone functions because the orphan rule prevents `From`/`TryFrom`
 //! impls when both sides come from foreign crates (lattice-model, lattice-proto).
 
-use lattice_model::types::{Hash, PubKey, Signature};
+use lattice_model::types::Signature;
 use lattice_model::weaver::{Intention, SignedIntention};
-use lattice_proto::network::AuthorTip;
-use std::collections::HashMap;
 
 // ==================== SignedIntention ====================
 
@@ -33,25 +31,3 @@ pub fn intention_from_proto(proto: &lattice_proto::weaver::SignedIntention) -> R
     })
 }
 
-// ==================== AuthorTips ====================
-
-/// Model → Proto
-pub fn tips_to_proto(tips: &HashMap<PubKey, Hash>) -> Vec<AuthorTip> {
-    tips.iter()
-        .map(|(pk, h)| AuthorTip {
-            author_id: pk.0.to_vec(),
-            tip_hash: h.as_bytes().to_vec(),
-        })
-        .collect()
-}
-
-/// Proto → Model
-pub fn tips_from_proto(tips: &[AuthorTip]) -> HashMap<PubKey, Hash> {
-    tips.iter()
-        .filter_map(|t| {
-            let pk = PubKey::try_from(t.author_id.as_slice()).ok()?;
-            let h = Hash::try_from(t.tip_hash.as_slice()).ok()?;
-            Some((pk, h))
-        })
-        .collect()
-}

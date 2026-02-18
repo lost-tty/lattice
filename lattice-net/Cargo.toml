@@ -9,6 +9,7 @@ license.workspace = true
 lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
 lattice-net-types = { workspace = true }
+lattice-sync = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
 prost = { workspace = true }

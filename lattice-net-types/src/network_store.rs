@@ -12,12 +12,14 @@ use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use lattice_sync::RangeStore;
+use async_trait::async_trait;
 
 /// Network layer's view of a replicated store.
 /// 
 /// Combines a SyncProvider (data access) with a PeerProvider (authorization).
 #[derive(Clone)]
-pub struct NetworkStore {
+    pub struct NetworkStore {
     id: Uuid,
     sync: Arc<dyn SyncProvider>,
     peer: Arc<dyn PeerProvider>,
@@ -62,6 +64,28 @@ impl NetworkStore {
         self.sync.subscribe_intentions()
     }
     
+    // --- Range Queries ---
+
+    pub async fn count_range(&self, start: &Hash, end: &Hash) -> Result<u64, StateError> {
+        self.sync.count_range(start, end).await
+            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    }
+
+    pub async fn fingerprint_range(&self, start: &Hash, end: &Hash) -> Result<Hash, StateError> {
+        self.sync.fingerprint_range(start, end).await
+            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    }
+
+    pub async fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, StateError> {
+        self.sync.hashes_in_range(start, end).await
+            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    }
+
+    pub async fn table_fingerprint(&self) -> Result<Hash, StateError> {
+        self.sync.table_fingerprint().await
+            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    }
+    
     // ==================== PeerProvider delegation ====================
     
     pub fn can_connect(&self, peer: &PubKey) -> bool {
@@ -74,6 +98,27 @@ impl NetworkStore {
     
     pub fn list_acceptable_authors(&self) -> Vec<PubKey> {
         self.peer.list_acceptable_authors()
+    }
+}
+
+#[async_trait]
+impl RangeStore for NetworkStore {
+    type Error = StateError;
+
+    async fn count_range(&self, start: &Hash, end: &Hash) -> Result<u64, Self::Error> {
+        self.count_range(start, end).await
+    }
+
+    async fn fingerprint_range(&self, start: &Hash, end: &Hash) -> Result<Hash, Self::Error> {
+        self.fingerprint_range(start, end).await
+    }
+
+    async fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, Self::Error> {
+        self.hashes_in_range(start, end).await
+    }
+
+    async fn table_fingerprint(&self) -> Result<Hash, Self::Error> {
+        self.table_fingerprint().await
     }
 }
 

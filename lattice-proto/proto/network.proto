@@ -29,43 +29,64 @@ message PeerMessage {
   oneof message {
     JoinRequest join_request = 1;
     JoinResponse join_response = 2;
-    StatusRequest status_request = 3;
-    StatusResponse status_response = 4;
-    FetchIntentions fetch_intentions = 5;
-    IntentionResponse intention_response = 6;
+    FetchIntentions fetch_intentions = 3;
+    IntentionResponse intention_response = 4;
+    ReconcilePayload reconcile = 5;
   }
 }
 
-// 3. Status Protocol — exchange author tips (PubKey → latest intention Hash)
-message AuthorTip {
-  bytes author_id = 1;  // Ed25519 public key (32 bytes)
-  bytes tip_hash = 2;   // Hash of latest intention from this author (32 bytes)
-}
+// 3. Status Protocol — REMOVED (Legacy)
 
-message StatusRequest {
-  bytes store_id = 1;                  // Store UUID (16 bytes)
-  repeated AuthorTip author_tips = 2;  // Sender's current author tips
-}
-
-message StatusResponse {
-  bytes store_id = 1;                  // Store UUID (16 bytes)
-  repeated AuthorTip author_tips = 2;  // Responder's current author tips
-}
-
-// 4. Fetch Protocol — request intentions by content hash
+// 4. Fetch Intentions — used to retrieve missing data
 message FetchIntentions {
-  bytes store_id = 1;              // Store UUID (16 bytes)
-  repeated bytes hashes = 2;      // Intention content hashes to fetch (32 bytes each)
+  bytes store_id = 1;
+  repeated bytes hashes = 2;   // List of content hashes to fetch
 }
 
 message IntentionResponse {
-  bytes store_id = 1;                                       // Store UUID (16 bytes)
-  bool done = 2;                                            // true = last chunk
-  repeated lattice.weaver.SignedIntention intentions = 3;   // Chunk of signed intentions
+  bytes store_id = 1;
+  bool done = 2;               // True if this is the last batch
+  repeated lattice.weaver.SignedIntention intentions = 3;
 }
 
-// 5. Gossip Protocol
+// 5. Gossip Protocol - propagates new items eagerly
 message GossipMessage {
-  optional lattice.weaver.SignedIntention intention = 1;  // Intention broadcast (if any)
-  repeated AuthorTip sender_tips = 2;                     // Sender's author tips (piggybacked)
+  bytes store_id = 1;
+  oneof content {
+    lattice.weaver.SignedIntention intention = 2;
+  }
+}
+
+// 6. Reconciliation Protocol (Negentropy)
+message ReconcilePayload {
+  bytes store_id = 1;
+  ReconcileMessage message = 2;
+}
+
+message ReconcileMessage {
+  oneof content {
+    RangeFingerprint range_fingerprint = 1;
+    RangeItemsRequest range_items_request = 2;
+    RangeItemsReply range_items_reply = 3;
+    bool done = 4;
+  }
+}
+
+message RangeFingerprint {
+  bytes start = 1;
+  bytes end = 2;
+  bytes fingerprint = 3;
+  uint64 count = 4;
+}
+
+message RangeItemsRequest {
+  bytes start = 1;
+  bytes end = 2;
+  repeated bytes hashes = 3;
+}
+
+message RangeItemsReply {
+  bytes start = 1;
+  bytes end = 2;
+  repeated bytes hashes = 3;
 }
