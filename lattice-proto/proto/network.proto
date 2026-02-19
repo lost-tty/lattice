@@ -32,7 +32,23 @@ message PeerMessage {
     IntentionResponse intention_response = 4;
     ReconcilePayload reconcile = 5;
     FetchChain fetch_chain = 6;
+    BootstrapRequest bootstrap_request = 7;
+    BootstrapResponse bootstrap_response = 8;
   }
+}
+
+// 7. Bootstrap (Clone) Protocol
+message BootstrapRequest {
+  bytes store_id = 1;      // Store UUID
+  bytes start_hash = 2;    // Hash of the last known witness entry (or all-zeros for start)
+  uint32 limit = 3;        // Max items to fetch
+}
+
+message BootstrapResponse {
+  bytes store_id = 1;
+  repeated lattice.weaver.WitnessRecord witness_records = 2;
+  repeated lattice.weaver.SignedIntention intentions = 3;
+  bool done = 4;
 }
 
 // 4. Fetch Intentions — used to retrieve missing data

@@ -6,11 +6,13 @@
 use crate::{MessageSink, MessageStream, LatticeNetError};
 use super::service::PeerStoreRegistry;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore, NodeProviderExt};
-use lattice_kernel::proto::network::{peer_message, JoinResponse, PeerMessage, FetchIntentions, IntentionResponse};
+use lattice_kernel::proto::network::{peer_message, JoinResponse, PeerMessage, FetchIntentions, IntentionResponse, BootstrapRequest, BootstrapResponse};
 use lattice_kernel::weaver::convert::{intention_to_proto};
-use lattice_model::{Uuid, types::PubKey};
+use lattice_model::{Uuid, types::{PubKey, Hash}};
+use lattice_kernel::proto::weaver::{WitnessRecord, WitnessContent};
 use iroh::endpoint::Connection;
 use std::sync::Arc;
+use futures_util::StreamExt;
 
 /// Helper to lookup store from registry
 pub fn lookup_store(registry: &dyn NetworkStoreRegistry, store_id: Uuid) -> Result<NetworkStore, LatticeNetError> {
@@ -24,6 +26,7 @@ pub fn lookup_store(registry: &dyn NetworkStoreRegistry, store_id: Uuid) -> Resu
 pub async fn handle_connection(
     provider: Arc<dyn NodeProviderExt>,
     peer_stores: PeerStoreRegistry,
+    sessions: Arc<super::session::SessionTracker>,
     conn: Connection,
 ) -> Result<(), LatticeNetError> {
     use crate::ToLattice;
@@ -32,6 +35,7 @@ pub async fn handle_connection(
     tracing::debug!("[Incoming] {} (ALPN: {})", remote_id.fmt_short(), String::from_utf8_lossy(conn.alpn()));
     
     let remote_pubkey: PubKey = remote_id.to_lattice();
+    let _ = sessions.mark_online(remote_pubkey);
 
     loop {
         match conn.accept_bi().await {
@@ -93,6 +97,9 @@ async fn handle_stream(
             }
             Some(peer_message::Message::FetchChain(req)) => {
                 handle_fetch_chain(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
+            }
+            Some(peer_message::Message::BootstrapRequest(req)) => {
+                handle_bootstrap_request(provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
             }
             _ => {
                 tracing::debug!("Unexpected message type");
@@ -165,8 +172,6 @@ async fn handle_fetch_intentions(
     req: FetchIntentions,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
-    use lattice_model::types::Hash;
-
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
@@ -212,8 +217,6 @@ async fn handle_fetch_chain(
     req: lattice_kernel::proto::network::FetchChain,
     sink: &mut MessageSink,
 ) -> Result<(), LatticeNetError> {
-    use lattice_model::types::Hash;
-
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
@@ -260,5 +263,116 @@ async fn handle_fetch_chain(
     };
     sink.send(&msg).await?;
 
+    Ok(())
+}
+
+/// Handle a BootstrapRequest - streams witness log and intentions
+async fn handle_bootstrap_request(
+    provider: &dyn NodeProviderExt,
+    remote_pubkey: &PubKey,
+    req: BootstrapRequest,
+    sink: &mut MessageSink,
+) -> Result<(), LatticeNetError> {
+    let store_id = Uuid::from_slice(&req.store_id)
+        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
+    
+    let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
+    
+    if !authorized_store.can_connect(remote_pubkey) {
+        return Err(LatticeNetError::Connection(format!(
+            "Peer {} not authorized", hex::encode(remote_pubkey)
+        )));
+    };
+
+    let start_hash = if req.start_hash.is_empty() {
+        None
+    } else {
+        let h = Hash::try_from(req.start_hash.as_slice())
+            .map_err(|_| LatticeNetError::Connection("Invalid start_hash".into()))?;
+        if h == Hash::ZERO { None } else { Some(h) }
+    };
+
+    // Use a reasonable cap for the total request, but batch responses to control memory
+    let max_limit = if req.limit == 0 { 1000 } else { req.limit as usize };
+    let max_limit = std::cmp::min(max_limit, 10_000); 
+
+    let mut stream = authorized_store.scan_witness_log(start_hash, max_limit);
+    
+    let mut witness_batch = Vec::new();
+    let mut intention_hashes = Vec::new();
+    let mut total_processed = 0;
+    const BATCH_SIZE: usize = 100;
+
+    while let Some(result) = stream.next().await {
+        let entry = result.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+        
+        witness_batch.push(WitnessRecord {
+            content: entry.content.clone(),
+            signature: entry.signature,
+        });
+        
+        use prost::Message;
+        let witness_content = WitnessContent::decode(entry.content.as_slice())
+            .map_err(|e| LatticeNetError::Sync(format!("Failed to decode witness content: {}", e)))?;
+            
+        let intention_hash = Hash::try_from(witness_content.intention_hash.as_slice())
+             .map_err(|_| LatticeNetError::Sync("Invalid intention hash in witness record".into()))?;
+             
+        intention_hashes.push(intention_hash);
+        total_processed += 1;
+
+        if witness_batch.len() >= BATCH_SIZE {
+            // Flush partial batch
+            send_bootstrap_batch(&authorized_store, sink, &req.store_id, &witness_batch, &intention_hashes, false).await?;
+            witness_batch.clear();
+            intention_hashes.clear();
+        }
+    }
+
+    // Send final batch (or empty done signal)
+    // If we processed fewer items than requested, we are at the end of the log => done=true.
+    // If we hit the limit, we assumption pagination continues => done=false.
+    let is_done = total_processed < max_limit;
+    
+    if !witness_batch.is_empty() {
+        send_bootstrap_batch(&authorized_store, sink, &req.store_id, &witness_batch, &intention_hashes, is_done).await?;
+    } else if is_done {
+        // Send empty message to signal completion if previous batch was full but we are actually done
+        send_bootstrap_batch(&authorized_store, sink, &req.store_id, &[], &[], true).await?;
+    }
+
+    Ok(())
+}
+
+async fn send_bootstrap_batch(
+    store: &NetworkStore,
+    sink: &mut MessageSink,
+    store_id_bytes: &[u8],
+    witness_records: &[WitnessRecord],
+    intention_hashes: &[Hash],
+    done: bool,
+) -> Result<(), LatticeNetError> {
+    if witness_records.is_empty() && !done {
+        return Ok(());
+    }
+
+    let intentions = store.fetch_intentions(intention_hashes.to_vec()).await
+        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+    
+    let proto_intentions: Vec<_> = intentions
+        .iter()
+        .map(intention_to_proto)
+        .collect();
+
+    let resp = PeerMessage {
+        message: Some(peer_message::Message::BootstrapResponse(BootstrapResponse {
+            store_id: store_id_bytes.to_vec(),
+            witness_records: witness_records.to_vec(),
+            intentions: proto_intentions,
+            done,
+        })),
+    };
+
+    sink.send(&resp).await?;
     Ok(())
 }

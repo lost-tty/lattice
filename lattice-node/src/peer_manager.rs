@@ -12,6 +12,7 @@ use lattice_model::{PeerInfo, PubKey, SystemEvent, InviteStatus, Uuid};
 use lattice_systemstore::{SystemStore, SystemBatch};
 use rand::RngCore;
 use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
 use tokio::sync::broadcast;
 use tracing::warn;
 use futures_util::StreamExt;
@@ -112,6 +113,8 @@ pub struct PeerManager {
     peer_event_tx: broadcast::Sender<PeerEvent>,
     /// Handle to the background watcher task
     watcher_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Ephemeral peers trusted for bootstrap (only in memory)
+    bootstrap_peers: Mutex<std::collections::HashSet<PubKey>>,
 }
 
 impl PeerManager {
@@ -128,6 +131,7 @@ impl PeerManager {
             store,
             peer_event_tx,
             watcher_task: Mutex::new(None),
+            bootstrap_peers: Mutex::new(HashSet::new()),
         });
         
         manager.start_watching().await?;
@@ -198,10 +202,31 @@ impl PeerManager {
 
     /// Check if author's entries are acceptable
     fn can_accept_author(&self, author: &PubKey) -> bool {
+        // Also trust the ephemeral bootstrap peers
+        if let Ok(guard) = self.bootstrap_peers.lock() {
+            if guard.contains(author) {
+                return true;
+            }
+        }
+
         matches!(
             self.get_peer_status(author),
             Some(PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked)
         )
+    }
+
+    /// Add an ephemeral bootstrap peer that is trusted for sync but not persisted.
+    pub fn add_bootstrap_peer(&self, peer: PubKey) {
+        if let Ok(mut guard) = self.bootstrap_peers.lock() {
+            guard.insert(peer);
+        }
+    }
+
+    /// Clear all ephemeral bootstrap peers.
+    pub fn reset_bootstrap_peers(&self) {
+        if let Ok(mut guard) = self.bootstrap_peers.lock() {
+            guard.clear();
+        }
     }
 
     // ==================== Write Operations ====================
@@ -281,12 +306,26 @@ impl PeerProvider for PeerManager {
     }
     
     fn list_acceptable_authors(&self) -> Vec<PubKey> {
-        self.store.get_peers()
+        let mut authors: Vec<PubKey> = self.store.get_peers()
             .unwrap_or_default()
             .into_iter()
             .filter(|p| matches!(p.status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
             .map(|p| p.pubkey)
-            .collect()
+            .collect();
+            
+        if let Ok(guard) = self.bootstrap_peers.lock() {
+            for peer in guard.iter() {
+                if !authors.contains(peer) {
+                    authors.push(*peer);
+                }
+            }
+        }
+        
+        authors
+    }
+    
+    fn reset_bootstrap_peers(&self) {
+        self.reset_bootstrap_peers()
     }
     
     fn subscribe_peer_events(&self) -> lattice_model::PeerEventStream {

@@ -9,6 +9,8 @@ use crate::store::{StateError, IngestResult};
 use lattice_model::types::Hash;
 use lattice_model::types::PubKey;
 use lattice_model::weaver::{Condition, FloatingIntention, Intention, SignedIntention, WitnessEntry};
+use lattice_proto::weaver::WitnessRecord;
+use ed25519_dalek::VerifyingKey;
 
 use lattice_model::{NodeIdentity, StateMachine};
 use uuid::Uuid;
@@ -26,6 +28,13 @@ pub enum ReplicationControllerCmd {
     IngestBatch {
         intentions: Vec<SignedIntention>,
         resp: oneshot::Sender<Result<IngestResult, StateError>>,
+    },
+    /// Ingest a batch of witness records and intentions (Bootstrap/Clone)
+    IngestWitnessedBatch {
+        witness_records: Vec<WitnessRecord>,
+        intentions: Vec<SignedIntention>,
+        peer_id: PubKey,
+        resp: oneshot::Sender<Result<(), StateError>>,
     },
     /// Fetch intentions by hash (for sync)
     FetchIntentions {
@@ -169,6 +178,18 @@ impl<S: StateMachine> ReplicationController<S> {
                 });
                 let _ = resp.send(result);
             }
+            ReplicationControllerCmd::IngestWitnessedBatch { witness_records, intentions, peer_id, resp } => {
+                let store_arc = self.intention_store.clone();
+                let mut store = store_arc.write().expect("Lock poisoned");
+
+                let result = self.apply_witnessed_batch(&mut store, witness_records, intentions, peer_id)
+                    .map_err(|e| match e {
+                        ReplicationControllerError::State(se) => se,
+                        ReplicationControllerError::IntentionStore(ie) => StateError::Backend(ie.to_string()),
+                    });
+
+                let _ = resp.send(result);
+            }
             ReplicationControllerCmd::FetchIntentions { hashes, resp } => {
                 let store = self.intention_store.read().expect("Lock poisoned");
                 let result = hashes
@@ -267,6 +288,45 @@ impl<S: StateMachine> ReplicationController<S> {
         let _ = self.intention_tx.send(signed);
 
         Ok(hash)
+    }
+
+    /// Ingest a batch of witness records and intentions (Bootstrap/Clone)
+    fn apply_witnessed_batch(
+        &mut self,
+        store: &mut IntentionStore,
+        witness_records: Vec<WitnessRecord>,
+        intentions: Vec<SignedIntention>,
+        peer_id: PubKey,
+    ) -> Result<(), ReplicationControllerError> {
+       // 1. Create HashMap of intentions
+       let mut intention_map = std::collections::HashMap::new();
+       for intention in intentions {
+           intention_map.insert(intention.intention.hash(), intention);
+       }
+       
+       let verifying_key = VerifyingKey::from_bytes(peer_id.as_bytes())
+            .map_err(|_| ReplicationControllerError::State(StateError::Unauthorized("Invalid peer public key".to_string())))?;
+
+       // 2. Iterate witness records
+       for record in witness_records {
+           // Verify WitnessRecord signature (signed by bootstrap peer)
+           // Use helper that handles content hashing correctly
+           let content = crate::weaver::verify_witness(&record, &verifying_key)
+               .map_err(|e| ReplicationControllerError::State(StateError::Unauthorized(format!("Invalid witness signature: {}", e))))?;
+           
+           let intention_hash = Hash::try_from(content.intention_hash.as_slice())
+                .map_err(|_| ReplicationControllerError::State(StateError::Backend("Invalid intention hash in witness".to_string())))?;
+
+           // 3. Find and Apply Intention
+           if let Some(intention) = intention_map.get(&intention_hash) {
+               store.insert(intention)?;
+               self.apply_intention_to_state(store, intention)?;
+           } else {
+               // Missing intention for a witness record implies incomplete batch or sync error
+               return Err(ReplicationControllerError::State(StateError::Backend(format!("Missing intention for witness {}", intention_hash))));
+           }
+       }
+       Ok(())
     }
 
     /// Ingest a batch of signed intentions from network (replacing single ingest)
@@ -442,6 +502,7 @@ impl<S: StateMachine> ReplicationController<S> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+
         let _ = store.witness(
             &intention,
             wall_time,

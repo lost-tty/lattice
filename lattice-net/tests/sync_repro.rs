@@ -4,6 +4,7 @@ use lattice_kvstore_client::KvStoreExt;
 use lattice_model::types::PubKey;
 use std::sync::Arc;
 use tokio::time::Duration;
+use futures_util::StreamExt;
 
 /// Helper to create a temp data dir for testing
 fn temp_data_dir(name: &str) -> lattice_node::DataDir {
@@ -41,6 +42,50 @@ async fn join_store_via_event(node: &Node, peer_pubkey: PubKey, store_id: Uuid, 
     }).await {
         Ok(res) => res,
         Err(_) => None,
+    }
+}
+
+async fn wait_for_peer(node: &Node, store_id: Uuid, peer: PubKey) {
+    let handle = node.store_manager().get_handle(&store_id)
+        .expect("Store not found for waiting");
+    let sys = handle.as_system()
+        .expect("Store does not support SystemStore");
+
+    // 1. Subscribe first to avoid missing events
+    let mut stream = sys.subscribe_events().expect("subscribe failed");
+
+    // 2. Check immediate status
+    if let Ok(Some(info)) = sys.get_peer(&peer) {
+        if matches!(info.status, lattice_model::PeerStatus::Active) {
+            return;
+        }
+    }
+
+    // 3. Wait for event
+    let timeout = tokio::time::Duration::from_secs(1);
+    tracing::info!("Waiting for peer {} to become Active in {}", peer, store_id);
+    
+    let wait = async {
+        while let Some(res) = stream.next().await {
+            match res {
+                Ok(lattice_model::SystemEvent::PeerUpdated(info)) => {
+                    if info.pubkey == peer && matches!(info.status, lattice_model::PeerStatus::Active) {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+    };
+
+    if tokio::time::timeout(timeout, wait).await.is_err() {
+         // One last check
+         if let Ok(Some(info)) = sys.get_peer(&peer) {
+            if matches!(info.status, lattice_model::PeerStatus::Active) {
+                return;
+            }
+        }
+        panic!("Timeout waiting for peer {} to become Active in store {}", peer, store_id);
     }
 }
 
@@ -95,7 +140,14 @@ async fn test_one_way_sync() {
 
 #[tokio::test]
 async fn test_bidirectional_sync() {
-    let (_node_a, _node_b, server_a, server_b, store_a, store_b) = setup_pair("bi_a", "bi_b").await;
+    let (node_a, node_b, server_a, server_b, store_a, store_b) = setup_pair("bi_a", "bi_b").await;
+
+    // Wait for mutual peering to be established/persisted
+    let peer_a_key = PubKey::from(*server_a.endpoint().public_key().as_bytes());
+    let peer_b_key = PubKey::from(*server_b.endpoint().public_key().as_bytes());
+    
+    wait_for_peer(&node_a, store_a.id(), peer_b_key).await;
+    wait_for_peer(&node_b, store_b.id(), peer_a_key).await;
 
     // A has Item X
     store_a.put(b"/a/x".to_vec(), b"val_x".to_vec()).await.expect("put a");
@@ -109,7 +161,7 @@ async fn test_bidirectional_sync() {
 
     tracing::info!("Starting bidirectional sync B -> A");
     server_b.sync_with_peer_by_id(store_id, peer_a, &[]).await.expect("sync");
-
+    
     // Verification
     // B should have A's item (Pull worked)
     assert_eq!(store_b.get(b"/a/x".to_vec()).await.unwrap(), Some(b"val_x".to_vec()), "B missing A's data");

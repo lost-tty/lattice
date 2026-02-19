@@ -2,12 +2,6 @@
 
 **Status:** Milestone 10 (Fractal Stores) complete. Current focus: M11 (Weaver Protocol).
 
-This document outlines the development plan for Lattice.
-- **Completed M1-M10:** Core RSM platform, Handle-Less Architecture, Typed API, Fractal Store Model.
-- **Completed M11A-B:** Intention data model, IntentionStore, floating intentions, witness records.
-- **Current Focus (M11C):** Negentropy sync.
-- **Upcoming:** Network Abstraction & Simulation (M12), CAS (M13).
-
 ## Completed
 
 | Milestone        | Summary                                                                                                                                       |
@@ -68,10 +62,16 @@ This document outlines the development plan for Lattice.
 
 ### 11D: Bootstrap Sync (Clone)
 - [x] Remove `authorized_peers` from `JoinRequest` and `JoinResponse`
-- [ ] **Witness Log Transfer on Join:** After `JoinResponse`, host streams its signed witness log + referenced intentions to the new peer. New peer verifies the host's witness chain signature, then re-witnesses each intention with its own key.
-- [ ] **Silent Ingestion Mode:** Bootstrap ingestion must **not** fire watchers, gossip broadcasts, or event subscriptions. This is a "clone" operation — the store is being seeded, not updated. Normal event flow resumes after bootstrap completes.
-- [ ] **Protocol Split:** Bootstrap (stream full history) for fresh peers; Negentropy for incremental sync between established peers.
-- [ ] **Post-Bootstrap Full Sync:** After bootstrap clone completes, run a Negentropy `sync_all` to catch any data the bootstrap peer was missing.
+- [x] Add `BootstrapRequest` and `BootstrapResponse` messages (streaming `WitnessRecord`)
+- [x] **Join using Bootstrap Protocol:**
+    - Request: `BootstrapRequest { store_id, start_hash: 0, limit: N }`
+    - Response: Stream of `WitnessRecord`s
+    - Action: Verify signatures, re-witness, and ingest as local history.
+- [x] **Silent Ingestion Mode:** Bootstrap ingestion must **not** fire watchers or gossip.
+- [x] **Post-Bootstrap Full Sync:** Run Negentropy after bootstrap to catch up tip.
+- [ ] **Recursive Store Bootstrapping:**
+    - Mechanism to discover and bootstrap child stores (e.g., `RecursiveWatcher` integration during bootstrap).
+    - `BootstrapResponse` includes list of child store IDs?
 
 ---
 
@@ -93,32 +93,59 @@ This document outlines the development plan for Lattice.
 
 ---
 
-## Milestone 13: Log Lifecycle & Pruning
+## Milestone 13: Intelligent Reconciliation (The "Meet" Operator)
+
+**Goal:** Enable the kernel to perform active reconciliation. This milestone introduces the 'Meet' operator and graph traversal primitives to identify, analyze, and merge divergent state histories.
+
+### 13A: Kernel Primitives
+To support the Meet operator, the kernel must expose efficient graph traversal queries.
+- [ ] **Store Trait Abstraction:** Decouple `StateMachine` from `redb`. Introduce a generic `Store` trait (get/put/del) that can be implemented by both `RedbStore` (disk) and `MemoryStore` (RAM). This allows replaying history into an ephemeral `MemoryStore` for conflict resolution without persisting changes.
+- [ ] **LCA Index:** Maintain an efficient index (likely `Hash -> (Height, Parents)`) to avoid O(N) scans. "Height" allows fast-forwarding the deeper node before scanning for intersection.
+- [ ] **Meet Query (`find_lca`):** `fn find_lca(hash_a, hash_b) -> Result<Hash>`
+- [ ] **Diff Query (`get_path`):** `fn get_path(from, to) -> Result<Vec<Intention>>`
+    - Returns the list of operations to replay from the Meet (common ancestor) to the Head.
+    - Usage: `get_path(LCA, Head_A)` yields Alice's local changes; `get_path(LCA, Head_B)` yields Bob's.
+
+### 13B: The "Meet" Operator (Core Logic)
+- [ ] **Computation:** When two divergent Heads (A and B) are detected, use `find_lca` to locate M.
+- [ ] **Delta Extraction:** Use `get_path` to compute ΔA (`M->A`) and ΔB (`M->B`).
+- [ ] **3-Way Merge:** Attempt to apply both ΔA and ΔB to M.
+    - **Non-Conflicting:** If they touch different fields, both are applied. The DAG collapses from 2 heads back to 1.
+    - **Conflicting:** If they touch the exact same field, the conflict is surfaced to the user.
+
+### 13C: Store Integration (`lattice-kvstore`)
+- [ ] **Patch/Delta Operations:** Introduce operations that describe mutations (e.g., "increment field X", "set field Y") instead of simple overwrites.
+- [ ] **Read-Time Merge:** Update `get()` to check for conflicting Heads and invoke meet logic dynamically.
+- [ ] **Snapshotting:** Cache values at specific "Checkpoints" (common ancestors) so calculating the state at M doesn't require replaying the entire history.
+
+---
+
+## Milestone 14: Log Lifecycle & Pruning
 
 **Goal:** Enable long-running nodes to manage log growth through snapshots, pruning, and finality checkpoints.
 
 > **See:** [DAG-Based Pruning Architecture](pruning.md) for details on Ancestry-based metrics and Log Rewriting.
 
-### 13A: Snapshotting
+### 14A: Snapshotting
 - [ ] `state.snapshot()` when log grows large
 - [ ] Store snapshots in `snapshot.db`
 - [ ] Bootstrap new peers from snapshot instead of full log replay
 
-### 13B: Waterlevel Pruning
+### 14B: Waterlevel Pruning
 - [ ] Calculate stability frontier (min seq acknowledged by all peers)
 - [ ] `truncate_prefix(seq)` for old log entries
 - [ ] Preserve entries newer than frontier
 
-### 13C: Checkpointing / Finality
+### 14C: Checkpointing / Finality
 - [ ] Periodically finalize state hash (protect against "Deep History Attacks")
 - [ ] Signed checkpoint entries in sigchain
 - [ ] Nodes reject entries that contradict finalized checkpoints
 
-### 13D: Hash Index Optimization ✅
+### 14D: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
 - [x] Support 100M+ entries without excessive RAM
 
-### 13E: Advanced Sync Optimization (Future)
+### 14E: Advanced Sync Optimization (Future)
 - [ ] **Persistent Merkle Index / Range Accumulator:**
   - Avoid O(N) scans for range fingerprints (currently linear)
   - Pre-compute internal node hashes in a B-Tree or Merkle Tree structure
@@ -128,76 +155,76 @@ This document outlines the development plan for Lattice.
 
 ---
 
-## Milestone 14: Content-Addressable Store (CAS)
+## Milestone 15: Content-Addressable Store (CAS)
 
 **Goal:** Provide a high-performance, node-local "Dumb Pipe" for content storage. Replication and policy are handled separately by a "Smart Manager". Requires M11 (Weaver sync) and M12 (simulation harness for validation).
 
-### 14A: Low-Level Storage (`lattice-cas`)
+### 15A: Low-Level Storage (`lattice-cas`)
 - [ ] `CasBackend` trait interface (`fs`, `block`, `s3`)
 - [ ] Isolation: Mandatory `store_id` for all ops
 - [ ] `redb` metadata index: ARC (Adaptive Replacement Cache), RefCounting
 - [ ] `FsBackend`: Sharded local disk blob storage
 
-### 14B: Replication & Safety (`CasManager`)
+### 15B: Replication & Safety (`CasManager`)
 - [ ] `ReplicationPolicy` trait: `crush_map()` and `replication_factor()` from System Table
 - [ ] `StateMachine::referenced_blobs()`: Pinning via State declarations
 - [ ] Pull-based reconciler: `ensure(cid)`, `calculate_duties()`, `gc()` with Soft Handoff
 
-### 14C: Wasm & FUSE Integration
+### 15C: Wasm & FUSE Integration
 - [ ] **Wasm**: Host Handles (avoid linear memory copy)
 - [ ] **FUSE**: `get_range` (random access) and `put_batch` (buffered write)
 - [ ] **Encryption**: Store-side encryption (client responsibility)
 
-### 14D: CLI & Observability
+### 15D: CLI & Observability
 - [ ] `cas put`, `cas get`, `cas pin`, `cas status`
 
 ---
 
-## Milestone 15: Lattice File Sync MVP
+## Milestone 16: Lattice File Sync MVP
 
-**Goal:** A functioning file sync tool that requires M11 (Sync) and M14 (CAS).
+**Goal:** A functioning file sync tool that requires M11 (Sync) and M15 (CAS).
 
-### 15A: Filesystem Logic
+### 16A: Filesystem Logic
 - [ ] Define `DirEntry` schema: `{ name, mode, cid, modified_at }` in KV Store
 - [ ] Map file operations (`write`, `mkdir`, `rename`) to KV Ops
 
-### 15B: FUSE Interface
+### 16B: FUSE Interface
 - [ ] Write `lattice-fs` using the `fuser` crate
 - [ ] Mount the Store as a folder on Linux/macOS
 - [ ] **Demo:** `cp photo.jpg ~/lattice/` → Syncs to second node
 
 ---
 
-## Milestone 16: Wasm Runtime
+## Milestone 17: Wasm Runtime
 
 **Goal:** Replace hardcoded state machine logic with dynamic Wasm modules.
 
-### 16A: Wasm Integration
+### 17A: Wasm Integration
 - [ ] Integrate `wasmtime` into the Kernel
 - [ ] Define minimal Host ABI: `kv_get`, `kv_set`, `log_append`, `get_head`
 - [ ] Replace hardcoded `KvStore::apply()` with `WasmRuntime::call_apply()`
 - [ ] Map Host Functions to `StorageBackend` calls (M9 prerequisite)
 
-### 16B: Data Structures & Verification
+### 17B: Data Structures & Verification
 - [ ] Finalize `Entry`, `SignedEntry`, `Hash`, `PubKey` structs for Wasm boundary
 - [ ] Wasm-side SigChain verification (optional, for paranoid clients)
 - **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
 
 ---
 
-## Milestone 17: Embedded Proof ("Lattice Nano")
+## Milestone 18: Embedded Proof ("Lattice Nano")
 
 **Goal:** Running the Kernel on the RP2350.
 
 > Because CLI is already separated from Daemon (M7) and storage is abstracted (M9), only the Daemon needs porting.
 > **Note:** Requires substantial refactoring of `lattice-kernel` to support `no_std`.
 
-### 17A: `no_std` Refactoring
+### 18A: `no_std` Refactoring
 - [ ] Split `lattice-kernel` into `core` (logic) and `std` (IO)
 - [ ] Replace `wasmtime` (JIT) with `wasmi` (Interpreter) for embedded target
 - [ ] Port storage layer to `sequential-storage` (Flash) via `StorageBackend`
 
-### 17B: The "Continuity" Demo
+### 18B: The "Continuity" Demo
 - [ ] Build physical USB stick prototype
 - [ ] Implement BLE/Serial transport
 - **The Reveal:** Sync a file from Laptop → Stick → Phone without Internet
@@ -214,6 +241,7 @@ This document outlines the development plan for Lattice.
 - [ ] **Payload Validation Strategy**: Decide where semantic validation occurs and what happens on failure. Options: build-time only, versioned rules, entry replacement, or separate chain/payload advancement. See `test_rejected_entry_breaks_chain` in `lattice-kvstore/src/kv.rs`.
 - [ ] **Signer Trait**: Introduce a `Signer` trait (sign hash → signature) to avoid passing raw `SigningKey` through the stack. Affects intention creation (`SignedIntention::sign`), witness signing (`WitnessRecord::sign`), and the M11 migration path.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
+- [ ] **Sync Trigger & Bootstrap Controller Review**: Review how and when sync is triggered (currently ad-hoc in `active_peer_ids` or `complete_join_handshake`). Consider introducing a dedicated `BootstrapController` to manage initial sync state, retry logic, and transition to steady-state gossip/sync.
 
 ---
 
@@ -261,3 +289,9 @@ This document outlines the development plan for Lattice.
 - **USB Gadget Node**: A dedicated hardware device (e.g., Pi Zero, RISC-V dongle) that plugs into a host and enumerates as a USB Ethernet gadget. It runs a standalone Lattice Node and peers with the host over the virtual network interface. This provides a "smart pluggable storage" experience—physically pluggable storage that syncs via standard Lattice protocols, decoupled from the host's filesystem limitations.
 - **Blind Ops / Cryptographic Revealing** (research): Encrypted intention payloads revealed only to nodes possessing specific keys (Convergent Encryption or ZK proofs). Enables selective disclosure within atomic transactions.
 - **S-Expression Intention View**: Enhance `store history` and `store debug` to optionally display Intentions as S-expressions, providing a structured, verifiable view of the underlying data for debugging.
+- **Async/Task-Based Bootstrapping**:
+    - Treat bootstrapping as a persistent state/task (`StoreState::Bootstrapping`).
+    - Retry indefinitely if peers are unavailable.
+    - Recover from "not yet bootstrapped" state on restart.
+    - Inviter sends list of potential bootstrap peers in `JoinResponse`.
+    - Node can bootstrap from any peer in the list, not just the inviter.

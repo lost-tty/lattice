@@ -28,6 +28,7 @@ ed25519-dalek.workspace = true
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 lattice-kvstore = { workspace = true }
 lattice-kvstore-client = { workspace = true }
 lattice-logstore = { workspace = true }

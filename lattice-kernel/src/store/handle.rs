@@ -7,6 +7,8 @@ use crate::weaver::intention_store::IntentionStore;
 use lattice_model::Uuid;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{Condition, FloatingIntention, SignedIntention, WitnessEntry};
+use lattice_proto::weaver::WitnessContent;
+use prost::Message;
 
 use lattice_model::NodeIdentity;
 use lattice_model::{StateMachine, Op};
@@ -298,6 +300,33 @@ impl<S: StateMachine> Store<S> {
             .map_err(StoreError::Store)
     }
 
+    /// Ingest a batch of witness records and intentions (Bootstrap/Clone)
+    pub async fn ingest_witness_batch<W, I>(
+        &self, 
+        witness_records: W,
+        intentions: I,
+        peer_id: lattice_model::PubKey,
+    ) -> Result<(), StoreError> 
+    where 
+        W: IntoIterator<Item = lattice_proto::weaver::WitnessRecord>,
+        I: IntoIterator<Item = SignedIntention>,
+    {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ReplicationControllerCmd::IngestWitnessedBatch {
+                witness_records: witness_records.into_iter().collect(),
+                intentions: intentions.into_iter().collect(),
+                peer_id,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?;
+        resp_rx
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?
+            .map_err(StoreError::Store)
+    }
+
     /// Fetch intentions by content hash
     pub async fn fetch_intentions(
         &self,
@@ -423,6 +452,15 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         Box::pin(Store::ingest_batch(self, intentions))
     }
 
+    fn ingest_witness_batch(
+        &self,
+        witness_records: Vec<lattice_proto::weaver::WitnessRecord>,
+        intentions: Vec<SignedIntention>,
+        peer_id: PubKey,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>> {
+        Box::pin(Store::ingest_witness_batch(self, witness_records, intentions, peer_id))
+    }
+
     fn fetch_intentions(
         &self,
         hashes: Vec<Hash>,
@@ -482,10 +520,21 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
 
                 remaining -= batch.len();
                 if let Some(last) = batch.last() {
-                    // Update start_hash for next batch (the store.scan_witness_log logic handles "after" logic if we pass the hash)
-                    // Currently IntentionStore::scan_witness_log takes start_hash and starts AFTER it.
-                    // So we can just use the last hash as the new start_hash.
-                    current_start = Some(last.content_hash);
+                    // Update start_hash for next batch using INTENTION hash (since we index by intention hash)
+                    match WitnessContent::decode(last.content.as_slice()) {
+                         Ok(content) => {
+                             if let Ok(hash) = Hash::try_from(content.intention_hash.as_slice()) {
+                                 current_start = Some(hash);
+                             } else {
+                                 tracing::warn!("Invalid hash in witness content during scan");
+                                 break;
+                             }
+                         },
+                         Err(e) => {
+                             tracing::warn!("Failed to decode witness content during scan: {}", e);
+                             break;
+                         }
+                    }
                 }
 
                 for item in batch {
@@ -580,7 +629,6 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
 // ==================== EntryStreamProvider (intention-based) ====================
 
 use lattice_model::replication::EntryStreamProvider;
-use prost::Message;
 use tokio_stream::wrappers::BroadcastStream;
 use futures_util::StreamExt;
 

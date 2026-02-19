@@ -25,4 +25,10 @@ pub enum LatticeNetError {
     
     #[error("Sync error: {0}")]
     Sync(String),
+
+    #[error("Authentication error: {0}")]
+    Auth(String),
+
+    #[error("Protocol error: {0}")]
+    Protocol(String),
 }

@@ -15,10 +15,6 @@ use std::sync::Arc;
 use tokio::time::Duration;
 use tokio::sync::Barrier;
 
-
-/// Ensure tracing is initialized
-
-
 /// Helper to create a temp data dir for testing
 fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     let path = std::env::temp_dir().join(format!("lattice_stress_test_{}", name));
@@ -153,6 +149,8 @@ async fn test_interleaved_modifications() {
     let (_node_a, _node_b, server_a, server_b, store_a, store_b) = setup_pair("conc_a", "conc_b").await;
     server_a.set_global_gossip_enabled(false);
     server_b.set_global_gossip_enabled(false);
+    
+    let pk_a = server_a.endpoint().public_key();
 
     // Initial data
     for i in 0..COUNT {
@@ -160,39 +158,38 @@ async fn test_interleaved_modifications() {
     }
 
     let barrier = Arc::new(Barrier::new(2));
-
-    // Writer task: Waits for barrier, then writes
+    
     let store_a_clone = store_a.clone();
     let barrier_write = barrier.clone();
+    
     let bg_write = tokio::spawn(async move {
         barrier_write.wait().await;
-        tracing::info!("Writer starting...");
+        tracing::info!("Modifications starting...");
         for i in 0..COUNT {
             store_a_clone.put(format!("/live/{}", i).into_bytes(), b"val".to_vec()).await.expect("put live");
             tokio::task::yield_now().await;
         }
-        tracing::info!("Writer done");
+        tracing::info!("Modifications done");
     });
-
-    // Sync task: Writes are interleaved
+    
     let server_b_clone = server_b.clone();
     let store_b_clone = store_b.clone();
     let barrier_sync = barrier.clone();
+
     let sync_task = tokio::spawn(async move {
         barrier_sync.wait().await;
         tracing::info!("Sync starting (concurrent)...");
-        for _ in 0..3 {
-             let _ = server_b_clone.sync_all_by_id(store_b_clone.id()).await;
-             tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        tracing::info!("Sync loop done");
+        // Sync once while modifications are happening
+        let _ = server_b_clone.sync_with_peer_by_id(store_b_clone.id(), pk_a, &[]).await;
+        tracing::info!("Sync done");
     });
-
+    
     let _ = tokio::join!(bg_write, sync_task);
 
     // Final convergence sync
     tracing::info!("Final convergence sync...");
-    server_b.sync_all_by_id(store_b.id()).await.expect("final sync");
+    server_b.endpoint().connect(pk_a).await.expect("connect");
+    server_b.sync_with_peer_by_id(store_b.id(), pk_a, &[]).await.expect("final sync");
 
     // Validation
     for i in 0..COUNT {
@@ -305,23 +302,33 @@ async fn test_partition_recovery() {
     server_a_2.endpoint().add_peer_addr(addr_c.clone());
     server_b_2.endpoint().add_peer_addr(addr_a.clone());
     server_b_2.endpoint().add_peer_addr(addr_c.clone());
-    server_c_2.endpoint().add_peer_addr(addr_a.clone());
-    server_c_2.endpoint().add_peer_addr(addr_b.clone());
-
-    // Trigger syncs (Convergence)
+    
     tracing::info!("Triggering convergence syncs...");
+
+    let pk_a = iroh::PublicKey::from_bytes(&peer_a).unwrap();
+    let pk_b = iroh::PublicKey::from_bytes(&peer_b).unwrap();
+    let pk_c = iroh::PublicKey::from_bytes(&peer_c).unwrap();
     
     // A pulls from B and C
-    server_a_2.sync_with_peer_by_id(store_id, peer_b, &[]).await.expect("sync a-b");
-    server_a_2.sync_with_peer_by_id(store_id, peer_c, &[]).await.expect("sync a-c");
+    server_a_2.endpoint().connect(pk_b).await.expect("connect a-b");
+    server_a_2.sync_with_peer_by_id(store_id, pk_b, &[]).await.expect("sync a-b");
+    
+    server_a_2.endpoint().connect(pk_c).await.expect("connect a-c");
+    server_a_2.sync_with_peer_by_id(store_id, pk_c, &[]).await.expect("sync a-c");
     
     // B pulls from A and C
-    server_b_2.sync_with_peer_by_id(store_id, peer_a, &[]).await.expect("sync b-a");
-    server_b_2.sync_with_peer_by_id(store_id, peer_c, &[]).await.expect("sync b-c");
+    server_b_2.endpoint().connect(pk_a).await.expect("connect b-a");
+    server_b_2.sync_with_peer_by_id(store_id, pk_a, &[]).await.expect("sync b-a");
+    
+    server_b_2.endpoint().connect(pk_c).await.expect("connect b-c");
+    server_b_2.sync_with_peer_by_id(store_id, pk_c, &[]).await.expect("sync b-c");
 
     // C pulls from A and B
-    server_c_2.sync_with_peer_by_id(store_id, peer_a, &[]).await.expect("sync c-a");
-    server_c_2.sync_with_peer_by_id(store_id, peer_b, &[]).await.expect("sync c-b");
+    server_c_2.endpoint().connect(pk_a).await.expect("connect c-a");
+    server_c_2.sync_with_peer_by_id(store_id, pk_a, &[]).await.expect("sync c-a");
+    
+    server_c_2.endpoint().connect(pk_b).await.expect("connect c-b");
+    server_c_2.sync_with_peer_by_id(store_id, pk_b, &[]).await.expect("sync c-b");
 
     // === Phase 4: Validation ===
     tracing::info!("Phase 4: Validation");

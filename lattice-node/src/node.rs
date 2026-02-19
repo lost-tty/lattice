@@ -375,12 +375,12 @@ impl Node {
     /// Process a JoinResponse from a peer.
     /// Encapsulates logic for initializing the mesh and processing authorized authors.
     pub async fn process_join_response(
-        &self, 
-        store_id: Uuid, 
+        &self,
+        store_id: Uuid,
         via_peer: PubKey
     ) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
         // 1. Initialize Mesh (must be done first)
-        let store = self.complete_join(store_id, Some(via_peer)).await?;
+        let store = self.complete_join(store_id, vec![via_peer]).await?;
         
         // 2. Clear pending joins
         if let Ok(mut pending) = self.pending_joins.lock() {
@@ -392,8 +392,8 @@ impl Node {
     
     /// Complete joining a mesh - creates store with given UUID, caches handle.
     /// Called after receiving store_id from peer's JoinResponse.
-    /// If `via_peer` is provided, server will sync with that peer after registration.
-    pub async fn complete_join(&self, store_id: Uuid, via_peer: Option<PubKey>) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
+    /// If `bootstrap_peers` is provided, server will sync with those peers after registration.
+    pub async fn complete_join(&self, store_id: Uuid, bootstrap_peers: Vec<PubKey>) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
         // Record in meta.db (as member)
         self.meta.add_rootstore(store_id, &lattice_kernel::proto::storage::RootStoreRecord {
             joined_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
@@ -408,18 +408,20 @@ impl Node {
         let system = handle.clone().as_system()
              .ok_or_else(|| NodeError::Validation("Root store must support SystemStore".into()))?;
         
-        let peer_manager = crate::PeerManager::new(system).await?;
+        let peer_manager = crate::PeerManager::new(system.clone()).await?;
         
+        for peer in &bootstrap_peers {
+            // Persist peer as Active so it is available for sync/gossip
+            peer_manager.set_peer_status(*peer, PeerStatus::Active).await.map_err(NodeError::PeerManager)?;
+            peer_manager.add_bootstrap_peer(*peer);
+        }
+
         self.store_manager.register(store_id, handle.clone(), crate::STORE_TYPE_KVSTORE, peer_manager)?;
         
         // Start watching
         self.store_manager.start_watching(store_id).map_err(NodeError::StoreManager)?;
 
         let _ = self.publish_name_to(store_id).await;
-        
-        if let Some(peer) = via_peer {
-            self.emit_net(NetEvent::SyncWithPeer { store_id, peer });
-        }
         
         Ok(handle)
     }
@@ -794,7 +796,7 @@ mod tests {
         assert_eq!(acceptance.store_id, invite.store_id);
         
         // Step 5: B completes join (simulates receiving JoinResponse)
-        let store_b = node_b.complete_join(invite.store_id, None).await.expect("B join");
+        let store_b = node_b.complete_join(invite.store_id, vec![]).await.expect("B join");
         
         // Verify B has the same store ID
         // Note: complete_join returns same ID, but store inner ID might be different if it's a new instance locally?

@@ -246,11 +246,53 @@ Network → Replica.ingest(entry) → validate → log commit
 ```
 
 
-### Bootstrap
+### Bootstrap Protocol
 
-- New peers request a full state snapshot from their first connection.
-- The snapshot allows them to skip replaying the entire log history.
-- After bootstrap, the node receives incremental updates via gossip.
+When a node joins a store for the first time, it must "bootstrap" (clone) the historical data from a peer before it can participate in normal synchronization.
+
+#### 1. The Bootstrap Flow
+
+1.  **Join Handshake**:
+    *   The new node (Joiner) connects to an existing peer (Inviter).
+    *   Inviter verifies the Joiner's token.
+    *   Inviter sends `JoinResponse` containing:
+        *   `store_id`: The UUID of the store.
+        *   `name`: Display name.
+        *   `peers`: A list of other known peers in this store.
+
+2.  **Indirect Bootstrapping**:
+    *   The Joiner is not required to bootstrap from the Inviter.
+    *   The `peers` list in `JoinResponse` allows the Joiner to select any available peer.
+    *   This prevents the Inviter (which might be a low-power device) from becoming a bottleneck.
+
+3.  **Witness Log Streaming**:
+    *   Joiner sends `BootstrapRequest { store_id, start_hash: 0, limit: N }`.
+    *   Selected Peer (Bootsrapper) responds with a stream of `WitnessRecord`s.
+    *   **Verification**: Joiner verifies every `WitnessRecord` signature against the Bootstrapper's public key.
+    *   **Ingestion**: Joiner re-witnesses the data, signing it with its own key, effectively authenticating the history as valid.
+
+4.  **Post-Bootstrap Sync**:
+    *   After the Witness Log is fully cloned, the Joiner enters `Active` state.
+    *   It immediately triggers a **Negentropy Sync** with all known peers to catch up on any recent data that might have accumulated during the bootstrap process.
+
+#### 2. Async & Task-Based Bootstrapping
+
+Bootstrapping is a long-running, resilient task, not a transient network request.
+
+*   **Persistent State**: The store tracks its state as `Bootstrapping` in `meta.db`.
+*   **Resumability**: 
+    - **Same Peer**: If the connection to a specific peer is interrupted and re-established, the node can restart the stream from the last successfully ingested `WitnessRecord` hash for that peer.
+    - **Different Peer**: If the node switches to a different bootstrap peer, it must restart the witness log stream from the beginning (`Hash::ZERO`), as witness logs are peer-specific linearizations.
+    - **Strategy**: The node maintains a map of `PeerId -> LastWitnessHash` (in memory or persisted) to enable this optimization.
+*   **Retry Logic**: If the selected Bootstrapper fails, the node automatically picks another peer from the known list and restarts the stream.
+
+#### 3. Nested Store Bootstrapping
+
+Lattice stores are fractal. A Root Store may contain references to multiple Child Stores.
+
+*   **Discovery**: As the Joiner clones the Root Store, it discovers `ChildStoreDeclaration` entries.
+*   **Automatic Tasking**: The system automatically spawns a `BootstrapTask` for each discovered child.
+*   **Prioritization**: Child stores can be prioritized based on user activity (e.g., "Open the Chat" prioritizes the Chat store bootstrap).
 
 ### Direct Store Registration (Network Security Boundary)
 

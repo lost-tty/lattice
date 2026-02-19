@@ -26,6 +26,7 @@ futures-core = "0.3.31"
 futures-util.workspace = true
 tokio-util = "0.7"
 async-stream = "0.3.6"
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "sync", "rt-multi-thread"] }

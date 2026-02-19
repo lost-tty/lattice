@@ -46,6 +46,9 @@ pub trait PeerProvider: Send + Sync {
     
     /// List all authors whose entries we can accept.
     fn list_acceptable_authors(&self) -> Vec<PubKey>;
+
+    /// Reset ephemeral bootstrap peers (optional).
+    fn reset_bootstrap_peers(&self) {}
     
     /// Subscribe to peer status change events.
     fn subscribe_peer_events(&self) -> PeerEventStream;

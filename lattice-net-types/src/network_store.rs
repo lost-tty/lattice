@@ -70,6 +70,17 @@ impl NetworkStore {
             .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
     
+    /// Ingest a batch of witness records and intentions (Bootstrap/Clone)
+    pub async fn ingest_witness_batch(
+        &self, 
+        witness_records: Vec<lattice_kernel::proto::weaver::WitnessRecord>,
+        intentions: Vec<SignedIntention>,
+        peer_id: PubKey,
+    ) -> Result<(), StateError> {
+        self.sync.ingest_witness_batch(witness_records, intentions, peer_id).await
+            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    }
+
     pub async fn fetch_intentions(&self, hashes: Vec<Hash>) -> Result<Vec<SignedIntention>, StateError> {
         self.sync.fetch_intentions(hashes).await
             .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
@@ -113,6 +124,11 @@ impl NetworkStore {
     
     pub fn list_acceptable_authors(&self) -> Vec<PubKey> {
         self.peer.list_acceptable_authors()
+    }
+
+    /// Reset ephemeral bootstrap peers
+    pub fn reset_bootstrap_peers(&self) {
+        self.peer.reset_bootstrap_peers()
     }
 }
 

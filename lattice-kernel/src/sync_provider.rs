@@ -37,6 +37,14 @@ pub trait SyncProvider: Send + Sync {
         intentions: Vec<SignedIntention>,
     ) -> Pin<Box<dyn Future<Output = Result<IngestResult, StoreError>> + Send + '_>>;
 
+    /// Ingest a batch of witness records and intentions (Bootstrap/Clone)
+    fn ingest_witness_batch(
+        &self,
+        witness_records: Vec<lattice_proto::weaver::WitnessRecord>,
+        intentions: Vec<SignedIntention>,
+        peer_id: PubKey,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>>;
+
     /// Fetch intentions by content hash
     fn fetch_intentions(
         &self,
