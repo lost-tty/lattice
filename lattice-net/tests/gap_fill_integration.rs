@@ -54,10 +54,10 @@ async fn join_store_via_event(node: &Node, peer_pubkey: PubKey, store_id: Uuid, 
     }
 }
 
-/// Integration test: Targeted author sync during gap filling.
-/// Tests that sync_author_all correctly syncs entries for a specific author.
+/// Integration test: Explicit sync during gap filling.
+/// Tests that sync_all correctly syncs missing entries via RPC pull.
 #[tokio::test]
-async fn test_targeted_author_sync() {
+async fn test_explicit_sync() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
@@ -104,7 +104,6 @@ async fn test_targeted_author_sync() {
     server_b.endpoint().connect(server_a.endpoint().public_key()).await.expect("connect");
 
     // B syncs (synchronous RPC pull)
-    // TODO: Fix `sync_author_all` filtering - currently returns 0 despite correct author ID.
     // Verifying `sync_all` works with gossip disabled (explicit pull) is sufficient for this integration test.
     let results = server_b.sync_all_by_id(store_b.id()).await.expect("sync all");
     tracing::info!("Sync results: {} peers", results.len());

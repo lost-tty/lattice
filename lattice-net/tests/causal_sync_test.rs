@@ -4,10 +4,9 @@ use lattice_kvstore_client::KvStoreExt;
 use lattice_model::Uuid;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration, sleep};
-use lattice_model::types::Hash;
-use lattice_proto::weaver::WitnessContent;
-use prost::Message;
 use futures_util::StreamExt;
+use lattice_kernel::proto::weaver::WitnessContent;
+use prost::Message;
 
 async fn create_node(dir: &std::path::Path) -> (Arc<Node>, Arc<NetworkService>) {
     let (net_tx, net_rx) = NetworkService::create_net_channel();
@@ -44,7 +43,7 @@ async fn test_sync_preserves_causal_order_in_witness_log() {
     
     // 1. Setup Node A and Node B
     let (node_a, net_a) = create_node(&path_a).await;
-    let (node_b, net_b) = create_node(&path_b).await;
+    let (node_b, _net_b) = create_node(&path_b).await;
     
     // Create Root Store on A
     let root_id = node_a.create_store(None, Some("root".into()), STORE_TYPE_KVSTORE).await.unwrap();

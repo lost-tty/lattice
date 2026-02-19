@@ -317,17 +317,6 @@ impl NetworkService {
         join_all(futures).await.into_iter().flatten().collect()
     }
     
-    /// Sync a specific author with all active peers for this store
-    pub async fn sync_author_all(&self, store: &NetworkStore, author: PubKey) -> Result<u64, LatticeNetError> {
-        let peer_ids = self.active_peer_ids_for_store(store).await?;
-        if peer_ids.is_empty() {
-            return Ok(0);
-        }
-        
-        let results = self.sync_peers(store, &peer_ids, &[author]).await;
-        Ok(results.iter().map(|r| r.entries_received).sum())
-    }
-    
     /// Sync with all active peers in parallel
     pub async fn sync_all(&self, store: &NetworkStore) -> Result<Vec<SyncResult>, LatticeNetError> {
         let peer_ids = self.active_peer_ids_for_store(store).await?;
@@ -352,14 +341,6 @@ impl NetworkService {
         let store = self.wait_for_store(store_id).await
             .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
         self.sync_all(&store).await
-    }
-    
-    /// Sync a specific author with all active peers (by store ID).
-    /// Waits briefly for store registration if not immediately available.
-    pub async fn sync_author_all_by_id(&self, store_id: Uuid, author: PubKey) -> Result<u64, LatticeNetError> {
-        let store = self.wait_for_store(store_id).await
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
-        self.sync_author_all(&store, author).await
     }
     
     /// Sync with a specific peer (by store ID).
@@ -623,7 +604,8 @@ impl NetworkService {
                     Ok(count) => {
                         tracing::info!(peer = %iroh_peer_id.fmt_short(), count = count, "Bootstrap finished successfully");
                         // Trigger initial sync with ALL peers to catch up on recent activity
-                        if let Ok(sync_count) = service.sync_author_all_by_id(store_id, lattice_model::types::PubKey::default()).await {
+                        if let Ok(results) = service.sync_all_by_id(store_id).await {
+                            let sync_count: u64 = results.iter().map(|r| r.entries_received).sum();
                             // Emit SyncResult to notify the UI/CLI of bootstrap completion stats
                             service.provider.emit_user_event(UserEvent::SyncResult {
                                 store_id,

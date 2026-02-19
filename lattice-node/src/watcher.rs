@@ -166,13 +166,6 @@ impl RecursiveWatcher {
 
                     match store_manager.open(decl.id, &store_type) {
                         Ok(opened) => {
-                            // Backfill Peer Strategy (Inherited for children)
-                            if let Some(_system) = opened.clone().as_system() {
-                                // TODO: Implement backfill_peer_strategy helper or import it?
-                                // For now, we assume it's handled or we port snippet later.
-                                // Simplest: Assume inherited.
-                            }
-
                             // Register with same peer_manager as root store
                             // Note: We deliberately use root's peer manager for children (Inherited)
                             if let Err(e) = store_manager.register(decl.id, opened, &store_type, peer_manager.clone()) {

@@ -131,8 +131,15 @@ impl LatticeBackend for InProcessBackend {
             
             let pk = PubKey::try_from(peer_key.as_slice())?;
             
-            // TODO: In the future, check if get_peer_strategy() == Independent before modifying.
-            // For now, we allow writing to the system table directly as requested.
+            match system.get_peer_strategy()? {
+                Some(PeerStrategy::Inherited) => {
+                    return Err("Cannot revoke peer from Inherited store. Revoke from the parent Independent store instead.".into());
+                }
+                Some(PeerStrategy::Snapshot(_)) => {
+                     return Err("Cannot revoke peer from Snapshot strategy.".into());
+                }
+                _ => {}
+            }
             
             SystemBatch::new(system.as_ref())
                 .set_status(pk, lattice_model::PeerStatus::Revoked)
