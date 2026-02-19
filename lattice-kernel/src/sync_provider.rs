@@ -80,10 +80,9 @@ pub trait SyncProvider: Send + Sync {
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, StoreError>> + Send + '_>>;
 
-    /// Scan witness log entries from start_seq
     fn scan_witness_log(
         &self,
-        start_seq: u64,
+        start_hash: Option<Hash>,
         limit: usize,
-    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, StoreError>> + Send>>;
+    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, StoreError>> + Send + '_>>;
 }

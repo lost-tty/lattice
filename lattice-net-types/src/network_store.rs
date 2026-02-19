@@ -152,12 +152,12 @@ impl NetworkStore {
 
     pub fn scan_witness_log(
         &self,
-        start_seq: u64,
+        start_hash: Option<Hash>,
         limit: usize,
     ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, StateError>> + Send + '_>> {
         // Map StoreError to StateError in the stream
-        let stream = self.sync.scan_witness_log(start_seq, limit);
-        Box::pin(futures_util::StreamExt::map(stream, |res| {
+        let stream = self.sync.scan_witness_log(start_hash, limit);
+        Box::pin(futures_util::StreamExt::map(stream, move |res| {
             res.map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
         }))
     }

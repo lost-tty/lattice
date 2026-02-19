@@ -25,6 +25,7 @@ tokio-stream = { version = "0.1.18", features = ["sync"] }
 futures-core = "0.3.31"
 futures-util.workspace = true
 tokio-util = "0.7"
+async-stream = "0.3.6"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "sync", "rt-multi-thread"] }

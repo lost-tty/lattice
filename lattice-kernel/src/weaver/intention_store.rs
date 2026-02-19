@@ -533,16 +533,43 @@ impl IntentionStore {
     /// Returns (seq, content_hash, record) tuples.
     /// Get the entire witness log (WARNING: O(N) memory usage)
     pub fn witness_log(&self) -> Result<Vec<WitnessEntry>, IntentionStoreError> {
-        self.scan_witness_log(0, usize::MAX)
+        self.scan_witness_log(None, usize::MAX)
     }
 
-    /// Scan witness log from a given sequence number.
-    /// Returns a paginated vector (O(limit) memory).
+    /// Get the witness sequence number for a given intention hash.
+    fn get_witness_seq(&self, hash: &Hash) -> Result<Option<u64>, IntentionStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let index = read_txn.open_table(TABLE_WITNESS_INDEX)?;
+        match index.get(hash.as_bytes().as_slice())? {
+            Some(v) => Ok(Some(u64::from_be_bytes(v.value().try_into().map_err(|_| {
+                IntentionStoreError::InvalidData("invalid witness seq length".into())
+            })?))),
+            None => Ok(None),
+        }
+    }
+
+    /// Scan witness log from a given start point.
+    /// 
+    /// If `start_hash` is provided:
+    /// - If `Hash::ZERO`, starts from genesis (seq 1).
+    /// - If found, starts from the entry *after* it.
+    /// - If not found, returns error.
+    ///
+    /// If `start_hash` is None, starts from genesis.
     pub fn scan_witness_log(
         &self,
-        start_seq: u64,
+        start_hash: Option<Hash>,
         limit: usize,
     ) -> Result<Vec<WitnessEntry>, IntentionStoreError> {
+        let start_seq = match start_hash {
+            Some(h) if h != Hash::ZERO => {
+                 self.get_witness_seq(&h)?
+                     .ok_or_else(|| IntentionStoreError::InvalidData(format!("witness hash {} not found", h)))? 
+                     + 1 // Start scanning AFTER the known hash (inclusive start = seq + 1)
+            },
+            _ => 1, // Genesis starts at 1
+        };
+
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_WITNESS)?;
         

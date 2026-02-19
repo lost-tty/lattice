@@ -458,36 +458,41 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
 
     fn scan_witness_log(
         &self,
-        start_seq: u64,
+        start_hash: Option<Hash>,
         limit: usize,
-    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, StoreError>> + Send>> {
+    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, StoreError>> + Send + '_>> {
         let store = self.intention_store.clone();
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
         
-        tokio::task::spawn_blocking(move || {
-            let guard = match store.read() {
-                Ok(g) => g,
-                Err(_) => {
-                    let _ = tx.blocking_send(Err(StoreError::Store(crate::store::StateError::Backend("Lock poisoned".into()))));
-                    return;
+        Box::pin(async_stream::try_stream! {
+            let mut current_start = start_hash;
+            let mut remaining = limit;
+            let batch_size = 1000; // Hardcoded internal batch size
+
+            while remaining > 0 {
+                let fetch_limit = std::cmp::min(remaining, batch_size);
+                
+                // Fetch a batch in a blocking task
+                let batch = run_store_read(store.clone(), move |guard| {
+                    guard.scan_witness_log(current_start, fetch_limit)
+                }).await?;
+
+                if batch.is_empty() {
+                    break;
                 }
-            };
-            
-            match guard.scan_witness_log(start_seq, limit) {
-                Ok(entries) => {
-                    for entry in entries {
-                        if tx.blocking_send(Ok(entry)).is_err() {
-                            break;
-                        }
-                    }
+
+                remaining -= batch.len();
+                if let Some(last) = batch.last() {
+                    // Update start_hash for next batch (the store.scan_witness_log logic handles "after" logic if we pass the hash)
+                    // Currently IntentionStore::scan_witness_log takes start_hash and starts AFTER it.
+                    // So we can just use the last hash as the new start_hash.
+                    current_start = Some(last.content_hash);
                 }
-                Err(e) => {
-                    let _ = tx.blocking_send(Err(StoreError::Store(crate::store::StateError::Backend(e.to_string()))));
+
+                for item in batch {
+                    yield item;
                 }
             }
-        });
-        
-        Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))
+        })
     }
 
     fn hashes_in_range(

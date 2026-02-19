@@ -324,7 +324,6 @@ impl<S: StateMachine> ReplicationController<S> {
         }
     }
 
-
     fn process_intention(&mut self, store: &mut crate::weaver::IntentionStore, signed: &SignedIntention) -> Result<IngestResult, ReplicationControllerError> {
         // Store it 
         store.insert(signed)?;

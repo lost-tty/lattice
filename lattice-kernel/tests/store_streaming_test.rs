@@ -88,46 +88,58 @@ async fn test_scan_witness_log_streaming() -> Result<(), Box<dyn std::error::Err
     assert_eq!(count, 10, "Should have 10 witness entries");
 
     // Test Streaming: limit 5
-    // start_seq=0 should include everything from beginning (seq 1)
-    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, 0, 5);
+    // start_hash=None should start from genesis
+    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, None, 5);
     let mut entries = Vec::new();
     while let Some(res) = stream.next().await {
-        entries.push(res?);
+        entries.push(res.expect("stream error"));
     }
     assert_eq!(entries.len(), 5, "Should return 5 entries");
     assert_eq!(entries[0].seq, 1, "First entry should be seq 1");
     assert_eq!(entries[4].seq, 5, "Fifth entry should be seq 5");
 
-    // Test Streaming: offset 6 (next batch)
-    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, 6, 5);
-    let mut entries = Vec::new();
+    // Get the intention hash of the last entry to continue iteration
+    // scan_witness_log expects an IntentionHash to look up the sequence number in TABLE_WITNESS_INDEX
+    let last_content = &entries.last().unwrap().content;
+    let last_witness_content = lattice_kernel::proto::weaver::WitnessContent::decode(last_content.as_slice())
+        .expect("Should decode WitnessContent");
+    let last_intention_hash = Hash::try_from(last_witness_content.intention_hash.as_slice())
+        .expect("Invalid hash");
+
+    // Test Streaming: limit 5, starting after last_intention_hash
+    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, Some(last_intention_hash), 5);
+    // Since scan_witness_log(Some(h)) starts AFTER h, we should get seq 6..10
+    
+    let mut entries_page2 = Vec::new();
     while let Some(res) = stream.next().await {
-        entries.push(res?);
+        entries_page2.push(res.expect("stream error"));
     }
-    assert_eq!(entries.len(), 5, "Should return remaining 5 entries");
-    assert_eq!(entries[0].seq, 6);
-    assert_eq!(entries[4].seq, 10);
+    assert_eq!(entries_page2.len(), 5, "Should return remaining 5 entries");
+    assert_eq!(entries_page2[0].seq, 6);
+    assert_eq!(entries_page2[4].seq, 10);
 
     // Verify content logic
-    // WitnessEntry content is Protobuf-encoded WitnessContent
-    // We decode it using the re-exported proto module from lattice-kernel
     let witness_content = lattice_kernel::proto::weaver::WitnessContent::decode(entries[0].content.as_slice())
         .expect("Should decode WitnessContent");
     
-    // Verify intention hash
-    let expected_hash = intentions[5].intention.hash();
-    assert_eq!(witness_content.intention_hash, expected_hash.as_bytes().to_vec(), "Intention hash mismatch");
-    // Verify intention hash
-    let expected_hash = intentions[5].intention.hash();
+    // entries[0] corresponds to intentions[0]
+    let expected_hash = intentions[0].intention.hash();
     assert_eq!(witness_content.intention_hash, expected_hash.as_bytes().to_vec(), "Intention hash mismatch");
 
-    // Test Streaming: offset 11 (empty)
-    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, 11, 5);
-    let mut entries = Vec::new();
+    // Test Streaming: limit 5, starting after last entry of page 2
+    let last_content_page2 = &entries_page2.last().unwrap().content;
+    let last_witness_content_page2 = lattice_kernel::proto::weaver::WitnessContent::decode(last_content_page2.as_slice())
+        .expect("Should decode WitnessContent");
+    let last_intention_hash_page2 = Hash::try_from(last_witness_content_page2.intention_hash.as_slice())
+        .expect("Invalid hash");
+
+    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, Some(last_intention_hash_page2), 5);
+    
+    let mut entries_empty = Vec::new();
     while let Some(res) = stream.next().await {
-        entries.push(res?);
+        entries_empty.push(res.expect("stream error"));
     }
-    assert!(entries.is_empty(), "Should be empty");
+    assert!(entries_empty.is_empty(), "Should be empty");
 
     Ok(())
 }

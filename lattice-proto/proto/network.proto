@@ -36,8 +36,6 @@ message PeerMessage {
   }
 }
 
-// 3. Status Protocol — REMOVED (Legacy)
-
 // 4. Fetch Intentions — used to retrieve missing data
 message FetchIntentions {
   bytes store_id = 1;
