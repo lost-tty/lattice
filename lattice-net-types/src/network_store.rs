@@ -41,7 +41,11 @@ impl NetworkStore {
         self.sync.author_tips().await
             .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
-    
+
+    pub fn emit_system_event(&self, event: lattice_model::SystemEvent) {
+        self.sync.emit_system_event(event);
+    }
+
     pub async fn ingest_intention(&self, intention: SignedIntention) -> Result<IngestResult, StateError> {
         // Check authorization first
         if !self.peer.can_accept_entry(&intention.intention.author) {

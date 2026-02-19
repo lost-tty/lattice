@@ -1,7 +1,5 @@
 ## Lattice Roadmap
 
-**Status:** Milestone 10 (Fractal Stores) complete. Current focus: M11 (Weaver Protocol).
-
 ## Completed
 
 | Milestone        | Summary                                                                                                                                       |
@@ -15,63 +13,7 @@
 | **M7**           | Client/Daemon split: library extraction, `latticed` daemon with UDS gRPC, `LatticeBackend` trait, RPC event streaming, socket security        |
 | **M8**           | Reflection & introspection: `lattice-api` crate, deep type schemas, `ReflectValue` structured results, store watchers & FFI stream bindings   |
 | **M10**          | Fractal Store Model: replaced `Mesh` struct with recursive store hierarchy, `TABLE_SYSTEM` with HeadList CRDTs, `RecursiveWatcher` for child discovery, invite/revoke peer management, `PeerStrategy` (Independent/Inherited), flattened `StoreManager`, `NetworkService` (renamed from `MeshService`), proper `Node::shutdown()` |
-
----
-
-## Milestone 11: The Weaver Protocol
-
-**Goal:** Replace the legacy linear-log sync with a **Negentropy-based set reconciliation protocol** and an **Intention-based Data Model**.
-
-> **See:** `weaver-hs/lattice-weaver.md` for the transition guide.
-
-### 11A: The Intention Data Model ✅
-- [x] Define `Intention` struct: `{ author, timestamp, store_id, store_prev, condition, ops }`
-- [x] Define `Condition` enum: `V1(Vec<Hash>)` — causal dependencies
-- [x] Borsh serialization, content-addressed `Intention::hash()`
-- [x] `SignedIntention` envelope with Ed25519 signing + verification
-- [x] `WitnessRecord` type with signed witness attestation
-- [x] `HLC` (Hybrid Logical Clock) for causal timestamps
-
-### 11B: Intention Storage ✅
-- [x] `IntentionStore` (redb): `TABLE_INTENTIONS` (hash → borsh) + `TABLE_WITNESS` (seq → borsh)
-- [x] In-memory `author_tips` tracking, rebuilt from DB on open
-- [x] Idempotent insert, out-of-order chain arrival
-- [x] Floating intention support (store-and-forward for unresolved causal deps)
-- [x] Witness records written on state application
-- [x] `HistoryEntry` proto with embedded `SignedIntention`, `HLC`, `Condition`
-- [x] Composable `From` impls (kernel → proto) for `HLC`, `Condition`, `SignedIntention`
-- [x] Remove legacy `Entry`/`SignedEntry`/`LogRecord` from storage proto
-- [x] Delete sigchain module + entry.rs + log_traits.rs
-- [x] **Witness Log Hash Chaining:** Add `prev_hash` to `WitnessContent`.
-    - Enables verifying the integrity of the witness log sequence itself.
-    - Requires caching `last_witness_hash` in `IntentionStore`.
-- [x] **Dependency Tracking & Execution Order:** `TABLE_FLOATING_BY_PREV` for linear progress, O(1) `is_witnessed` via `TABLE_WITNESS_INDEX` for causal deps. Round-robin across authors (FIFO per-author). No O(N) scanning.
-
-### 11B½: Validation Hardening & Test Coverage
-- [x] Reject ingested intentions with invalid signature (actor-level enforcement + test)
-- [x] Reject ingested intentions with mismatched `store_id` (actor-level enforcement + test)
-- [x] Verify duplicate ingest doesn't create duplicate witness record
-- [x] Multi-author convergence test (3+ authors on same store)
-- [x] HLC monotonicity across sequential submits at actor level
-
-### 11C: Negentropy Sync
-- [x] Port `negentropy` implementation to Rust (`lattice-sync`)
-- [x] Implement `sync_v2` protocol (Negentropy + Bulk Fetch; Phase 1 Skipped)
-- [x] Remove `OrphanStore` (replaced by `FloatingIntention` logic)
-- [x] **Smart Chain Fetch (Linear Extension):** `FetchChain(target, since)` protocol fills any linear gap in 1 RTT. Cascading fallback: smart fetch → targeted peer sync → full `sync_all`. Integration tests cover single gap, multi-gap, large gap detection, unresponsive peer fallback, and tip-zero (new author) recovery.
-
-### 11D: Bootstrap Sync (Clone)
-- [x] Remove `authorized_peers` from `JoinRequest` and `JoinResponse`
-- [x] Add `BootstrapRequest` and `BootstrapResponse` messages (streaming `WitnessRecord`)
-- [x] **Join using Bootstrap Protocol:**
-    - Request: `BootstrapRequest { store_id, start_hash: 0, limit: N }`
-    - Response: Stream of `WitnessRecord`s
-    - Action: Verify signatures, re-witness, and ingest as local history.
-- [x] **Silent Ingestion Mode:** Bootstrap ingestion must **not** fire watchers or gossip.
-- [x] **Post-Bootstrap Full Sync:** Run Negentropy after bootstrap to catch up tip.
-- [ ] **Recursive Store Bootstrapping:**
-    - Mechanism to discover and bootstrap child stores (e.g., `RecursiveWatcher` integration during bootstrap).
-    - `BootstrapResponse` includes list of child store IDs?
+| **M11**          | Weaver Migration & Protocol Sync: Intention DAG (`IntentionStore`), Negentropy set reconciliation, Smart Chain Fetch, stream-based Bootstrap (Clone) Protocol without gossip storms |
 
 ---
 
@@ -141,7 +83,13 @@ To support the Meet operator, the kernel must expose efficient graph traversal q
 - [ ] Signed checkpoint entries in sigchain
 - [ ] Nodes reject entries that contradict finalized checkpoints
 
-### 14D: Hash Index Optimization ✅
+### 14D: Recursive Store Bootstrapping (Pruning-Aware)
+- [ ] `RecursiveWatcher` identifies child stores from live state, not just intention logs.
+- [ ] Bootstrapping a child store requires a **Two-Phase Protocol** because Negentropy cannot sync from an implicit zero-genesis if the store has been pruned.
+- [ ] **Phase 1 (Snapshot):** Request the opaque snapshot (`state.db`) from the peer for the discovered child store.
+- [ ] **Phase 2 (Tail Sync):** Run Negentropy to sync floating intentions that occurred *after* the snapshot's causal frontier.
+
+### 14E: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
 - [x] Support 100M+ entries without excessive RAM
 

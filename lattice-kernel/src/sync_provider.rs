@@ -20,6 +20,11 @@ use tokio::sync::broadcast;
 pub trait SyncProvider: Send + Sync {
     fn id(&self) -> Uuid;
 
+    /// Emit an ephemeral system event to local watchers
+    fn emit_system_event(&self, event: lattice_model::SystemEvent) {
+        let _ = event; // default no-op
+    }
+
     /// Get author tips (PubKey → latest intention hash) for sync
     fn author_tips(
         &self,

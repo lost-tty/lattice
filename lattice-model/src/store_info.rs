@@ -62,6 +62,7 @@ pub enum SystemEvent {
     StrategyUpdated(PeerStrategy),
     StoreNameUpdated(String),
     PeerNameUpdated(crate::types::PubKey, String),
+    BootstrapComplete,
 }
 
 /// Trait for store handles to provide basic store information.

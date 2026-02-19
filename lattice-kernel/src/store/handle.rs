@@ -11,7 +11,7 @@ use lattice_proto::weaver::WitnessContent;
 use prost::Message;
 
 use lattice_model::NodeIdentity;
-use lattice_model::{StateMachine, Op};
+use lattice_model::{StateMachine, Op, SystemEvent};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +33,8 @@ pub trait StoreHandle: Send + Sync {
     fn as_any(&self) -> &dyn Any;
     /// Request actor shutdown
     fn shutdown(&self);
+    /// Emit an ephemeral system event to local watchers
+    fn emit_system_event(&self, _event: SystemEvent) {}
 }
 
 impl<S: StateMachine + Send + Sync + 'static> StoreHandle for Store<S> {
@@ -42,6 +44,10 @@ impl<S: StateMachine + Send + Sync + 'static> StoreHandle for Store<S> {
 
     fn shutdown(&self) {
         Store::shutdown(self);
+    }
+
+    fn emit_system_event(&self, event: SystemEvent) {
+        let _ = self.local_system_event_tx.send(event);
     }
 }
 
@@ -100,6 +106,7 @@ pub struct Store<S> {
     intention_tx: broadcast::Sender<SignedIntention>,
     shutdown_token: CancellationToken,
     intention_store: std::sync::Arc<std::sync::RwLock<IntentionStore>>,
+    local_system_event_tx: broadcast::Sender<SystemEvent>,
 }
 
 impl<S> Clone for Store<S> {
@@ -111,6 +118,7 @@ impl<S> Clone for Store<S> {
             intention_tx: self.intention_tx.clone(),
             shutdown_token: self.shutdown_token.clone(),
             intention_store: self.intention_store.clone(),
+            local_system_event_tx: self.local_system_event_tx.clone(),
         }
     }
 }
@@ -165,6 +173,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
     ) -> Result<(Store<S>, StoreInfo, ActorRunner<S>), super::StateError> {
         let (tx, rx) = mpsc::channel(32);
         let (intention_tx, _rx) = broadcast::channel(64);
+        let (local_system_event_tx, _sys_rx) = broadcast::channel(16);
         let shutdown_token = CancellationToken::new();
 
         let intention_store = self
@@ -192,6 +201,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
             intention_tx,
             shutdown_token,
             intention_store,
+            local_system_event_tx,
         };
         let info = StoreInfo {
             store_id: self.store_id,
@@ -253,6 +263,11 @@ impl<S: StateMachine> Store<S> {
     /// Subscribe to receive intentions as they're committed
     pub fn subscribe_intentions(&self) -> broadcast::Receiver<SignedIntention> {
         self.intention_tx.subscribe()
+    }
+
+    /// Subscribe to local ephemeral system events
+    pub fn subscribe_local_system_events(&self) -> broadcast::Receiver<SystemEvent> {
+        self.local_system_event_tx.subscribe()
     }
 
     /// Get author tips for sync
@@ -430,6 +445,10 @@ use crate::sync_provider::SyncProvider;
 impl<S: StateMachine + 'static> SyncProvider for Store<S> {
     fn id(&self) -> Uuid {
         self.store_id
+    }
+
+    fn emit_system_event(&self, event: lattice_model::SystemEvent) {
+        let _ = self.local_system_event_tx.send(event);
     }
 
     fn author_tips(

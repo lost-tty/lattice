@@ -9,7 +9,7 @@ use lattice_model::{PeerInfo, StoreLink, StateWriter, Hash, SystemEvent};
 use lattice_model::store_info::PeerStrategy;
 use std::pin::Pin;
 use std::future::Future;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 
 // ==================== Trait Definitions (Local) ====================
 
@@ -114,7 +114,13 @@ where
     lattice_kernel::Store<S>: lattice_model::replication::EntryStreamProvider, 
 {
     fn subscribe_events(&self) -> Result<Pin<Box<dyn Stream<Item = Result<SystemEvent, String>> + Send>>, String> {
-        Ok(crate::helpers::subscribe_system_events(self))
+        let log_stream = crate::helpers::subscribe_system_events(self);
+        let local_rx = self.subscribe_local_system_events();
+        
+        let local_stream = tokio_stream::wrappers::BroadcastStream::new(local_rx)
+            .filter_map(|res| std::future::ready(res.ok().map(Ok)));
+            
+        Ok(Box::pin(futures_util::stream::select(log_stream, Box::pin(local_stream))))
     }
 }
 

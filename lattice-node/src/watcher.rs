@@ -50,28 +50,31 @@ impl RecursiveWatcher {
         
         tokio::spawn(async move {
             // Get SystemStore capability
-            let Some(system) = root_store.clone().as_system() else {
-                 warn!("Root store does not support SystemStore - watcher disabled");
-                 return;
-            };
-
-            // Watch for System Op events
-            let mut stream = match system.subscribe_events() {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(error = %e, "Failed to start store watcher");
+            let system = match root_store.clone().as_system() {
+                Some(s) => s,
+                None => {
+                    warn!(store_id = %root_store_id, "Root store does not support SystemStore");
                     return;
                 }
             };
             
-            debug!("Store watcher started for root {}", root_store_id);
+            // 1. Subscribe to system events (Log-based + Local Ephemeral)
+            let mut stream = match system.subscribe_events() {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "Failed to subscribe to system events");
+                    return;
+                }
+            };
             
             // 2. Initial reconcile (manual list)
             if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores).await {
                 warn!(error = %e, "Initial reconcile failed");
             }
+
+            debug!("Store watcher started for root {}", root_store_id);
             
-            // 3. Process stream
+            // 5. Process unified stream
             loop {
                 tokio::select! {
                     _ = shutdown_rx.recv() => {
@@ -81,11 +84,12 @@ impl RecursiveWatcher {
                     next = stream.next() => {
                         match next {
                             Some(Ok(evt)) => {
-                                // Reconcile on child/hierarchy changes
+                                // Reconcile on child/hierarchy changes or BootstrapComplete
                                 let should_reconcile = match evt {
                                     SystemEvent::ChildLinkUpdated(_) | 
                                     SystemEvent::ChildStatusUpdated(_, _) | 
-                                    SystemEvent::ChildLinkRemoved(_) => true,
+                                    SystemEvent::ChildLinkRemoved(_) |
+                                    SystemEvent::BootstrapComplete => true,
                                     _ => false, 
                                 };
                                 

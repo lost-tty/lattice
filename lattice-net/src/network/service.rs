@@ -623,7 +623,21 @@ impl NetworkService {
                     Ok(count) => {
                         tracing::info!(peer = %iroh_peer_id.fmt_short(), count = count, "Bootstrap finished successfully");
                         // Trigger initial sync with ALL peers to catch up on recent activity
-                        let _ = service.sync_author_all_by_id(store_id, lattice_model::types::PubKey::default()).await;
+                        if let Ok(sync_count) = service.sync_author_all_by_id(store_id, lattice_model::types::PubKey::default()).await {
+                            // Emit SyncResult to notify the UI/CLI of bootstrap completion stats
+                            service.provider.emit_user_event(UserEvent::SyncResult {
+                                store_id,
+                                peers_synced: 1, // Approximation for initial bootstrap
+                                entries_sent: 0,
+                                entries_received: count + sync_count,
+                            });
+                            
+                            if let Some(store) = service.get_store(store_id) {
+                                store.emit_system_event(lattice_model::SystemEvent::BootstrapComplete);
+                            } else {
+                                tracing::warn!(store_id = %store_id, "Store not found to emit BootstrapComplete event");
+                            }
+                        }
                     },
                     Err(e) => tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "Bootstrap failed"),
                 }
