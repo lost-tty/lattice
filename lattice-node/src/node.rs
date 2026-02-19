@@ -232,8 +232,6 @@ impl Node {
         self.node.public_key()
     }
     
-
-    
     /// Subscribe to node events (e.g., root store activation)
     pub fn subscribe_events(&self) -> broadcast::Receiver<NodeEvent> {
         self.event_tx.subscribe()
@@ -244,22 +242,6 @@ impl Node {
         self.net_tx.subscribe()
     }
     
-    /// Set bootstrap authors for a mesh - trusted for initial sync before peer list is synced.
-    pub fn set_bootstrap_authors(&self, store_id: Uuid, authors: Vec<PubKey>) -> Result<(), NodeError> {
-        let pm = self.store_manager.get_peer_manager(&store_id)
-            .ok_or_else(|| NodeError::StoreManager(crate::StoreManagerError::NotFound(store_id)))?;
-        pm.set_bootstrap_authors(authors)
-            .map_err(|e| NodeError::Actor(e.to_string()))
-    }
-    
-    /// Clear bootstrap authors after initial sync completes.
-    pub fn clear_bootstrap_authors(&self, store_id: Uuid) -> Result<(), NodeError> {
-        let pm = self.store_manager.get_peer_manager(&store_id)
-            .ok_or_else(|| NodeError::StoreManager(crate::StoreManagerError::NotFound(store_id)))?;
-        pm.clear_bootstrap_authors()
-            .map_err(|e| NodeError::Actor(e.to_string()))
-    }
-
     /// Get the signing key for Iroh integration (same Ed25519 key).
     /// Use `.to_bytes()` when raw bytes are needed.
     pub fn signing_key(&self) -> &ed25519_dalek::SigningKey {
@@ -395,24 +377,12 @@ impl Node {
     pub async fn process_join_response(
         &self, 
         store_id: Uuid, 
-        authorized_authors_bytes: Vec<Vec<u8>>, 
         via_peer: PubKey
     ) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
         // 1. Initialize Mesh (must be done first)
         let store = self.complete_join(store_id, Some(via_peer)).await?;
         
-        // 2. Set bootstrap authors (now that mesh exists and peer manager is ready)
-        let bootstrap_authors: Vec<PubKey> = authorized_authors_bytes.iter()
-            .filter_map(|b| PubKey::try_from(b.as_slice()).ok())
-            .collect();
-
-        if !bootstrap_authors.is_empty() {
-             if let Some(pm) = self.store_manager.get_peer_manager(&store_id) {
-                pm.set_bootstrap_authors(bootstrap_authors)?;
-            }
-        }
-        
-        // Clear from pending joins
+        // 2. Clear pending joins
         if let Ok(mut pending) = self.pending_joins.lock() {
             pending.remove(&store_id);
         }
@@ -549,10 +519,9 @@ impl NodeProviderAsync for Node {
     async fn process_join_response(
         &self, 
         store_id: Uuid, 
-        authorized_authors: Vec<Vec<u8>>, 
         via_peer: PubKey
     ) -> Result<(), NodeProviderError> {
-        self.process_join_response(store_id, authorized_authors, via_peer).await
+        self.process_join_response(store_id, via_peer).await
             .map(|_| ())
             .map_err(|e| NodeProviderError::Join(e.to_string()))
     }

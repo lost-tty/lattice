@@ -60,7 +60,6 @@ pub trait NodeProviderAsync: NodeProvider {
     async fn process_join_response(
         &self, 
         store_id: Uuid, 
-        authorized_authors: Vec<Vec<u8>>, 
         via_peer: PubKey
     ) -> Result<(), NodeProviderError>;
     

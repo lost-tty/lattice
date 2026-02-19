@@ -270,7 +270,7 @@ impl NetworkService {
                 let via_peer = PubKey::from(*peer_id.as_bytes());
                 
                 tracing::info!(store_id = %store_id, "Join protocol: processing join response");
-                self.provider.process_join_response(store_id, resp.authorized_authors, via_peer).await
+                self.provider.process_join_response(store_id, via_peer).await
                     .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
                 
                 // Mark peer as online so sync can find them immediately

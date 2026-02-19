@@ -21,7 +21,6 @@ message InviteToken {
 message JoinResponse {
   bytes inviter_pubkey = 1;  // Inviter's public key for verification
   bytes store_id = 2;       // Root store UUID (16 bytes) for new node to create
-  repeated bytes authorized_authors = 3;  // All known author pubkeys (for bootstrap sync)
 }
 
 // 2. Peer Message Wrapper (unicast RPC)

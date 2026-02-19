@@ -118,18 +118,10 @@ async fn handle_join_request(
     let acceptance = provider.accept_join(*remote_pubkey, store_id, &req.invite_secret).await
         .map_err(|e| LatticeNetError::Sync(format!("Join failed: {}", e)))?;
     
-    let authorized_authors: Vec<Vec<u8>> = acceptance.authorized_authors
-        .into_iter()
-        .map(|p| p.to_vec())
-        .collect();
-    
-    tracing::debug!("[Join] Sending {} authorized authors", authorized_authors.len());
-    
     let resp = PeerMessage {
         message: Some(peer_message::Message::JoinResponse(JoinResponse {
             store_id: acceptance.store_id.as_bytes().to_vec(),
             inviter_pubkey: provider.node_id().to_vec(),
-            authorized_authors,
         })),
     };
     sink.send(&resp).await?;

@@ -67,6 +67,7 @@ This document outlines the development plan for Lattice.
 - [x] **Smart Chain Fetch (Linear Extension):** `FetchChain(target, since)` protocol fills any linear gap in 1 RTT. Cascading fallback: smart fetch → targeted peer sync → full `sync_all`. Integration tests cover single gap, multi-gap, large gap detection, unresponsive peer fallback, and tip-zero (new author) recovery.
 
 ### 11D: Bootstrap Sync (Clone)
+- [x] Remove `authorized_peers` from `JoinRequest` and `JoinResponse`
 - [ ] **Witness Log Transfer on Join:** After `JoinResponse`, host streams its signed witness log + referenced intentions to the new peer. New peer verifies the host's witness chain signature, then re-witnesses each intention with its own key.
 - [ ] **Silent Ingestion Mode:** Bootstrap ingestion must **not** fire watchers, gossip broadcasts, or event subscriptions. This is a "clone" operation — the store is being seeded, not updated. Normal event flow resumes after bootstrap completes.
 - [ ] **Protocol Split:** Bootstrap (stream full history) for fresh peers; Negentropy for incremental sync between established peers.

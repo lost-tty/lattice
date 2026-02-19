@@ -11,9 +11,7 @@ use lattice_kernel::PeerStatus;
 use lattice_model::{PeerInfo, PubKey, SystemEvent, InviteStatus, Uuid};
 use lattice_systemstore::{SystemStore, SystemBatch};
 use rand::RngCore;
-
-use std::collections::HashSet;
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tracing::warn;
 use futures_util::StreamExt;
@@ -112,8 +110,6 @@ pub struct PeerManager {
     store: Arc<dyn SystemStore + Send + Sync>,
     /// Broadcast channel for peer events
     peer_event_tx: broadcast::Sender<PeerEvent>,
-    /// Bootstrap authors trusted during initial sync
-    bootstrap_authors: Arc<RwLock<HashSet<PubKey>>>,
     /// Handle to the background watcher task
     watcher_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -131,7 +127,6 @@ impl PeerManager {
         let manager = Arc::new(Self {
             store,
             peer_event_tx,
-            bootstrap_authors: Arc::new(RwLock::new(HashSet::new())),
             watcher_task: Mutex::new(None),
         });
         
@@ -256,28 +251,6 @@ impl PeerManager {
         self.set_peer_status(pubkey, PeerStatus::Revoked).await
     }
 
-    // ==================== Bootstrap Authors ====================
-    
-    pub fn set_bootstrap_authors(&self, authors: Vec<PubKey>) -> Result<(), PeerManagerError> {
-        let mut bootstrap = self.bootstrap_authors.write()
-            .map_err(|_| PeerManagerError::LockPoisoned)?;
-        *bootstrap = authors.into_iter().collect();
-        Ok(())
-    }
-    
-    pub fn clear_bootstrap_authors(&self) -> Result<(), PeerManagerError> {
-        let mut bootstrap = self.bootstrap_authors.write()
-            .map_err(|_| PeerManagerError::LockPoisoned)?;
-        bootstrap.clear();
-        Ok(())
-    }
-    
-    fn is_bootstrap_author(&self, author: &PubKey) -> bool {
-        self.bootstrap_authors.read()
-            .map(|b| b.contains(author))
-            .unwrap_or(false)
-    }
-    
     // ==================== Shutdown ====================
 
     pub async fn shutdown(&self) {
@@ -297,9 +270,6 @@ impl PeerProvider for PeerManager {
     }
     
     fn can_connect(&self, peer: &PubKey) -> bool {
-        if self.is_bootstrap_author(peer) {
-            return true;
-        }
         matches!(
             self.get_peer_status(peer),
             Some(PeerStatus::Active | PeerStatus::Dormant)
@@ -307,28 +277,16 @@ impl PeerProvider for PeerManager {
     }
     
     fn can_accept_entry(&self, author: &PubKey) -> bool {
-        if self.is_bootstrap_author(author) {
-            return true;
-        }
         self.can_accept_author(author)
     }
     
     fn list_acceptable_authors(&self) -> Vec<PubKey> {
-        let mut authors: Vec<PubKey> = self.store.get_peers()
+        self.store.get_peers()
             .unwrap_or_default()
             .into_iter()
             .filter(|p| matches!(p.status, PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked))
             .map(|p| p.pubkey)
-            .collect();
-        
-        if let Ok(bootstrap) = self.bootstrap_authors.read() {
-            for pk in bootstrap.iter() {
-                if !authors.contains(pk) {
-                    authors.push(*pk);
-                }
-            }
-        }
-        authors
+            .collect()
     }
     
     fn subscribe_peer_events(&self) -> lattice_model::PeerEventStream {

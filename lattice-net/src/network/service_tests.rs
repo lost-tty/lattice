@@ -32,7 +32,6 @@ mod tests {
         async fn process_join_response(
             &self, 
             _store_id: Uuid, 
-            _authorized_authors: Vec<Vec<u8>>, 
             _via_peer: PubKey
         ) -> Result<(), NodeProviderError> { 
             Ok(()) 
