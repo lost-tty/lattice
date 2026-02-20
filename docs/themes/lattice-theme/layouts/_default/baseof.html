@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.LanguageCode }}">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ if .IsHome }}{{ .Site.Title }}{{ else }}{{ .Title }} — {{ .Site.Title }}{{ end }}</title>
+    <link rel="stylesheet" href="/tufte.css">
+    <link rel="stylesheet" href="/syntax.css">
+    <style>
+        body {
+            display: flex;
+            max-width: none;
+            width: 100%;
+            padding: 0;
+            margin: 0;
+        }
+
+        nav.sidebar {
+            width: 220px;
+            min-width: 220px;
+            padding: 2rem 1.5rem;
+            border-right: 1px solid #ddd;
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            overflow-y: auto;
+            font-size: 0.85rem;
+            line-height: 1.8;
+        }
+
+        nav.sidebar a {
+            text-decoration: none;
+            color: #333;
+            display: block;
+        }
+
+        nav.sidebar a:hover {
+            color: #111;
+        }
+
+        nav.sidebar a.active {
+            font-weight: bold;
+            color: #111;
+        }
+
+        nav.sidebar .site-title {
+            font-size: 1.1rem;
+            font-weight: bold;
+            margin-bottom: 1.5rem;
+            display: block;
+        }
+
+        nav.sidebar ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            width: 100%;
+        }
+
+        nav.sidebar li {
+            margin: 0;
+        }
+
+        nav.sidebar ul ul {
+            padding-left: 1rem;
+        }
+
+        nav.sidebar .section-label {
+            font-variant: small-caps;
+            letter-spacing: 0.05em;
+            color: #888;
+            margin-top: 1rem;
+            font-size: 0.8rem;
+        }
+
+        article.content {
+            flex: 1;
+            max-width: 900px;
+            padding: 2rem 2rem 2rem 3rem;
+        }
+
+        section>pre,
+        section>.highlight {
+            width: 55%;
+        }
+
+        @media (max-width: 760px) {
+            body {
+                flex-direction: column;
+            }
+
+            nav.sidebar {
+                width: 100%;
+                min-width: auto;
+                height: auto;
+                position: static;
+                border-right: none;
+                border-bottom: 1px solid #ddd;
+                padding: 1rem;
+            }
+
+            article.content {
+                padding: 1rem;
+            }
+
+            section>pre,
+            section>.highlight {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <nav class="sidebar">
+        <a href="/" class="site-title">{{ .Site.Title }}</a>
+        <ul>
+            {{ range site.Menus.main }}
+            {{ if .HasChildren }}
+            <li>
+                <span class="section-label">{{ .Name }}</span>
+                <ul>
+                    {{ range .Children }}
+                    <li><a href="{{ .URL }}" {{ if eq $.RelPermalink .URL }} class="active" {{ end }}>{{ .Name }}</a>
+                    </li>
+                    {{ end }}
+                </ul>
+            </li>
+            {{ else }}
+            <li><a href="{{ .URL }}" {{ if eq $.RelPermalink .URL }} class="active" {{ end }}>{{ .Name }}</a></li>
+            {{ end }}
+            {{ end }}
+        </ul>
+    </nav>
+    <article class="content">
+        {{ block "main" . }}{{ end }}
+    </article>
+</body>
+
+</html>

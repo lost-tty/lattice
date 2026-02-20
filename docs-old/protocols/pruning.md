@@ -31,7 +31,7 @@ It creates a new file `log.new`:
 2.  **Body**: Iterates through the old `log.wal`.
     -   If Op is in **Stability Set** → **Skip / Omit** (It is baked into the Snapshot).
     -   If Op is **NOT** in Stability Set → **Copy to `log.new`** (It is still pending/floating).
-3.  **Link**: Re-signs the copied entries to point to the new Snapshot Anchor (wrapping them in new local envelopes if necessary, or just linking the first one to the snapshot).
+3.  **Link**: Re-signs the copied intentions to point to the new Snapshot Anchor (wrapping them in new local envelopes if necessary, or just linking the first one to the snapshot).
 
 ### Phase C: The Switch
 Atomic rename: `mv log.new log.wal`.

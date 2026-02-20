@@ -7,8 +7,8 @@
 ├── identity.key              # Ed25519 private key (not replicated)
 ├── meta.db                   # Global metadata (redb)
 └── stores/{uuid}/
-    ├── sigchain/             # SigChainManager owns this directory
-    │   └── {author}.log      # Append-only SignedEntry stream
+    ├── log.db             # IntentionStore owns this directory
+    │   └── {author}.log      # Append-only SignedIntention stream
     ├── state/                # Backend owns this directory
     │   └── state.db          # Per-store backend state (e.g. redb for KvState)
     └── sync/                 # Sync metadata
@@ -36,8 +36,8 @@ Each `{author}.log` contains length-delimited `LogRecord` messages:
 
 ```protobuf
 message LogRecord {
-  bytes hash = 1;         // BLAKE3 hash of entry_bytes
-  bytes entry_bytes = 2;  // Serialized SignedEntry
+  bytes hash = 1;         // BLAKE3 hash of intention_bytes
+  bytes intention_bytes = 2;  // Serialized SignedIntention
 }
 ```
 

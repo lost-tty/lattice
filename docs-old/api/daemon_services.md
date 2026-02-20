@@ -23,7 +23,7 @@ pub trait ServiceProvider {
 
 ### 2. Service Registry (Cluster Configuration)
 
-Services are declared cluster-wide in the **Mesh Root Store** (the coordination layer). This allows coherent configuration management across the mesh.
+Services are declared cluster-wide in the **System Table (rootstores)** (the coordination layer). This allows coherent configuration management across the mesh.
 
 **Storage Path:** `/services/{service_id}/config`
 
@@ -39,7 +39,7 @@ channels = ["#general", "#dev"]
 
 ### 3. Node Assignment (Runtime)
 
-Each node watches the Mesh Root Store. If a node matches the `policy` for a service, it instantiates the service locally using the `LatticeService` trait.
+Each node watches the System Table. If a node matches the `policy` for a service, it instantiates the service locally using the `LatticeService` trait.
 
 - **Global**: Runs on every node in the mesh (e.g., `HealthCheck`).
 - **LocalOnly**: Configured only in local `meta.db` (e.g., `PersonalDashboard`).
@@ -72,7 +72,7 @@ The interface is defined in `lattice-rpc` using Protocol Buffers. It provides a 
 syntax = "proto3";
 package lattice.rpc;
 
-import "lattice/proto/storage.proto"; // Imports SignedEntry, HLC
+import "lattice/proto/storage.proto"; // Imports SignedIntention, HLC
 
 service LatticeController {
     // 1. Connection & Capabilities
@@ -123,7 +123,7 @@ message WatchRequest {
 
 message WatchEvent {
     oneof event {
-        Entry put = 1;          // New value written
+        Intention put = 1;          // New value written
         bytes delete = 2;       // Key deleted
     }
 }
@@ -161,13 +161,13 @@ A key requirement is that a Node can participate in **Multiple Meshes**, and ide
 
 ### The Service Instance
 
-A running service is identified by the tuple `(MeshID, ServiceID)`.
--   Mesh A (Work): `lattice-irc`
--   Mesh B (Hobby): `lattice-irc`
+A running service is identified by the tuple `(StoreID, ServiceID)`.
+-   Store A (Work): `lattice-irc`
+-   Store B (Hobby): `lattice-irc`
 
 This requires the **External Daemon** model to spawn **two separate processes**:
-1.  `lattice-irc --mesh-id <A> --socket /tmp/lattice.sock --port 6667`
-2.  `lattice-irc --mesh-id <B> --socket /tmp/lattice.sock --port 6668`
+1.  `lattice-irc --store-id <A> --socket /tmp/lattice.sock --port 6667`
+2.  `lattice-irc --store-id <B> --socket /tmp/lattice.sock --port 6668`
 
 ### Resolving Port Conflicts
 
@@ -242,7 +242,7 @@ let mut node = NodeBuilder::new()
 ### 2. Initialization (Runtime / Dynamic)
 The `ServiceManager` (inside `Node`) runs a reconciliation loop:
 
-1.  **Watch Config**: Monitors `/services/{id}` in the Mesh Root Store.
+1.  **Watch Config**: Monitors `/services/{id}` in the System Table.
 2.  **Evaluate Policy**: Checks `should_run(service_id, policy)`.
 3.  **Spawn/Kill**:
     -   **Start**: If policy matches + locally consented -> calls `Descriptor.spawn(ctx)`.

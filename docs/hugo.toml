@@ -1,0 +1,27 @@
+baseURL = "/"
+languageCode = "en-us"
+title = "Lattice"
+theme = "lattice-theme"
+
+[markup]
+  [markup.highlight]
+    noClasses = false
+    codeFences = true
+  [markup.goldmark]
+    [markup.goldmark.renderer]
+      unsafe = true
+
+[menus]
+  [[menus.main]]
+    name = "Home"
+    pageRef = "/"
+    weight = 10
+  [[menus.main]]
+    identifier = "reference"
+    name = "Reference"
+    weight = 90
+  [[menus.main]]
+    name = "Roadmap"
+    pageRef = "/roadmap"
+    parent = "reference"
+    weight = 10

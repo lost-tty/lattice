@@ -114,7 +114,7 @@ pub trait ReplicationPolicy {
 Replication is **Pull-Based**, driven by the Store's `StateMachine`.
 
 ### 1. The Trigger
--   **Metadata Sync**: Stores sync lightweight metadata (Ops) instantly via SigChain.
+-   **Metadata Sync**: Stores sync lightweight metadata (Ops) instantly via Intention DAG.
 -   **Data Ingestion**: Handled by **Store Logic** (Native or WASM).
     -   Store receives data (e.g. `ProfileStore::set_avatar(stream)`).
     -   Store streams to `cas.put()`.

@@ -51,8 +51,8 @@ Result: single head, Alice (10,0) + Bob (0,3) = 7
 
 ### `test_counter_merge_when_citing_parent`
 ```
-Alice: incr(key, 100)  // Entry 1
-Alice: incr(key, 50, parent=Entry1)  // Entry 2
+Alice: incr(key, 100)  // Intention 1
+Alice: incr(key, 50, parent=Intention1)  // Intention 2
 
 Result: total = 150 (not 100+100+50)
 ```
@@ -70,14 +70,14 @@ Result: total = 5 (reset by delete)
 
 ### `test_counter_replay_head_dedup`
 ```
-Apply same entry to store1 and store2
+Apply same intention to store1 and store2
 Result: both stores have identical heads (no duplicates)
 ```
 
 ### `test_counter_order_independence`
 ```
-Store1: apply [entry_a, entry_b]
-Store2: apply [entry_b, entry_a]
+Store1: apply [intention_a, intention_b]
+Store2: apply [intention_b, intention_a]
 
 Result: same total regardless of apply order
 ```
@@ -151,14 +151,14 @@ Result: saturates at i64::MAX (no panic)
 
 ### `test_counter_atomic_batch_ops`
 ```
-Entry with ops: [incr(key, 10), decr(key, 2), incr(key, 5)]
+Intention with ops: [incr(key, 10), decr(key, 2), incr(key, 5)]
 
 Result: total = 13 (all ops in batch applied atomically)
 ```
 
-### `test_counter_intra_entry_same_key_accumulation`
+### `test_counter_intra_intention_same_key_accumulation`
 ```
-Entry with ops: [incr(key, 1), incr(key, 1)]
+Intention with ops: [incr(key, 1), incr(key, 1)]
 
 Result: total = 2 (not 1, both ops accumulated)
 ```

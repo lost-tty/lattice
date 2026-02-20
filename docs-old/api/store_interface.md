@@ -5,7 +5,7 @@ The `Store` provides the generic replication interface, while `KvHandle` (and `K
 ## Architecture
 
 ```
-Store/KvHandle → ReplicatedState → { SigChain (log), StateMachine (heads) }
+Store/KvHandle → ReplicationController → { Intention DAG (log), StateMachine (heads) }
 ```
 
 **Heads-Only:** All read methods return `Vec<Head>`. Use `Merge` trait for resolution.
@@ -24,7 +24,7 @@ let all = handle.get(key).await?.all();         // Vec<Vec<u8>>
 
 // Lists
 use lattice_core::MergeList;
-let entries = handle.list().await?.lww();       // Vec<(Key, Value)>
+let intentions = handle.list().await?.lww();       // Vec<(Key, Value)>
 ```
 
 Strategies: `.lww()` (newest wins), `.fww()` (oldest wins), `.all()` (sorted by HLC)
@@ -66,7 +66,7 @@ watch_by_prefix(prefix: &[u8]) -> (snapshot, Receiver<WatchEvent>)
 ## Subscriptions
 
 ```rust
-subscribe_entries() -> Receiver<SignedEntry>
+subscribe_entries() -> Receiver<SignedIntention>
 subscribe_sync_needed() -> Receiver<SyncNeeded>
 subscribe_gaps() -> Receiver<GapInfo>
 ```
@@ -80,8 +80,8 @@ sync_state() -> SyncState
 set_peer_sync_state(peer, info) -> SyncDiscrepancy
 get_peer_sync_state(peer) -> Option<PeerSyncInfo>
 list_peer_sync_states() -> Vec<(PubKey, PeerSyncInfo)>
-ingest_entry(entry) -> Result<()>
-stream_entries_in_range(author, from, to) -> Receiver<SignedEntry>
+ingest_intention(intention) -> Result<()>
+stream_entries_in_range(author, from, to) -> Receiver<SignedIntention>
 ```
 
 ---

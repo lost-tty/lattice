@@ -43,7 +43,7 @@ struct ChatState {
 }
 
 struct Message {
-    id: Hash,           // SigChain Entry Hash
+    id: Hash,           // Intention DAG Intention Hash
     author: PubKey,
     timestamp: HLC,
     content: MessageType,
@@ -105,7 +105,7 @@ To support existing clients (Textual, Irssi, WeeChat), we implement a translatio
     - `JOIN #channel` -> Open Store, Sync.
     - `PRIVMSG #channel :msg` -> `ChatState::apply(Post(msg))`.
     - `Topic` -> `ChatState` metadata.
-    - `Names` -> List of peers (authors) seen in the SigChain.
+    - `Names` -> List of peers (authors) seen in the Intention DAG.
 
 ## Implementation Plan
 
@@ -128,6 +128,6 @@ To support existing clients (Textual, Irssi, WeeChat), we implement a translatio
 
 ## Technical Considerations
 
-- **Causal Ordering**: Messages should be sorted by causal history (Lamport/Vector clocks implicit in SigChain). `ChatState` simply appends in apply order, which is causally consistent by definition of the SigChain.
+- **Causal Ordering**: Messages should be sorted by causal history (Lamport/Vector clocks implicit in Intention DAG). `ChatState` simply appends in apply order, which is causally consistent by definition of the Intention DAG.
 - **Conflicting Reacts**: Reactions are a set. CRDT "Add Wins" logic is implicit since operations are additive.
 - **Pruning**: Chat logs grow forever. Future work: `snapshot` and `truncate`.

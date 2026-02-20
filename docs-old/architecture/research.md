@@ -36,7 +36,7 @@ Mechanisms to handle millions of nodes and prevent gossip flooding from maliciou
 ### Byzantine Fault Tolerance (BFT)
 Ensure system resilience against malicious peers who may lie, omit messages, or attempt to corrupt state (beyond simple forks).
 - **Objective:** Validated consistency without a central authority or global consensus.
-- **Strategy:** Local verification of all data (SigChains), cryptographic prohibition of history rewriting, and detection/rejection of invalid CRDT merges.
+- **Strategy:** Local verification of all data (Intention DAGs), cryptographic prohibition of history rewriting, and detection/rejection of invalid CRDT merges.
 
 ### Deep vs. Shallow Log Architecture
 
@@ -85,7 +85,7 @@ If a friend's device is seized or malicious:
 - **Storage:** Log (Append-only).
 - **Transport:** State (Snapshot).
 - **Updates:** Future Ops (Stream).
-- **Role:** You act as a "Time Gateway," allowing entry to the stream 'now' but not 'travel back'.
+- **Role:** You act as a "Time Gateway," allowing intention to the stream 'now' but not 'travel back'.
 
 ### Use Case: The Serverless Compute Grid
 

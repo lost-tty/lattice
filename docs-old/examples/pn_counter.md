@@ -21,12 +21,12 @@ impl CounterState {
     
     fn merge(&mut self, other: &Self) {
         for (node, val) in &other.p {
-            let entry = self.p.entry(*node).or_insert(0);
-            *entry = (*entry).max(*val);
+            let intention = self.p.intention(*node).or_insert(0);
+            *intention = (*intention).max(*val);
         }
         for (node, val) in &other.n {
-            let entry = self.n.entry(*node).or_insert(0);
-            *entry = (*entry).max(*val);
+            let intention = self.n.intention(*node).or_insert(0);
+            *intention = (*intention).max(*val);
         }
     }
 }

@@ -16,14 +16,14 @@ The daemon (`latticed`) exposes a gRPC API over a Unix Domain Socket (UDS) for C
 |------------------------|----------------------|----------------|----------|
 | `node status`          | NodeService          | GetStatus      | ✅       |
 | `node set-name`        | NodeService          | SetName        | ✅       |
-| `mesh create`          | MeshService          | Create         | ✅       |
-| `mesh list`            | MeshService          | List           | ✅       |
-| `mesh use`             | —                    | —              | CLI-only |
-| `mesh status`          | MeshService          | GetStatus      | ✅       |
-| `mesh join`            | MeshService          | Join           | ✅       |
-| `mesh peers`           | MeshService          | ListPeers      | ✅       |
-| `mesh invite`          | MeshService          | Invite         | ✅       |
-| `mesh revoke`          | MeshService          | Revoke         | ✅       |
+| `store create`         | StoreManager         | CreateStore    | ✅       |
+| `store list`           | StoreManager         | ListStores     | ✅       |
+| `store use`            | —                    | —              | CLI-only |
+| `store status`         | StoreManager         | GetStoreStatus | ✅       |
+| `peer join`            | NetworkService       | Join           | ✅       |
+| `peer list`            | NetworkService       | ListPeers      | ✅       |
+| `peer invite`          | NetworkService       | Invite         | ✅       |
+| `peer revoke`          | NetworkService       | Revoke         | ✅       |
 | `store create`         | StoreService         | Create         | ✅       |
 | `store list`           | StoreService         | List           | ✅       |
 | `store use`            | —                    | —              | CLI-only |
@@ -33,7 +33,6 @@ The daemon (`latticed`) exposes a gRPC API over a Unix Domain Socket (UDS) for C
 | `store debug`          | StoreService         | Debug          | ✅       |
 | `store history`        | StoreService         | History        | ✅       |
 | `store author-state`   | StoreService         | AuthorState    | ✅       |
-| `store orphan-cleanup` | StoreService         | OrphanCleanup  | ✅       |
 | `get/put/delete/list`  | DynamicStoreService  | Exec           | ✅       |
 
 ---
@@ -52,19 +51,21 @@ service NodeService {
 }
 ```
 
-### MeshService
-
-See [`daemon.proto`](../lattice-rpc/proto/daemon.proto) for full message definitions.
+### NetworkService & StoreManager
+Networking is handled by the `NetworkService`, while local store orchestration is handled by the `StoreManager` (following the flattened M10 architecture).
 
 ```protobuf
-service MeshService {
-  rpc Create(Empty) returns (MeshInfo);
-  rpc List(Empty) returns (MeshList);
-  rpc GetStatus(MeshId) returns (MeshInfo);
-  rpc Join(JoinRequest) returns (JoinResponse);
-  rpc Invite(MeshId) returns (InviteToken);
-  rpc ListPeers(MeshId) returns (PeerList);
+service NetworkService {
+  rpc Join(JoinToken) returns (JoinResponse);
+  rpc Invite(StoreId) returns (InviteToken);
+  rpc ListPeers(StoreId) returns (PeerList);
   rpc Revoke(RevokeRequest) returns (Empty);
+}
+
+service StoreManager {
+  rpc CreateStore(CreateStoreRequest) returns (StoreInfo);
+  rpc ListStores(Empty) returns (StoreList);
+  rpc GetStoreStatus(StoreId) returns (StoreInfo);
 }
 ```
 
@@ -105,7 +106,7 @@ service DynamicStoreService {
 | Phase | Description | Status |
 |-------|-------------|--------|
 | M7C-1 | UDS listener + NodeService | ✅ Done |
-| M7C-2 | MeshService RPCs | ✅ Done |
+| M7C-2 | StoreManager RPCs | ✅ Done |
 | M7C-3 | StoreService RPCs | ✅ Done |
 | M7C-4 | DynamicStoreService | ✅ Done |
 | M7D | CLI as RPC client | ✅ Done |

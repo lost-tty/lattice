@@ -4,7 +4,7 @@
 
 | Milestone        | Summary                                                                                                                                       |
 |------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| **M1–M3**        | Single-node log with SigChain/HLC, DAG conflict resolution (LWW), async actor pattern, two-node sync via Iroh, Mesh API with token-based join |
+| **M1–M3**        | Single-node log with Intention DAG/HLC, DAG conflict resolution (LWW), async actor pattern, two-node sync via Iroh, Mesh API with token-based join |
 | **M4**           | Generic RSM platform: extracted `lattice-model`, `lattice-kvstore`, WAL-first persistence, gRPC introspection                                 |
 | **M5**           | Atomic multi-key transactions: `batch().put(k1,v1).put(k2,v2).commit()`                                                                       |
 | **M6**           | Multi-store: root store as control plane, StoreManager with live reconciliation, per-store gossip                                             |
@@ -66,7 +66,7 @@ To support the Meet operator, the kernel must expose efficient graph traversal q
 
 **Goal:** Enable long-running nodes to manage log growth through snapshots, pruning, and finality checkpoints.
 
-> **See:** [DAG-Based Pruning Architecture](pruning.md) for details on Ancestry-based metrics and Log Rewriting.
+> **See:** [DAG-Based Pruning Architecture](protocols/pruning.md) for details on Ancestry-based metrics and Log Rewriting.
 
 ### 14A: Snapshotting
 - [ ] `state.snapshot()` when log grows large
@@ -75,13 +75,13 @@ To support the Meet operator, the kernel must expose efficient graph traversal q
 
 ### 14B: Waterlevel Pruning
 - [ ] Calculate stability frontier (min seq acknowledged by all peers)
-- [ ] `truncate_prefix(seq)` for old log entries
-- [ ] Preserve entries newer than frontier
+- [ ] `truncate_prefix(seq)` for old log intentions
+- [ ] Preserve intentions newer than frontier
 
 ### 14C: Checkpointing / Finality
 - [ ] Periodically finalize state hash (protect against "Deep History Attacks")
-- [ ] Signed checkpoint entries in sigchain
-- [ ] Nodes reject entries that contradict finalized checkpoints
+- [ ] Signed checkpoint intentions in sigchain
+- [ ] Nodes reject intentions that contradict finalized checkpoints
 
 ### 14D: Recursive Store Bootstrapping (Pruning-Aware)
 - [ ] `RecursiveWatcher` identifies child stores from live state, not just intention logs.
@@ -91,7 +91,7 @@ To support the Meet operator, the kernel must expose efficient graph traversal q
 
 ### 14E: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
-- [x] Support 100M+ entries without excessive RAM
+- [x] Support 100M+ intentions without excessive RAM
 
 ### 14E: Advanced Sync Optimization (Future)
 - [ ] **Persistent Merkle Index / Range Accumulator:**
@@ -154,8 +154,8 @@ To support the Meet operator, the kernel must expose efficient graph traversal q
 - [ ] Map Host Functions to `StorageBackend` calls (M9 prerequisite)
 
 ### 17B: Data Structures & Verification
-- [ ] Finalize `Entry`, `SignedEntry`, `Hash`, `PubKey` structs for Wasm boundary
-- [ ] Wasm-side SigChain verification (optional, for paranoid clients)
+- [ ] Finalize `Intention`, `SignedIntention`, `Hash`, `PubKey` structs for Wasm boundary
+- [ ] Wasm-side Intention DAG verification (optional, for paranoid clients)
 - **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
 
 ---
@@ -186,7 +186,7 @@ To support the Meet operator, the kernel must expose efficient graph traversal q
 - [ ] **Store Name Lookup Optimization**: `find_store_name()` in `store_service.rs` and `backend_inprocess.rs` does O(meshes × stores) linear search. Store names live in mesh root KV stores (StoreDeclaration). Consider caching in StoreManager or adding index.
 - [ ] **Data Directory Lock File**: Investigate lock file mechanism to prevent multiple processes from using the same data directory simultaneously (daemon + embedded app conflict). Options: flock, PID file, or socket-based detection.
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
-- [ ] **Payload Validation Strategy**: Decide where semantic validation occurs and what happens on failure. Options: build-time only, versioned rules, entry replacement, or separate chain/payload advancement. See `test_rejected_entry_breaks_chain` in `lattice-kvstore/src/kv.rs`.
+- [ ] **Payload Validation Strategy**: Decide where semantic validation occurs and what happens on failure. Options: build-time only, versioned rules, intention replacement, or separate chain/payload advancement. See `test_rejected_entry_breaks_chain` in `lattice-kvstore/src/kv.rs`.
 - [ ] **Signer Trait**: Introduce a `Signer` trait (sign hash → signature) to avoid passing raw `SigningKey` through the stack. Affects intention creation (`SignedIntention::sign`), witness signing (`WitnessRecord::sign`), and the M11 migration path.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
 - [ ] **Sync Trigger & Bootstrap Controller Review**: Review how and when sync is triggered (currently ad-hoc in `active_peer_ids` or `complete_join_handshake`). Consider introducing a dedicated `BootstrapController` to manage initial sync state, retry logic, and transition to steady-state gossip/sync.
@@ -227,8 +227,8 @@ To support the Meet operator, the kernel must expose efficient graph traversal q
 - Secure storage of node key (Keychain, TPM)
 - **Salted Gossip ALPN**: Use `/config/salt` from root store to salt the gossip ALPN per mesh (improves privacy by isolating mesh traffic).
 - **HTTP API**: External access to stores via REST/gRPC-Web (design TBD based on store types)
-- **Inter-Store Messaging** (research): Stores exchange typed messages using an actor model. Parent stores have a store-level identity (keypair derived from UUID + node key). Children trust the parent's store key — not individual parent authors — preserving encapsulation. Parent state machines decide what to relay; child state machines process messages as ops in their own DAG. Key design questions: message format, delivery guarantees (at-least-once via DAG?), bidirectional messaging (child→parent replies), and whether messages are durable (entries) or ephemeral.
-- **Audit Trail Enhancements** (HLC `wall_time` already in Entry):
+- **Inter-Store Messaging** (research): Stores exchange typed messages using an actor model. Parent stores have a store-level identity (keypair derived from UUID + node key). Children trust the parent's store key — not individual parent authors — preserving encapsulation. Parent state machines decide what to relay; child state machines process messages as ops in their own DAG. Key design questions: message format, delivery guarantees (at-least-once via DAG?), bidirectional messaging (child→parent replies), and whether messages are durable (intentions) or ephemeral.
+- **Audit Trail Enhancements** (HLC `wall_time` already in Intention):
   - Human-readable timestamps in CLI (`store history` shows ISO 8601)
   - Time-based query filters (`store history --from 2026-01-01 --to 2026-01-31`)
   - Identity mapping layer (PublicKey → User name/email)
@@ -243,3 +243,4 @@ To support the Meet operator, the kernel must expose efficient graph traversal q
     - Recover from "not yet bootstrapped" state on restart.
     - Inviter sends list of potential bootstrap peers in `JoinResponse`.
     - Node can bootstrap from any peer in the list, not just the inviter.
+- **Blind Node Relays (The Constellation)**: Define architectural support for "Blind Nodes" (e.g., untrusted Cloud VPS relays) vs. "Smart Nodes" (User Devices). Blind nodes do not hold store keys, do not run Wasm state machines, and only reconcile the raw Intention DAG (opaque blobs) via Negentropy to serve as highly-available offline-first backups without compromising privacy.
