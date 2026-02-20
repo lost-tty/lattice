@@ -1,27 +1,9 @@
-use lattice_node::{NodeBuilder, Invite, Node, direct_opener, STORE_TYPE_KVSTORE};
-use lattice_kvstore::PersistentKvState;
-use lattice_systemstore::system_state::SystemLayer;
-use lattice_model::types::PubKey;
-use lattice_net::NetworkService;
+mod common;
+
+use lattice_node::{Invite, STORE_TYPE_KVSTORE};
 use lattice_model::PeerStatus;
-use std::sync::Arc;
-
-fn temp_data_dir(name: &str) -> lattice_node::DataDir {
-    let path = std::env::temp_dir().join(format!("lattice_repro_{}", name));
-    let _ = std::fs::remove_dir_all(&path);
-    lattice_node::DataDir::new(path)
-}
-
-fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
-    NodeBuilder::new(data_dir)
-        .with_opener(STORE_TYPE_KVSTORE, |registry| direct_opener::<SystemLayer<PersistentKvState>>(registry))
-}
-
-async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<NetworkService>, Box<dyn std::error::Error>> {
-    let endpoint = lattice_net::IrohTransport::new(node.signing_key().clone()).await?;
-    let event_rx = node.subscribe_net_events();
-    Ok(NetworkService::new_with_provider(node, endpoint, event_rx).await?)
-}
+use lattice_net::network;
+use lattice_net_sim::{ChannelTransport, ChannelNetwork};
 
 #[tokio::test]
 async fn test_peer_persistence_after_bootstrap() {
@@ -29,14 +11,20 @@ async fn test_peer_persistence_after_bootstrap() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 
-    let data_a = temp_data_dir("persist_a");
-    let data_b = temp_data_dir("persist_b");
+    let node_a = common::build_node("persist_a");
+    let node_b = common::build_node("persist_b");
 
-    let node_a = Arc::new(test_node_builder(data_a.clone()).build().expect("node a"));
-    let node_b = Arc::new(test_node_builder(data_b.clone()).build().expect("node b"));
+    let net = ChannelNetwork::new();
+    let transport_a = ChannelTransport::new(node_a.node_id(), &net).await;
+    let transport_b = ChannelTransport::new(node_b.node_id(), &net).await;
 
-    let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
-    let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
+    let event_rx_a = node_a.subscribe_net_events();
+    let event_rx_b = node_b.subscribe_net_events();
+
+    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(event_rx_a));
+    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(event_rx_b));
+    server_a.set_global_gossip_enabled(false);
+    server_b.set_global_gossip_enabled(false);
 
     // A creates store
     let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store");
@@ -48,14 +36,13 @@ async fn test_peer_persistence_after_bootstrap() {
     // Create invite for B (not used for auth in this manual setup but good for completeness)
     let token = pm_a.create_invite(node_a.node_id(), store_id).await.expect("invite");
     // MANUAL SETUP: Add B to A so A accepts connection
-    let b_pubkey = PubKey::from(*server_b.endpoint().public_key().as_bytes());
+    let b_pubkey = node_b.node_id();
     pm_a.set_peer_status(b_pubkey, PeerStatus::Active).await.expect("add B to A");
     
     let _invite = Invite::parse(&token).expect("parse");
 
     // B joins A
-    let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
-    server_b.endpoint().add_peer_addr(server_a.endpoint().addr());
+    let a_pubkey = node_a.node_id();
 
     // Manually run join flow (simplified from complete_join_handshake to isolate bootstrap)
     

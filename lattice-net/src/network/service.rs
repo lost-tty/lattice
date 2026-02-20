@@ -7,7 +7,7 @@
 //! while Iroh-specific infrastructure (Router, GossipManager, event handling)
 //! is implemented only for `NetworkService<IrohTransport>`.
 
-use crate::{MessageSink, MessageStream, IrohTransport, LatticeNetError, LATTICE_ALPN, ToLattice};
+use crate::{MessageSink, MessageStream, IrohTransport, LatticeNetError, LATTICE_ALPN};
 use lattice_net_types::{NetworkStore, NodeProviderExt};
 use lattice_net_types::transport::{Transport, Connection as TransportConnection, BiStream};
 use lattice_model::{NetEvent, Uuid, UserEvent};
@@ -139,6 +139,7 @@ impl NetworkService<IrohTransport> {
         });
         
         // Subscribe to network events (NetEvent channel)
+        // Uses the generic event handler from impl<T: Transport>
         let service_clone = service.clone();
         tokio::spawn(async move {
             Self::run_net_event_handler(service_clone, event_rx).await;
@@ -152,201 +153,14 @@ impl NetworkService<IrohTransport> {
         &self.transport
     }
 
-    /// Handle a join request triggered by a NetEvent.
-    /// Connects to the peer, performs the Join handshake, and returns the established connection.
-    async fn handle_join_request_event(
-        &self,
-        peer_id: iroh::PublicKey,
-        store_id: Uuid,
-        secret: Vec<u8>,
-    ) -> Result<iroh::endpoint::Connection, LatticeNetError> {
-        tracing::debug!("Connecting to {} for join...", peer_id);
-        
-        let conn = self.transport.endpoint().connect(peer_id, LATTICE_ALPN).await
-            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
+}
 
-        let (send, recv) = conn.open_bi().await
-            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
+// ====================================================================================
+// Generic: Sync protocol, peer discovery, accessors
+// These work with any Transport implementation.
+// ====================================================================================
 
-        let req = lattice_kernel::proto::network::JoinRequest {
-             node_pubkey: self.provider.node_id().as_bytes().to_vec(),
-             store_id: store_id.as_bytes().to_vec(),
-             invite_secret: secret,
-        };
-        
-        let mut sink = MessageSink::new(send);
-        sink.send(&lattice_kernel::proto::network::PeerMessage {
-             message: Some(peer_message::Message::JoinRequest(req)),
-        }).await?;
-        
-        let mut stream = MessageStream::new(recv);
-        if let Some(msg) = stream.recv().await? {
-             match msg.message {
-                 Some(peer_message::Message::JoinResponse(_)) => {
-                     Ok(conn)
-                 },
-                 _ => Err(LatticeNetError::Protocol("Unexpected response to JoinRequest".into())),
-             }
-        } else {
-             Err(LatticeNetError::Connection("Connection closed during join".into()))
-        }
-    }
-
-    /// Complete the join handshake after receiving a JoinResponse.
-    /// Creates the store locally, starts handling incoming streams, and triggers bootstrap.
-    ///
-    /// NOTE: Takes Arc<Self> to allow spawning background bootstrap tasks.
-    pub async fn complete_join_handshake(
-        service: Arc<Self>,
-        conn: iroh::endpoint::Connection,
-        store_id: Uuid,
-    ) {
-        let iroh_peer_id = conn.remote_id();
-        tracing::info!(peer = %iroh_peer_id.fmt_short(), "Join handshake successful");
-
-        // 1. Create the store locally via provider
-        let peer_pk: lattice_model::types::PubKey = iroh_peer_id.to_lattice();
-        let _ = service.sessions.mark_online(peer_pk);
-
-        if let Err(e) = service.provider.process_join_response(store_id, peer_pk).await {
-             tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "Node failed to process join response (create store)");
-             service.provider.emit_user_event(UserEvent::JoinFailed { store_id, reason: e.to_string() });
-             return;
-        }
-
-        // 2. Start handling incoming streams on this connection (concurrently)
-        let provider = service.provider.clone();
-        let peer_stores = service.peer_stores.clone();
-        let sessions = service.sessions.clone();
-        let conn_clone = conn.clone();
-        tokio::spawn(async move {
-            if let Err(e) = super::handlers::handle_connection(provider, peer_stores, sessions, conn_clone).await {
-                tracing::debug!("Join connection handler ended: {}", e);
-            }
-        });
-
-        // 3. Bootstrap (Clone) content from peer
-        if service.auto_sync_enabled.load(Ordering::SeqCst) {
-            tracing::info!(peer = %iroh_peer_id.fmt_short(), "Bootstrapping store {}...", store_id);
-            let peer_pk = PubKey::from(*iroh_peer_id.as_bytes());
-            tokio::spawn(async move {
-                match service.bootstrap_from_peer(store_id, peer_pk).await {
-                    Ok(count) => {
-                        tracing::info!(peer = %iroh_peer_id.fmt_short(), count = count, "Bootstrap finished successfully");
-                        // Trigger initial sync with ALL peers to catch up on recent activity
-                        if let Ok(results) = service.sync_all_by_id(store_id).await {
-                            let sync_count: u64 = results.iter().map(|r| r.entries_received).sum();
-                            // Emit SyncResult to notify the UI/CLI of bootstrap completion stats
-                            // TODO: Once Bootstrap is stateful, emit BootstrapResult
-                            service.provider.emit_user_event(UserEvent::SyncResult {
-                                store_id,
-                                peers_synced: 1,
-                                entries_sent: 0,
-                                entries_received: count + sync_count,
-                            });
-                            
-                            if let Some(store) = service.get_store(store_id) {
-                                store.emit_system_event(lattice_model::SystemEvent::BootstrapComplete);
-                            } else {
-                                tracing::warn!(store_id = %store_id, "Store not found to emit BootstrapComplete event");
-                            }
-                        }
-                    },
-                    Err(e) => tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "Bootstrap failed"),
-                }
-            });
-        }
-    }
-
-    async fn run_net_event_handler(service: Arc<Self>, mut event_rx: tokio::sync::broadcast::Receiver<NetEvent>) {
-        while let Ok(event) = event_rx.recv().await {
-            let service = service.clone();
-            
-            match event {
-                NetEvent::Join { peer, store_id, secret } => {
-                    tokio::spawn(async move {
-                        let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
-                            tracing::error!(peer = %PubKey::from(peer), "Join: invalid PubKey");
-                            return;
-                        };
-                        tracing::info!(peer = %iroh_peer_id.fmt_short(), mesh = %store_id, "NetEvent::Join → starting join protocol");
-                        
-                        match service.handle_join_request_event(iroh_peer_id, store_id, secret).await {
-                            Ok(conn) => {
-                                Self::complete_join_handshake(service, conn, store_id).await;
-                            }
-                            Err(e) => {
-                                tracing::error!(peer = %iroh_peer_id.fmt_short(), error = %e, "NetEvent::Join → join failed");
-                                service.provider.emit_user_event(UserEvent::JoinFailed { store_id, reason: e.to_string() });
-                            }
-                        }
-                    });
-                }
-                NetEvent::StoreReady { store_id } => {
-                    tokio::spawn(async move {
-                        tracing::info!(store_id = %store_id, "NetEvent::StoreReady → registering store");
-                        // Get peer_provider from provider for gossip setup
-                        let Some(peer_provider) = service.provider.get_peer_provider(&store_id) else {
-                            tracing::warn!(store_id = %store_id, "PeerProvider not found for store");
-                            return;
-                        };
-                        service.register_store_by_id(store_id, peer_provider).await;
-                    });
-                }
-                NetEvent::SyncWithPeer { store_id, peer } => {
-                    tokio::spawn(async move {
-                        let peer_pk = PubKey::from(peer);
-                        tracing::info!(
-                            store_id = %store_id, 
-                            peer = %peer_pk, 
-                            "NetEvent::SyncWithPeer → starting targeted sync"
-                        );
-                        
-                        match service.sync_with_peer_by_id(store_id, peer_pk, &[]).await {
-                            Ok(result) => tracing::info!(
-                                store_id = %store_id,
-                                peer = %peer_pk,
-                                entries = result.entries_received,
-                                "NetEvent::SyncWithPeer → complete"
-                            ),
-                            Err(e) => tracing::warn!(
-                                store_id = %store_id,
-                                peer = %peer_pk,
-                                error = %e,
-                                "NetEvent::SyncWithPeer → failed"
-                            ),
-                        }
-                    });
-                }
-                NetEvent::SyncStore { store_id } => {
-                    tokio::spawn(async move {
-                        tracing::debug!(store_id = %store_id, "NetEvent::SyncStore → syncing with all peers");
-                        if service.get_store(store_id).is_some() {
-                            match service.sync_all_by_id(store_id).await {
-                                Ok(results) => {
-                                    let entries_received: u64 = results.iter().map(|r| r.entries_received).sum();
-                                    let entries_sent: u64 = results.iter().map(|r| r.entries_sent).sum();
-                                    let peers_synced = results.len() as u32;
-                                    
-                                    // Emit SyncResult event
-                                    service.provider.emit_user_event(UserEvent::SyncResult {
-                                        store_id,
-                                        peers_synced,
-                                        entries_sent,
-                                        entries_received,
-                                    });
-                                }
-                                Err(e) => tracing::warn!(store_id = %store_id, error = %e, "NetEvent::SyncStore → failed"),
-                            }
-                        } else {
-                            tracing::warn!(store_id = %store_id, "NetEvent::SyncStore → store not registered");
-                        }
-                    });
-                }
-            }
-        }
-    }
-    
+impl<T: Transport> NetworkService<T> {
     /// Register a store for network access.
     /// The store must already be registered in Node's StoreManager.
     pub async fn register_store_by_id(self: &Arc<Self>, store_id: Uuid, pm: std::sync::Arc<dyn lattice_model::PeerProvider>) {
@@ -424,14 +238,6 @@ impl NetworkService<IrohTransport> {
         }
     }
 
-}
-
-// ====================================================================================
-// Generic: Sync protocol, peer discovery, accessors
-// These work with any Transport implementation.
-// ====================================================================================
-
-impl<T: Transport> NetworkService<T> {
     /// Bootstrap from a peer (Clone protocol).
     ///
     /// Connects to peer, requests full witness history, and locally re-witnesses (clones) the chain.
@@ -555,11 +361,15 @@ impl<T: Transport> NetworkService<T> {
     ///
     /// Suitable for in-memory testing with `ChannelTransport` or any
     /// non-iroh `Transport` implementation.
+    ///
+    /// Accepts an optional `event_rx` to handle NetEvents (Join, SyncWithPeer, etc.).
+    /// If provided, spawns the accept loop and event handler automatically.
     pub fn new_simulated(
         provider: Arc<dyn NodeProviderExt>,
         transport: T,
+        event_rx: Option<broadcast::Receiver<NetEvent>>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let service = Arc::new(Self {
             provider,
             transport,
             gossip_manager: None,
@@ -567,8 +377,133 @@ impl<T: Transport> NetworkService<T> {
             sessions: Arc::new(super::session::SessionTracker::new()),
             router: None,
             global_gossip_enabled: Arc::new(AtomicBool::new(false)),
-            auto_sync_enabled: Arc::new(AtomicBool::new(false)),
-        })
+            auto_sync_enabled: Arc::new(AtomicBool::new(true)),
+        });
+
+        // Spawn accept loop
+        { let s = service.clone(); tokio::spawn(async move { s.run_accept_loop().await; }); }
+
+        // Spawn event handler if event_rx provided
+        if let Some(rx) = event_rx {
+            let s = service.clone();
+            tokio::spawn(async move { Self::run_net_event_handler(s, rx).await; });
+        }
+
+        service
+    }
+
+    /// Event handler — handles NetEvents using generic Transport.
+    async fn run_net_event_handler(service: Arc<Self>, mut event_rx: broadcast::Receiver<NetEvent>) {
+        while let Ok(event) = event_rx.recv().await {
+            let service = service.clone();
+            match event {
+                NetEvent::Join { peer, store_id, secret } => {
+                    tokio::spawn(async move {
+                        let peer_pk = PubKey::from(peer);
+                        tracing::info!(peer = %peer_pk, store_id = %store_id, "NetEvent::Join → starting generic join");
+                        match service.handle_join(peer_pk, store_id, secret).await {
+                            Ok(()) => tracing::info!(peer = %peer_pk, "Join completed successfully"),
+                            Err(e) => {
+                                tracing::error!(peer = %peer_pk, error = %e, "Join failed");
+                                service.provider.emit_user_event(UserEvent::JoinFailed { store_id, reason: e.to_string() });
+                            }
+                        }
+                    });
+                }
+                NetEvent::StoreReady { store_id } => {
+                    tokio::spawn(async move {
+                        if let Some(peer_provider) = service.provider.get_peer_provider(&store_id) {
+                            service.register_store_by_id(store_id, peer_provider).await;
+                        }
+                    });
+                }
+                NetEvent::SyncWithPeer { store_id, peer } => {
+                    tokio::spawn(async move {
+                        let _ = service.sync_with_peer_by_id(store_id, PubKey::from(peer), &[]).await;
+                    });
+                }
+                NetEvent::SyncStore { store_id } => {
+                    tokio::spawn(async move {
+                        let _ = service.sync_all_by_id(store_id).await;
+                    });
+                }
+            }
+        }
+    }
+
+    /// Generic join flow: connect, send JoinRequest, receive JoinResponse, bootstrap.
+    async fn handle_join(
+        self: &Arc<Self>,
+        peer_id: PubKey,
+        store_id: Uuid,
+        secret: Vec<u8>,
+    ) -> Result<(), LatticeNetError> {
+        // 1. Connect and send JoinRequest
+        let conn = self.transport.connect(&peer_id).await
+            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
+
+        let bi = conn.open_bi().await
+            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
+        let (send, recv) = bi.into_split();
+
+        let req = lattice_kernel::proto::network::JoinRequest {
+            node_pubkey: self.provider.node_id().as_bytes().to_vec(),
+            store_id: store_id.as_bytes().to_vec(),
+            invite_secret: secret,
+        };
+
+        let mut sink = MessageSink::new(send);
+        sink.send(&PeerMessage {
+            message: Some(peer_message::Message::JoinRequest(req)),
+        }).await?;
+
+        let mut stream = MessageStream::new(recv);
+        match stream.recv().await? {
+            Some(msg) => match msg.message {
+                Some(peer_message::Message::JoinResponse(_)) => {}
+                _ => return Err(LatticeNetError::Protocol("Unexpected response to JoinRequest".into())),
+            },
+            None => return Err(LatticeNetError::Connection("Connection closed during join".into())),
+        }
+
+        // 2. Create store locally
+        let _ = self.sessions.mark_online(peer_id);
+        self.provider.process_join_response(store_id, peer_id).await
+            .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+
+        // 3. Bootstrap from peer
+        if self.auto_sync_enabled.load(Ordering::SeqCst) {
+            tracing::info!(peer = %peer_id, "Bootstrapping store {}...", store_id);
+            let service = self.clone();
+            tokio::spawn(async move {
+                match service.bootstrap_from_peer(store_id, peer_id).await {
+                    Ok(count) => {
+                        tracing::info!(peer = %peer_id, count = count, "Bootstrap finished successfully");
+                        // Trigger initial sync with ALL peers to catch up on recent activity
+                        if let Ok(results) = service.sync_all_by_id(store_id).await {
+                            let sync_count: u64 = results.iter().map(|r| r.entries_received).sum();
+                            // Emit SyncResult to notify the UI/CLI of bootstrap completion stats
+                            // TODO: Once Bootstrap is stateful, emit BootstrapResult
+                            service.provider.emit_user_event(UserEvent::SyncResult {
+                                store_id,
+                                peers_synced: 1,
+                                entries_sent: 0,
+                                entries_received: count + sync_count,
+                            });
+                            
+                            if let Some(store) = service.get_store(store_id) {
+                                store.emit_system_event(lattice_model::SystemEvent::BootstrapComplete);
+                            } else {
+                                tracing::warn!(store_id = %store_id, "Store not found to emit BootstrapComplete event");
+                            }
+                        }
+                    },
+                    Err(e) => tracing::error!(peer = %peer_id, error = %e, "Bootstrap failed"),
+                }
+            });
+        }
+
+        Ok(())
     }
 
     /// Access the provider (trait object)
@@ -651,9 +586,6 @@ impl<T: Transport> NetworkService<T> {
         W: tokio::io::AsyncWrite + Send + Unpin,
         R: tokio::io::AsyncRead + Send + Unpin,
     {
-        use lattice_kernel::proto::network::peer_message;
-        use lattice_kernel::weaver::convert::intention_to_proto;
-
         let mut sink = crate::MessageSink::new(send);
         let mut stream = crate::MessageStream::new(recv);
         let timeout = Duration::from_secs(15);
@@ -668,60 +600,20 @@ impl<T: Transport> NetworkService<T> {
 
             match msg.message {
                 Some(peer_message::Message::Reconcile(req)) => {
-                    let store_id = Uuid::from_slice(&req.store_id)
-                        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
-                    let store = super::handlers::lookup_store(self.provider.store_registry().as_ref(), store_id)?;
-                    let mut session = super::sync_session::SyncSession::new(&store, &mut sink, &mut stream, remote_pubkey);
-                    let _ = session.run(Some(req)).await?;
+                    super::handlers::handle_reconcile_start(self.provider.as_ref(), self.peer_stores.clone(), &remote_pubkey, req, &mut sink, &mut stream).await?;
                 }
                 Some(peer_message::Message::FetchIntentions(req)) => {
-                    let store_id = Uuid::from_slice(&req.store_id)
-                        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
-                    let store = super::handlers::lookup_store(self.provider.store_registry().as_ref(), store_id)?;
-                    let hashes: Vec<_> = req.hashes.iter()
-                        .filter_map(|h| Hash::try_from(h.as_slice()).ok())
-                        .collect();
-                    let intentions = store.fetch_intentions(hashes).await
-                        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-                    let proto: Vec<_> = intentions.iter().map(intention_to_proto).collect();
-                    let msg = lattice_kernel::proto::network::PeerMessage {
-                        message: Some(peer_message::Message::IntentionResponse(
-                            lattice_kernel::proto::network::IntentionResponse {
-                                store_id: req.store_id,
-                                done: true,
-                                intentions: proto,
-                            }
-                        )),
-                    };
-                    sink.send(&msg).await?;
+                    super::handlers::handle_fetch_intentions(self.provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
                 }
                 Some(peer_message::Message::FetchChain(req)) => {
-                    let store_id = Uuid::from_slice(&req.store_id)
-                        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
-                    let store = super::handlers::lookup_store(self.provider.store_registry().as_ref(), store_id)?;
-                    let target = Hash::try_from(req.target_hash.as_slice())
-                        .map_err(|_| LatticeNetError::Connection("Invalid target_hash".into()))?;
-                    let since = if req.since_hash.is_empty() { None } else {
-                        let h = Hash::try_from(req.since_hash.as_slice())
-                            .map_err(|_| LatticeNetError::Connection("Invalid since_hash".into()))?;
-                        if h == Hash::ZERO { None } else { Some(h) }
-                    };
-                    let chain = store.walk_back_until(target, since, 500).await
-                        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-                    let proto: Vec<_> = chain.iter().map(intention_to_proto).collect();
-                    let msg = lattice_kernel::proto::network::PeerMessage {
-                        message: Some(peer_message::Message::IntentionResponse(
-                            lattice_kernel::proto::network::IntentionResponse {
-                                store_id: req.store_id,
-                                done: true,
-                                intentions: proto,
-                            }
-                        )),
-                    };
-                    sink.send(&msg).await?;
+                    super::handlers::handle_fetch_chain(self.provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
                 }
                 Some(peer_message::Message::BootstrapRequest(req)) => {
                     super::handlers::handle_bootstrap_request(self.provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
+                }
+                Some(peer_message::Message::JoinRequest(req)) => {
+                    super::handlers::handle_join_request(self.provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
+                    break; // Join is a terminal message, close the stream after response
                 }
                 _ => {
                     tracing::debug!("Unexpected message type in generic handler");

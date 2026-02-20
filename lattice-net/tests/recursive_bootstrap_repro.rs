@@ -1,48 +1,25 @@
-use lattice_node::{NodeBuilder, Node, DataDir, Invite, NodeEvent};
-use lattice_net::{IrohTransport, NetworkService, ToLattice};
+mod common;
+
+use lattice_node::{Invite, NodeEvent, STORE_TYPE_KVSTORE};
+use lattice_net::network;
+use lattice_net_sim::{ChannelTransport, ChannelNetwork};
 use lattice_kvstore_client::KvStoreExt;
 use lattice_model::Uuid;
-use std::sync::Arc;
 use tokio::time::{timeout, Duration, sleep};
-
-async fn create_node(dir: &std::path::Path) -> (Arc<Node>, Arc<NetworkService>) {
-    let (net_tx, net_rx) = NetworkService::create_net_channel();
-    let data_dir = DataDir::new(dir.to_path_buf());
-    
-    use lattice_node::{STORE_TYPE_KVSTORE, direct_opener};
-    
-    let mut builder = NodeBuilder::new(data_dir.clone())
-        .with_net_tx(net_tx);
-
-    // Register KV store opener with the SystemLayer wrapper.
-    // This provides the expected environment for system-level operations.
-    builder = builder.with_opener(STORE_TYPE_KVSTORE, |registry| {
-        // Use system layer wrapper around persistent state
-        type PersistentKvState = lattice_systemstore::SystemLayer<lattice_storage::PersistentState<lattice_kvstore::KvState>>;
-        direct_opener::<PersistentKvState>(registry)
-    });
-
-    let node = builder.build().unwrap();
-    let node = Arc::new(node);
-    
-    let endpoint = IrohTransport::new(node.signing_key().clone()).await.unwrap();
-    let net = NetworkService::new_with_provider(node.clone(), endpoint, net_rx).await.unwrap();
-    
-    (node, net)
-}
 
 #[tokio::test]
 async fn test_recursive_discovery_and_sync() {
     let _ = tracing_subscriber::fmt::try_init(); 
-    use lattice_node::STORE_TYPE_KVSTORE;
     
-    let base_dir = std::env::temp_dir().join(format!("lattice_repro_{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&base_dir).unwrap();
-    let path_a = base_dir.join("node_a");
-    let path_b = base_dir.join("node_b");
-    
-    // 1. Setup Node A (The Creator)
-    let (node_a, net_a) = create_node(&path_a).await;
+    let node_a = common::build_node(&format!("repro_a_{}", Uuid::new_v4()));
+    let node_b = common::build_node(&format!("repro_b_{}", Uuid::new_v4()));
+
+    let net = ChannelNetwork::new();
+    let transport_a = ChannelTransport::new(node_a.node_id(), &net).await;
+    let transport_b = ChannelTransport::new(node_b.node_id(), &net).await;
+
+    let _net_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(node_a.subscribe_net_events()));
+    let _net_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(node_b.subscribe_net_events()));
     
     // Create Root Store
     let root_id = node_a.create_store(None, Some("root".into()), STORE_TYPE_KVSTORE).await.unwrap();
@@ -58,16 +35,13 @@ async fn test_recursive_discovery_and_sync() {
     // Write to Child
     child_handle.put(b"child_data".to_vec(), b"val".to_vec()).await.unwrap();
     
-    // 2. Setup Node B (The Joiner)
-    let (node_b, _net_b) = create_node(&path_b).await;
-    
-    // 3. Node B joins Root
+    // 2. Node B joins Root
     // Create invite on A
     let invite_code = node_a.store_manager().create_invite(root_id, node_b.node_id()).await.unwrap();
     let invite = Invite::parse(&invite_code).unwrap();
     
     // Trigger join event on B via Node API
-    node_b.join(net_a.endpoint().public_key().to_lattice(), root_id, invite.secret).unwrap();
+    node_b.join(node_a.node_id(), root_id, invite.secret).unwrap();
     
     // Verify Root Sync using Table Fingerprints
     let root_a_handle = node_a.store_manager().get_handle(&root_id).unwrap();
@@ -127,7 +101,4 @@ async fn test_recursive_discovery_and_sync() {
             sleep(Duration::from_millis(50)).await;
         }
     }).await.expect("Node B failed to sync child data (fingerprint mismatch)");
-
-    // Cleanup
-    let _ = std::fs::remove_dir_all(&base_dir);
 }

@@ -6,6 +6,9 @@
 //! - **gossip_manager**: Gossip subsystem encapsulation
 //! - **session**: Ephemeral session tracking (who is online)
 
+/// Maximum number of items returned by a single FetchChain request.
+const MAX_FETCH_CHAIN_ITEMS: usize = 32;
+
 mod service;
 mod error;
 mod gossip_manager;

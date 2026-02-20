@@ -7,102 +7,30 @@
 //!
 //! Uses extensive validation and tracing.
 
-use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, Uuid, direct_opener, StoreHandle, STORE_TYPE_KVSTORE};
-use lattice_net::{NetworkService, ToLattice, ToIroh};
+mod common;
+
+use common::TestPair;
 use lattice_kvstore_client::KvStoreExt;
-use lattice_model::types::PubKey;
+use lattice_net_sim::{ChannelTransport, ChannelNetwork};
 use std::sync::Arc;
-use tokio::time::Duration;
 use tokio::sync::Barrier;
-
-/// Helper to create a temp data dir for testing
-fn temp_data_dir(name: &str) -> lattice_node::DataDir {
-    let path = std::env::temp_dir().join(format!("lattice_stress_test_{}", name));
-    let _ = std::fs::remove_dir_all(&path);
-    lattice_node::DataDir::new(path)
-}
-
-/// Helper to create node builder
-fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
-    NodeBuilder::new(data_dir)
-        .with_opener(STORE_TYPE_KVSTORE, |registry| direct_opener::<lattice_systemstore::system_state::SystemLayer<lattice_kvstore::PersistentKvState>>(registry))
-}
-
-async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<NetworkService>, Box<dyn std::error::Error>> {
-    let endpoint = lattice_net::IrohTransport::new(node.signing_key().clone()).await?;
-    let event_rx = node.subscribe_net_events();
-    Ok(NetworkService::new_with_provider(node, endpoint, event_rx).await?)
-}
-
-async fn join_store_via_event(node: &Node, peer_pubkey: PubKey, store_id: Uuid, secret: Vec<u8>) -> Option<Arc<dyn StoreHandle>> {
-    let mut events = node.subscribe_events();
-    if node.join(peer_pubkey, store_id, secret).is_err() {
-        return None;
-    }
-    match tokio::time::timeout(Duration::from_secs(10), async {
-        while let Ok(event) = events.recv().await {
-            if let NodeEvent::StoreReady { store_id: ready_id, .. } = event {
-                if ready_id == store_id {
-                    return node.store_manager().get_handle(&ready_id);
-                }
-            }
-        }
-        None
-    }).await {
-        Ok(res) => res,
-        Err(_) => None,
-    }
-}
-
-async fn setup_pair(name_a: &str, name_b: &str) -> (Arc<Node>, Arc<Node>, Arc<NetworkService>, Arc<NetworkService>, Arc<dyn StoreHandle>, Arc<dyn StoreHandle>) {
-    let data_a = temp_data_dir(name_a);
-    let data_b = temp_data_dir(name_b);
-
-    let node_a = Arc::new(test_node_builder(data_a).build().expect("node a"));
-    let node_b = Arc::new(test_node_builder(data_b).build().expect("node b"));
-
-    let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
-    let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
-
-    let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store a");
-    let store_a = node_a.store_manager().get_handle(&store_id).expect("get store a");
-
-    let token_string = node_a.store_manager().create_invite(store_id, node_a.node_id()).await.expect("create invite");
-    let invite = Invite::parse(&token_string).expect("parse token");
-    let a_pubkey = PubKey::from(*server_a.endpoint().public_key().as_bytes());
-
-    server_b.endpoint().add_peer_addr(server_a.endpoint().addr());
-
-    let store_b = join_store_via_event(&node_b, a_pubkey, store_id, invite.secret)
-        .await.expect("B join A");
-
-    (node_a, node_b, server_a, server_b, store_a, store_b)
-}
 
 #[tokio::test]
 async fn test_large_dataset_sync() {
+    let TestPair { server_b, store_a, store_b, .. } =
+        TestPair::new("large_a", "large_b").await;
 
-    let (_node_a, _node_b, server_a, server_b, store_a, store_b) = setup_pair("large_a", "large_b").await;
-    server_a.set_global_gossip_enabled(false);
-    server_b.set_global_gossip_enabled(false);
-
-    // Use 1000 items (still recursive, but faster)
-    // 2500 was too slow on this env.
     const COUNT: usize = 100; 
     
-    tracing::info!("Generating {} items...", COUNT);
     for i in 0..COUNT {
         store_a.put(format!("/key/{}", i).into_bytes(), format!("val_{}", i).into_bytes()).await.expect("put");
         if i % 500 == 0 { tokio::task::yield_now().await; }
     }
 
-    tracing::info!("Starting sync...");
     let start = std::time::Instant::now();
     let results = server_b.sync_all_by_id(store_b.id()).await.expect("sync");
-    tracing::info!("Sync finished in {:?} (Results: {} peers)", start.elapsed(), results.len());
+    tracing::info!("Sync finished in {:?} ({} peers)", start.elapsed(), results.len());
 
-    // Validation: Check ALL items
-    tracing::info!("Validating items...");
     for i in 0..COUNT {
         let key = format!("/key/{}", i).into_bytes();
         let expected_val = format!("val_{}", i).into_bytes();
@@ -114,10 +42,8 @@ async fn test_large_dataset_sync() {
 #[tokio::test]
 async fn test_bidirectional_sync() {
     const COUNT: usize = 100;
-
-    let (_node_a, _node_b, server_a, server_b, store_a, store_b) = setup_pair("bi_a", "bi_b").await;
-    server_a.set_global_gossip_enabled(false);
-    server_b.set_global_gossip_enabled(false);
+    let TestPair { server_b, store_a, store_b, .. } =
+        TestPair::new("bi_a", "bi_b").await;
 
     for i in 0..COUNT {
         store_a.put(format!("/a/{}", i).into_bytes(), b"val_a".to_vec()).await.expect("put a");
@@ -126,16 +52,12 @@ async fn test_bidirectional_sync() {
         store_b.put(format!("/b/{}", i).into_bytes(), b"val_b".to_vec()).await.expect("put b");
     }
 
-    tracing::info!("Starting bidirectional sync...");
     server_b.sync_all_by_id(store_b.id()).await.expect("sync");
 
-    // Validate A has B's data (sync is bidirectional — both sides reconcile in one session)
     for i in 0..COUNT {
         let val = store_a.get(format!("/b/{}", i).into_bytes()).await.expect("get");
         assert_eq!(val, Some(b"val_b".to_vec()), "A missing B's data at {}", i);
     }
-
-    // Validate B has A's data
     for i in 0..COUNT {
         let val = store_b.get(format!("/a/{}", i).into_bytes()).await.expect("get");
         assert_eq!(val, Some(b"val_a".to_vec()), "B missing A's data at {}", i);
@@ -145,14 +67,13 @@ async fn test_bidirectional_sync() {
 #[tokio::test]
 async fn test_interleaved_modifications() {
     const COUNT: usize = 100;
-
-    let (_node_a, _node_b, server_a, server_b, store_a, store_b) = setup_pair("conc_a", "conc_b").await;
-    server_a.set_global_gossip_enabled(false);
-    server_b.set_global_gossip_enabled(false);
+    let TestPair { node_a, server_a, server_b, store_a, store_b, .. } =
+        TestPair::new("conc_a", "conc_b").await;
+    server_a.set_auto_sync_enabled(false);
+    server_b.set_auto_sync_enabled(false);
     
-    let pk_a = server_a.endpoint().public_key().to_lattice();
+    let pk_a = node_a.node_id();
 
-    // Initial data
     for i in 0..COUNT {
         store_a.put(format!("/init/{}", i).into_bytes(), b"val".to_vec()).await.expect("put init");
     }
@@ -164,12 +85,10 @@ async fn test_interleaved_modifications() {
     
     let bg_write = tokio::spawn(async move {
         barrier_write.wait().await;
-        tracing::info!("Modifications starting...");
         for i in 0..COUNT {
             store_a_clone.put(format!("/live/{}", i).into_bytes(), b"val".to_vec()).await.expect("put live");
             tokio::task::yield_now().await;
         }
-        tracing::info!("Modifications done");
     });
     
     let server_b_clone = server_b.clone();
@@ -178,20 +97,14 @@ async fn test_interleaved_modifications() {
 
     let sync_task = tokio::spawn(async move {
         barrier_sync.wait().await;
-        tracing::info!("Sync starting (concurrent)...");
-        // Sync once while modifications are happening
         let _ = server_b_clone.sync_with_peer_by_id(store_b_clone.id(), pk_a, &[]).await;
-        tracing::info!("Sync done");
     });
     
     let _ = tokio::join!(bg_write, sync_task);
 
-    // Final convergence sync
-    tracing::info!("Final convergence sync...");
-    server_b.endpoint().connect(pk_a.to_iroh().unwrap()).await.expect("connect");
+    // Final convergence sync — all writes done, single pass should converge.
     server_b.sync_with_peer_by_id(store_b.id(), pk_a, &[]).await.expect("final sync");
 
-    // Validation
     for i in 0..COUNT {
         let val = store_b.get(format!("/live/{}", i).into_bytes()).await.expect("get");
         assert_eq!(val, Some(b"val".to_vec()), "Missing live data at {}", i);
@@ -204,26 +117,31 @@ async fn test_interleaved_modifications() {
 
 #[tokio::test]
 async fn test_partition_recovery() {
+    use lattice_node::{Invite, STORE_TYPE_KVSTORE};
+    use lattice_net::network;
+
     const COUNT: usize = 10;
+    let net = ChannelNetwork::new();
 
-    let data_a = temp_data_dir("part_a");
-    let data_b = temp_data_dir("part_b");
-    let data_c = temp_data_dir("part_c");
+    let node_a = common::build_node("part_a");
+    let node_b = common::build_node("part_b");
+    let node_c = common::build_node("part_c");
 
-    let node_a = Arc::new(test_node_builder(data_a).build().expect("node a"));
-    let node_b = Arc::new(test_node_builder(data_b).build().expect("node b"));
-    let node_c = Arc::new(test_node_builder(data_c).build().expect("node c"));
+    // === Phase 1: Connected ===
+    let transport_a = ChannelTransport::new(node_a.node_id(), &net).await;
+    let transport_b = ChannelTransport::new(node_b.node_id(), &net).await;
+    let transport_c = ChannelTransport::new(node_c.node_id(), &net).await;
 
-    // === Phase 1: Connected (Setup) ===
-    tracing::info!("Phase 1: Initial Setup");
-    let server_a = new_from_node_test(node_a.clone()).await.expect("server a");
-    let server_b = new_from_node_test(node_b.clone()).await.expect("server b");
-    let server_c = new_from_node_test(node_c.clone()).await.expect("server c");
-
-    // Disable gossip globally to isolate sync logic
+    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(node_a.subscribe_net_events()));
+    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(node_b.subscribe_net_events()));
+    let server_c = network::NetworkService::new_simulated(node_c.clone(), transport_c, Some(node_c.subscribe_net_events()));
     server_a.set_global_gossip_enabled(false);
     server_b.set_global_gossip_enabled(false);
     server_c.set_global_gossip_enabled(false);
+
+    let a_pubkey = node_a.node_id();
+    let b_pubkey = node_b.node_id();
+    let c_pubkey = node_c.node_id();
 
     let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store");
     let store_a = node_a.store_manager().get_handle(&store_id).expect("store a");
@@ -231,121 +149,54 @@ async fn test_partition_recovery() {
     let invite_b = Invite::parse(&node_a.store_manager().create_invite(store_id, node_a.node_id()).await.expect("invite")).expect("parse");
     let invite_c = Invite::parse(&node_a.store_manager().create_invite(store_id, node_a.node_id()).await.expect("invite")).expect("parse");
 
-    // Peering
-    let addr_a = server_a.endpoint().addr();
-    server_b.endpoint().add_peer_addr(addr_a.clone());
-    server_c.endpoint().add_peer_addr(addr_a);
+    let store_b = common::join_store_via_event(&node_b, a_pubkey, store_id, invite_b.secret).await.expect("join b");
+    let store_c = common::join_store_via_event(&node_c, a_pubkey, store_id, invite_c.secret).await.expect("join c");
 
-    // Join B
-    let store_b = join_store_via_event(&node_b, PubKey::from(*server_a.endpoint().public_key().as_bytes()), store_id, invite_b.secret)
-        .await.expect("join b");
-    
-    // Join C
-    let store_c = join_store_via_event(&node_c, PubKey::from(*server_a.endpoint().public_key().as_bytes()), store_id, invite_c.secret)
-        .await.expect("join c");
-
-    // Fully connect mesh (B knows C via A, but implicit discovery might take time, so manual peering for speed)
-    let addr_b = server_b.endpoint().addr();
-    let addr_c = server_c.endpoint().addr();
-    server_a.endpoint().add_peer_addr(addr_b.clone());
-    server_a.endpoint().add_peer_addr(addr_c.clone());
-    server_b.endpoint().add_peer_addr(addr_c); // B knows C
-    server_c.endpoint().add_peer_addr(addr_b); // C knows B
-
-    // Initial Sync
-    tracing::info!("Initial sync...");
     store_a.put(b"shared_key".to_vec(), b"shared_val".to_vec()).await.expect("put");
     server_b.sync_all_by_id(store_id).await.expect("sync b");
     server_c.sync_all_by_id(store_id).await.expect("sync c");
-
-    // Verify
     assert_eq!(store_b.get(b"shared_key".to_vec()).await.unwrap(), Some(b"shared_val".to_vec()));
     assert_eq!(store_c.get(b"shared_key".to_vec()).await.unwrap(), Some(b"shared_val".to_vec()));
 
-    // === Phase 2: Partition (Disconnect) ===
-    tracing::info!("Phase 2: Partition");
-    // Drop servers to kill connections
+    // === Phase 2: Partition ===
     drop(server_a);
     drop(server_b);
     drop(server_c);
 
-    // Write independent data
-    tracing::info!("Writing independent data while partitioned...");
     for i in 0..COUNT {
         store_a.put(format!("/a/{}", i).into_bytes(), b"val_a".to_vec()).await.expect("put a");
         store_b.put(format!("/b/{}", i).into_bytes(), b"val_b".to_vec()).await.expect("put b");
         store_c.put(format!("/c/{}", i).into_bytes(), b"val_c".to_vec()).await.expect("put c");
     }
 
-    // === Phase 3: Reconnect & Converge ===
-    tracing::info!("Phase 3: Reconnect");
-    
-    // Restart networking (new ports)
-    let server_a_2 = new_from_node_test(node_a.clone()).await.expect("server a 2");
-    let server_b_2 = new_from_node_test(node_b.clone()).await.expect("server b 2");
-    let server_c_2 = new_from_node_test(node_c.clone()).await.expect("server c 2");
+    // === Phase 3: Reconnect ===
+    let transport_a_2 = ChannelTransport::new(node_a.node_id(), &net).await;
+    let transport_b_2 = ChannelTransport::new(node_b.node_id(), &net).await;
+    let transport_c_2 = ChannelTransport::new(node_c.node_id(), &net).await;
 
+    let server_a_2 = network::NetworkService::new_simulated(node_a.clone(), transport_a_2, Some(node_a.subscribe_net_events()));
+    let server_b_2 = network::NetworkService::new_simulated(node_b.clone(), transport_b_2, Some(node_b.subscribe_net_events()));
+    let server_c_2 = network::NetworkService::new_simulated(node_c.clone(), transport_c_2, Some(node_c.subscribe_net_events()));
     server_a_2.set_global_gossip_enabled(false);
     server_b_2.set_global_gossip_enabled(false);
     server_c_2.set_global_gossip_enabled(false);
 
-    // Re-peer (discovery lost because ports changed)
-    let addr_a = server_a_2.endpoint().addr();
-    let addr_b = server_b_2.endpoint().addr();
-    let addr_c = server_c_2.endpoint().addr();
-
-    let peer_a = server_a_2.endpoint().public_key();
-    let peer_b = server_b_2.endpoint().public_key();
-    let peer_c = server_c_2.endpoint().public_key();
-
-    server_a_2.endpoint().add_peer_addr(addr_b.clone());
-    server_a_2.endpoint().add_peer_addr(addr_c.clone());
-    server_b_2.endpoint().add_peer_addr(addr_a.clone());
-    server_b_2.endpoint().add_peer_addr(addr_c.clone());
-    
-    tracing::info!("Triggering convergence syncs...");
-
-    let pk_a = peer_a.to_lattice();
-    let pk_b = peer_b.to_lattice();
-    let pk_c = peer_c.to_lattice();
-    
-    // A pulls from B and C
-    server_a_2.endpoint().connect(peer_b).await.expect("connect a-b");
-    server_a_2.sync_with_peer_by_id(store_id, pk_b, &[]).await.expect("sync a-b");
-    
-    server_a_2.endpoint().connect(peer_c).await.expect("connect a-c");
-    server_a_2.sync_with_peer_by_id(store_id, pk_c, &[]).await.expect("sync a-c");
-    
-    // B pulls from A and C
-    server_b_2.endpoint().connect(peer_a).await.expect("connect b-a");
-    server_b_2.sync_with_peer_by_id(store_id, pk_a, &[]).await.expect("sync b-a");
-    
-    server_b_2.endpoint().connect(peer_c).await.expect("connect b-c");
-    server_b_2.sync_with_peer_by_id(store_id, pk_c, &[]).await.expect("sync b-c");
-
-    // C pulls from A and B
-    server_c_2.endpoint().connect(peer_a).await.expect("connect c-a");
-    server_c_2.sync_with_peer_by_id(store_id, pk_a, &[]).await.expect("sync c-a");
-    
-    server_c_2.endpoint().connect(peer_b).await.expect("connect c-b");
-    server_c_2.sync_with_peer_by_id(store_id, pk_b, &[]).await.expect("sync c-b");
+    server_a_2.sync_with_peer_by_id(store_id, b_pubkey, &[]).await.expect("sync a-b");
+    server_a_2.sync_with_peer_by_id(store_id, c_pubkey, &[]).await.expect("sync a-c");
+    server_b_2.sync_with_peer_by_id(store_id, a_pubkey, &[]).await.expect("sync b-a");
+    server_b_2.sync_with_peer_by_id(store_id, c_pubkey, &[]).await.expect("sync b-c");
+    server_c_2.sync_with_peer_by_id(store_id, a_pubkey, &[]).await.expect("sync c-a");
+    server_c_2.sync_with_peer_by_id(store_id, b_pubkey, &[]).await.expect("sync c-b");
 
     // === Phase 4: Validation ===
-    tracing::info!("Phase 4: Validation");
-    
-    // Check A has everything
     for i in 0..COUNT {
         assert_eq!(store_a.get(format!("/b/{}", i).into_bytes()).await.unwrap(), Some(b"val_b".to_vec()), "A missing B {}", i);
         assert_eq!(store_a.get(format!("/c/{}", i).into_bytes()).await.unwrap(), Some(b"val_c".to_vec()), "A missing C {}", i);
     }
-    
-    // Check B has everything
     for i in 0..COUNT {
         assert_eq!(store_b.get(format!("/a/{}", i).into_bytes()).await.unwrap(), Some(b"val_a".to_vec()), "B missing A {}", i);
         assert_eq!(store_b.get(format!("/c/{}", i).into_bytes()).await.unwrap(), Some(b"val_c".to_vec()), "B missing C {}", i);
     }
-
-    // Check C has everything
     for i in 0..COUNT {
         assert_eq!(store_c.get(format!("/a/{}", i).into_bytes()).await.unwrap(), Some(b"val_a".to_vec()), "C missing A {}", i);
         assert_eq!(store_c.get(format!("/b/{}", i).into_bytes()).await.unwrap(), Some(b"val_b".to_vec()), "C missing B {}", i);

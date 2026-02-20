@@ -28,6 +28,7 @@ Decouple `lattice-net` from Iroh-specific types so multi-node networks can be si
 - [ ] Extract `GossipLayer` trait from `iroh_gossip::Gossip` (join/broadcast/subscribe)
 - [ ] `IrohTransport` + `IrohGossip`: Production implementations wrapping Iroh QUIC
 - [ ] `NetworkService` generic over `Transport` + `GossipLayer`
+- [ ] **Replace Polling with Notify:** `register_store_by_id` and `wait_for_store` use `sleep()` polling loops. Replace with `tokio::sync::Notify` or channel-based signaling.
 - [ ] **Async Gossip Queue:** Decouple `IntentionStore` ingest from broadcast. Use a bounded channel with backpressure to prevent local ingest latency spikes during network congestion.
 
 ### 12B: In-Memory Simulation Harness

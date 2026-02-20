@@ -116,11 +116,11 @@ async fn handle_stream(
 }
 
 /// Handle a join request from an invited peer
-async fn handle_join_request(
+pub(super) async fn handle_join_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
     req: lattice_kernel::proto::network::JoinRequest,
-    sink: &mut MessageSink,
+    sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
     tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
     
@@ -143,14 +143,18 @@ async fn handle_join_request(
 }
 
 /// Handle an incoming reconcile start message
-async fn handle_reconcile_start(
+pub(super) async fn handle_reconcile_start<W, R>(
     provider: &dyn NodeProviderExt,
     _peer_stores: PeerStoreRegistry,
     remote_pubkey: &PubKey,
     req: lattice_kernel::proto::network::ReconcilePayload,
-    sink: &mut MessageSink,
-    stream: &mut MessageStream,
-) -> Result<(), LatticeNetError> {
+    sink: &mut framing::MessageSink<W>,
+    stream: &mut framing::MessageStream<R>,
+) -> Result<(), LatticeNetError>
+where
+    W: tokio::io::AsyncWrite + Send + Unpin,
+    R: tokio::io::AsyncRead + Send + Unpin,
+{
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
     
@@ -171,11 +175,11 @@ async fn handle_reconcile_start(
 }
 
 /// Handle a FetchIntentions request - returns requested intentions
-async fn handle_fetch_intentions(
+pub(super) async fn handle_fetch_intentions<W: tokio::io::AsyncWrite + Send + Unpin>(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
     req: FetchIntentions,
-    sink: &mut MessageSink,
+    sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
@@ -213,14 +217,13 @@ async fn handle_fetch_intentions(
     Ok(())
 }
 
-const MAX_FETCH_CHAIN_ITEMS: usize = 32;
 
 /// Handle a FetchChain request - walks back history and returns the chain.
-async fn handle_fetch_chain(
+pub(super) async fn handle_fetch_chain<W: tokio::io::AsyncWrite + Send + Unpin>(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
     req: lattice_kernel::proto::network::FetchChain,
-    sink: &mut MessageSink,
+    sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
@@ -250,7 +253,7 @@ async fn handle_fetch_chain(
     };
 
     // Walk back the chain
-    let chain = authorized_store.walk_back_until(target, since, MAX_FETCH_CHAIN_ITEMS).await
+    let chain = authorized_store.walk_back_until(target, since, super::MAX_FETCH_CHAIN_ITEMS).await
         .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
 
     let proto_intentions: Vec<_> = chain
