@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "io-util"] }
 prost = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }

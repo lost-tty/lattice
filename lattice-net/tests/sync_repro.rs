@@ -1,5 +1,5 @@
 use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, Uuid, direct_opener, StoreHandle, STORE_TYPE_KVSTORE};
-use lattice_net::NetworkService;
+use lattice_net::{NetworkService, ToLattice};
 use lattice_kvstore_client::KvStoreExt;
 use lattice_model::types::PubKey;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
 }
 
 async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<NetworkService>, Box<dyn std::error::Error>> {
-    let endpoint = lattice_net::LatticeEndpoint::new(node.signing_key().clone()).await?;
+    let endpoint = lattice_net::IrohTransport::new(node.signing_key().clone()).await?;
     let event_rx = node.subscribe_net_events();
     Ok(NetworkService::new_with_provider(node, endpoint, event_rx).await?)
 }
@@ -124,7 +124,7 @@ async fn test_one_way_sync() {
     }
 
     // Explicitly sync B -> A (pull from A)
-    let peer_a = _server_a.endpoint().public_key();
+    let peer_a = _server_a.endpoint().public_key().to_lattice();
     let store_id = store_a.id();
     
     tracing::info!("Starting one-way sync B -> A");
@@ -156,7 +156,7 @@ async fn test_bidirectional_sync() {
     store_b.put(b"/b/y".to_vec(), b"val_y".to_vec()).await.expect("put b");
 
     // Explicitly sync B -> A (B initiates)
-    let peer_a = server_a.endpoint().public_key();
+    let peer_a = server_a.endpoint().public_key().to_lattice();
     let store_id = store_a.id();
 
     tracing::info!("Starting bidirectional sync B -> A");
@@ -180,7 +180,7 @@ async fn test_large_sync() {
         store_a.put(format!("/key/{}", i).into_bytes(), format!("val_{}", i).into_bytes()).await.expect("put");
     }
 
-    let peer_a = _server_a.endpoint().public_key();
+    let peer_a = _server_a.endpoint().public_key().to_lattice();
     let store_id = store_a.id();
     
     tracing::info!("Starting large sync B -> A (50 items)");
@@ -231,7 +231,7 @@ async fn test_partition_repro() {
         store_a.put(format!("/new/{}", i).into_bytes(), b"val_new".to_vec()).await.expect("put a");
     }
 
-    let peer_a = server_a.endpoint().public_key();
+    let peer_a = server_a.endpoint().public_key().to_lattice();
 
     // VERIFY: Ensure B does NOT have the data yet
     // Since gossip is disabled globally, B should effectively be isolated from push updates

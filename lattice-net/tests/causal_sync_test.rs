@@ -1,5 +1,5 @@
 use lattice_node::{NodeBuilder, Node, DataDir, Invite, NodeEvent};
-use lattice_net::{LatticeEndpoint, NetworkService, ToLattice};
+use lattice_net::{IrohTransport, NetworkService, ToLattice};
 use lattice_kvstore_client::KvStoreExt;
 use lattice_model::Uuid;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ async fn create_node(dir: &std::path::Path) -> (Arc<Node>, Arc<NetworkService>) 
     let node = builder.build().unwrap();
     let node = Arc::new(node);
     
-    let endpoint = LatticeEndpoint::new(node.signing_key().clone()).await.unwrap();
+    let endpoint = IrohTransport::new(node.signing_key().clone()).await.unwrap();
     let net = NetworkService::new_with_provider(node.clone(), endpoint, net_rx).await.unwrap();
     
     (node, net)

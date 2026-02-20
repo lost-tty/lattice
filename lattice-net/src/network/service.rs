@@ -2,9 +2,14 @@
 //!
 //! Handles both inbound (server) and outbound (client) mesh operations.
 //! Provides sync, status, and join protocol operations.
+//!
+//! Generic over `T: Transport` — the sync path uses the abstract transport,
+//! while Iroh-specific infrastructure (Router, GossipManager, event handling)
+//! is implemented only for `NetworkService<IrohTransport>`.
 
-use crate::{MessageSink, MessageStream, LatticeEndpoint, LatticeNetError, LATTICE_ALPN, ToLattice};
+use crate::{MessageSink, MessageStream, IrohTransport, LatticeNetError, LATTICE_ALPN, ToLattice};
 use lattice_net_types::{NetworkStore, NodeProviderExt};
+use lattice_net_types::transport::{Transport, Connection as TransportConnection, BiStream};
 use lattice_model::{NetEvent, Uuid, UserEvent};
 use lattice_kernel::proto::network::{PeerMessage, peer_message, BootstrapRequest, FetchChain};
 use lattice_model::types::{PubKey, Hash};
@@ -32,10 +37,10 @@ pub struct SyncResult {
 pub type PeerStoreRegistry = Arc<RwLock<std::collections::HashSet<Uuid>>>;
 
 /// Central service for mesh networking.
-/// Combines routing, gossip, and sync into a unified API.
-pub struct NetworkService {
+/// Generic over `T: Transport` for the sync/connect path.
+pub struct NetworkService<T: Transport> {
     provider: Arc<dyn NodeProviderExt>,
-    endpoint: LatticeEndpoint,
+    transport: T,
     gossip_manager: Arc<super::gossip_manager::GossipManager>,
     peer_stores: PeerStoreRegistry,
     sessions: Arc<super::session::SessionTracker>,
@@ -72,7 +77,11 @@ impl ProtocolHandler for SyncProtocol {
     }
 }
 
-impl NetworkService {
+// ====================================================================================
+// Iroh-specific: Construction, event handling, join protocol, gossip setup
+// ====================================================================================
+
+impl NetworkService<IrohTransport> {
     /// Create the NetEvent channel that the network layer owns.
     /// 
     /// Returns (sender, receiver):
@@ -91,13 +100,13 @@ impl NetworkService {
     /// ```ignore
     /// let (net_tx, net_rx) = NetworkService::create_net_channel();
     /// let node = NodeBuilder::new(data_dir).with_net_tx(net_tx).build()?;
-    /// let endpoint = LatticeEndpoint::new(node.signing_key().clone()).await?;
+    /// let endpoint = IrohTransport::new(node.signing_key().clone()).await?;
     /// let service = NetworkService::new_with_provider(Arc::new(node), endpoint, net_rx).await?;
     /// ```
     #[tracing::instrument(skip(provider, endpoint, event_rx))]
     pub async fn new_with_provider(
         provider: Arc<dyn NodeProviderExt>,
-        endpoint: LatticeEndpoint,
+        endpoint: IrohTransport,
         event_rx: broadcast::Receiver<NetEvent>,
     ) -> Result<Arc<Self>, super::error::ServerError> {
         let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint));
@@ -119,7 +128,7 @@ impl NetworkService {
         
         let service = Arc::new(Self { 
             provider,
-            endpoint,
+            transport: endpoint,
             gossip_manager: gossip_manager.clone(),
             peer_stores,
             sessions: sessions.clone(),
@@ -137,293 +146,9 @@ impl NetworkService {
         Ok(service)
     }
     
-    /// Access the provider (trait object)
-    pub fn provider(&self) -> &dyn NodeProviderExt {
-        self.provider.as_ref()
-    }
-    
-    /// Access the underlying endpoint
-    pub fn endpoint(&self) -> &LatticeEndpoint {
-        &self.endpoint
-    }
-    
-    /// Access the gossip manager
-    pub fn gossip_manager(&self) -> &super::gossip_manager::GossipManager {
-        &self.gossip_manager
-    }
-    
-    /// Access the session tracker for online status queries.
-    pub fn sessions(&self) -> &super::session::SessionTracker {
-        &self.sessions
-    }
-    
-    /// Access the peer store registry
-    pub fn peer_stores(&self) -> &PeerStoreRegistry {
-        &self.peer_stores
-    }
-    
-    /// Get currently connected peers with last-seen timestamp.
-    pub fn connected_peers(&self) -> Result<std::collections::HashMap<PubKey, std::time::Instant>, String> {
-        self.sessions.online_peers()
-    }
-    
-    /// Gracefully shut down the network router
-    pub async fn shutdown(&self) -> Result<(), String> {
-        self.gossip_manager.shutdown().await;
-        self.router.shutdown().await.map_err(|e| e.to_string())
-    }
-
-    /// Set global gossip enabled flag.
-    /// If disabled, new stores will not start gossip.
-    pub fn set_global_gossip_enabled(&self, enabled: bool) {
-        self.global_gossip_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Set global auto-sync enabled flag.
-    /// If disabled, the node will not trigger automatic syncs (Boot Sync, Post-Join Sync).
-    /// Defaults to true. Disabling is useful for testing manual sync behavior.
-    pub fn set_auto_sync_enabled(&self, enabled: bool) {
-        self.auto_sync_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    // ==================== Store Registry ====================
-    
-    /// Get a registered store by ID
-    pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
-        self.provider.store_registry().get_network_store(&store_id)
-    }
-    
-    /// Wait for a store to be registered (handles async registration race).
-    /// Returns None if store not available after timeout.
-    async fn wait_for_store(&self, store_id: Uuid) -> Option<NetworkStore> {
-        // Try immediately first
-        if let Some(store) = self.get_store(store_id) {
-            return Some(store);
-        }
-        
-        // Poll briefly (async registration should complete quickly)
-        for _ in 0..10 {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            if let Some(store) = self.get_store(store_id) {
-                return Some(store);
-            }
-        }
-        None
-    }
-
-    // ==================== Peer Discovery ====================
-    
-    /// Get active peer IDs for a specific store (excluding self).
-    /// Only returns peers that are both online AND in this store's acceptable authors.
-    pub async fn active_peer_ids_for_store(&self, store: &NetworkStore) -> Result<Vec<iroh::PublicKey>, LatticeNetError> {
-        let my_pubkey = self.endpoint.public_key();
-        
-        let online_peers = self.sessions.online_peers()
-            .map_err(|e| LatticeNetError::Sync(e))?;
-        
-        let acceptable_authors = store.list_acceptable_authors();
-        
-        let active: Vec<iroh::PublicKey> = online_peers.keys()
-            .filter(|pk| acceptable_authors.contains(pk))
-            .filter_map(|pk| iroh::PublicKey::from_bytes(pk).ok())
-            .filter(|id| *id != my_pubkey)
-            .collect();
-            
-        Ok(active)
-    }
-    
-    /// Get all active peer IDs (excluding self)
-    pub async fn active_peer_ids(&self) -> Result<Vec<iroh::PublicKey>, LatticeNetError> {
-        let my_pubkey = self.endpoint.public_key();
-        
-        let peers = self.sessions.online_peers()
-            .map_err(|e| LatticeNetError::Sync(e))?;
-        
-        Ok(peers.keys()
-            .filter_map(|pk| iroh::PublicKey::from_bytes(pk).ok())
-            .filter(|id| *id != my_pubkey)
-            .collect())
-    }
-
-
-
-    // ==================== Status Operations ====================
-
-    // ==================== Sync Operations ====================
-    
-    /// Sync with a peer using symmetric SyncSession protocol
-    #[tracing::instrument(skip(self, store, _authors), fields(store_id = %store.id(), peer = %peer_id.fmt_short()))]
-    pub async fn sync_with_peer(
-        &self, 
-        store: &NetworkStore, 
-        peer_id: iroh::PublicKey, 
-        _authors: &[PubKey]
-    ) -> Result<SyncResult, LatticeNetError> {
-        tracing::debug!("Sync: connecting to peer");
-        let conn = self.endpoint.connect(peer_id).await
-            .map_err(|e| {
-                tracing::warn!(error = %e, "Sync: connection failed");
-                LatticeNetError::Sync(format!("Connection failed: {}", e))
-            })?;
-        
-        let (send, recv) = conn.open_bi().await
-            .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
-        
-        let mut sink = MessageSink::new(send);
-        let mut stream = MessageStream::new(recv);
-        
-        let peer_pubkey: PubKey = peer_id.to_lattice();
-        
-        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_pubkey);
-        let result = session.run(None).await?;
-        
-        sink.finish().await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-        
-        tracing::info!(entries = result.entries_received, "Sync: complete");
-        
-        Ok(SyncResult { 
-            entries_received: result.entries_received, 
-            entries_sent: result.entries_sent,
-        })
-    }
-    
-    /// Sync with specific peers in parallel
-    async fn sync_peers(
-        &self, 
-        store: &NetworkStore, 
-        peer_ids: &[iroh::PublicKey], 
-        authors: &[PubKey]
-    ) -> Vec<SyncResult> {
-        const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
-        
-        let futures = peer_ids.iter().map(|&peer_id| {
-            let store = store.clone();
-            let authors = authors.to_vec();
-            async move {
-                match tokio::time::timeout(SYNC_TIMEOUT, self.sync_with_peer(&store, peer_id, &authors)).await {
-                    Ok(Ok(result)) => Some(result),
-                    Ok(Err(e)) => {
-                        tracing::debug!(peer = %peer_id.fmt_short(), error = %e, "Sync failed");
-                        None
-                    }
-                    Err(_) => {
-                        tracing::debug!(peer = %peer_id.fmt_short(), "Sync timed out");
-                        None
-                    }
-                }
-            }
-        });
-        
-        join_all(futures).await.into_iter().flatten().collect()
-    }
-    
-    /// Sync with all active peers in parallel
-    pub async fn sync_all(&self, store: &NetworkStore) -> Result<Vec<SyncResult>, LatticeNetError> {
-        let peer_ids = self.active_peer_ids_for_store(store).await?;
-        if peer_ids.is_empty() {
-            tracing::debug!("[Sync] No active peers");
-            return Ok(Vec::new());
-        }
-        
-        tracing::debug!("[Sync] Syncing with {} peers...", peer_ids.len());
-        let results = self.sync_peers(store, &peer_ids, &[]).await;
-        tracing::info!("[Sync] Complete: {}/{} peers", results.len(), peer_ids.len());
-        
-        Ok(results)
-    }
-    
-    // ==================== Convenience Methods (by ID) ====================
-    
-    /// Sync with all active peers for a store (by ID).
-    /// Waits briefly for store registration if not immediately available.
-    pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, LatticeNetError> {
-        // Wait for store to be registered (async registration from NetEvent::StoreReady)
-        let store = self.wait_for_store(store_id).await
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
-        self.sync_all(&store).await
-    }
-    
-    /// Sync with a specific peer (by store ID).
-    /// Waits briefly for store registration if not immediately available.
-    pub async fn sync_with_peer_by_id(
-        &self,
-        store_id: Uuid,
-        peer_id: iroh::PublicKey,
-        authors: &[PubKey]
-    ) -> Result<SyncResult, LatticeNetError> {
-        let store = self.wait_for_store(store_id).await
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
-        self.sync_with_peer(&store, peer_id, authors).await
-    }
-
-
-    /// Real implementation of fetch_chain_with_peer
-    #[tracing::instrument(skip(self), fields(store_id = %store_id, peer = %peer_id.fmt_short()))]
-    pub async fn fetch_chain(
-        &self,
-        store_id: Uuid,
-        peer_id: iroh::PublicKey,
-        target_hash: Hash,
-        since_hash: Option<Hash>, 
-    ) -> Result<usize, LatticeNetError> {
-         let store = self.wait_for_store(store_id).await
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
-
-         tracing::debug!("FetchChain: connecting to peer");
-         let conn = self.endpoint.connect(peer_id).await
-            .map_err(|e| LatticeNetError::Sync(format!("Connection failed: {}", e)))?;
-
-         let (send, recv) = conn.open_bi().await
-            .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
-
-         let mut sink = MessageSink::new(send);
-         let mut stream = MessageStream::new(recv);
-         
-         let req = PeerMessage {
-             message: Some(peer_message::Message::FetchChain(FetchChain {
-                 store_id: store_id.as_bytes().to_vec(),
-                 target_hash: target_hash.0.to_vec(),
-                 since_hash: since_hash.map(|h| h.0.to_vec()).unwrap_or_default(),
-             })),
-         };
-         
-         sink.send(&req).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-         sink.finish().await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-
-        // Expect IntentionResponse
-        let msg = stream.recv().await
-            .map_err(|e| LatticeNetError::Sync(e.to_string()))?
-            .ok_or_else(|| LatticeNetError::Sync("Peer closed stream without response".to_string()))?;
-
-        match msg.message {
-            Some(peer_message::Message::IntentionResponse(resp)) => {
-                let count = resp.intentions.len();
-                tracing::info!(count = count, "FetchChain: received items");
-                
-                let mut valid_intentions = Vec::with_capacity(count);
-                for proto in resp.intentions {
-                    if let Ok(signed) = intention_from_proto(&proto) {
-                        valid_intentions.push(signed);
-                    }
-                }
-                
-                match store.ingest_batch(valid_intentions).await {
-                     Ok(lattice_kernel::store::IngestResult::Applied) => Ok(count),
-                     Ok(lattice_kernel::store::IngestResult::MissingDeps(missing)) => {
-                         tracing::warn!(count = missing.len(), "Fetch chain incomplete: still missing dependencies");
-                         if let Some(first) = missing.first() {
-                              tracing::warn!(first_missing = %first.prev, "First missing dep");
-                         }
-                         Err(LatticeNetError::Sync(format!("Fetch chain incomplete, missing {} dependencies", missing.len())))
-                     },
-                     Err(e) => {
-                         tracing::warn!(error = %e, "Failed to ingest fetched batch");
-                         Err(LatticeNetError::Sync(format!("Ingest failing during fetch_chain: {}", e)))
-                     }
-                }
-            }
-            _ => Err(LatticeNetError::Sync("Unexpected response to FetchChain".to_string())),
-        }
+    /// Access the underlying endpoint (Iroh-specific)
+    pub fn endpoint(&self) -> &IrohTransport {
+        &self.transport
     }
 
     /// Bootstrap from a peer (Clone protocol)
@@ -518,8 +243,6 @@ impl NetworkService {
         Ok(total_ingested)
     }
 
-    // ==================== Event Handling & Lifecycle ====================
-
     /// Handle a join request triggered by a NetEvent.
     /// Connects to the peer, performs the Join handshake, and returns the established connection.
     async fn handle_join_request_event(
@@ -530,7 +253,7 @@ impl NetworkService {
     ) -> Result<iroh::endpoint::Connection, LatticeNetError> {
         tracing::debug!("Connecting to {} for join...", peer_id);
         
-        let conn = self.endpoint.connect(peer_id).await
+        let conn = self.transport.endpoint().connect(peer_id, LATTICE_ALPN).await
             .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
 
         let (send, recv) = conn.open_bi().await
@@ -593,7 +316,6 @@ impl NetworkService {
             }
         });
 
-        // 3. Bootstrap (Clone) content from peer
         // 3. Bootstrap (Clone) content from peer
         if service.auto_sync_enabled.load(std::sync::atomic::Ordering::SeqCst) {
             tracing::info!(peer = %iroh_peer_id.fmt_short(), "Bootstrapping store {}...", store_id);
@@ -664,26 +386,23 @@ impl NetworkService {
                 }
                 NetEvent::SyncWithPeer { store_id, peer } => {
                     tokio::spawn(async move {
-                        let Ok(iroh_peer_id) = iroh::PublicKey::from_bytes(&peer) else {
-                            tracing::error!("SyncWithPeer: invalid PubKey");
-                            return;
-                        };
+                        let peer_pk = PubKey::from(peer);
                         tracing::info!(
                             store_id = %store_id, 
-                            peer = %iroh_peer_id.fmt_short(), 
+                            peer = %peer_pk, 
                             "NetEvent::SyncWithPeer → starting targeted sync"
                         );
                         
-                        match service.sync_with_peer_by_id(store_id, iroh_peer_id, &[]).await {
+                        match service.sync_with_peer_by_id(store_id, peer_pk, &[]).await {
                             Ok(result) => tracing::info!(
                                 store_id = %store_id,
-                                peer = %iroh_peer_id.fmt_short(),
+                                peer = %peer_pk,
                                 entries = result.entries_received,
                                 "NetEvent::SyncWithPeer → complete"
                             ),
                             Err(e) => tracing::warn!(
                                 store_id = %store_id,
-                                peer = %iroh_peer_id.fmt_short(),
+                                peer = %peer_pk,
                                 error = %e,
                                 "NetEvent::SyncWithPeer → failed"
                             ),
@@ -746,7 +465,7 @@ impl NetworkService {
             let weak_self = Arc::downgrade(self);
             let store_id_captured = store_id;
             // Define gap_handler closure
-            let gap_handler: super::gossip_manager::GapHandler = Arc::new(move |missing: MissingDep, peer: Option<iroh::PublicKey>| {
+            let gap_handler: super::gossip_manager::GapHandler = Arc::new(move |missing: MissingDep, peer: Option<PubKey>| {
                 if let Some(service) = weak_self.upgrade() {
                     tokio::spawn(async move {
                         let _ = service.handle_missing_dep(store_id_captured, missing, peer).await;
@@ -795,8 +514,7 @@ impl NetworkService {
     }
 
     /// Handle a missing dependency signal: trigger fetch chain or full sync
-
-    pub async fn handle_missing_dep(&self, store_id: Uuid, missing: lattice_kernel::store::MissingDep, peer_id: Option<iroh::PublicKey>) -> Result<(), LatticeNetError> {
+    pub async fn handle_missing_dep(&self, store_id: Uuid, missing: MissingDep, peer_id: Option<PubKey>) -> Result<(), LatticeNetError> {
         tracing::debug!(store_id = %store_id, missing = ?missing, "Handling missing dependency");
         
         let Some(peer) = peer_id else {
@@ -806,11 +524,9 @@ impl NetworkService {
         
         let missing_hash = missing.prev;
         
-        let iroh_peer = peer;
-
         // Try smart fetch first
         let since_hash = if missing.since == Hash::ZERO { None } else { Some(missing.since) };
-        match self.fetch_chain(store_id, iroh_peer, missing_hash, since_hash).await {
+        match self.fetch_chain(store_id, peer, missing_hash, since_hash).await {
             Ok(count) => {
                 tracing::info!(store_id = %store_id, count = %count, "Smart fetch filled gap");
                 if count == 0 {
@@ -821,7 +537,7 @@ impl NetworkService {
             Err(e) => {
                 tracing::warn!(store_id = %store_id, error = %e, "Smart fetch failed or incomplete, triggering targeted sync fallback");
                 // Explicitly sync with this peer first, as they likely have the data we need
-                if let Err(e) = self.sync_with_peer_by_id(store_id, iroh_peer, &[]).await {
+                if let Err(e) = self.sync_with_peer_by_id(store_id, peer, &[]).await {
                     tracing::warn!("Fallback targeted sync failed: {}, trying sync_all", e);
                     if let Err(e) = self.sync_all_by_id(store_id).await {
                         tracing::warn!("Fallback network sync failed: {}", e);
@@ -834,3 +550,298 @@ impl NetworkService {
     }
 }
 
+// ====================================================================================
+// Generic: Sync protocol, peer discovery, accessors
+// These work with any Transport implementation.
+// ====================================================================================
+
+impl<T: Transport> NetworkService<T> {
+    /// Access the provider (trait object)
+    pub fn provider(&self) -> &dyn NodeProviderExt {
+        self.provider.as_ref()
+    }
+    
+    /// Access the transport
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+    
+    /// Access the gossip manager
+    pub fn gossip_manager(&self) -> &super::gossip_manager::GossipManager {
+        &self.gossip_manager
+    }
+    
+    /// Access the session tracker for online status queries.
+    pub fn sessions(&self) -> &super::session::SessionTracker {
+        &self.sessions
+    }
+    
+    /// Access the peer store registry
+    pub fn peer_stores(&self) -> &PeerStoreRegistry {
+        &self.peer_stores
+    }
+    
+    /// Get currently connected peers with last-seen timestamp.
+    pub fn connected_peers(&self) -> Result<std::collections::HashMap<PubKey, std::time::Instant>, String> {
+        self.sessions.online_peers()
+    }
+    
+    /// Gracefully shut down the network router
+    pub async fn shutdown(&self) -> Result<(), String> {
+        self.gossip_manager.shutdown().await;
+        self.router.shutdown().await.map_err(|e| e.to_string())
+    }
+
+    /// Set global gossip enabled flag.
+    /// If disabled, new stores will not start gossip.
+    pub fn set_global_gossip_enabled(&self, enabled: bool) {
+        self.global_gossip_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Set global auto-sync enabled flag.
+    /// If disabled, the node will not trigger automatic syncs (Boot Sync, Post-Join Sync).
+    /// Defaults to true. Disabling is useful for testing manual sync behavior.
+    pub fn set_auto_sync_enabled(&self, enabled: bool) {
+        self.auto_sync_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    // ==================== Store Registry ====================
+    
+    /// Get a registered store by ID
+    pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
+        self.provider.store_registry().get_network_store(&store_id)
+    }
+    
+    /// Wait for a store to be registered (handles async registration race).
+    /// Returns None if store not available after timeout.
+    async fn wait_for_store(&self, store_id: Uuid) -> Option<NetworkStore> {
+        // Try immediately first
+        if let Some(store) = self.get_store(store_id) {
+            return Some(store);
+        }
+        
+        // Poll briefly (async registration should complete quickly)
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            if let Some(store) = self.get_store(store_id) {
+                return Some(store);
+            }
+        }
+        None
+    }
+
+    // ==================== Peer Discovery ====================
+    
+    /// Get active peer IDs for a specific store (excluding self).
+    /// Only returns peers that are both online AND in this store's acceptable authors.
+    pub async fn active_peer_ids_for_store(&self, store: &NetworkStore) -> Result<Vec<PubKey>, LatticeNetError> {
+        let my_pubkey = self.transport.public_key();
+        
+        let online_peers = self.sessions.online_peers()
+            .map_err(|e| LatticeNetError::Sync(e))?;
+        
+        let acceptable_authors = store.list_acceptable_authors();
+        
+        let active: Vec<PubKey> = online_peers.keys()
+            .filter(|pk| acceptable_authors.contains(pk))
+            .filter(|pk| **pk != my_pubkey)
+            .copied()
+            .collect();
+            
+        Ok(active)
+    }
+    
+    /// Get all active peer IDs (excluding self)
+    pub async fn active_peer_ids(&self) -> Result<Vec<PubKey>, LatticeNetError> {
+        let my_pubkey = self.transport.public_key();
+        
+        let peers = self.sessions.online_peers()
+            .map_err(|e| LatticeNetError::Sync(e))?;
+        
+        Ok(peers.keys()
+            .filter(|pk| **pk != my_pubkey)
+            .copied()
+            .collect())
+    }
+
+    // ==================== Sync Operations ====================
+    
+    /// Sync with a peer using symmetric SyncSession protocol.
+    /// Uses the abstract `Transport` trait for connection establishment.
+    #[tracing::instrument(skip(self, store, _authors), fields(store_id = %store.id(), peer = %peer_id))]
+    pub async fn sync_with_peer(
+        &self, 
+        store: &NetworkStore, 
+        peer_id: PubKey, 
+        _authors: &[PubKey]
+    ) -> Result<SyncResult, LatticeNetError> {
+        tracing::debug!("Sync: connecting to peer");
+        let conn = self.transport.connect(&peer_id).await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "Sync: connection failed");
+                LatticeNetError::Sync(format!("Connection failed: {}", e))
+            })?;
+        
+        let bi = conn.open_bi().await
+            .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
+        let (send, recv) = bi.into_split();
+        
+        let mut sink = MessageSink::new(send);
+        let mut stream = MessageStream::new(recv);
+        
+        let mut session = super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_id);
+        let result = session.run(None).await?;
+        
+        // Note: finish() is only available for iroh SendStream.
+        // For generic transports, dropping the sink is sufficient.
+        drop(sink);
+        
+        tracing::info!(entries = result.entries_received, "Sync: complete");
+        
+        Ok(SyncResult { 
+            entries_received: result.entries_received, 
+            entries_sent: result.entries_sent,
+        })
+    }
+    
+    /// Sync with specific peers in parallel
+    async fn sync_peers(
+        &self, 
+        store: &NetworkStore, 
+        peer_ids: &[PubKey], 
+        authors: &[PubKey]
+    ) -> Vec<SyncResult> {
+        const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+        
+        let futures = peer_ids.iter().map(|&peer_id| {
+            let store = store.clone();
+            let authors = authors.to_vec();
+            async move {
+                match tokio::time::timeout(SYNC_TIMEOUT, self.sync_with_peer(&store, peer_id, &authors)).await {
+                    Ok(Ok(result)) => Some(result),
+                    Ok(Err(e)) => {
+                        tracing::debug!(peer = %peer_id, error = %e, "Sync failed");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::debug!(peer = %peer_id, "Sync timed out");
+                        None
+                    }
+                }
+            }
+        });
+        
+        join_all(futures).await.into_iter().flatten().collect()
+    }
+    
+    /// Sync with all active peers in parallel
+    pub async fn sync_all(&self, store: &NetworkStore) -> Result<Vec<SyncResult>, LatticeNetError> {
+        let peer_ids = self.active_peer_ids_for_store(store).await?;
+        if peer_ids.is_empty() {
+            tracing::debug!("[Sync] No active peers");
+            return Ok(Vec::new());
+        }
+        
+        tracing::debug!("[Sync] Syncing with {} peers...", peer_ids.len());
+        let results = self.sync_peers(store, &peer_ids, &[]).await;
+        tracing::info!("[Sync] Complete: {}/{} peers", results.len(), peer_ids.len());
+        
+        Ok(results)
+    }
+    
+    // ==================== Convenience Methods (by ID) ====================
+    
+    /// Sync with all active peers for a store (by ID).
+    /// Waits briefly for store registration if not immediately available.
+    pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, LatticeNetError> {
+        // Wait for store to be registered (async registration from NetEvent::StoreReady)
+        let store = self.wait_for_store(store_id).await
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
+        self.sync_all(&store).await
+    }
+    
+    /// Sync with a specific peer (by store ID).
+    /// Waits briefly for store registration if not immediately available.
+    pub async fn sync_with_peer_by_id(
+        &self,
+        store_id: Uuid,
+        peer_id: PubKey,
+        authors: &[PubKey]
+    ) -> Result<SyncResult, LatticeNetError> {
+        let store = self.wait_for_store(store_id).await
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
+        self.sync_with_peer(&store, peer_id, authors).await
+    }
+
+    /// Fetch a specific chain segment from a peer.
+    /// Uses the abstract `Transport` trait for connection establishment.
+    #[tracing::instrument(skip(self), fields(store_id = %store_id, peer = %peer_id))]
+    pub async fn fetch_chain(
+        &self,
+        store_id: Uuid,
+        peer_id: PubKey,
+        target_hash: Hash,
+        since_hash: Option<Hash>, 
+    ) -> Result<usize, LatticeNetError> {
+         let store = self.wait_for_store(store_id).await
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
+
+         tracing::debug!("FetchChain: connecting to peer");
+         let conn = self.transport.connect(&peer_id).await
+            .map_err(|e| LatticeNetError::Sync(format!("Connection failed: {}", e)))?;
+
+         let bi = conn.open_bi().await
+            .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
+         let (send, recv) = bi.into_split();
+
+         let mut sink = MessageSink::new(send);
+         let mut stream = MessageStream::new(recv);
+         
+         let req = PeerMessage {
+             message: Some(peer_message::Message::FetchChain(FetchChain {
+                 store_id: store_id.as_bytes().to_vec(),
+                 target_hash: target_hash.0.to_vec(),
+                 since_hash: since_hash.map(|h| h.0.to_vec()).unwrap_or_default(),
+             })),
+         };
+         
+         sink.send(&req).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+         // Note: finish() is iroh-specific; for generic transports, we just drop the sink
+         drop(sink);
+
+        // Expect IntentionResponse
+        let msg = stream.recv().await
+            .map_err(|e| LatticeNetError::Sync(e.to_string()))?
+            .ok_or_else(|| LatticeNetError::Sync("Peer closed stream without response".to_string()))?;
+
+        match msg.message {
+            Some(peer_message::Message::IntentionResponse(resp)) => {
+                let count = resp.intentions.len();
+                tracing::info!(count = count, "FetchChain: received items");
+                
+                let mut valid_intentions = Vec::with_capacity(count);
+                for proto in resp.intentions {
+                    if let Ok(signed) = intention_from_proto(&proto) {
+                        valid_intentions.push(signed);
+                    }
+                }
+                
+                match store.ingest_batch(valid_intentions).await {
+                     Ok(lattice_kernel::store::IngestResult::Applied) => Ok(count),
+                     Ok(lattice_kernel::store::IngestResult::MissingDeps(missing)) => {
+                         tracing::warn!(count = missing.len(), "Fetch chain incomplete: still missing dependencies");
+                         if let Some(first) = missing.first() {
+                              tracing::warn!(first_missing = %first.prev, "First missing dep");
+                         }
+                         Err(LatticeNetError::Sync(format!("Fetch chain incomplete, missing {} dependencies", missing.len())))
+                     },
+                     Err(e) => {
+                         tracing::warn!(error = %e, "Failed to ingest fetched batch");
+                         Err(LatticeNetError::Sync(format!("Ingest failing during fetch_chain: {}", e)))
+                     }
+                }
+            }
+            _ => Err(LatticeNetError::Sync("Unexpected response to FetchChain".to_string())),
+        }
+    }
+}

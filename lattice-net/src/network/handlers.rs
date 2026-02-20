@@ -3,7 +3,12 @@
 //! Extracted from NetworkService to keep concerns separated.
 //! These handlers receive only the context they need (provider trait), not the entire service.
 
-use crate::{MessageSink, MessageStream, LatticeNetError};
+use crate::{LatticeNetError};
+use crate::framing;
+
+/// Handlers always use iroh streams (inbound connections via Router)
+type MessageSink = framing::MessageSink<iroh::endpoint::SendStream>;
+type MessageStream = framing::MessageStream<iroh::endpoint::RecvStream>;
 use super::service::PeerStoreRegistry;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore, NodeProviderExt};
 use lattice_kernel::proto::network::{peer_message, JoinResponse, PeerMessage, FetchIntentions, IntentionResponse, BootstrapRequest, BootstrapResponse};

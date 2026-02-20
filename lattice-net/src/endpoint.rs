@@ -18,13 +18,21 @@ pub const LATTICE_ALPN: &[u8] = b"lattice-sync/1";
 
 /// Wrapper around Iroh endpoint with Lattice integration
 #[derive(Clone)]
-pub struct LatticeEndpoint {
+pub struct IrohTransport {
     endpoint: Endpoint,
     /// Static provider for adding peer addresses directly (useful for tests)
     static_discovery: StaticProvider,
 }
 
-impl LatticeEndpoint {
+impl std::fmt::Debug for IrohTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IrohTransport")
+            .field("public_key", &self.endpoint.secret_key().public())
+            .finish()
+    }
+}
+
+impl IrohTransport {
     /// Create a new endpoint from Ed25519 signing key (from NodeIdentity)
     /// Enables both DNS discovery (internet) and mDNS discovery (local network)
     pub async fn new(signing_key: ed25519_dalek::SigningKey) -> Result<Self, BindError> {
@@ -88,3 +96,78 @@ impl LatticeEndpoint {
         self.static_discovery.add_endpoint_info(addr);
     }
 }
+
+// ==================== Transport trait implementations ====================
+
+use lattice_net_types::transport::{
+    Transport, Connection as TransportConnection, BiStream, TransportError,
+};
+use lattice_model::types::PubKey;
+
+/// Adapter: iroh bi-stream → `BiStream` trait
+pub struct IrohBiStream {
+    pub send: iroh::endpoint::SendStream,
+    pub recv: iroh::endpoint::RecvStream,
+}
+
+impl BiStream for IrohBiStream {
+    type SendStream = iroh::endpoint::SendStream;
+    type RecvStream = iroh::endpoint::RecvStream;
+
+    fn into_split(self) -> (Self::SendStream, Self::RecvStream) {
+        (self.send, self.recv)
+    }
+}
+
+/// Adapter: iroh connection → `Connection` trait
+pub struct IrohConnection {
+    pub(crate) inner: iroh::endpoint::Connection,
+}
+
+impl TransportConnection for IrohConnection {
+    type Stream = IrohBiStream;
+
+    async fn open_bi(&self) -> Result<IrohBiStream, TransportError> {
+        let (send, recv) = self.inner.open_bi().await
+            .map_err(|e| TransportError::Stream(e.to_string()))?;
+        Ok(IrohBiStream { send, recv })
+    }
+
+    fn remote_public_key(&self) -> PubKey {
+        PubKey::from(*self.inner.remote_id().as_bytes())
+    }
+}
+
+impl Transport for IrohTransport {
+    type Connection = IrohConnection;
+
+    fn public_key(&self) -> PubKey {
+        PubKey::from(*self.endpoint.secret_key().public().as_bytes())
+    }
+
+    async fn connect(&self, peer: &PubKey) -> Result<IrohConnection, TransportError> {
+        let iroh_key = iroh::PublicKey::from_bytes(&**peer)
+            .map_err(|e| TransportError::Connect(format!("Invalid public key: {}", e)))?;
+        let conn = self.endpoint.connect(iroh_key, LATTICE_ALPN).await
+            .map_err(|e| TransportError::Connect(e.to_string()))?;
+        Ok(IrohConnection { inner: conn })
+    }
+
+    async fn accept(&self) -> Option<IrohConnection> {
+        let incoming = self.endpoint.accept().await?;
+        match incoming.accept() {
+            Ok(connecting) => match connecting.await {
+                Ok(conn) => Some(IrohConnection { inner: conn }),
+                Err(e) => {
+                    tracing::warn!("Transport accept: connection failed: {}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("Transport accept: incoming failed: {}", e);
+                None
+            }
+        }
+    }
+}
+

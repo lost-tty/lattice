@@ -1,5 +1,5 @@
 use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, Uuid, direct_opener, StoreHandle, STORE_TYPE_KVSTORE};
-use lattice_net::NetworkService;
+use lattice_net::{NetworkService, ToLattice};
 use lattice_kvstore_client::KvStoreExt;
 use lattice_model::types::{Hash, PubKey};
 use std::sync::Arc;
@@ -19,7 +19,7 @@ fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
 }
 
 async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<NetworkService>, Box<dyn std::error::Error>> {
-    let endpoint = lattice_net::LatticeEndpoint::new(node.signing_key().clone()).await?;
+    let endpoint = lattice_net::IrohTransport::new(node.signing_key().clone()).await?;
     let event_rx = node.subscribe_net_events();
     Ok(NetworkService::new_with_provider(node, endpoint, event_rx).await?)
 }
@@ -102,7 +102,7 @@ async fn test_chain_fetch_linear_gap() {
     
     let result = server_b.fetch_chain(
         store_b.id(), 
-        _server_a.endpoint().public_key(), 
+        _server_a.endpoint().public_key().to_lattice(), 
         target, 
         Some(since)
     ).await;
@@ -138,7 +138,7 @@ async fn test_chain_fetch_invalid_since() {
     // Request with since=None
     let result = server_b.fetch_chain(
         store_b.id(), 
-        _server_a.endpoint().public_key(), 
+        _server_a.endpoint().public_key().to_lattice(), 
         target, 
         None
     ).await;
@@ -188,7 +188,7 @@ async fn test_chain_fetch_fork_detect() {
     // B requests fetch_chain(target=4, since=fake_since)
     let result = server_b.fetch_chain(
         store_b.id(), 
-        server_a.endpoint().public_key(), 
+        server_a.endpoint().public_key().to_lattice(), 
         target, 
         Some(fake_since)
     ).await;
@@ -228,7 +228,7 @@ async fn test_chain_fetch_limit_exceeded() {
     
     let result = server_b.fetch_chain(
         store_b.id(), 
-        server_a.endpoint().public_key(), 
+        server_a.endpoint().public_key().to_lattice(), 
         target, 
         Some(since)
     ).await;
@@ -262,7 +262,7 @@ async fn test_chain_fetch_future_since() {
     
     let result = server_b.fetch_chain(
         store_b.id(), 
-        server_a.endpoint().public_key(), 
+        server_a.endpoint().public_key().to_lattice(), 
         target, 
         Some(since)
     ).await;

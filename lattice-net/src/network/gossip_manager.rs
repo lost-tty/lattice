@@ -1,6 +1,6 @@
 //! GossipManager - Encapsulates gossip subsystem complexity
 
-use crate::{LatticeEndpoint, ToLattice};
+use crate::{IrohTransport, ToLattice};
 use super::error::GossipError;
 use lattice_model::{PeerStatus, PeerEvent, PeerProvider, Uuid, types::PubKey};
 use lattice_model::weaver::SignedIntention;
@@ -14,7 +14,7 @@ use tokio::sync::RwLock;
 use prost::Message;
 use lattice_kernel::store::{IngestResult, MissingDep};
 
-pub type GapHandler = Arc<dyn Fn(MissingDep, Option<iroh::PublicKey>) + Send + Sync>;
+pub type GapHandler = Arc<dyn Fn(MissingDep, Option<PubKey>) + Send + Sync>;
 
 /// Generate a deterministic TopicId for a store
 pub fn topic_for_store(store_id: Uuid) -> iroh_gossip::TopicId {
@@ -34,7 +34,7 @@ pub struct GossipManager {
 
 impl GossipManager {
     /// Create a new GossipManager
-    pub fn new(endpoint: &LatticeEndpoint) -> Self {
+    pub fn new(endpoint: &IrohTransport) -> Self {
         Self {
             gossip: Gossip::builder().spawn(endpoint.endpoint().clone()),
             senders: Arc::new(RwLock::new(HashMap::new())),
@@ -200,7 +200,7 @@ impl GossipManager {
                                 Ok(IngestResult::MissingDeps(missing_deps)) => {
                                     for missing in missing_deps {
                                         tracing::info!(store_id = %store_id, missing = %missing.prev, "Gossip ingestion gap detected, triggering fetch");
-                                        gap_handler(missing, Some(msg.delivered_from));
+                                        gap_handler(missing, Some(msg.delivered_from.to_lattice()));
                                     }
                                 },
                                 Err(e) => tracing::warn!(store_id = %store_id, error = %e, "Failed to ingest gossip intention"),

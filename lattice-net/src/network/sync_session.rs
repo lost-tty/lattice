@@ -25,6 +25,7 @@ use lattice_kernel::proto::network::{
     reconcile_message::Content as ReconcileContent,
     ReconcilePayload,
 };
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Result of a sync session
 #[derive(Debug, Default)]
@@ -36,17 +37,17 @@ pub struct SyncResult {
 const PROTOCOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Symmetric sync session - same core logic runs on both sides
-pub struct SyncSession<'a> {
+pub struct SyncSession<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> {
     store: &'a NetworkStore,
-    sink: &'a mut MessageSink,
-    stream: &'a mut MessageStream,
+    sink: &'a mut MessageSink<W>,
+    stream: &'a mut MessageStream<R>,
 }
 
-impl<'a> SyncSession<'a> {
+impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<'a, W, R> {
     pub fn new(
         store: &'a NetworkStore,
-        sink: &'a mut MessageSink,
-        stream: &'a mut MessageStream,
+        sink: &'a mut MessageSink<W>,
+        stream: &'a mut MessageStream<R>,
         _peer_id: PubKey,
     ) -> Self {
         Self { store, sink, stream }

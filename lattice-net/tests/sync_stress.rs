@@ -8,7 +8,7 @@
 //! Uses extensive validation and tracing.
 
 use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, Uuid, direct_opener, StoreHandle, STORE_TYPE_KVSTORE};
-use lattice_net::NetworkService;
+use lattice_net::{NetworkService, ToLattice, ToIroh};
 use lattice_kvstore_client::KvStoreExt;
 use lattice_model::types::PubKey;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
 }
 
 async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<NetworkService>, Box<dyn std::error::Error>> {
-    let endpoint = lattice_net::LatticeEndpoint::new(node.signing_key().clone()).await?;
+    let endpoint = lattice_net::IrohTransport::new(node.signing_key().clone()).await?;
     let event_rx = node.subscribe_net_events();
     Ok(NetworkService::new_with_provider(node, endpoint, event_rx).await?)
 }
@@ -150,7 +150,7 @@ async fn test_interleaved_modifications() {
     server_a.set_global_gossip_enabled(false);
     server_b.set_global_gossip_enabled(false);
     
-    let pk_a = server_a.endpoint().public_key();
+    let pk_a = server_a.endpoint().public_key().to_lattice();
 
     // Initial data
     for i in 0..COUNT {
@@ -188,7 +188,7 @@ async fn test_interleaved_modifications() {
 
     // Final convergence sync
     tracing::info!("Final convergence sync...");
-    server_b.endpoint().connect(pk_a).await.expect("connect");
+    server_b.endpoint().connect(pk_a.to_iroh().unwrap()).await.expect("connect");
     server_b.sync_with_peer_by_id(store_b.id(), pk_a, &[]).await.expect("final sync");
 
     // Validation
@@ -305,29 +305,29 @@ async fn test_partition_recovery() {
     
     tracing::info!("Triggering convergence syncs...");
 
-    let pk_a = iroh::PublicKey::from_bytes(&peer_a).unwrap();
-    let pk_b = iroh::PublicKey::from_bytes(&peer_b).unwrap();
-    let pk_c = iroh::PublicKey::from_bytes(&peer_c).unwrap();
+    let pk_a = peer_a.to_lattice();
+    let pk_b = peer_b.to_lattice();
+    let pk_c = peer_c.to_lattice();
     
     // A pulls from B and C
-    server_a_2.endpoint().connect(pk_b).await.expect("connect a-b");
+    server_a_2.endpoint().connect(peer_b).await.expect("connect a-b");
     server_a_2.sync_with_peer_by_id(store_id, pk_b, &[]).await.expect("sync a-b");
     
-    server_a_2.endpoint().connect(pk_c).await.expect("connect a-c");
+    server_a_2.endpoint().connect(peer_c).await.expect("connect a-c");
     server_a_2.sync_with_peer_by_id(store_id, pk_c, &[]).await.expect("sync a-c");
     
     // B pulls from A and C
-    server_b_2.endpoint().connect(pk_a).await.expect("connect b-a");
+    server_b_2.endpoint().connect(peer_a).await.expect("connect b-a");
     server_b_2.sync_with_peer_by_id(store_id, pk_a, &[]).await.expect("sync b-a");
     
-    server_b_2.endpoint().connect(pk_c).await.expect("connect b-c");
+    server_b_2.endpoint().connect(peer_c).await.expect("connect b-c");
     server_b_2.sync_with_peer_by_id(store_id, pk_c, &[]).await.expect("sync b-c");
 
     // C pulls from A and B
-    server_c_2.endpoint().connect(pk_a).await.expect("connect c-a");
+    server_c_2.endpoint().connect(peer_a).await.expect("connect c-a");
     server_c_2.sync_with_peer_by_id(store_id, pk_a, &[]).await.expect("sync c-a");
     
-    server_c_2.endpoint().connect(pk_b).await.expect("connect c-b");
+    server_c_2.endpoint().connect(peer_b).await.expect("connect c-b");
     server_c_2.sync_with_peer_by_id(store_id, pk_b, &[]).await.expect("sync c-b");
 
     // === Phase 4: Validation ===

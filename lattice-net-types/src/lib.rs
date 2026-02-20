@@ -10,6 +10,8 @@
 
 mod network_store;
 mod node_provider_ext;
+pub mod transport;
 
 pub use network_store::{NetworkStore, NetworkStoreRegistry};
 pub use node_provider_ext::NodeProviderExt;
+pub use transport::{Transport, Connection, BiStream, TransportError};

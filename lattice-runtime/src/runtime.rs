@@ -117,7 +117,7 @@ impl RuntimeBuilder {
         let node = Arc::new(builder.build().map_err(|e| RuntimeError::Node(e.to_string()))?);
         
         // Create endpoint
-        let endpoint = lattice_net::LatticeEndpoint::new(node.signing_key().clone())
+        let endpoint = lattice_net::IrohTransport::new(node.signing_key().clone())
             .await
             .map_err(|e| RuntimeError::Network(e.to_string()))?;
         

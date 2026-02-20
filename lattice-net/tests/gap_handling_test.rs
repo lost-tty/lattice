@@ -1,5 +1,5 @@
 use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, Uuid, direct_opener, StoreHandle, STORE_TYPE_KVSTORE};
-use lattice_net::NetworkService;
+use lattice_net::{NetworkService, ToLattice};
 use lattice_model::{types::{Hash, PubKey}};
 use std::sync::Arc;
 use lattice_kernel::{store::IngestResult};
@@ -20,7 +20,7 @@ fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
 }
 
 async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<NetworkService>, Box<dyn std::error::Error>> {
-    let endpoint = lattice_net::LatticeEndpoint::new(node.signing_key().clone()).await?;
+    let endpoint = lattice_net::IrohTransport::new(node.signing_key().clone()).await?;
     let event_rx = node.subscribe_net_events();
     Ok(NetworkService::new_with_provider(node, endpoint, event_rx).await?)
 }
@@ -220,7 +220,7 @@ async fn test_unresponsive_peer_fallback() {
     server_b.set_global_gossip_enabled(false);
     server_c.set_global_gossip_enabled(false);
     
-    let a_endpoint_key = server_a.endpoint().public_key();
+    let a_endpoint_key = server_a.endpoint().public_key().to_lattice();
 
     server_b.endpoint().add_peer_addr(server_c.endpoint().addr());
     server_c.endpoint().add_peer_addr(server_a.endpoint().addr());
@@ -371,7 +371,7 @@ async fn test_tip_zero_fallback() {
     server_b_reborn.sessions().mark_online(a_pub_for_session).expect("mark A online");
 
     // Trigger fetch_chain to A with since=None (tip zero path)
-    server_b_reborn.handle_missing_dep(store_id, missing, Some(server_a.endpoint().public_key())).await
+    server_b_reborn.handle_missing_dep(store_id, missing, Some(server_a.endpoint().public_key().to_lattice())).await
         .expect("handle_missing_dep should fetch H1 from A");
 
     // B_reborn syncs H1 from A

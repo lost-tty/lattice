@@ -80,7 +80,7 @@ mod tests {
         let pubkey = PubKey::from(key.verifying_key().to_bytes());
         
         // Create the endpoint (this is lattice-net's own type)
-        let endpoint = crate::LatticeEndpoint::new(key).await
+        let endpoint = crate::IrohTransport::new(key).await
             .expect("Failed to create endpoint");
         
         // Create the net channel (network layer owns it)

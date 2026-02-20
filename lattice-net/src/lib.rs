@@ -12,14 +12,19 @@ pub mod error;
 pub mod framing;
 pub mod network;
 
-pub use endpoint::{LatticeEndpoint, PublicKey, LATTICE_ALPN};
+pub use endpoint::{IrohTransport, PublicKey, LATTICE_ALPN, IrohBiStream, IrohConnection};
+// Re-export Transport abstraction from lattice-net-types
+pub use lattice_net_types::{Transport, Connection, BiStream, TransportError};
 pub use error::LatticeNetError;
 pub use framing::{MessageSink, MessageStream};
 pub use lattice_kernel::proto::network::{
     JoinRequest, JoinResponse, 
     FetchIntentions, IntentionResponse
 };
-pub use network::{NetworkService, SyncResult};
+// Re-export NetworkService with default Iroh transport for backward compat.
+// The generic version is available via `network::NetworkService<T>`.
+pub type NetworkService = network::NetworkService<IrohTransport>;
+pub use network::SyncResult;
 pub use lattice_model::types::PubKey;
 
 /// Parse a PublicKey (NodeId) from hex or base32 string

@@ -1,21 +1,22 @@
-//! Message framing for Iroh streams using tokio-util LengthDelimitedCodec
+//! Message framing for QUIC-style streams using tokio-util LengthDelimitedCodec
 //!
 //! Provides a clean interface for sending/receiving length-prefixed PeerMessage
-//! over QUIC streams without manual buffer management.
+//! over any AsyncWrite/AsyncRead stream, decoupled from iroh-specific types.
 
 use crate::error::LatticeNetError;
 use futures_util::{SinkExt, StreamExt};
 use lattice_kernel::proto::network::PeerMessage;
 use prost::Message;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-/// Framed writer for sending PeerMessage over an Iroh SendStream
-pub struct MessageSink {
-    inner: FramedWrite<iroh::endpoint::SendStream, LengthDelimitedCodec>,
+/// Framed writer for sending PeerMessage over any AsyncWrite stream
+pub struct MessageSink<W: AsyncWrite + Send + Unpin> {
+    inner: FramedWrite<W, LengthDelimitedCodec>,
 }
 
-impl MessageSink {
-    pub fn new(stream: iroh::endpoint::SendStream) -> Self {
+impl<W: AsyncWrite + Send + Unpin> MessageSink<W> {
+    pub fn new(stream: W) -> Self {
         Self {
             inner: FramedWrite::new(stream, LengthDelimitedCodec::new()),
         }
@@ -27,8 +28,10 @@ impl MessageSink {
         self.inner.send(bytes.into()).await
             .map_err(|e| LatticeNetError::Io(e.into()))
     }
+}
 
-    /// Finish the stream (signal we're done sending)
+/// Iroh-specific: gracefully finish the stream after sending
+impl MessageSink<iroh::endpoint::SendStream> {
     pub async fn finish(self) -> Result<(), LatticeNetError> {
         let mut stream = self.inner.into_inner();
         let _ = stream.finish();
@@ -37,13 +40,13 @@ impl MessageSink {
     }
 }
 
-/// Framed reader for receiving PeerMessage from an Iroh RecvStream
-pub struct MessageStream {
-    inner: FramedRead<iroh::endpoint::RecvStream, LengthDelimitedCodec>,
+/// Framed reader for receiving PeerMessage from any AsyncRead stream
+pub struct MessageStream<R: AsyncRead + Send + Unpin> {
+    inner: FramedRead<R, LengthDelimitedCodec>,
 }
 
-impl MessageStream {
-    pub fn new(stream: iroh::endpoint::RecvStream) -> Self {
+impl<R: AsyncRead + Send + Unpin> MessageStream<R> {
+    pub fn new(stream: R) -> Self {
         Self {
             inner: FramedRead::new(stream, LengthDelimitedCodec::new()),
         }

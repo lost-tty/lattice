@@ -25,7 +25,7 @@ fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
 
 /// Test helper: Create NetworkService from Node (replaces removed new_from_node)
 async fn new_from_node_test(node: Arc<Node>) -> Result<Arc<NetworkService>, Box<dyn std::error::Error>> {
-    let endpoint = lattice_net::LatticeEndpoint::new(node.signing_key().clone()).await?;
+    let endpoint = lattice_net::IrohTransport::new(node.signing_key().clone()).await?;
     let event_rx = node.subscribe_net_events();
     Ok(NetworkService::new_with_provider(node, endpoint, event_rx).await?)
 }

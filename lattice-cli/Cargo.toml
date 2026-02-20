@@ -19,7 +19,6 @@ uuid = { workspace = true }
 shlex = "1"
 clap = { workspace = true }
 serde_json = "1"
-iroh = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true }
 chrono = { workspace = true }
