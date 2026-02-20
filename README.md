@@ -52,4 +52,4 @@ cd docs && hugo server
 
 ## License
 
-AGPL-3.0
+MPL-2.0

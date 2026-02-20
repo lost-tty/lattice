@@ -79,4 +79,4 @@ lattice --embedded
 
 ## License
 
-GNU Affero General Public License v3.0 (AGPL-3.0).
+Mozilla Public License 2.0 (MPL-2.0).
