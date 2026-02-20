@@ -19,6 +19,7 @@ members = [
     "lattice-store-base",
     "lattice-mockkernel",
     "lattice-sync",
+    "lattice-net-sim",
 ]
 
 # lattice-bindings is excluded from default members to prevent slow linking (cdylib)
@@ -38,6 +39,7 @@ default-members = [
     "lattice-storage",
     "lattice-systemstore",
     "lattice-store-base",
+    "lattice-net-sim",
 ]
 
 [workspace.package]

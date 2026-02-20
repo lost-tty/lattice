@@ -37,6 +37,16 @@ Decouple `lattice-net` from Iroh-specific types so multi-node networks can be si
 
 ---
 
+## Milestone 12C: Symmetric Sync
+
+Negentropy sync is pull-only — only the initiator discovers missing items. The responder sends its data but never computes its own needs, requiring two sync calls for full bidirectional exchange.
+
+- [ ] Compute `need` on both sides during `RangeItemsRequest` processing in `Reconciler`
+- [ ] Fix `test_bidirectional_sync` in `sync_repro.rs` (currently failing)
+- [ ] Verify with ChannelTransport bidirectional test (single sync call)
+
+---
+
 ## Milestone 13: Intelligent Reconciliation ("Meet" Operator)
 
 Add the "Meet" operator: find the common ancestor of two divergent heads, extract the deltas, and attempt a 3-way merge.

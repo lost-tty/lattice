@@ -1,0 +1,12 @@
+[package]
+name = "lattice-net-sim"
+description = "In-memory network simulation for Lattice (ChannelTransport)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-net-types = { path = "../lattice-net-types" }
+lattice-model = { path = "../lattice-model" }
+tokio = { workspace = true, features = ["sync", "io-util"] }
+tracing = { workspace = true }

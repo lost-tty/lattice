@@ -39,3 +39,4 @@ rand = { workspace = true }
 async-trait = "0.1"
 lattice-store-base = { workspace = true }
 lattice-proto = { workspace = true }
+lattice-net-sim = { path = "../lattice-net-sim" }

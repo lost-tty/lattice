@@ -272,11 +272,11 @@ async fn handle_fetch_chain(
 }
 
 /// Handle a BootstrapRequest - streams witness log and intentions
-async fn handle_bootstrap_request(
+pub(super) async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
     req: BootstrapRequest,
-    sink: &mut MessageSink,
+    sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
     let store_id = Uuid::from_slice(&req.store_id)
         .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
@@ -297,7 +297,6 @@ async fn handle_bootstrap_request(
         if h == Hash::ZERO { None } else { Some(h) }
     };
 
-    // Use a reasonable cap for the total request, but batch responses to control memory
     let max_limit = if req.limit == 0 { 1000 } else { req.limit as usize };
     let max_limit = std::cmp::min(max_limit, 10_000); 
 
@@ -327,31 +326,26 @@ async fn handle_bootstrap_request(
         total_processed += 1;
 
         if witness_batch.len() >= BATCH_SIZE {
-            // Flush partial batch
             send_bootstrap_batch(&authorized_store, sink, &req.store_id, &witness_batch, &intention_hashes, false).await?;
             witness_batch.clear();
             intention_hashes.clear();
         }
     }
 
-    // Send final batch (or empty done signal)
-    // If we processed fewer items than requested, we are at the end of the log => done=true.
-    // If we hit the limit, we assumption pagination continues => done=false.
     let is_done = total_processed < max_limit;
     
     if !witness_batch.is_empty() {
         send_bootstrap_batch(&authorized_store, sink, &req.store_id, &witness_batch, &intention_hashes, is_done).await?;
     } else if is_done {
-        // Send empty message to signal completion if previous batch was full but we are actually done
         send_bootstrap_batch(&authorized_store, sink, &req.store_id, &[], &[], true).await?;
     }
 
     Ok(())
 }
 
-async fn send_bootstrap_batch(
+async fn send_bootstrap_batch<W: tokio::io::AsyncWrite + Send + Unpin>(
     store: &NetworkStore,
-    sink: &mut MessageSink,
+    sink: &mut framing::MessageSink<W>,
     store_id_bytes: &[u8],
     witness_records: &[WitnessRecord],
     intention_hashes: &[Hash],

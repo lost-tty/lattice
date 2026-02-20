@@ -55,14 +55,3 @@ impl Dispatchable for TestStore {
     }
 }
 
-// Ensure TestStore implements KvStoreExt (via blanket impls)
-// T: CommandDispatcher + StreamReflectable => KvStoreExt
-// TestStore: Dispatchable + StateProvider => CommandDispatcher
-// TestStore: StateProvider (where State: StreamProvider) => StreamReflectable
-// PersistentKvState implements StreamProvider.
-
-// Helper to assist type inference if needed
-#[allow(dead_code)]
-pub fn as_kv_store(store: &TestStore) -> &dyn lattice_kvstore_client::KvStoreExt {
-    store
-}

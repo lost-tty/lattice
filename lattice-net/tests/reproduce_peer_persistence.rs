@@ -58,13 +58,12 @@ async fn test_peer_persistence_after_bootstrap() {
     server_b.endpoint().add_peer_addr(server_a.endpoint().addr());
 
     // Manually run join flow (simplified from complete_join_handshake to isolate bootstrap)
-    let conn = server_b.endpoint().connect(server_a.endpoint().public_key()).await.expect("connect");
     
     // 1. Process join response (creates store on B, adds 'via_peer' to bootstrap set)
     let _store_b = node_b.process_join_response(store_id, a_pubkey).await.expect("process join");
     
-    // 2. Run bootstrap
-    let count = server_b.bootstrap_from_peer(store_id, conn).await.expect("bootstrap");
+    // 2. Run bootstrap (connects to peer internally via Transport::connect)
+    let count = server_b.bootstrap_from_peer(store_id, a_pubkey).await.expect("bootstrap");
     tracing::info!("Bootstrap count: {}", count);
     
     // DEBUG: Dump witness log

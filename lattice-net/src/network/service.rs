@@ -18,12 +18,13 @@ use lattice_kernel::weaver::convert::intention_from_proto;
 use iroh::endpoint::Connection;
 use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use futures_util::future::join_all;
+use std::collections::HashSet;
 use std::time::Duration;
-use lattice_kernel::proto::weaver::WitnessContent;
-use prost::Message;
+
 
 /// Result of a sync operation with a peer
 pub struct SyncResult {
@@ -41,12 +42,12 @@ pub type PeerStoreRegistry = Arc<RwLock<std::collections::HashSet<Uuid>>>;
 pub struct NetworkService<T: Transport> {
     provider: Arc<dyn NodeProviderExt>,
     transport: T,
-    gossip_manager: Arc<super::gossip_manager::GossipManager>,
+    gossip_manager: Option<Arc<super::gossip_manager::GossipManager>>,
     peer_stores: PeerStoreRegistry,
     sessions: Arc<super::session::SessionTracker>,
-    router: Router,
-    global_gossip_enabled: Arc<std::sync::atomic::AtomicBool>,
-    auto_sync_enabled: Arc<std::sync::atomic::AtomicBool>,
+    router: Option<Router>,
+    global_gossip_enabled: Arc<AtomicBool>,
+    auto_sync_enabled: Arc<AtomicBool>,
 }
 
 /// Protocol handler for the main LATTICE_ALPN protocol.
@@ -112,7 +113,7 @@ impl NetworkService<IrohTransport> {
         let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint));
         
         // Track which stores are registered for networking
-        let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashSet::new()));
         
         let sessions = Arc::new(super::session::SessionTracker::new());
         
@@ -129,12 +130,12 @@ impl NetworkService<IrohTransport> {
         let service = Arc::new(Self { 
             provider,
             transport: endpoint,
-            gossip_manager: gossip_manager.clone(),
+            gossip_manager: Some(gossip_manager.clone()),
             peer_stores,
             sessions: sessions.clone(),
-            router,
-            global_gossip_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            auto_sync_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            router: Some(router),
+            global_gossip_enabled: Arc::new(AtomicBool::new(true)),
+            auto_sync_enabled: Arc::new(AtomicBool::new(true)),
         });
         
         // Subscribe to network events (NetEvent channel)
@@ -149,98 +150,6 @@ impl NetworkService<IrohTransport> {
     /// Access the underlying endpoint (Iroh-specific)
     pub fn endpoint(&self) -> &IrohTransport {
         &self.transport
-    }
-
-    /// Bootstrap from a peer (Clone protocol)
-    ///
-    /// Connects to peer, requests full witness history, and locally re-witnesses (clones) the chain.
-    /// This is used when joining a store as a new replica.
-    #[tracing::instrument(skip(self, conn), fields(store_id = %store_id))]
-    pub async fn bootstrap_from_peer(
-        &self,
-        store_id: Uuid,
-        conn: iroh::endpoint::Connection,
-    ) -> Result<u64, LatticeNetError> {
-        let peer_id = conn.remote_id();
-        let store = self.wait_for_store(store_id).await
-             .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
-
-        tracing::info!("Bootstrap: using existing connection to peer {}", peer_id);
-
-        // Track stats
-        let mut total_ingested = 0;
-        let mut start_hash = Hash::ZERO.to_vec();
-        let mut fully_done = false;
-
-        while !fully_done {
-            let (send, recv) = conn.open_bi().await
-                 .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
-
-            let mut sink = MessageSink::new(send);
-            let mut stream = MessageStream::new(recv);
-
-            // Send BootstrapRequest
-            let req = PeerMessage {
-                message: Some(peer_message::Message::BootstrapRequest(BootstrapRequest {
-                    store_id: store_id.as_bytes().to_vec(),
-                    start_hash: start_hash.clone(),
-                    limit: 1000, 
-                })),
-            };
-
-            sink.send(&req).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-            sink.finish().await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-
-            loop {
-                // Read next message
-                let msg_opt = stream.recv().await
-                    .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-
-                let msg = match msg_opt {
-                    Some(m) => m,
-                    None => break, // Stream closed by peer (end of this batch request)
-                };
-
-                if let Some(peer_message::Message::BootstrapResponse(resp)) = msg.message {
-                    if !resp.witness_records.is_empty() {
-                         let peer_pk = lattice_model::PubKey::from(*peer_id.as_bytes());
-                         let count = resp.witness_records.len() as u64;
-
-                         // Update start_hash from the last record for pagination
-                         if let Some(last_record) = resp.witness_records.last() {
-                             let content = WitnessContent::decode(last_record.content.as_slice())
-                                 .map_err(|e| LatticeNetError::Sync(format!("Failed to decode witness content: {}", e)))?;
-                             start_hash = content.intention_hash;
-                         }
-                         
-                         // Decode intentions
-                         let intentions: Vec<_> = resp.intentions.iter()
-                            .filter_map(|proto| intention_from_proto(proto).ok())
-                            .collect();
-
-                         store.ingest_witness_batch(resp.witness_records, intentions, peer_pk).await
-                             .map_err(|e| LatticeNetError::Sync(format!("Failed to ingest bootstrap batch: {}", e)))?;
-                             
-                         total_ingested += count;
-                    }
-
-                    if resp.done {
-                        fully_done = true;
-                        break;
-                    }
-                } else {
-                    return Err(LatticeNetError::Sync("Unexpected response during bootstrap".to_string()));
-                }
-            }
-        }
-        
-        tracing::info!("Bootstrap complete. Total items ingested: {}", total_ingested);
-        
-        // Reset ephemeral bootstrap peers now that we have (presumably) synced the real peer list from the log.
-        // This ensures we transition to using the persisted, verified peer list.
-        store.reset_bootstrap_peers();
-
-        Ok(total_ingested)
     }
 
     /// Handle a join request triggered by a NetEvent.
@@ -317,21 +226,21 @@ impl NetworkService<IrohTransport> {
         });
 
         // 3. Bootstrap (Clone) content from peer
-        if service.auto_sync_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+        if service.auto_sync_enabled.load(Ordering::SeqCst) {
             tracing::info!(peer = %iroh_peer_id.fmt_short(), "Bootstrapping store {}...", store_id);
-            let bootstrap_conn = conn.clone(); // Use existing connection
-            
+            let peer_pk = PubKey::from(*iroh_peer_id.as_bytes());
             tokio::spawn(async move {
-                match service.bootstrap_from_peer(store_id, bootstrap_conn).await {
+                match service.bootstrap_from_peer(store_id, peer_pk).await {
                     Ok(count) => {
                         tracing::info!(peer = %iroh_peer_id.fmt_short(), count = count, "Bootstrap finished successfully");
                         // Trigger initial sync with ALL peers to catch up on recent activity
                         if let Ok(results) = service.sync_all_by_id(store_id).await {
                             let sync_count: u64 = results.iter().map(|r| r.entries_received).sum();
                             // Emit SyncResult to notify the UI/CLI of bootstrap completion stats
+                            // TODO: Once Bootstrap is stateful, emit BootstrapResult
                             service.provider.emit_user_event(UserEvent::SyncResult {
                                 store_id,
-                                peers_synced: 1, // Approximation for initial bootstrap
+                                peers_synced: 1,
                                 entries_sent: 0,
                                 entries_received: count + sync_count,
                             });
@@ -459,34 +368,36 @@ impl NetworkService<IrohTransport> {
         self.peer_stores.write().await.insert(store_id);
         
         // Check global flag
-        let global_enabled = self.global_gossip_enabled.load(std::sync::atomic::Ordering::SeqCst);
+        let global_enabled = self.global_gossip_enabled.load(Ordering::SeqCst);
         
         if global_enabled {
-            let weak_self = Arc::downgrade(self);
-            let store_id_captured = store_id;
-            // Define gap_handler closure
-            let gap_handler: super::gossip_manager::GapHandler = Arc::new(move |missing: MissingDep, peer: Option<PubKey>| {
-                if let Some(service) = weak_self.upgrade() {
-                    tokio::spawn(async move {
-                        let _ = service.handle_missing_dep(store_id_captured, missing, peer).await;
-                    });
-                }
-            });
+            if let Some(gossip) = &self.gossip_manager {
+                let weak_self = Arc::downgrade(self);
+                let store_id_captured = store_id;
+                // Define gap_handler closure
+                let gap_handler: super::gossip_manager::GapHandler = Arc::new(move |missing: MissingDep, peer: Option<PubKey>| {
+                    if let Some(service) = weak_self.upgrade() {
+                        tokio::spawn(async move {
+                            let _ = service.handle_missing_dep(store_id_captured, missing, peer).await;
+                        });
+                    }
+                });
 
-            if let Err(e) = self.gossip_manager.setup_for_store(
-                pm, 
-                self.sessions.clone(), 
-                network_store.clone(),
-                gap_handler,
-            ).await {
-                tracing::error!(error = %e, "Gossip setup failed");
+                if let Err(e) = gossip.setup_for_store(
+                    pm, 
+                    self.sessions.clone(), 
+                    network_store.clone(),
+                    gap_handler,
+                ).await {
+                    tracing::error!(error = %e, "Gossip setup failed");
+                }
             }
         } else {
             tracing::info!(store_id = %store_id, "Gossip disabled globally");
         }
 
         // Boot Sync: Spawn a task to wait for active peers and trigger initial sync
-        if self.auto_sync_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.auto_sync_enabled.load(Ordering::SeqCst) {
             let service = self.clone();
             tokio::spawn(async move {
                 tracing::info!(store_id = %store_id, "Boot Sync: Waiting for peers...");
@@ -513,6 +424,98 @@ impl NetworkService<IrohTransport> {
         }
     }
 
+}
+
+// ====================================================================================
+// Generic: Sync protocol, peer discovery, accessors
+// These work with any Transport implementation.
+// ====================================================================================
+
+impl<T: Transport> NetworkService<T> {
+    /// Bootstrap from a peer (Clone protocol).
+    ///
+    /// Connects to peer, requests full witness history, and locally re-witnesses (clones) the chain.
+    /// This is used when joining a store as a new replica.
+    pub async fn bootstrap_from_peer(
+        &self,
+        store_id: Uuid,
+        peer_id: PubKey,
+    ) -> Result<u64, LatticeNetError> {
+        let store = self.wait_for_store(store_id).await
+            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
+
+        tracing::info!("Bootstrap: connecting to peer {}", peer_id);
+
+        let mut total_ingested: u64 = 0;
+        let mut start_hash = Hash::ZERO.to_vec();
+        let mut fully_done = false;
+
+        let conn = self.transport.connect(&peer_id).await
+            .map_err(|e| LatticeNetError::Sync(format!("Failed to connect: {}", e)))?;
+
+        while !fully_done {
+            let bi = conn.open_bi().await
+                .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
+            let (send, recv) = bi.into_split();
+
+            let mut sink = crate::MessageSink::new(send);
+            let mut stream = crate::MessageStream::new(recv);
+
+            let req = PeerMessage {
+                message: Some(peer_message::Message::BootstrapRequest(BootstrapRequest {
+                    store_id: store_id.as_bytes().to_vec(),
+                    start_hash: start_hash.clone(),
+                    limit: 1000,
+                })),
+            };
+            sink.send(&req).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+
+            loop {
+                let msg_opt = stream.recv().await
+                    .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+
+                let msg = match msg_opt {
+                    Some(m) => m,
+                    None => break,
+                };
+
+                if let Some(peer_message::Message::BootstrapResponse(resp)) = msg.message {
+                    if !resp.witness_records.is_empty() {
+                        let count = resp.witness_records.len() as u64;
+
+                        if let Some(last_record) = resp.witness_records.last() {
+                            use prost::Message;
+                            let content = lattice_kernel::proto::weaver::WitnessContent::decode(last_record.content.as_slice())
+                                .map_err(|e| LatticeNetError::Sync(format!("Failed to decode witness content: {}", e)))?;
+                            start_hash = content.intention_hash;
+                        }
+
+                        let intentions: Vec<_> = resp.intentions.iter()
+                            .filter_map(|proto| intention_from_proto(proto).ok())
+                            .collect();
+
+                        store.ingest_witness_batch(resp.witness_records, intentions, peer_id).await
+                            .map_err(|e| LatticeNetError::Sync(format!("Failed to ingest bootstrap batch: {}", e)))?;
+
+                        total_ingested += count;
+                    }
+
+                    if resp.done {
+                        fully_done = true;
+                        break;
+                    }
+                } else {
+                    return Err(LatticeNetError::Sync("Unexpected response during bootstrap".to_string()));
+                }
+            }
+        }
+
+        tracing::info!("Bootstrap complete. Total items ingested: {}", total_ingested);
+        store.reset_bootstrap_peers();
+
+        Ok(total_ingested)
+    }
+
     /// Handle a missing dependency signal: trigger fetch chain or full sync
     pub async fn handle_missing_dep(&self, store_id: Uuid, missing: MissingDep, peer_id: Option<PubKey>) -> Result<(), LatticeNetError> {
         tracing::debug!(store_id = %store_id, missing = ?missing, "Handling missing dependency");
@@ -536,7 +539,6 @@ impl NetworkService<IrohTransport> {
             },
             Err(e) => {
                 tracing::warn!(store_id = %store_id, error = %e, "Smart fetch failed or incomplete, triggering targeted sync fallback");
-                // Explicitly sync with this peer first, as they likely have the data we need
                 if let Err(e) = self.sync_with_peer_by_id(store_id, peer, &[]).await {
                     tracing::warn!("Fallback targeted sync failed: {}, trying sync_all", e);
                     if let Err(e) = self.sync_all_by_id(store_id).await {
@@ -548,14 +550,27 @@ impl NetworkService<IrohTransport> {
             }
         }
     }
-}
 
-// ====================================================================================
-// Generic: Sync protocol, peer discovery, accessors
-// These work with any Transport implementation.
-// ====================================================================================
+    /// Create a simulated NetworkService (no Router, no Gossip).
+    ///
+    /// Suitable for in-memory testing with `ChannelTransport` or any
+    /// non-iroh `Transport` implementation.
+    pub fn new_simulated(
+        provider: Arc<dyn NodeProviderExt>,
+        transport: T,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            provider,
+            transport,
+            gossip_manager: None,
+            peer_stores: Arc::new(RwLock::new(HashSet::new())),
+            sessions: Arc::new(super::session::SessionTracker::new()),
+            router: None,
+            global_gossip_enabled: Arc::new(AtomicBool::new(false)),
+            auto_sync_enabled: Arc::new(AtomicBool::new(false)),
+        })
+    }
 
-impl<T: Transport> NetworkService<T> {
     /// Access the provider (trait object)
     pub fn provider(&self) -> &dyn NodeProviderExt {
         self.provider.as_ref()
@@ -566,9 +581,9 @@ impl<T: Transport> NetworkService<T> {
         &self.transport
     }
     
-    /// Access the gossip manager
-    pub fn gossip_manager(&self) -> &super::gossip_manager::GossipManager {
-        &self.gossip_manager
+    /// Access the gossip manager (None for simulated transports)
+    pub fn gossip_manager(&self) -> Option<&super::gossip_manager::GossipManager> {
+        self.gossip_manager.as_deref()
     }
     
     /// Access the session tracker for online status queries.
@@ -588,21 +603,145 @@ impl<T: Transport> NetworkService<T> {
     
     /// Gracefully shut down the network router
     pub async fn shutdown(&self) -> Result<(), String> {
-        self.gossip_manager.shutdown().await;
-        self.router.shutdown().await.map_err(|e| e.to_string())
+        if let Some(gossip) = &self.gossip_manager {
+            gossip.shutdown().await;
+        }
+        if let Some(router) = &self.router {
+            router.shutdown().await.map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Run the accept loop for incoming connections (generic, non-Router).
+    ///
+    /// For `IrohTransport`, the iroh `Router` handles this via `SyncProtocol`.
+    /// For other transports (e.g. `ChannelTransport`), call this explicitly.
+    pub async fn run_accept_loop(self: &Arc<Self>) {
+        loop {
+            let Some(conn) = self.transport.accept().await else { break };
+            let service = self.clone();
+            tokio::spawn(async move {
+                let remote = conn.remote_public_key();
+                let _ = service.sessions.mark_online(remote);
+                // Accept multiple bi-streams per connection (supports bootstrap pagination)
+                loop {
+                    match conn.open_bi().await {
+                        Ok(bi) => {
+                            let (send, recv) = bi.into_split();
+                            if let Err(e) = service.handle_incoming_stream(remote, send, recv).await {
+                                tracing::debug!(error = %e, "Incoming stream handler error");
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+    }
+
+    /// Handle an incoming stream generically (any Transport).
+    /// Dispatches Reconcile, FetchIntentions, FetchChain messages.
+    async fn handle_incoming_stream<W, R>(
+        &self,
+        remote_pubkey: PubKey,
+        send: W,
+        recv: R,
+    ) -> Result<(), LatticeNetError>
+    where
+        W: tokio::io::AsyncWrite + Send + Unpin,
+        R: tokio::io::AsyncRead + Send + Unpin,
+    {
+        use lattice_kernel::proto::network::peer_message;
+        use lattice_kernel::weaver::convert::intention_to_proto;
+
+        let mut sink = crate::MessageSink::new(send);
+        let mut stream = crate::MessageStream::new(recv);
+        let timeout = Duration::from_secs(15);
+
+        loop {
+            let msg = match tokio::time::timeout(timeout, stream.recv()).await {
+                Ok(Ok(Some(m))) => m,
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => { tracing::debug!("stream error: {}", e); break; }
+                Err(_) => { tracing::debug!("stream timeout"); break; }
+            };
+
+            match msg.message {
+                Some(peer_message::Message::Reconcile(req)) => {
+                    let store_id = Uuid::from_slice(&req.store_id)
+                        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
+                    let store = super::handlers::lookup_store(self.provider.store_registry().as_ref(), store_id)?;
+                    let mut session = super::sync_session::SyncSession::new(&store, &mut sink, &mut stream, remote_pubkey);
+                    let _ = session.run(Some(req)).await?;
+                }
+                Some(peer_message::Message::FetchIntentions(req)) => {
+                    let store_id = Uuid::from_slice(&req.store_id)
+                        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
+                    let store = super::handlers::lookup_store(self.provider.store_registry().as_ref(), store_id)?;
+                    let hashes: Vec<_> = req.hashes.iter()
+                        .filter_map(|h| Hash::try_from(h.as_slice()).ok())
+                        .collect();
+                    let intentions = store.fetch_intentions(hashes).await
+                        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+                    let proto: Vec<_> = intentions.iter().map(intention_to_proto).collect();
+                    let msg = lattice_kernel::proto::network::PeerMessage {
+                        message: Some(peer_message::Message::IntentionResponse(
+                            lattice_kernel::proto::network::IntentionResponse {
+                                store_id: req.store_id,
+                                done: true,
+                                intentions: proto,
+                            }
+                        )),
+                    };
+                    sink.send(&msg).await?;
+                }
+                Some(peer_message::Message::FetchChain(req)) => {
+                    let store_id = Uuid::from_slice(&req.store_id)
+                        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
+                    let store = super::handlers::lookup_store(self.provider.store_registry().as_ref(), store_id)?;
+                    let target = Hash::try_from(req.target_hash.as_slice())
+                        .map_err(|_| LatticeNetError::Connection("Invalid target_hash".into()))?;
+                    let since = if req.since_hash.is_empty() { None } else {
+                        let h = Hash::try_from(req.since_hash.as_slice())
+                            .map_err(|_| LatticeNetError::Connection("Invalid since_hash".into()))?;
+                        if h == Hash::ZERO { None } else { Some(h) }
+                    };
+                    let chain = store.walk_back_until(target, since, 500).await
+                        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+                    let proto: Vec<_> = chain.iter().map(intention_to_proto).collect();
+                    let msg = lattice_kernel::proto::network::PeerMessage {
+                        message: Some(peer_message::Message::IntentionResponse(
+                            lattice_kernel::proto::network::IntentionResponse {
+                                store_id: req.store_id,
+                                done: true,
+                                intentions: proto,
+                            }
+                        )),
+                    };
+                    sink.send(&msg).await?;
+                }
+                Some(peer_message::Message::BootstrapRequest(req)) => {
+                    super::handlers::handle_bootstrap_request(self.provider.as_ref(), &remote_pubkey, req, &mut sink).await?;
+                }
+                _ => {
+                    tracing::debug!("Unexpected message type in generic handler");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Set global gossip enabled flag.
     /// If disabled, new stores will not start gossip.
     pub fn set_global_gossip_enabled(&self, enabled: bool) {
-        self.global_gossip_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
+        self.global_gossip_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// Set global auto-sync enabled flag.
     /// If disabled, the node will not trigger automatic syncs (Boot Sync, Post-Join Sync).
     /// Defaults to true. Disabling is useful for testing manual sync behavior.
     pub fn set_auto_sync_enabled(&self, enabled: bool) {
-        self.auto_sync_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
+        self.auto_sync_enabled.store(enabled, Ordering::SeqCst);
     }
 
     // ==================== Store Registry ====================

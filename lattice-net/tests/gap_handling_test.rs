@@ -159,12 +159,11 @@ async fn test_longer_gap() {
     for i in 2..=10 {
         last = put_kv(&handle_a, format!("key{}", i).into_bytes(), vec![]).await;
     }
-    
+
     let provider_a = handle_a.as_sync_provider();
     let intentions = provider_a.fetch_intentions(vec![last]).await.expect("fetch failed");
     let h10 = intentions[0].clone();
 
-    // Ingest H10 on B
     let provider_b = handle_b.as_sync_provider();
     let res = provider_b.ingest_intention(h10).await.unwrap();
     if let IngestResult::MissingDeps(_) = res {
@@ -185,7 +184,7 @@ async fn test_large_gap_detection() {
     for i in 2..=50 {
         last = put_kv(&handle_a, format!("key{}", i).into_bytes(), vec![]).await;
     }
-    
+
     let provider_a = handle_a.as_sync_provider();
     let intentions = provider_a.fetch_intentions(vec![last]).await.unwrap();
     let h50 = intentions[0].clone();
@@ -194,7 +193,6 @@ async fn test_large_gap_detection() {
     let res = provider_b.ingest_intention(h50).await.unwrap();
     match res {
         IngestResult::MissingDeps(_deps) => {
-             // Just verifying we get deps. The "Too Long" logic causing fallback is in SERVICE `handle_missing_dep`.
              // Store just reports missing.
         }
         _ => panic!("Expected missing"),
