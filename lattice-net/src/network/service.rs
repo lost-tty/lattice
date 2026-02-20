@@ -42,7 +42,7 @@ pub type PeerStoreRegistry = Arc<RwLock<std::collections::HashSet<Uuid>>>;
 pub struct NetworkService<T: Transport> {
     provider: Arc<dyn NodeProviderExt>,
     transport: T,
-    gossip_manager: Option<Arc<super::gossip_manager::GossipManager>>,
+    gossip: Option<Arc<dyn lattice_net_types::GossipLayer>>,
     peer_stores: PeerStoreRegistry,
     sessions: Arc<super::session::SessionTracker>,
     router: Option<Router>,
@@ -110,12 +110,11 @@ impl NetworkService<IrohTransport> {
         endpoint: IrohTransport,
         event_rx: broadcast::Receiver<NetEvent>,
     ) -> Result<Arc<Self>, super::error::ServerError> {
-        let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint));
+        let sessions = Arc::new(super::session::SessionTracker::new());
+        let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint, sessions.clone()));
         
         // Track which stores are registered for networking
         let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashSet::new()));
-        
-        let sessions = Arc::new(super::session::SessionTracker::new());
         
         let sync_protocol = SyncProtocol { 
             provider: provider.clone(), 
@@ -130,7 +129,7 @@ impl NetworkService<IrohTransport> {
         let service = Arc::new(Self { 
             provider,
             transport: endpoint,
-            gossip_manager: Some(gossip_manager.clone()),
+            gossip: Some(gossip_manager as Arc<dyn lattice_net_types::GossipLayer>),
             peer_stores,
             sessions: sessions.clone(),
             router: Some(router),
@@ -185,11 +184,11 @@ impl<T: Transport> NetworkService<T> {
         let global_enabled = self.global_gossip_enabled.load(Ordering::SeqCst);
         
         if global_enabled {
-            if let Some(gossip) = &self.gossip_manager {
+            if let Some(gossip) = &self.gossip {
                 let weak_self = Arc::downgrade(self);
                 let store_id_captured = store_id;
                 // Define gap_handler closure
-                let gap_handler: super::gossip_manager::GapHandler = Arc::new(move |missing: MissingDep, peer: Option<PubKey>| {
+                let gap_handler: lattice_net_types::GapHandler = Arc::new(move |missing: MissingDep, peer: Option<PubKey>| {
                     if let Some(service) = weak_self.upgrade() {
                         tokio::spawn(async move {
                             let _ = service.handle_missing_dep(store_id_captured, missing, peer).await;
@@ -197,10 +196,9 @@ impl<T: Transport> NetworkService<T> {
                     }
                 });
 
-                if let Err(e) = gossip.setup_for_store(
-                    pm, 
-                    self.sessions.clone(), 
+                if let Err(e) = gossip.subscribe(
                     network_store.clone(),
+                    pm,
                     gap_handler,
                 ).await {
                     tracing::error!(error = %e, "Gossip setup failed");
@@ -357,26 +355,28 @@ impl<T: Transport> NetworkService<T> {
         }
     }
 
-    /// Create a simulated NetworkService (no Router, no Gossip).
+    /// Create a simulated NetworkService (no Router, no iroh Gossip).
     ///
     /// Suitable for in-memory testing with `ChannelTransport` or any
     /// non-iroh `Transport` implementation.
     ///
-    /// Accepts an optional `event_rx` to handle NetEvents (Join, SyncWithPeer, etc.).
-    /// If provided, spawns the accept loop and event handler automatically.
+    /// Accepts an optional `event_rx` to handle NetEvents (Join, SyncWithPeer, etc.)
+    /// and an optional `gossip` layer (e.g. `BroadcastGossip` for in-memory gossip).
     pub fn new_simulated(
         provider: Arc<dyn NodeProviderExt>,
         transport: T,
         event_rx: Option<broadcast::Receiver<NetEvent>>,
+        gossip: Option<Arc<dyn lattice_net_types::GossipLayer>>,
     ) -> Arc<Self> {
+        let has_gossip = gossip.is_some();
         let service = Arc::new(Self {
             provider,
             transport,
-            gossip_manager: None,
+            gossip,
             peer_stores: Arc::new(RwLock::new(HashSet::new())),
             sessions: Arc::new(super::session::SessionTracker::new()),
             router: None,
-            global_gossip_enabled: Arc::new(AtomicBool::new(false)),
+            global_gossip_enabled: Arc::new(AtomicBool::new(has_gossip)),
             auto_sync_enabled: Arc::new(AtomicBool::new(true)),
         });
 
@@ -516,9 +516,9 @@ impl<T: Transport> NetworkService<T> {
         &self.transport
     }
     
-    /// Access the gossip manager (None for simulated transports)
-    pub fn gossip_manager(&self) -> Option<&super::gossip_manager::GossipManager> {
-        self.gossip_manager.as_deref()
+    /// Access the gossip layer (None for simulated transports without gossip)
+    pub fn gossip(&self) -> Option<&dyn lattice_net_types::GossipLayer> {
+        self.gossip.as_deref()
     }
     
     /// Access the session tracker for online status queries.
@@ -538,7 +538,7 @@ impl<T: Transport> NetworkService<T> {
     
     /// Gracefully shut down the network router
     pub async fn shutdown(&self) -> Result<(), String> {
-        if let Some(gossip) = &self.gossip_manager {
+        if let Some(gossip) = &self.gossip {
             gossip.shutdown().await;
         }
         if let Some(router) = &self.router {

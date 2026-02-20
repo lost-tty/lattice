@@ -6,7 +6,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-lattice-net-types = { path = "../lattice-net-types" }
-lattice-model = { path = "../lattice-model" }
+lattice-net-types = { workspace = true }
+lattice-model = { workspace = true }
+lattice-kernel = { workspace = true }
 tokio = { workspace = true, features = ["sync", "io-util"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
+async-trait = "0.1"
+uuid = { workspace = true }

@@ -1,7 +1,7 @@
 //! GossipManager - Encapsulates gossip subsystem complexity
 
 use crate::{IrohTransport, ToLattice};
-use super::error::GossipError;
+use lattice_net_types::{GossipError, GapHandler};
 use lattice_model::{PeerStatus, PeerEvent, PeerProvider, Uuid, types::PubKey};
 use lattice_model::weaver::SignedIntention;
 use lattice_net_types::NetworkStore;
@@ -12,9 +12,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use prost::Message;
-use lattice_kernel::store::{IngestResult, MissingDep};
-
-pub type GapHandler = Arc<dyn Fn(MissingDep, Option<PubKey>) + Send + Sync>;
+use lattice_kernel::store::IngestResult;
 
 /// Generate a deterministic TopicId for a store
 pub fn topic_for_store(store_id: Uuid) -> iroh_gossip::TopicId {
@@ -23,22 +21,24 @@ pub fn topic_for_store(store_id: Uuid) -> iroh_gossip::TopicId {
     )
 }
 
-/// Manages gossip subscriptions and peer discovery for stores
+/// Manages gossip subscriptions and peer discovery for stores (Iroh implementation)
 pub struct GossipManager {
     gossip: Gossip,
     senders: Arc<RwLock<HashMap<Uuid, iroh_gossip::api::GossipSender>>>,
     store_tokens: Arc<RwLock<HashMap<Uuid, tokio_util::sync::CancellationToken>>>,
+    sessions: Arc<super::session::SessionTracker>,
     my_pubkey: iroh::PublicKey,
     cancel_token: tokio_util::sync::CancellationToken,
 }
 
 impl GossipManager {
     /// Create a new GossipManager
-    pub fn new(endpoint: &IrohTransport) -> Self {
+    pub fn new(endpoint: &IrohTransport, sessions: Arc<super::session::SessionTracker>) -> Self {
         Self {
             gossip: Gossip::builder().spawn(endpoint.endpoint().clone()),
             senders: Arc::new(RwLock::new(HashMap::new())),
             store_tokens: Arc::new(RwLock::new(HashMap::new())),
+            sessions,
             my_pubkey: endpoint.public_key(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
         }
@@ -54,8 +54,8 @@ impl GossipManager {
         }
     }
     
-    /// Stop gossip for a specific store
-    pub async fn shutdown_store(&self, store_id: Uuid) {
+    /// Unsubscribe gossip for a specific store
+    pub async fn unsubscribe_impl(&self, store_id: Uuid) {
         // Cancel tasks
         if let Some(token) = self.store_tokens.write().await.remove(&store_id) {
             token.cancel();
@@ -69,19 +69,18 @@ impl GossipManager {
         &self.gossip
     }
     
-    /// Setup gossip for a store - uses supplied PeerProvider trait for auth and SessionTracker for online state
-    #[tracing::instrument(skip(self, pm, sessions, store, gap_handler), fields(store_id = %store.id()))]
-    pub async fn setup_for_store(
+    /// Setup gossip for a store (internal method with full iroh types)
+    #[tracing::instrument(skip(self, pm, store, gap_handler), fields(store_id = %store.id()))]
+    async fn setup_for_store_impl(
         &self,
         pm: std::sync::Arc<dyn PeerProvider>,
-        sessions: std::sync::Arc<super::session::SessionTracker>,
         store: NetworkStore,
         gap_handler: GapHandler,
     ) -> Result<(), GossipError> {
         let store_id = store.id();
         
         // Stop any existing gossip for this store first
-        self.shutdown_store(store_id).await;
+        self.unsubscribe_impl(store_id).await;
 
         // Get initial peers from peer provider trait (sync method using cache) and subscribe to changes
         let peers = pm.list_peers();
@@ -114,7 +113,7 @@ impl GossipManager {
         self.store_tokens.write().await.insert(store_id, store_token.clone());
 
         // Spawn background tasks
-        self.spawn_receiver(store.clone(), receiver, pm.clone(), sessions, store_token.clone(), gap_handler);
+        self.spawn_receiver(store.clone(), receiver, pm.clone(), self.sessions.clone(), store_token.clone(), gap_handler);
         self.spawn_forwarder(store.clone(), intention_rx, store_token.clone());
         self.spawn_peer_watcher(store_id, rx, store_token);
         
@@ -321,5 +320,25 @@ impl GossipManager {
                 }
             }
         });
+    }
+}
+
+#[async_trait::async_trait]
+impl lattice_net_types::GossipLayer for GossipManager {
+    async fn subscribe(
+        &self,
+        store: NetworkStore,
+        pm: Arc<dyn PeerProvider>,
+        gap_handler: GapHandler,
+    ) -> Result<(), GossipError> {
+        self.setup_for_store_impl(pm, store, gap_handler).await
+    }
+
+    async fn unsubscribe(&self, store_id: Uuid) {
+        self.unsubscribe_impl(store_id).await
+    }
+
+    async fn shutdown(&self) {
+        self.shutdown().await
     }
 }

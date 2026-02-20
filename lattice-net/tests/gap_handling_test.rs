@@ -53,8 +53,8 @@ async fn test_single_gap() {
     let event_rx_a = node_a.subscribe_net_events();
     let event_rx_b = node_b.subscribe_net_events();
 
-    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(event_rx_a));
-    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(event_rx_b));
+    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(event_rx_a), None);
+    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(event_rx_b), None);
     server_a.set_auto_sync_enabled(false);
     server_b.set_auto_sync_enabled(false);
     server_a.set_global_gossip_enabled(false);
@@ -175,9 +175,9 @@ async fn test_unresponsive_peer_fallback() {
     let event_rx_b = node_b.subscribe_net_events();
     let event_rx_c = node_c.subscribe_net_events();
 
-    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(event_rx_a));
-    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(event_rx_b));
-    let server_c = network::NetworkService::new_simulated(node_c.clone(), transport_c, Some(event_rx_c));
+    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(event_rx_a), None);
+    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(event_rx_b), None);
+    let server_c = network::NetworkService::new_simulated(node_c.clone(), transport_c, Some(event_rx_c), None);
     server_a.set_global_gossip_enabled(false);
     server_b.set_global_gossip_enabled(false);
     server_c.set_global_gossip_enabled(false);
@@ -283,8 +283,8 @@ async fn test_tip_zero_fallback() {
     let event_rx_a = node_a.subscribe_net_events();
     let event_rx_c = node_c.subscribe_net_events();
 
-    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(event_rx_a));
-    let server_c = network::NetworkService::new_simulated(node_c.clone(), transport_c, Some(event_rx_c));
+    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(event_rx_a), None);
+    let server_c = network::NetworkService::new_simulated(node_c.clone(), transport_c, Some(event_rx_c), None);
     server_a.set_global_gossip_enabled(false);
     server_c.set_global_gossip_enabled(false);
 
@@ -311,7 +311,7 @@ async fn test_tip_zero_fallback() {
     let node_b_reborn = common::build_node("gap_z_b_reborn");
     let transport_b_reborn = ChannelTransport::new(node_b_reborn.node_id(), &net).await;
     let event_rx_b_reborn = node_b_reborn.subscribe_net_events();
-    let server_b_reborn = network::NetworkService::new_simulated(node_b_reborn.clone(), transport_b_reborn, Some(event_rx_b_reborn));
+    let server_b_reborn = network::NetworkService::new_simulated(node_b_reborn.clone(), transport_b_reborn, Some(event_rx_b_reborn), None);
 
     let token_reborn = node_a.store_manager().create_invite(store_id, node_a.node_id()).await.unwrap();
     let invite_reborn = Invite::parse(&token_reborn).unwrap();

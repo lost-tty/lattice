@@ -21,8 +21,8 @@ async fn test_sync_preserves_causal_order_in_witness_log() {
     let transport_a = ChannelTransport::new(node_a.node_id(), &net).await;
     let transport_b = ChannelTransport::new(node_b.node_id(), &net).await;
 
-    let _net_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(node_a.subscribe_net_events()));
-    let _net_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(node_b.subscribe_net_events()));
+    let _net_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(node_a.subscribe_net_events()), None);
+    let _net_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(node_b.subscribe_net_events()), None);
     
     // Create Root Store on A
     let root_id = node_a.create_store(None, Some("root".into()), STORE_TYPE_KVSTORE).await.unwrap();

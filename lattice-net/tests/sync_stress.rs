@@ -17,8 +17,10 @@ use tokio::sync::Barrier;
 
 #[tokio::test]
 async fn test_large_dataset_sync() {
-    let TestPair { server_b, store_a, store_b, .. } =
+    let TestPair { server_a, server_b, store_a, store_b, .. } =
         TestPair::new("large_a", "large_b").await;
+    server_a.set_auto_sync_enabled(false);
+    server_b.set_auto_sync_enabled(false);
 
     const COUNT: usize = 100; 
     
@@ -132,9 +134,9 @@ async fn test_partition_recovery() {
     let transport_b = ChannelTransport::new(node_b.node_id(), &net).await;
     let transport_c = ChannelTransport::new(node_c.node_id(), &net).await;
 
-    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(node_a.subscribe_net_events()));
-    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(node_b.subscribe_net_events()));
-    let server_c = network::NetworkService::new_simulated(node_c.clone(), transport_c, Some(node_c.subscribe_net_events()));
+    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(node_a.subscribe_net_events()), None);
+    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(node_b.subscribe_net_events()), None);
+    let server_c = network::NetworkService::new_simulated(node_c.clone(), transport_c, Some(node_c.subscribe_net_events()), None);
     server_a.set_global_gossip_enabled(false);
     server_b.set_global_gossip_enabled(false);
     server_c.set_global_gossip_enabled(false);
@@ -174,9 +176,9 @@ async fn test_partition_recovery() {
     let transport_b_2 = ChannelTransport::new(node_b.node_id(), &net).await;
     let transport_c_2 = ChannelTransport::new(node_c.node_id(), &net).await;
 
-    let server_a_2 = network::NetworkService::new_simulated(node_a.clone(), transport_a_2, Some(node_a.subscribe_net_events()));
-    let server_b_2 = network::NetworkService::new_simulated(node_b.clone(), transport_b_2, Some(node_b.subscribe_net_events()));
-    let server_c_2 = network::NetworkService::new_simulated(node_c.clone(), transport_c_2, Some(node_c.subscribe_net_events()));
+    let server_a_2 = network::NetworkService::new_simulated(node_a.clone(), transport_a_2, Some(node_a.subscribe_net_events()), None);
+    let server_b_2 = network::NetworkService::new_simulated(node_b.clone(), transport_b_2, Some(node_b.subscribe_net_events()), None);
+    let server_c_2 = network::NetworkService::new_simulated(node_c.clone(), transport_c_2, Some(node_c.subscribe_net_events()), None);
     server_a_2.set_global_gossip_enabled(false);
     server_b_2.set_global_gossip_enabled(false);
     server_c_2.set_global_gossip_enabled(false);

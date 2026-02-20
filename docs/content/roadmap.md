@@ -24,16 +24,22 @@ title: "Roadmap"
 Decouple `lattice-net` from Iroh-specific types so multi-node networks can be simulated in-memory. Required before validating Negentropy sync at scale.
 
 ### 12A: Transport Abstraction
-- [ ] Extract `Transport` trait from `LatticeEndpoint` (connect/accept → MessageSink/MessageStream)
-- [ ] Extract `GossipLayer` trait from `iroh_gossip::Gossip` (join/broadcast/subscribe)
-- [ ] `IrohTransport` + `IrohGossip`: Production implementations wrapping Iroh QUIC
-- [ ] `NetworkService` generic over `Transport` + `GossipLayer`
+- [x] Extract `Transport` trait from `LatticeEndpoint` (connect/accept → MessageSink/MessageStream)
+- [x] Extract `GossipLayer` trait from `iroh_gossip::Gossip` (subscribe/unsubscribe/shutdown)
+- [x] `IrohTransport` + `IrohGossip`: Production implementations wrapping Iroh QUIC
+- [x] `NetworkService` generic over `Transport` + `GossipLayer`
 - [ ] **Replace Polling with Notify:** `register_store_by_id` and `wait_for_store` use `sleep()` polling loops. Replace with `tokio::sync::Notify` or channel-based signaling.
 - [ ] **Async Gossip Queue:** Decouple `IntentionStore` ingest from broadcast. Use a bounded channel with backpressure to prevent local ingest latency spikes during network congestion.
+- [ ] **Event-Driven Gap Handling:** Replace `GapHandler` callback in `GossipLayer::subscribe` with `SystemEvent::MissingDep` emitted by the store. NetworkService subscribes to the event instead of injecting a closure. Simplifies the gossip trait and decouples gossip from gap recovery.
+- [ ] **Extract `lattice-net-iroh`:** Move `IrohTransport`, `GossipManager`, and Router setup into a dedicated crate. `lattice-net` becomes fully transport-agnostic, depending only on `lattice-net-types` traits.
 
 ### 12B: In-Memory Simulation Harness
-- [ ] `ChannelTransport` + `BroadcastGossip`: In-memory implementations using mpsc channels
+- [x] `ChannelTransport`: In-memory transport using mpsc channels (`lattice-net-sim` crate)
+- [x] All integration tests migrated to `ChannelTransport`, shared helpers in `tests/common/mod.rs`
+- [x] `BroadcastGossip`: In-memory gossip implementation
+- [ ] Document `lattice-net-sim` crate (`ChannelTransport`, `BroadcastGossip`, `GossipNetwork`) in `docs/`
 - [ ] N-node simulator: configurable topology, round-based sync, convergence metrics
+- [ ] **Fix flaky `test_large_dataset_sync`:** Intermittent partial sync failures (misses items). Likely race between auto_sync boot task and explicit `sync_all_by_id`. Currently mitigated by disabling auto_sync in test.
 - [ ] **Gate:** 20+ node convergence simulation with metrics: rounds to convergence, message count, total bytes, gap recovery count. Runs as a standalone binary (like `weaver-hs`).
 
 ---

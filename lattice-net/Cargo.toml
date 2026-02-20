@@ -25,6 +25,7 @@ anyhow = "1.0.100"
 futures-lite = "2.6.1"
 regex = "1"
 ed25519-dalek.workspace = true
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio-test = { workspace = true }
@@ -36,7 +37,6 @@ lattice-storage = { workspace = true }
 lattice-systemstore = { workspace = true }
 lattice-node = { workspace = true }
 rand = { workspace = true }
-async-trait = "0.1"
 lattice-store-base = { workspace = true }
 lattice-proto = { workspace = true }
 lattice-net-sim = { path = "../lattice-net-sim" }

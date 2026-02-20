@@ -21,8 +21,8 @@ async fn test_peer_persistence_after_bootstrap() {
     let event_rx_a = node_a.subscribe_net_events();
     let event_rx_b = node_b.subscribe_net_events();
 
-    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(event_rx_a));
-    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(event_rx_b));
+    let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(event_rx_a), None);
+    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(event_rx_b), None);
     server_a.set_global_gossip_enabled(false);
     server_b.set_global_gossip_enabled(false);
 
