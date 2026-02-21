@@ -18,4 +18,4 @@ pub mod gossip;
 pub use network_store::{NetworkStore, NetworkStoreRegistry};
 pub use node_provider_ext::NodeProviderExt;
 pub use transport::{Transport, Connection, BiStream, TransportError};
-pub use gossip::{GossipLayer, GapHandler, GossipError};
+pub use gossip::{GossipLayer, GossipError};

@@ -4,13 +4,11 @@
 //! Production uses `IrohGossip` (wrapping `iroh_gossip::Gossip`);
 //! simulation harnesses can provide in-memory broadcast implementations.
 
-use lattice_kernel::store::MissingDep;
+use tokio::sync::broadcast;
+use uuid::Uuid;
 use lattice_model::types::PubKey;
+use lattice_model::weaver::SignedIntention;
 use crate::NetworkStore;
-use std::sync::Arc;
-
-/// Callback invoked when gossip discovers a missing dependency (gap).
-pub type GapHandler = Arc<dyn Fn(MissingDep, Option<PubKey>) + Send + Sync>;
 
 /// Error type for gossip operations.
 #[derive(Debug, thiserror::Error)]
@@ -21,24 +19,20 @@ pub enum GossipError {
     Setup(String),
 }
 
-/// Gossip layer abstraction.
-///
-/// Manages per-store pub/sub: broadcasting local intentions to peers
-/// and ingesting received intentions. Production uses iroh gossip;
-/// simulation harnesses can provide in-memory broadcast implementations.
+/// Core interface for decentralized mesh networking.
+/// This trait abstracts over concrete gossip protocols (e.g., Iroh gossip vs in-memory).
 #[async_trait::async_trait]
 pub trait GossipLayer: Send + Sync + 'static {
     /// Subscribe to gossip for a store — join the topic, spawn receiver/forwarder tasks.
+    /// Returns a broadcast receiver for inbound intentions from peers.
     async fn subscribe(
         &self,
         store: NetworkStore,
-        pm: Arc<dyn lattice_model::PeerProvider>,
-        gap_handler: GapHandler,
-    ) -> Result<(), GossipError>;
+    ) -> Result<broadcast::Receiver<(PubKey, SignedIntention)>, GossipError>;
 
     /// Unsubscribe gossip for a specific store.
-    async fn unsubscribe(&self, store_id: uuid::Uuid);
+    async fn unsubscribe(&self, store_id: Uuid);
 
-    /// Shutdown all gossip.
+    /// Shut down the entire gossip layer.
     async fn shutdown(&self);
 }

@@ -1,10 +1,10 @@
 //! GossipManager - Encapsulates gossip subsystem complexity
 
 use crate::{IrohTransport, ToLattice};
-use lattice_net_types::{GossipError, GapHandler};
-use lattice_model::{PeerStatus, PeerEvent, PeerProvider, Uuid, types::PubKey};
+use super::error::GossipError;
+use lattice_net_types::{GossipLayer, NetworkStore};
+use lattice_model::{PeerStatus, PeerEvent, PeerProvider, types::PubKey};
 use lattice_model::weaver::SignedIntention;
-use lattice_net_types::NetworkStore;
 use lattice_kernel::proto::network::{GossipMessage, gossip_message};
 use lattice_kernel::weaver::convert::{intention_to_proto, intention_from_proto};
 use iroh_gossip::Gossip;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use prost::Message;
-use lattice_kernel::store::IngestResult;
+use lattice_model::Uuid;
 
 /// Generate a deterministic TopicId for a store
 pub fn topic_for_store(store_id: Uuid) -> iroh_gossip::TopicId {
@@ -26,22 +26,26 @@ pub struct GossipManager {
     gossip: Gossip,
     senders: Arc<RwLock<HashMap<Uuid, iroh_gossip::api::GossipSender>>>,
     store_tokens: Arc<RwLock<HashMap<Uuid, tokio_util::sync::CancellationToken>>>,
+    inbound_channels: Arc<RwLock<HashMap<Uuid, tokio::sync::broadcast::Sender<(PubKey, SignedIntention)>>>>,
     sessions: Arc<super::session::SessionTracker>,
     my_pubkey: iroh::PublicKey,
     cancel_token: tokio_util::sync::CancellationToken,
+    pm: Arc<dyn PeerProvider>,
 }
 
 impl GossipManager {
     /// Create a new GossipManager
-    pub fn new(endpoint: &IrohTransport, sessions: Arc<super::session::SessionTracker>) -> Self {
-        Self {
+    pub async fn new(endpoint: &IrohTransport, sessions: Arc<super::session::SessionTracker>, pm: Arc<dyn PeerProvider>) -> Result<Self, GossipError> {
+        Ok(Self {
             gossip: Gossip::builder().spawn(endpoint.endpoint().clone()),
             senders: Arc::new(RwLock::new(HashMap::new())),
             store_tokens: Arc::new(RwLock::new(HashMap::new())),
+            inbound_channels: Arc::new(RwLock::new(HashMap::new())),
             sessions,
             my_pubkey: endpoint.public_key(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
-        }
+            pm,
+        })
     }
 
     /// Shutdown all gossip background tasks
@@ -54,14 +58,15 @@ impl GossipManager {
         }
     }
     
-    /// Unsubscribe gossip for a specific store
+    /// Cancel tasks and remove tracking state. Does not affect network subscriptions.
     pub async fn unsubscribe_impl(&self, store_id: Uuid) {
         // Cancel tasks
         if let Some(token) = self.store_tokens.write().await.remove(&store_id) {
             token.cancel();
         }
-        // Remove sender
+        // Remove channels 
         self.senders.write().await.remove(&store_id);
+        self.inbound_channels.write().await.remove(&store_id);
     }
     
     /// Get the gossip instance for router registration
@@ -70,14 +75,13 @@ impl GossipManager {
     }
     
     /// Setup gossip for a store (internal method with full iroh types)
-    #[tracing::instrument(skip(self, pm, store, gap_handler), fields(store_id = %store.id()))]
+    #[tracing::instrument(skip(self, store), fields(store_id = %store.id()))]
     async fn setup_for_store_impl(
         &self,
-        pm: std::sync::Arc<dyn PeerProvider>,
         store: NetworkStore,
-        gap_handler: GapHandler,
-    ) -> Result<(), GossipError> {
+    ) -> Result<tokio::sync::broadcast::Receiver<(PubKey, SignedIntention)>, GossipError> {
         let store_id = store.id();
+        let pm = self.pm.clone();
         
         // Stop any existing gossip for this store first
         self.unsubscribe_impl(store_id).await;
@@ -112,26 +116,28 @@ impl GossipManager {
         
         self.store_tokens.write().await.insert(store_id, store_token.clone());
 
+        // Create inbound channel
+        let (inbound_tx, inbound_rx) = tokio::sync::broadcast::channel(256);
+        self.inbound_channels.write().await.insert(store_id, inbound_tx.clone());
+
         // Spawn background tasks
-        self.spawn_receiver(store.clone(), receiver, pm.clone(), self.sessions.clone(), store_token.clone(), gap_handler);
+        self.spawn_receiver(store_id, receiver, pm.clone(), self.sessions.clone(), inbound_tx, store_token.clone());
         self.spawn_forwarder(store.clone(), intention_rx, store_token.clone());
         self.spawn_peer_watcher(store_id, rx, store_token);
         
         tracing::debug!("Gossip tasks spawned");
-        Ok(())
+        Ok(inbound_rx)
     }
 
     fn spawn_receiver(
         &self,
-        store: NetworkStore,
+        store_id: Uuid,
         mut rx: iroh_gossip::api::GossipReceiver,
         pm: std::sync::Arc<dyn PeerProvider>,
         sessions: std::sync::Arc<super::session::SessionTracker>,
+        inbound_tx: tokio::sync::broadcast::Sender<(PubKey, SignedIntention)>,
         token: tokio_util::sync::CancellationToken,
-        gap_handler: GapHandler,
     ) {
-        let store_id = store.id();
-        
         tokio::spawn(async move {
             let neighbors: Vec<_> = rx.neighbors().collect();
             for peer in &neighbors {
@@ -155,8 +161,8 @@ impl GossipManager {
                 };
                 
                 Self::handle_gossip_event(
-                    &store, store_id, event,
-                    &pm, &sessions, &gap_handler,
+                    store_id, event,
+                    &pm, &sessions, &inbound_tx,
                 ).await;
             }
             tracing::warn!(store_id = %store_id, "Gossip receiver ended");
@@ -164,12 +170,11 @@ impl GossipManager {
     }
     
     async fn handle_gossip_event(
-        store: &NetworkStore,
         store_id: Uuid,
         event: iroh_gossip::api::Event,
         pm: &std::sync::Arc<dyn PeerProvider>,
         sessions: &std::sync::Arc<super::session::SessionTracker>,
-        gap_handler: &GapHandler,
+        inbound_tx: &tokio::sync::broadcast::Sender<(PubKey, SignedIntention)>,
     ) {
         match event {
             iroh_gossip::api::Event::Received(msg) => {
@@ -194,16 +199,7 @@ impl GossipManager {
                     Some(gossip_message::Content::Intention(proto_intention)) => {
                         tracing::debug!(store_id = %store_id, from = %msg.delivered_from.fmt_short(), "Gossip intention received");
                         if let Ok(signed) = intention_from_proto(&proto_intention) {
-                            match store.ingest_intention(signed).await {
-                                Ok(IngestResult::Applied) => {},
-                                Ok(IngestResult::MissingDeps(missing_deps)) => {
-                                    for missing in missing_deps {
-                                        tracing::info!(store_id = %store_id, missing = %missing.prev, "Gossip ingestion gap detected, triggering fetch");
-                                        gap_handler(missing, Some(msg.delivered_from.to_lattice()));
-                                    }
-                                },
-                                Err(e) => tracing::warn!(store_id = %store_id, error = %e, "Failed to ingest gossip intention"),
-                            }
+                            let _ = inbound_tx.send((sender, signed));
                         }
                     }
                     None => {
@@ -324,18 +320,16 @@ impl GossipManager {
 }
 
 #[async_trait::async_trait]
-impl lattice_net_types::GossipLayer for GossipManager {
+impl GossipLayer for GossipManager {
     async fn subscribe(
         &self,
         store: NetworkStore,
-        pm: Arc<dyn PeerProvider>,
-        gap_handler: GapHandler,
-    ) -> Result<(), GossipError> {
-        self.setup_for_store_impl(pm, store, gap_handler).await
+    ) -> Result<tokio::sync::broadcast::Receiver<(PubKey, SignedIntention)>, GossipError> {
+        self.setup_for_store_impl(store).await
     }
 
     async fn unsubscribe(&self, store_id: Uuid) {
-        self.unsubscribe_impl(store_id).await
+        self.unsubscribe_impl(store_id).await;
     }
 
     async fn shutdown(&self) {

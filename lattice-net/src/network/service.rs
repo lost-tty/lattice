@@ -111,7 +111,12 @@ impl NetworkService<IrohTransport> {
         event_rx: broadcast::Receiver<NetEvent>,
     ) -> Result<Arc<Self>, super::error::ServerError> {
         let sessions = Arc::new(super::session::SessionTracker::new());
-        let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint, sessions.clone()));
+        // NetworkService needs a global PeerProvider for tracking online status across stores
+        let pm = Arc::new(super::global_peer_provider::GlobalPeerProvider::new(
+            provider.store_registry()
+        ));
+
+        let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint, sessions.clone(), pm).await?);
         
         // Track which stores are registered for networking
         let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashSet::new()));
@@ -187,21 +192,39 @@ impl<T: Transport> NetworkService<T> {
             if let Some(gossip) = &self.gossip {
                 let weak_self = Arc::downgrade(self);
                 let store_id_captured = store_id;
-                // Define gap_handler closure
-                let gap_handler: lattice_net_types::GapHandler = Arc::new(move |missing: MissingDep, peer: Option<PubKey>| {
-                    if let Some(service) = weak_self.upgrade() {
+                let store_clone = network_store.clone();
+
+                match gossip.subscribe(network_store.clone()).await {
+                    Ok(mut receiver) => {
+                        // Spawn the ingestion task
                         tokio::spawn(async move {
-                            let _ = service.handle_missing_dep(store_id_captured, missing, peer).await;
+                            while let Ok((sender_pubkey, intention)) = receiver.recv().await {
+                                let Some(service) = weak_self.upgrade() else { break };
+                                
+                                // 1. Auth check: is this peer allowed to connect/send?
+                                if !pm.can_connect(&sender_pubkey) {
+                                    tracing::warn!(store_id = %store_id_captured, sender = %sender_pubkey, "Rejected gossip from unauthorized peer");
+                                    continue;
+                                }
+
+                                // 2. Ingest
+                                match store_clone.ingest_intention(intention).await {
+                                    Ok(lattice_kernel::store::IngestResult::Applied) => {},
+                                    Ok(lattice_kernel::store::IngestResult::MissingDeps(missing_deps)) => {
+                                        for missing in missing_deps {
+                                            tracing::info!(store_id = %store_id_captured, missing = %missing.prev, "Gossip ingestion gap detected, triggering fetch");
+                                            // 3. Handle gaps
+                                            let _ = service.handle_missing_dep(store_id_captured, missing, Some(sender_pubkey)).await;
+                                        }
+                                    },
+                                    Err(e) => tracing::warn!(store_id = %store_id_captured, error = %e, "Failed to ingest gossip intention"),
+                                }
+                            }
                         });
                     }
-                });
-
-                if let Err(e) = gossip.subscribe(
-                    network_store.clone(),
-                    pm,
-                    gap_handler,
-                ).await {
-                    tracing::error!(error = %e, "Gossip setup failed");
+                    Err(e) => {
+                        tracing::error!(error = %e, "Gossip setup failed");
+                    }
                 }
             }
         } else {

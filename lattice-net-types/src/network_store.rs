@@ -134,6 +134,11 @@ impl NetworkStore {
     pub fn reset_bootstrap_peers(&self) {
         self.peer.reset_bootstrap_peers()
     }
+    
+    /// Access the underlying PeerProvider
+    pub fn peer_provider(&self) -> &Arc<dyn PeerProvider> {
+        &self.peer
+    }
 }
 
 #[async_trait]

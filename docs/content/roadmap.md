@@ -54,11 +54,24 @@ Negentropy sync is pull-only — only the initiator discovers missing items. The
 
 ---
 
-## Milestone 13: Intelligent Reconciliation ("Meet" Operator)
+## Milestone 13: Crate Dependency Architecture
+
+Remove improper architectural couplings and establish clean abstraction boundaries between crates.
+
+- [ ] **Bindings & Model:** Remove `lattice-store-base` and `lattice-model` from `lattice-bindings`.
+- [ ] **Network Isolation:** Remove `lattice-kernel` from `lattice-net` and related networking crates to make the transport abstraction fully generic.
+- [ ] **Network Types Isolation:** Investigate and remove `lattice-kernel` from `lattice-net-types` (elevate `IngestResult` or related types to `store-base`).
+- [ ] **Store Hierarchy:** Investigate and abstract `lattice-systemstore` dependency on `lattice-kernel`.
+- [ ] **API Boundary:** Investigate `lattice-api` direct dependencies on `lattice-net`.
+- [ ] **Node Boundary:** Investigate `lattice-node` direct concrete store dependencies.
+
+---
+
+## Milestone 14: Intelligent Reconciliation ("Meet" Operator)
 
 Add the "Meet" operator: find the common ancestor of two divergent heads, extract the deltas, and attempt a 3-way merge.
 
-### 13A: Kernel Primitives
+### 14A: Kernel Primitives
 - [ ] **Store Trait Abstraction:** Decouple `StateMachine` from `redb`. Introduce a generic `Store` trait (get/put/del) that can be implemented by both `RedbStore` (disk) and `MemoryStore` (RAM). This allows replaying history into an ephemeral `MemoryStore` for conflict resolution without persisting changes.
 - [ ] **LCA Index:** Maintain an efficient index (likely `Hash -> (Height, Parents)`) to avoid O(N) scans. "Height" allows fast-forwarding the deeper node before scanning for intersection.
 - [ ] **Meet Query (`find_lca`):** `fn find_lca(hash_a, hash_b) -> Result<Hash>`
@@ -66,52 +79,52 @@ Add the "Meet" operator: find the common ancestor of two divergent heads, extrac
     - Returns the list of operations to replay from the Meet (common ancestor) to the Head.
     - Usage: `get_path(LCA, Head_A)` yields Alice's local changes; `get_path(LCA, Head_B)` yields Bob's.
 
-### 13B: The "Meet" Operator (Core Logic)
+### 14B: The "Meet" Operator (Core Logic)
 - [ ] **Computation:** When two divergent Heads (A and B) are detected, use `find_lca` to locate M.
 - [ ] **Delta Extraction:** Use `get_path` to compute ΔA (`M->A`) and ΔB (`M->B`).
 - [ ] **3-Way Merge:** Attempt to apply both ΔA and ΔB to M.
     - **Non-Conflicting:** If they touch different fields, both are applied. The DAG collapses from 2 heads back to 1.
     - **Conflicting:** If they touch the exact same field, the conflict is surfaced to the user.
 
-### 13C: Store Integration (`lattice-kvstore`)
+### 14C: Store Integration (`lattice-kvstore`)
 - [ ] **Patch/Delta Operations:** Introduce operations that describe mutations (e.g., "increment field X", "set field Y") instead of simple overwrites.
 - [ ] **Read-Time Merge:** Update `get()` to check for conflicting Heads and invoke meet logic dynamically.
 - [ ] **Snapshotting:** Cache values at specific "Checkpoints" (common ancestors) so calculating the state at M doesn't require replaying the entire history.
 
 ---
 
-## Milestone 14: Log Lifecycle & Pruning
+## Milestone 15: Log Lifecycle & Pruning
 
 Manage log growth on long-running nodes via snapshots, pruning, and finality checkpoints.
 
 > **See:** [DAG-Based Pruning Architecture](protocols/pruning.md) for details on Ancestry-based metrics and Log Rewriting.
 
-### 14A: Snapshotting
+### 15A: Snapshotting
 - [ ] `state.snapshot()` when log grows large
 - [ ] Store snapshots in `snapshot.db`
 - [ ] Bootstrap new peers from snapshot instead of full log replay
 
-### 14B: Waterlevel Pruning
+### 15B: Waterlevel Pruning
 - [ ] Calculate stability frontier (min seq acknowledged by all peers)
 - [ ] `truncate_prefix(seq)` for old log intentions
 - [ ] Preserve intentions newer than frontier
 
-### 14C: Checkpointing / Finality
+### 15C: Checkpointing / Finality
 - [ ] Periodically finalize state hash (protect against "Deep History Attacks")
 - [ ] Signed checkpoint intentions in sigchain
 - [ ] Nodes reject intentions that contradict finalized checkpoints
 
-### 14D: Recursive Store Bootstrapping (Pruning-Aware)
+### 15D: Recursive Store Bootstrapping (Pruning-Aware)
 - [ ] `RecursiveWatcher` identifies child stores from live state, not just intention logs.
 - [ ] Bootstrapping a child store requires a **Two-Phase Protocol** because Negentropy cannot sync from an implicit zero-genesis if the store has been pruned.
 - [ ] **Phase 1 (Snapshot):** Request the opaque snapshot (`state.db`) from the peer for the discovered child store.
 - [ ] **Phase 2 (Tail Sync):** Run Negentropy to sync floating intentions that occurred *after* the snapshot's causal frontier.
 
-### 14E: Hash Index Optimization ✅
+### 15E: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
 - [x] Support 100M+ intentions without excessive RAM
 
-### 14E: Advanced Sync Optimization (Future)
+### 15E: Advanced Sync Optimization (Future)
 - [ ] **Persistent Merkle Index / Range Accumulator:**
   - Avoid O(N) scans for range fingerprints (currently linear)
   - Pre-compute internal node hashes in a B-Tree or Merkle Tree structure
@@ -121,76 +134,76 @@ Manage log growth on long-running nodes via snapshots, pruning, and finality che
 
 ---
 
-## Milestone 15: Content-Addressable Store (CAS)
+## Milestone 16: Content-Addressable Store (CAS)
 
 Node-local content-addressable blob storage. Replication policy managed separately. Requires M11 and M12.
 
-### 15A: Low-Level Storage (`lattice-cas`)
+### 16A: Low-Level Storage (`lattice-cas`)
 - [ ] `CasBackend` trait interface (`fs`, `block`, `s3`)
 - [ ] Isolation: Mandatory `store_id` for all ops
 - [ ] `redb` metadata index: ARC (Adaptive Replacement Cache), RefCounting
 - [ ] `FsBackend`: Sharded local disk blob storage
 
-### 15B: Replication & Safety (`CasManager`)
+### 16B: Replication & Safety (`CasManager`)
 - [ ] `ReplicationPolicy` trait: `crush_map()` and `replication_factor()` from System Table
 - [ ] `StateMachine::referenced_blobs()`: Pinning via State declarations
 - [ ] Pull-based reconciler: `ensure(cid)`, `calculate_duties()`, `gc()` with Soft Handoff
 
-### 15C: Wasm & FUSE Integration
+### 16C: Wasm & FUSE Integration
 - [ ] **Wasm**: Host Handles (avoid linear memory copy)
 - [ ] **FUSE**: `get_range` (random access) and `put_batch` (buffered write)
 - [ ] **Encryption**: Store-side encryption (client responsibility)
 
-### 15D: CLI & Observability
+### 16D: CLI & Observability
 - [ ] `cas put`, `cas get`, `cas pin`, `cas status`
 
 ---
 
-## Milestone 16: Lattice File Sync MVP
+## Milestone 17: Lattice File Sync MVP
 
 File sync over Lattice. Requires M11 (Sync) and M15 (CAS).
 
-### 16A: Filesystem Logic
+### 17A: Filesystem Logic
 - [ ] Define `DirEntry` schema: `{ name, mode, cid, modified_at }` in KV Store
 - [ ] Map file operations (`write`, `mkdir`, `rename`) to KV Ops
 
-### 16B: FUSE Interface
+### 17B: FUSE Interface
 - [ ] Write `lattice-fs` using the `fuser` crate
 - [ ] Mount the Store as a folder on Linux/macOS
 - [ ] **Demo:** `cp photo.jpg ~/lattice/` → Syncs to second node
 
 ---
 
-## Milestone 17: Wasm Runtime
+## Milestone 18: Wasm Runtime
 
 Replace hardcoded state machines with dynamic Wasm modules.
 
-### 17A: Wasm Integration
+### 18A: Wasm Integration
 - [ ] Integrate `wasmtime` into the Kernel
 - [ ] Define minimal Host ABI: `kv_get`, `kv_set`, `log_append`, `get_head`
 - [ ] Replace hardcoded `KvStore::apply()` with `WasmRuntime::call_apply()`
 - [ ] Map Host Functions to `StorageBackend` calls (M9 prerequisite)
 
-### 17B: Data Structures & Verification
+### 18B: Data Structures & Verification
 - [ ] Finalize `Intention`, `SignedIntention`, `Hash`, `PubKey` structs for Wasm boundary
 - [ ] Wasm-side Intention DAG verification (optional, for paranoid clients)
 - **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
 
 ---
 
-## Milestone 18: Embedded Proof ("Lattice Nano")
+## Milestone 19: Embedded Proof ("Lattice Nano")
 
 Run the kernel on the RP2350.
 
 > Because CLI is already separated from Daemon (M7) and storage is abstracted (M9), only the Daemon needs porting.
 > **Note:** Requires substantial refactoring of `lattice-kernel` to support `no_std`.
 
-### 18A: `no_std` Refactoring
+### 19A: `no_std` Refactoring
 - [ ] Split `lattice-kernel` into `core` (logic) and `std` (IO)
 - [ ] Replace `wasmtime` (JIT) with `wasmi` (Interpreter) for embedded target
 - [ ] Port storage layer to `sequential-storage` (Flash) via `StorageBackend`
 
-### 18B: Hardware Demo
+### 19B: Hardware Demo
 - [ ] Build physical USB stick prototype
 - [ ] Implement BLE/Serial transport
 - [ ] Sync a file from Laptop → Stick → Phone without Internet

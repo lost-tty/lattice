@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 lattice-net-types = { workspace = true }
 lattice-model = { workspace = true }
-lattice-kernel = { workspace = true }
 tokio = { workspace = true, features = ["sync", "io-util"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

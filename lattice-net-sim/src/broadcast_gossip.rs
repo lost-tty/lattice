@@ -4,13 +4,14 @@
 //! Mirrors the `ChannelNetwork` pattern: a shared `GossipNetwork` broker
 //! connects multiple `BroadcastGossip` instances.
 
-use lattice_net_types::{GossipLayer, GossipError, GapHandler, NetworkStore};
+use lattice_net_types::{GossipLayer, GossipError, NetworkStore};
 use lattice_model::weaver::SignedIntention;
 use lattice_model::types::PubKey;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use uuid::Uuid;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Shared broadcast network — routes intentions between BroadcastGossip instances.
 ///
@@ -53,6 +54,8 @@ pub struct BroadcastGossip {
     my_pubkey: PubKey,
     network: GossipNetwork,
     store_tokens: Arc<Mutex<HashMap<Uuid, tokio_util::sync::CancellationToken>>>,
+    inbound_channels: Arc<Mutex<HashMap<Uuid, broadcast::Sender<(PubKey, SignedIntention)>>>>,
+    drop_next_message: Arc<AtomicBool>,
 }
 
 impl BroadcastGossip {
@@ -61,7 +64,15 @@ impl BroadcastGossip {
             my_pubkey: pubkey,
             network: network.clone(),
             store_tokens: Arc::new(Mutex::new(HashMap::new())),
+            inbound_channels: Arc::new(Mutex::new(HashMap::new())),
+            drop_next_message: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Tell this node to drop the next incoming gossip message it receives.
+    /// This is used for testing `handle_missing_dep` recovery natively.
+    pub fn drop_next_incoming_message(&self) {
+        self.drop_next_message.store(true, Ordering::SeqCst);
     }
 }
 
@@ -70,9 +81,7 @@ impl GossipLayer for BroadcastGossip {
     async fn subscribe(
         &self,
         store: NetworkStore,
-        _pm: Arc<dyn lattice_model::PeerProvider>,
-        gap_handler: GapHandler,
-    ) -> Result<(), GossipError> {
+    ) -> Result<broadcast::Receiver<(PubKey, SignedIntention)>, GossipError> {
         let store_id = store.id();
 
         // Tear down existing subscription if any
@@ -84,6 +93,10 @@ impl GossipLayer for BroadcastGossip {
 
         let token = tokio_util::sync::CancellationToken::new();
         self.store_tokens.lock().await.insert(store_id, token.clone());
+
+        // Create the inbound channel for this store
+        let (inbound_tx, inbound_rx) = broadcast::channel(256);
+        self.inbound_channels.lock().await.insert(store_id, inbound_tx.clone());
 
         // Task 1: Forward local intentions → broadcast channel
         let sender_clone = sender.clone();
@@ -108,9 +121,9 @@ impl GossipLayer for BroadcastGossip {
             }
         });
 
-        // Task 2: Receive intentions from broadcast channel → ingest
-        let store_clone = store.clone();
+        // Task 2: Receive intentions from broadcast channel → deliver to NetworkService
         let token_recv = token.clone();
+        let drop_flag = self.drop_next_message.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -122,18 +135,15 @@ impl GossipLayer for BroadcastGossip {
                                 if sender_pubkey == my_pubkey {
                                     continue;
                                 }
-                                match store_clone.ingest_intention(intention).await {
-                                    Ok(result) => {
-                                        if let lattice_kernel::store::IngestResult::MissingDeps(deps) = result {
-                                            for dep in deps {
-                                                gap_handler(dep, Some(sender_pubkey));
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(error = %e, "Broadcast gossip ingest error");
-                                    }
+                                
+                                // Test injection: drop exactly one message if flag is set
+                                if drop_flag.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                                    tracing::info!("TEST: Intentionally dropping incoming gossip message from {}", sender_pubkey);
+                                    continue;
                                 }
+                                
+                                // Deliver raw message to subscriber
+                                let _ = inbound_tx.send((sender_pubkey, intention));
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 tracing::warn!(lagged = n, "Broadcast gossip receiver lagged");
@@ -146,13 +156,14 @@ impl GossipLayer for BroadcastGossip {
         });
 
         tracing::debug!(store_id = %store_id, "BroadcastGossip subscribed");
-        Ok(())
+        Ok(inbound_rx)
     }
 
     async fn unsubscribe(&self, store_id: Uuid) {
         if let Some(token) = self.store_tokens.lock().await.remove(&store_id) {
             token.cancel();
         }
+        self.inbound_channels.lock().await.remove(&store_id);
     }
 
     async fn shutdown(&self) {

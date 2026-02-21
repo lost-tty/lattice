@@ -46,6 +46,17 @@ mod tests {
             Err(NodeProviderError::Join("Mock provider cannot accept joins".into())) 
         }
     }
+
+    impl PeerProvider for MockProvider {
+        fn can_join(&self, _peer: &PubKey) -> bool { true }
+        fn can_connect(&self, _peer: &PubKey) -> bool { true }
+        fn can_accept_entry(&self, _author: &PubKey) -> bool { true }
+        fn list_acceptable_authors(&self) -> Vec<PubKey> { vec![] }
+        fn subscribe_peer_events(&self) -> lattice_model::PeerEventStream {
+            Box::pin(futures_util::stream::empty())
+        }
+        fn list_peers(&self) -> Vec<lattice_model::GossipPeer> { vec![] }
+    }
     
     /// Mock store registry - returns empty for all queries
     struct MockRegistry;

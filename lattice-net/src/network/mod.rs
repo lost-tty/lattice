@@ -15,6 +15,7 @@ mod gossip_manager;
 mod sync_session;
 mod session;
 mod handlers;
+pub mod global_peer_provider;
 
 #[cfg(test)]
 mod service_tests;
@@ -23,5 +24,4 @@ pub use service::{NetworkService, SyncResult, PeerStoreRegistry};
 pub use error::{ServerError, GossipError};
 pub use sync_session::SyncSession;
 pub use session::SessionTracker;
-
-
+pub use global_peer_provider::GlobalPeerProvider;
