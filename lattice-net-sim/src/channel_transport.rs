@@ -40,16 +40,19 @@ pub struct ChannelTransport {
     pubkey: PubKey,
     network: ChannelNetwork,
     accept_rx: Arc<Mutex<mpsc::Receiver<ChannelConnection>>>,
+    network_events_tx: tokio::sync::broadcast::Sender<lattice_net_types::NetworkEvent>,
 }
 
 impl ChannelTransport {
     pub async fn new(pubkey: PubKey, network: &ChannelNetwork) -> Self {
         let (accept_tx, accept_rx) = mpsc::channel(64);
+        let (network_events_tx, _) = tokio::sync::broadcast::channel(128);
         network.register(pubkey, accept_tx).await;
         Self {
             pubkey,
             network: network.clone(),
             accept_rx: Arc::new(Mutex::new(accept_rx)),
+            network_events_tx,
         }
     }
 }
@@ -88,6 +91,9 @@ impl Transport for ChannelTransport {
                 TransportError::Connect(format!("Peer {} accept channel closed", peer_pubkey))
             })?;
 
+            // Emit peer connected
+            let _ = self.network_events_tx.send(lattice_net_types::NetworkEvent::PeerConnected(peer_pubkey));
+
             // Return the initiator connection.
             Ok(ChannelConnection {
                 remote_pubkey: peer_pubkey,
@@ -98,9 +104,18 @@ impl Transport for ChannelTransport {
 
     fn accept(&self) -> impl std::future::Future<Output = Option<Self::Connection>> + Send {
         let accept_rx = self.accept_rx.clone();
+        let events_tx = self.network_events_tx.clone();
         async move {
-            accept_rx.lock().await.recv().await
+            let conn = accept_rx.lock().await.recv().await;
+            if let Some(ref c) = conn {
+                let _ = events_tx.send(lattice_net_types::NetworkEvent::PeerConnected(c.remote_pubkey));
+            }
+            conn
         }
+    }
+    
+    fn network_events(&self) -> tokio::sync::broadcast::Receiver<lattice_net_types::NetworkEvent> {
+        self.network_events_tx.subscribe()
     }
 }
 

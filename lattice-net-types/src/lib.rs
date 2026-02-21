@@ -19,3 +19,11 @@ pub use network_store::{NetworkStore, NetworkStoreRegistry};
 pub use node_provider_ext::NodeProviderExt;
 pub use transport::{Transport, Connection, BiStream, TransportError};
 pub use gossip::{GossipLayer, GossipError};
+
+/// Generic network connectivity events 
+/// Emitted by Transport and GossipLayer to abstract session tracking
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkEvent {
+    PeerConnected(lattice_model::types::PubKey),
+    PeerDisconnected(lattice_model::types::PubKey),
+}

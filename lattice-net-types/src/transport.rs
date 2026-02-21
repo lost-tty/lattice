@@ -63,4 +63,7 @@ pub trait Transport: Send + Sync + fmt::Debug + 'static {
 
     /// Accept an incoming connection (blocks until one arrives, or returns None on shutdown).
     fn accept(&self) -> impl std::future::Future<Output = Option<Self::Connection>> + Send;
+    
+    /// Get a stream of network connectivity events (e.g. PeerConnected/Disconnected)
+    fn network_events(&self) -> tokio::sync::broadcast::Receiver<crate::NetworkEvent>;
 }

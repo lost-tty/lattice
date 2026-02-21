@@ -172,4 +172,9 @@ impl GossipLayer for BroadcastGossip {
             token.cancel();
         }
     }
+
+    fn network_events(&self) -> tokio::sync::broadcast::Receiver<lattice_net_types::NetworkEvent> {
+        let (_, rx) = tokio::sync::broadcast::channel(1);
+        rx
+    }
 }

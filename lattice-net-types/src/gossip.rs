@@ -35,4 +35,7 @@ pub trait GossipLayer: Send + Sync + 'static {
 
     /// Shut down the entire gossip layer.
     async fn shutdown(&self);
+    
+    /// Get a stream of network connectivity events
+    fn network_events(&self) -> tokio::sync::broadcast::Receiver<crate::NetworkEvent>;
 }

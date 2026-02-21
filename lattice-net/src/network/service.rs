@@ -8,7 +8,7 @@
 //! is implemented only for `NetworkService<IrohTransport>`.
 
 use crate::{MessageSink, MessageStream, IrohTransport, LatticeNetError, LATTICE_ALPN};
-use lattice_net_types::{NetworkStore, NodeProviderExt};
+use lattice_net_types::{NetworkStore, NodeProviderExt, GossipLayer};
 use lattice_net_types::transport::{Transport, Connection as TransportConnection, BiStream};
 use lattice_model::{NetEvent, Uuid, UserEvent};
 use lattice_kernel::proto::network::{PeerMessage, peer_message, BootstrapRequest, FetchChain};
@@ -55,7 +55,6 @@ pub struct NetworkService<T: Transport> {
 pub struct SyncProtocol {
     pub(crate) provider: Arc<dyn NodeProviderExt>,
     pub(crate) peer_stores: PeerStoreRegistry,
-    pub(crate) sessions: Arc<super::session::SessionTracker>,
 }
 
 impl std::fmt::Debug for SyncProtocol {
@@ -68,9 +67,8 @@ impl ProtocolHandler for SyncProtocol {
     fn accept(&self, conn: Connection) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
         let provider = self.provider.clone();
         let peer_stores = self.peer_stores.clone();
-        let sessions = self.sessions.clone();
         Box::pin(async move {
-            if let Err(e) = super::handlers::handle_connection(provider, peer_stores, sessions, conn).await {
+            if let Err(e) = super::handlers::handle_connection(provider, peer_stores, conn).await {
                 tracing::error!(error = %e, "Connection handler error");
             }
             Ok(())
@@ -116,7 +114,7 @@ impl NetworkService<IrohTransport> {
             provider.store_registry()
         ));
 
-        let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint, sessions.clone(), pm).await?);
+        let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint, pm).await?);
         
         // Track which stores are registered for networking
         let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashSet::new()));
@@ -124,19 +122,24 @@ impl NetworkService<IrohTransport> {
         let sync_protocol = SyncProtocol { 
             provider: provider.clone(), 
             peer_stores: peer_stores.clone(),
-            sessions: sessions.clone(),
         };
         let router = Router::builder(endpoint.endpoint().clone())
             .accept(LATTICE_ALPN, sync_protocol)
             .accept(iroh_gossip::ALPN, gossip_manager.gossip().clone())
             .spawn();
+            
+        Self::spawn_event_listener(
+            sessions.clone(),
+            endpoint.network_events(),
+            Some(gossip_manager.network_events()),
+        );
         
         let service = Arc::new(Self { 
             provider,
             transport: endpoint,
             gossip: Some(gossip_manager as Arc<dyn lattice_net_types::GossipLayer>),
             peer_stores,
-            sessions: sessions.clone(),
+            sessions,
             router: Some(router),
             global_gossip_enabled: Arc::new(AtomicBool::new(true)),
             auto_sync_enabled: Arc::new(AtomicBool::new(true)),
@@ -392,12 +395,20 @@ impl<T: Transport> NetworkService<T> {
         gossip: Option<Arc<dyn lattice_net_types::GossipLayer>>,
     ) -> Arc<Self> {
         let has_gossip = gossip.is_some();
+        let sessions = Arc::new(super::session::SessionTracker::new());
+        
+        Self::spawn_event_listener(
+            sessions.clone(),
+            transport.network_events(),
+            gossip.as_ref().map(|g| g.network_events()),
+        );
+
         let service = Arc::new(Self {
             provider,
             transport,
             gossip,
             peer_stores: Arc::new(RwLock::new(HashSet::new())),
-            sessions: Arc::new(super::session::SessionTracker::new()),
+            sessions,
             router: None,
             global_gossip_enabled: Arc::new(AtomicBool::new(has_gossip)),
             auto_sync_enabled: Arc::new(AtomicBool::new(true)),
@@ -413,6 +424,47 @@ impl<T: Transport> NetworkService<T> {
         }
 
         service
+    }
+
+    /// Spawns a background task to listen for abstract network events
+    /// and update the SessionTracker accordingly.
+    fn spawn_event_listener(
+        sessions: Arc<super::session::SessionTracker>,
+        mut transport_events: broadcast::Receiver<lattice_net_types::NetworkEvent>,
+        gossip_events: Option<broadcast::Receiver<lattice_net_types::NetworkEvent>>,
+    ) {
+        if let Some(mut gossip_rx) = gossip_events {
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        result = transport_events.recv() => {
+                            match result {
+                                Ok(lattice_net_types::NetworkEvent::PeerConnected(p)) => { let _ = sessions.mark_online(p); }
+                                Ok(lattice_net_types::NetworkEvent::PeerDisconnected(p)) => { let _ = sessions.mark_offline(p); }
+                                Err(_) => break, // Channel closed
+                            }
+                        }
+                        result = gossip_rx.recv() => {
+                            match result {
+                                Ok(lattice_net_types::NetworkEvent::PeerConnected(p)) => { let _ = sessions.mark_online(p); }
+                                Ok(lattice_net_types::NetworkEvent::PeerDisconnected(p)) => { let _ = sessions.mark_offline(p); }
+                                Err(_) => break, // Channel closed
+                            }
+                        }
+                    }
+                }
+            });
+        } else {
+            tokio::spawn(async move {
+                loop {
+                    match transport_events.recv().await {
+                        Ok(lattice_net_types::NetworkEvent::PeerConnected(p)) => { let _ = sessions.mark_online(p); }
+                        Ok(lattice_net_types::NetworkEvent::PeerDisconnected(p)) => { let _ = sessions.mark_offline(p); }
+                        Err(_) => break, // Channel closed
+                    }
+                }
+            });
+        }
     }
 
     /// Event handler — handles NetEvents using generic Transport.

@@ -11,6 +11,7 @@ mod tests {
     use lattice_model::PeerProvider;
     use async_trait::async_trait;
     use std::sync::Arc;
+    use crate::Transport;
 
     /// Minimal Mock Provider - proves lattice-net can work without lattice-node
     struct MockProvider { 
@@ -123,5 +124,82 @@ mod tests {
         
         assert!(registry.get_network_store(&random_id).is_none());
         assert!(registry.list_store_ids().is_empty());
+    }
+    
+    // --- Mock Transport for Event Testing ---
+    
+    struct DummyBiStream;
+    impl lattice_net_types::transport::BiStream for DummyBiStream {
+        type SendStream = tokio::io::Sink;
+        type RecvStream = tokio::io::Empty;
+        fn into_split(self) -> (Self::SendStream, Self::RecvStream) {
+            (tokio::io::sink(), tokio::io::empty())
+        }
+    }
+    
+    struct MockConnection;
+    impl lattice_net_types::transport::Connection for MockConnection {
+        type Stream = DummyBiStream;
+        async fn open_bi(&self) -> Result<Self::Stream, lattice_net_types::TransportError> {
+            Ok(DummyBiStream)
+        }
+        fn remote_public_key(&self) -> PubKey { PubKey::from([0; 32]) }
+    }
+    
+    #[derive(Clone, Debug)]
+    struct MockEventTransport {
+        pubkey: PubKey,
+        tx: tokio::sync::broadcast::Sender<lattice_net_types::NetworkEvent>,
+    }
+    
+    impl Transport for MockEventTransport {
+        type Connection = MockConnection;
+        fn public_key(&self) -> PubKey { self.pubkey }
+        async fn connect(&self, _peer: &PubKey) -> Result<Self::Connection, lattice_net_types::TransportError> {
+            Err(lattice_net_types::TransportError::Connect("Mock".into()))
+        }
+        async fn accept(&self) -> Option<Self::Connection> { None }
+        fn network_events(&self) -> tokio::sync::broadcast::Receiver<lattice_net_types::NetworkEvent> {
+            self.tx.subscribe()
+        }
+    }
+
+    /// Test that SessionTracker correctly updates via abstract NetworkEvent stream
+    #[tokio::test]
+    async fn test_session_tracker_network_events() {
+        let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let pubkey = PubKey::from(key.verifying_key().to_bytes());
+        let provider: Arc<dyn NodeProviderExt> = Arc::new(MockProvider { pubkey });
+        
+        // Control the events emitted by the fake transport
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let transport = MockEventTransport { pubkey, tx: tx.clone() };
+        
+        let service = crate::network::NetworkService::new_simulated(provider, transport, None, None);
+        
+        assert_eq!(service.connected_peers().unwrap().len(), 0, "Should start with zero online peers");
+        
+        let peer_a = PubKey::from([1; 32]);
+        let peer_b = PubKey::from([2; 32]);
+        
+        // Broadcast connect
+        tx.send(lattice_net_types::NetworkEvent::PeerConnected(peer_a)).unwrap();
+        tx.send(lattice_net_types::NetworkEvent::PeerConnected(peer_b)).unwrap();
+        
+        // Wait for background spawn_event_listener task to process
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        
+        let online = service.connected_peers().unwrap();
+        assert_eq!(online.len(), 2, "Should have 2 online peers now");
+        assert!(online.contains_key(&peer_a));
+        
+        // Broadcast disconnect
+        tx.send(lattice_net_types::NetworkEvent::PeerDisconnected(peer_a)).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        
+        let online2 = service.connected_peers().unwrap();
+        assert_eq!(online2.len(), 1, "Should have 1 online peer left");
+        assert!(!online2.contains_key(&peer_a), "Peer A should have disconnected");
+        assert!(online2.contains_key(&peer_b), "Peer B should still be online");
     }
 }

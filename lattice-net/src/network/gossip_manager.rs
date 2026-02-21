@@ -27,7 +27,7 @@ pub struct GossipManager {
     senders: Arc<RwLock<HashMap<Uuid, iroh_gossip::api::GossipSender>>>,
     store_tokens: Arc<RwLock<HashMap<Uuid, tokio_util::sync::CancellationToken>>>,
     inbound_channels: Arc<RwLock<HashMap<Uuid, tokio::sync::broadcast::Sender<(PubKey, SignedIntention)>>>>,
-    sessions: Arc<super::session::SessionTracker>,
+    network_events_tx: tokio::sync::broadcast::Sender<lattice_net_types::NetworkEvent>,
     my_pubkey: iroh::PublicKey,
     cancel_token: tokio_util::sync::CancellationToken,
     pm: Arc<dyn PeerProvider>,
@@ -35,13 +35,14 @@ pub struct GossipManager {
 
 impl GossipManager {
     /// Create a new GossipManager
-    pub async fn new(endpoint: &IrohTransport, sessions: Arc<super::session::SessionTracker>, pm: Arc<dyn PeerProvider>) -> Result<Self, GossipError> {
+    pub async fn new(endpoint: &IrohTransport, pm: Arc<dyn PeerProvider>) -> Result<Self, GossipError> {
+        let (network_events_tx, _) = tokio::sync::broadcast::channel(128);
         Ok(Self {
             gossip: Gossip::builder().spawn(endpoint.endpoint().clone()),
             senders: Arc::new(RwLock::new(HashMap::new())),
             store_tokens: Arc::new(RwLock::new(HashMap::new())),
             inbound_channels: Arc::new(RwLock::new(HashMap::new())),
-            sessions,
+            network_events_tx,
             my_pubkey: endpoint.public_key(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
             pm,
@@ -121,7 +122,7 @@ impl GossipManager {
         self.inbound_channels.write().await.insert(store_id, inbound_tx.clone());
 
         // Spawn background tasks
-        self.spawn_receiver(store_id, receiver, pm.clone(), self.sessions.clone(), inbound_tx, store_token.clone());
+        self.spawn_receiver(store_id, receiver, pm.clone(), self.network_events_tx.clone(), inbound_tx, store_token.clone());
         self.spawn_forwarder(store.clone(), intention_rx, store_token.clone());
         self.spawn_peer_watcher(store_id, rx, store_token);
         
@@ -134,14 +135,14 @@ impl GossipManager {
         store_id: Uuid,
         mut rx: iroh_gossip::api::GossipReceiver,
         pm: std::sync::Arc<dyn PeerProvider>,
-        sessions: std::sync::Arc<super::session::SessionTracker>,
+        events_tx: tokio::sync::broadcast::Sender<lattice_net_types::NetworkEvent>,
         inbound_tx: tokio::sync::broadcast::Sender<(PubKey, SignedIntention)>,
         token: tokio_util::sync::CancellationToken,
     ) {
         tokio::spawn(async move {
             let neighbors: Vec<_> = rx.neighbors().collect();
             for peer in &neighbors {
-                let _ = sessions.mark_online(peer.to_lattice());
+                let _ = events_tx.send(lattice_net_types::NetworkEvent::PeerConnected(peer.to_lattice()));
             }
             tracing::info!(store_id = %store_id, neighbors = neighbors.len(), "Gossip receiver started");
             
@@ -162,7 +163,7 @@ impl GossipManager {
                 
                 Self::handle_gossip_event(
                     store_id, event,
-                    &pm, &sessions, &inbound_tx,
+                    &pm, &events_tx, &inbound_tx,
                 ).await;
             }
             tracing::warn!(store_id = %store_id, "Gossip receiver ended");
@@ -173,13 +174,13 @@ impl GossipManager {
         store_id: Uuid,
         event: iroh_gossip::api::Event,
         pm: &std::sync::Arc<dyn PeerProvider>,
-        sessions: &std::sync::Arc<super::session::SessionTracker>,
+        events_tx: &tokio::sync::broadcast::Sender<lattice_net_types::NetworkEvent>,
         inbound_tx: &tokio::sync::broadcast::Sender<(PubKey, SignedIntention)>,
     ) {
         match event {
             iroh_gossip::api::Event::Received(msg) => {
                 let sender: PubKey = msg.delivered_from.to_lattice();
-                let _ = sessions.mark_online(sender);
+                let _ = events_tx.send(lattice_net_types::NetworkEvent::PeerConnected(sender));
                 
                 if !pm.can_connect(&sender) {
                     tracing::warn!(store_id = %store_id, sender = %sender, "Rejected gossip from unauthorized peer");
@@ -208,14 +209,12 @@ impl GossipManager {
                 }
             }
             iroh_gossip::api::Event::NeighborUp(peer_id) => {
-                let _ = sessions.mark_online(peer_id.to_lattice());
-                let count = sessions.online_peers().map(|m| m.len()).unwrap_or(0);
-                tracing::info!(store_id = %store_id, peer = %peer_id.fmt_short(), total = count, "NeighborUp");
+                let _ = events_tx.send(lattice_net_types::NetworkEvent::PeerConnected(peer_id.to_lattice()));
+                tracing::info!(store_id = %store_id, peer = %peer_id.fmt_short(), "NeighborUp");
             }
             iroh_gossip::api::Event::NeighborDown(peer_id) => {
-                let _ = sessions.mark_offline(peer_id.to_lattice());
-                let count = sessions.online_peers().map(|m| m.len()).unwrap_or(0);
-                tracing::info!(store_id = %store_id, peer = %peer_id.fmt_short(), total = count, "NeighborDown");
+                let _ = events_tx.send(lattice_net_types::NetworkEvent::PeerDisconnected(peer_id.to_lattice()));
+                tracing::info!(store_id = %store_id, peer = %peer_id.fmt_short(), "NeighborDown");
             }
             iroh_gossip::api::Event::Lagged => {
                 tracing::warn!(store_id = %store_id, "Gossip receiver lagged");
@@ -334,5 +333,9 @@ impl GossipLayer for GossipManager {
 
     async fn shutdown(&self) {
         self.shutdown().await
+    }
+    
+    fn network_events(&self) -> tokio::sync::broadcast::Receiver<lattice_net_types::NetworkEvent> {
+        self.network_events_tx.subscribe()
     }
 }

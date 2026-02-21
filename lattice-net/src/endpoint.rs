@@ -22,6 +22,7 @@ pub struct IrohTransport {
     endpoint: Endpoint,
     /// Static provider for adding peer addresses directly (useful for tests)
     static_discovery: StaticProvider,
+    pub(crate) events_tx: tokio::sync::broadcast::Sender<lattice_net_types::NetworkEvent>,
 }
 
 impl std::fmt::Debug for IrohTransport {
@@ -61,8 +62,10 @@ impl IrohTransport {
             .discovery(dht)
             .discovery(dns)
             .bind()
-            .await?;
-        Ok(Self { endpoint, static_discovery })
+            .await?;        // Create background connection event broadcaster
+        let (events_tx, _) = tokio::sync::broadcast::channel(256);
+
+        Ok(Self { endpoint, static_discovery, events_tx })
     }
 
     /// Get the public key (same as Lattice pubkey, can be shared with peers)
@@ -150,6 +153,8 @@ impl Transport for IrohTransport {
             .map_err(|e| TransportError::Connect(format!("Invalid public key: {}", e)))?;
         let conn = self.endpoint.connect(iroh_key, LATTICE_ALPN).await
             .map_err(|e| TransportError::Connect(e.to_string()))?;
+            
+        let _ = self.events_tx.send(lattice_net_types::NetworkEvent::PeerConnected(*peer));
         Ok(IrohConnection { inner: conn })
     }
 
@@ -157,7 +162,10 @@ impl Transport for IrohTransport {
         let incoming = self.endpoint.accept().await?;
         match incoming.accept() {
             Ok(connecting) => match connecting.await {
-                Ok(conn) => Some(IrohConnection { inner: conn }),
+                Ok(conn) => {
+                    let _ = self.events_tx.send(lattice_net_types::NetworkEvent::PeerConnected(PubKey::from(*conn.remote_id().as_bytes())));
+                    Some(IrohConnection { inner: conn })
+                },
                 Err(e) => {
                     tracing::warn!("Transport accept: connection failed: {}", e);
                     None
@@ -168,6 +176,10 @@ impl Transport for IrohTransport {
                 None
             }
         }
+    }
+    
+    fn network_events(&self) -> tokio::sync::broadcast::Receiver<lattice_net_types::NetworkEvent> {
+        self.events_tx.subscribe()
     }
 }
 

@@ -31,7 +31,6 @@ pub fn lookup_store(registry: &dyn NetworkStoreRegistry, store_id: Uuid) -> Resu
 pub async fn handle_connection(
     provider: Arc<dyn NodeProviderExt>,
     peer_stores: PeerStoreRegistry,
-    sessions: Arc<super::session::SessionTracker>,
     conn: Connection,
 ) -> Result<(), LatticeNetError> {
     use crate::ToLattice;
@@ -40,7 +39,6 @@ pub async fn handle_connection(
     tracing::debug!("[Incoming] {} (ALPN: {})", remote_id.fmt_short(), String::from_utf8_lossy(conn.alpn()));
     
     let remote_pubkey: PubKey = remote_id.to_lattice();
-    let _ = sessions.mark_online(remote_pubkey);
 
     loop {
         match conn.accept_bi().await {
