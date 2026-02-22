@@ -18,7 +18,7 @@ pub mod global_peer_provider;
 #[cfg(test)]
 mod service_tests;
 
-pub use service::{NetworkService, NetworkBackend, SyncResult, PeerStoreRegistry, ShutdownHandle};
+pub use service::{NetworkService, NetworkBackend, SyncResult, PeerStoreRegistry, ShutdownHandle, GossipLagStats, GossipStatsRegistry};
 pub use error::{ServerError, GossipError};
 pub use sync_session::SyncSession;
 pub use session::SessionTracker;

@@ -32,6 +32,45 @@ pub struct SyncResult {
     pub entries_sent: u64,
 }
 
+/// Per-store gossip lag statistics.
+/// Tracks dropped messages to inform sync scheduling decisions.
+pub struct GossipLagStats {
+    /// Total number of messages dropped due to channel lag
+    pub total_drops: u64,
+    /// Timestamp of the most recent drop
+    pub last_drop_at: Option<std::time::Instant>,
+    /// Whether at least one broadcast succeeded since the last drop
+    pub broadcast_since_last_drop: bool,
+}
+
+impl GossipLagStats {
+    pub fn new() -> Self {
+        Self {
+            total_drops: 0,
+            last_drop_at: None,
+            broadcast_since_last_drop: true, // no drops yet, nothing to recover
+        }
+    }
+
+    pub fn record_drop(&mut self, count: u64) {
+        self.total_drops += count;
+        self.last_drop_at = Some(std::time::Instant::now());
+        self.broadcast_since_last_drop = false;
+    }
+
+    pub fn record_broadcast(&mut self) {
+        self.broadcast_since_last_drop = true;
+    }
+
+    /// True if drops occurred and no successful broadcast has happened since.
+    pub fn needs_sync(&self) -> bool {
+        self.last_drop_at.is_some() && !self.broadcast_since_last_drop
+    }
+}
+
+/// Per-store gossip stats registry
+pub type GossipStatsRegistry = Arc<RwLock<std::collections::HashMap<Uuid, GossipLagStats>>>;
+
 /// Peer store registry - now just tracks which stores have been registered for networking
 pub type PeerStoreRegistry = Arc<RwLock<std::collections::HashSet<Uuid>>>;
 
@@ -46,6 +85,8 @@ pub struct NetworkService<T: Transport> {
     router: Option<Box<dyn ShutdownHandle>>,
     global_gossip_enabled: Arc<AtomicBool>,
     auto_sync_enabled: Arc<AtomicBool>,
+    /// Per-store gossip lag statistics
+    gossip_stats: GossipStatsRegistry,
 }
 
 /// Trait for abstract shutdown handles (e.g. iroh Router)
@@ -94,6 +135,7 @@ impl<T: Transport> NetworkService<T> {
             router: backend.router,
             global_gossip_enabled: Arc::new(AtomicBool::new(true)),
             auto_sync_enabled: Arc::new(AtomicBool::new(true)),
+            gossip_stats: Arc::new(RwLock::new(std::collections::HashMap::new())),
         });
         
         // Subscribe to network events (NetEvent channel)
@@ -200,6 +242,7 @@ impl<T: Transport> NetworkService<T> {
                         // Task 2: Forward local intentions → encode → gossip.broadcast
                         let gossip_clone = gossip.clone();
                         let mut intention_rx = network_store.subscribe_intentions();
+                        let gossip_stats = self.gossip_stats.clone();
                         tokio::spawn(async move {
                             loop {
                                 match intention_rx.recv().await {
@@ -213,10 +256,23 @@ impl<T: Transport> NetworkService<T> {
                                         let encoded = gossip_msg.encode_to_vec();
                                         if let Err(e) = gossip_clone.broadcast(store_id_captured, encoded).await {
                                             tracing::warn!(error = %e, "Failed to broadcast intention via gossip");
+                                            gossip_stats.write().await
+                                                .entry(store_id_captured)
+                                                .or_insert_with(GossipLagStats::new)
+                                                .record_drop(1);
+                                        } else {
+                                            gossip_stats.write().await
+                                                .entry(store_id_captured)
+                                                .or_insert_with(GossipLagStats::new)
+                                                .record_broadcast();
                                         }
                                     }
                                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                        tracing::warn!(lagged = n, "Intention forwarder lagged");
+                                        tracing::warn!(lagged = n, store_id = %store_id_captured, "Intention forwarder lagged, {} messages dropped", n);
+                                        gossip_stats.write().await
+                                            .entry(store_id_captured)
+                                            .or_insert_with(GossipLagStats::new)
+                                            .record_drop(n);
                                     }
                                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 }
@@ -700,6 +756,11 @@ impl<T: Transport> NetworkService<T> {
     /// Get a registered store by ID
     pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
         self.provider.store_registry().get_network_store(&store_id)
+    }
+
+    /// Get the gossip lag stats registry (for sync scheduling decisions)
+    pub fn gossip_stats(&self) -> &GossipStatsRegistry {
+        &self.gossip_stats
     }
 
     // ==================== Peer Discovery ====================
