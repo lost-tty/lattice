@@ -1,4 +1,4 @@
-baseURL = "/"
+baseURL = "https://latticesync.org/"
 languageCode = "en-us"
 title = "Lattice"
 theme = "lattice-theme"
