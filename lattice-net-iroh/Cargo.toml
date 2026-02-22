@@ -1,0 +1,37 @@
+[package]
+name = "lattice-net-iroh"
+description = "Iroh transport and gossip implementation for Lattice networking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-net = { workspace = true }
+lattice-net-types = { workspace = true }
+lattice-model = { workspace = true }
+iroh = { workspace = true }
+iroh-gossip = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+blake3.workspace = true
+ed25519-dalek.workspace = true
+uuid = { workspace = true }
+futures-util = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+rand = { workspace = true }
+tokio = { workspace = true, features = ["full", "macros"] }
+futures-util = { workspace = true }
+async-trait = "0.1"
+lattice-net = { workspace = true }
+lattice-net-types = { workspace = true }
+lattice-model = { workspace = true }
+lattice-node = { workspace = true }
+lattice-kvstore = { workspace = true }
+lattice-storage = { workspace = true }
+lattice-systemstore = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { workspace = true }
+iroh = { workspace = true }
+iroh-gossip = { workspace = true }

@@ -1,11 +1,10 @@
 //! BroadcastGossip — in-memory GossipLayer implementation
 //!
-//! Uses `tokio::sync::broadcast` for per-store intention propagation.
+//! Uses `tokio::sync::broadcast` for per-store raw-bytes propagation.
 //! Mirrors the `ChannelNetwork` pattern: a shared `GossipNetwork` broker
 //! connects multiple `BroadcastGossip` instances.
 
-use lattice_net_types::{GossipLayer, GossipError, NetworkStore};
-use lattice_model::weaver::SignedIntention;
+use lattice_net_types::{GossipLayer, GossipError};
 use lattice_model::types::PubKey;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,13 +12,13 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use uuid::Uuid;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Shared broadcast network — routes intentions between BroadcastGossip instances.
+/// Shared broadcast network — routes raw bytes between BroadcastGossip instances.
 ///
 /// Each store gets a broadcast channel. All subscribed nodes for that store
 /// share the same channel, simulating gossip propagation.
 #[derive(Clone, Debug)]
 pub struct GossipNetwork {
-    channels: Arc<RwLock<HashMap<Uuid, broadcast::Sender<(PubKey, SignedIntention)>>>>,
+    channels: Arc<RwLock<HashMap<Uuid, broadcast::Sender<(PubKey, Vec<u8>)>>>>,
 }
 
 impl GossipNetwork {
@@ -30,7 +29,7 @@ impl GossipNetwork {
     }
 
     /// Get or create the broadcast channel for a store.
-    async fn get_or_create(&self, store_id: Uuid) -> broadcast::Sender<(PubKey, SignedIntention)> {
+    pub async fn get_or_create(&self, store_id: Uuid) -> broadcast::Sender<(PubKey, Vec<u8>)> {
         let mut channels = self.channels.write().await;
         channels.entry(store_id)
             .or_insert_with(|| broadcast::channel(256).0)
@@ -46,15 +45,14 @@ impl Default for GossipNetwork {
 
 /// In-memory GossipLayer implementation using broadcast channels.
 ///
-/// Each `BroadcastGossip` instance belongs to one node. When `subscribe` is
-/// called for a store, it spawns tasks that:
-/// 1. Forward local intentions to the shared broadcast channel
-/// 2. Ingest received intentions from other nodes
+/// Each `BroadcastGossip` instance belongs to one node. The gossip layer
+/// only deals with raw bytes — intention encoding/decoding is handled by NetworkService.
 pub struct BroadcastGossip {
     my_pubkey: PubKey,
     network: GossipNetwork,
     store_tokens: Arc<Mutex<HashMap<Uuid, tokio_util::sync::CancellationToken>>>,
-    inbound_channels: Arc<Mutex<HashMap<Uuid, broadcast::Sender<(PubKey, SignedIntention)>>>>,
+    store_senders: Arc<Mutex<HashMap<Uuid, broadcast::Sender<(PubKey, Vec<u8>)>>>>,
+    inbound_channels: Arc<Mutex<HashMap<Uuid, broadcast::Sender<(PubKey, Vec<u8>)>>>>,
     drop_next_message: Arc<AtomicBool>,
 }
 
@@ -64,6 +62,7 @@ impl BroadcastGossip {
             my_pubkey: pubkey,
             network: network.clone(),
             store_tokens: Arc::new(Mutex::new(HashMap::new())),
+            store_senders: Arc::new(Mutex::new(HashMap::new())),
             inbound_channels: Arc::new(Mutex::new(HashMap::new())),
             drop_next_message: Arc::new(AtomicBool::new(false)),
         }
@@ -80,10 +79,9 @@ impl BroadcastGossip {
 impl GossipLayer for BroadcastGossip {
     async fn subscribe(
         &self,
-        store: NetworkStore,
-    ) -> Result<broadcast::Receiver<(PubKey, SignedIntention)>, GossipError> {
-        let store_id = store.id();
-
+        store_id: Uuid,
+        _initial_peers: Vec<PubKey>,
+    ) -> Result<broadcast::Receiver<(PubKey, Vec<u8>)>, GossipError> {
         // Tear down existing subscription if any
         self.unsubscribe(store_id).await;
 
@@ -94,34 +92,14 @@ impl GossipLayer for BroadcastGossip {
         let token = tokio_util::sync::CancellationToken::new();
         self.store_tokens.lock().await.insert(store_id, token.clone());
 
+        // Store the sender for broadcast()
+        self.store_senders.lock().await.insert(store_id, sender.clone());
+
         // Create the inbound channel for this store
         let (inbound_tx, inbound_rx) = broadcast::channel(256);
         self.inbound_channels.lock().await.insert(store_id, inbound_tx.clone());
 
-        // Task 1: Forward local intentions → broadcast channel
-        let sender_clone = sender.clone();
-        let mut intention_rx = store.subscribe_intentions();
-        let token_fwd = token.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = token_fwd.cancelled() => break,
-                    result = intention_rx.recv() => {
-                        match result {
-                            Ok(intention) => {
-                                let _ = sender_clone.send((my_pubkey, intention));
-                            }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!(lagged = n, "Broadcast gossip forwarder lagged");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                }
-            }
-        });
-
-        // Task 2: Receive intentions from broadcast channel → deliver to NetworkService
+        // Receive task: route incoming bytes, skip our own messages
         let token_recv = token.clone();
         let drop_flag = self.drop_next_message.clone();
         tokio::spawn(async move {
@@ -130,7 +108,7 @@ impl GossipLayer for BroadcastGossip {
                     _ = token_recv.cancelled() => break,
                     result = receiver.recv() => {
                         match result {
-                            Ok((sender_pubkey, intention)) => {
+                            Ok((sender_pubkey, data)) => {
                                 // Skip our own messages
                                 if sender_pubkey == my_pubkey {
                                     continue;
@@ -142,8 +120,8 @@ impl GossipLayer for BroadcastGossip {
                                     continue;
                                 }
                                 
-                                // Deliver raw message to subscriber
-                                let _ = inbound_tx.send((sender_pubkey, intention));
+                                // Deliver raw bytes to subscriber
+                                let _ = inbound_tx.send((sender_pubkey, data));
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 tracing::warn!(lagged = n, "Broadcast gossip receiver lagged");
@@ -159,11 +137,25 @@ impl GossipLayer for BroadcastGossip {
         Ok(inbound_rx)
     }
 
+    async fn broadcast(&self, store_id: Uuid, data: Vec<u8>) -> Result<(), GossipError> {
+        let senders = self.store_senders.lock().await;
+        if let Some(sender) = senders.get(&store_id) {
+            let _ = sender.send((self.my_pubkey, data));
+        }
+        Ok(())
+    }
+
+    async fn join_peers(&self, _store_id: Uuid, _peers: Vec<PubKey>) -> Result<(), GossipError> {
+        // No-op: BroadcastGossip is all-to-all, every subscriber sees every message
+        Ok(())
+    }
+
     async fn unsubscribe(&self, store_id: Uuid) {
         if let Some(token) = self.store_tokens.lock().await.remove(&store_id) {
             token.cancel();
         }
         self.inbound_channels.lock().await.remove(&store_id);
+        self.store_senders.lock().await.remove(&store_id);
     }
 
     async fn shutdown(&self) {

@@ -57,13 +57,13 @@ async fn test_native_gossip_gap_recovery() {
     let gossip_a = Arc::new(BroadcastGossip::new(node_a.node_id(), &gossip_net));
     let gossip_b = Arc::new(BroadcastGossip::new(node_b.node_id(), &gossip_net));
 
-    let _server_a = network::NetworkService::new_simulated(
-        node_a.clone(), transport_a, Some(event_rx_a), 
-        Some(gossip_a as Arc<dyn lattice_net_types::GossipLayer>)
+    let _server_a = network::NetworkService::new(
+        node_a.clone(), lattice_net_sim::SimBackend::new(transport_a, node_a.clone(), 
+            Some(gossip_a as Arc<dyn lattice_net_types::GossipLayer>)), event_rx_a,
     );
-    let _server_b = network::NetworkService::new_simulated(
-        node_b.clone(), transport_b, Some(event_rx_b), 
-        Some(gossip_b.clone() as Arc<dyn lattice_net_types::GossipLayer>)
+    let _server_b = network::NetworkService::new(
+        node_b.clone(), lattice_net_sim::SimBackend::new(transport_b, node_b.clone(),
+            Some(gossip_b.clone() as Arc<dyn lattice_net_types::GossipLayer>)), event_rx_b,
     );
 
     // Disable background auto-sync to ensure ONLY gossip propagates H0 and H2,

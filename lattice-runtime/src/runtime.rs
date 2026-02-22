@@ -86,7 +86,7 @@ impl RuntimeBuilder {
     /// Build and start the runtime.
     pub async fn build(self) -> Result<Runtime, RuntimeError> {
         // Create net channel
-        let (net_tx, net_rx) = NetworkService::create_net_channel();
+        let (net_tx, net_rx) = tokio::sync::broadcast::channel(64);
         
         // Determine data directory
         let data_path = match self.data_dir {
@@ -101,7 +101,6 @@ impl RuntimeBuilder {
         let data_dir = lattice_node::data_dir::DataDir::new(data_path);
 
         // Build node with openers (using handle-less pattern)
-
         let mut builder = NodeBuilder::new(data_dir)
             .with_net_tx(net_tx)
             .with_opener(STORE_TYPE_KVSTORE, |registry| {
@@ -116,15 +115,17 @@ impl RuntimeBuilder {
         
         let node = Arc::new(builder.build().map_err(|e| RuntimeError::Node(e.to_string()))?);
         
-        // Create endpoint
-        let endpoint = lattice_net::IrohTransport::new(node.signing_key().clone())
+        // --- Create networking stack ---
+        
+        let backend = lattice_net_iroh::IrohBackend::new(node.signing_key().clone(), node.clone())
             .await
             .map_err(|e| RuntimeError::Network(e.to_string()))?;
         
-        // Create NetworkService
-        let mesh_service = NetworkService::new_with_provider(node.clone(), endpoint, net_rx)
-            .await
-            .map_err(|e| RuntimeError::Network(e.to_string()))?;
+        let mesh_service = lattice_net::network::NetworkService::new(
+            node.clone(),
+            backend,
+            net_rx,
+        );
         
         // Create backend
         let backend = Arc::new(InProcessBackend::new(node.clone(), Some(mesh_service.clone())));

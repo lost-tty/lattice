@@ -8,6 +8,9 @@ pub use lattice_net_types::GossipError;
 /// Server-level errors
 #[derive(Error, Debug)]
 pub enum ServerError {
+    #[error("init: {0}")]
+    Init(String),
+    
     #[error("endpoint: {0}")]
     Endpoint(String),
     

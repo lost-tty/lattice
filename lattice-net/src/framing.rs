@@ -28,15 +28,11 @@ impl<W: AsyncWrite + Send + Unpin> MessageSink<W> {
         self.inner.send(bytes.into()).await
             .map_err(|e| LatticeNetError::Io(e.into()))
     }
-}
-
-/// Iroh-specific: gracefully finish the stream after sending
-impl MessageSink<iroh::endpoint::SendStream> {
-    pub async fn finish(self) -> Result<(), LatticeNetError> {
-        let mut stream = self.inner.into_inner();
-        let _ = stream.finish();
-        stream.stopped().await.ok();
-        Ok(())
+    
+    /// Consume the sink and return the underlying writer.
+    /// Useful for transport-specific stream finalization (e.g. iroh's `finish()`).
+    pub fn into_inner(self) -> W {
+        self.inner.into_inner()
     }
 }
 

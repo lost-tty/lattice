@@ -1,4 +1,4 @@
-//! Iroh endpoint for network connectivity
+//! Iroh transport for Lattice networking
 //!
 //! Creates an Iroh endpoint from the node's Ed25519 secret key,
 //! ensuring the same identity is used for both Lattice and Iroh.
@@ -12,6 +12,11 @@ use iroh::discovery::pkarr::dht::DhtDiscovery;
 use iroh::discovery::dns::DnsDiscovery;
 use iroh::discovery::static_provider::StaticProvider;
 pub use iroh::PublicKey;
+
+use lattice_net_types::transport::{
+    Transport, Connection as TransportConnection, BiStream, TransportError,
+};
+use lattice_model::types::PubKey;
 
 /// ALPN protocol identifier for Lattice sync
 pub const LATTICE_ALPN: &[u8] = b"lattice-sync/1";
@@ -62,7 +67,9 @@ impl IrohTransport {
             .discovery(dht)
             .discovery(dns)
             .bind()
-            .await?;        // Create background connection event broadcaster
+            .await?;
+        
+        // Create background connection event broadcaster
         let (events_tx, _) = tokio::sync::broadcast::channel(256);
 
         Ok(Self { endpoint, static_discovery, events_tx })
@@ -74,12 +81,12 @@ impl IrohTransport {
     }
 
     /// Connect to a peer by their public key
-    pub async fn connect(&self, peer: PublicKey) -> Result<Connection, ConnectError> {
+    pub async fn connect_raw(&self, peer: PublicKey) -> Result<Connection, ConnectError> {
         self.endpoint.connect(peer, LATTICE_ALPN).await
     }
 
     /// Accept an incoming connection
-    pub async fn accept(&self) -> Option<iroh::endpoint::Incoming> {
+    pub async fn accept_raw(&self) -> Option<iroh::endpoint::Incoming> {
         self.endpoint.accept().await
     }
 
@@ -102,11 +109,6 @@ impl IrohTransport {
 
 // ==================== Transport trait implementations ====================
 
-use lattice_net_types::transport::{
-    Transport, Connection as TransportConnection, BiStream, TransportError,
-};
-use lattice_model::types::PubKey;
-
 /// Adapter: iroh bi-stream → `BiStream` trait
 pub struct IrohBiStream {
     pub send: iroh::endpoint::SendStream,
@@ -124,7 +126,7 @@ impl BiStream for IrohBiStream {
 
 /// Adapter: iroh connection → `Connection` trait
 pub struct IrohConnection {
-    pub(crate) inner: iroh::endpoint::Connection,
+    pub inner: iroh::endpoint::Connection,
 }
 
 impl TransportConnection for IrohConnection {
@@ -182,4 +184,3 @@ impl Transport for IrohTransport {
         self.events_tx.subscribe()
     }
 }
-

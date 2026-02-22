@@ -27,6 +27,6 @@ pub use lattice_model::types::{PubKey, Hash};
 pub use lattice_model::SExpr;
 
 // Internal re-exports (not public API)
-pub(crate) use lattice_net::NetworkService;
+pub(crate) type NetworkService = lattice_net::network::NetworkService<lattice_net_iroh::IrohTransport>;
 pub(crate) use lattice_node::{Node, NodeBuilder, StoreHandle};
 pub(crate) use lattice_api::RpcServer;

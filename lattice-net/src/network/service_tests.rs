@@ -5,7 +5,6 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::NetworkService;
     use lattice_model::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo, Uuid, types::PubKey};
     use lattice_net_types::{NodeProviderExt, NetworkStoreRegistry, NetworkStore};
     use lattice_model::PeerProvider;
@@ -81,40 +80,6 @@ mod tests {
             None 
         }
     }
-
-    /// Test that NetworkService can be instantiated with a mock provider.
-    /// This proves the decoupling is real - lattice-net depends only on traits,
-    /// not on the concrete Node type from lattice-node.
-    #[tokio::test]
-    async fn test_mesh_service_with_mock_provider() {
-        // Create a mock provider with a generated key
-        let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-        let pubkey = PubKey::from(key.verifying_key().to_bytes());
-        
-        // Create the endpoint (this is lattice-net's own type)
-        let endpoint = crate::IrohTransport::new(key).await
-            .expect("Failed to create endpoint");
-        
-        // Create the net channel (network layer owns it)
-        let (_tx, rx) = NetworkService::create_net_channel();
-        
-        let provider: Arc<dyn NodeProviderExt> = Arc::new(MockProvider { pubkey });
-        
-        // Action: Create service with MOCK provider
-        let service = NetworkService::new_with_provider(provider.clone(), endpoint, rx).await;
-        
-        // Assert: It should succeed
-        assert!(service.is_ok(), "NetworkService failed to initialize with MockProvider");
-        
-        let service = service.unwrap();
-        
-        // Verify the provider is accessible and returns the correct node_id
-        assert_eq!(service.provider().node_id(), pubkey);
-        
-        // Verify we can query the (empty) store registry
-        let store_ids = service.provider().store_registry().list_store_ids();
-        assert!(store_ids.is_empty(), "Mock registry should have no stores");
-    }
     
     /// Test that the store registry returns None for unknown stores
     #[tokio::test]
@@ -167,7 +132,7 @@ mod tests {
     /// Test that SessionTracker correctly updates via abstract NetworkEvent stream
     #[tokio::test]
     async fn test_session_tracker_network_events() {
-        let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let key = lattice_model::SigningKey::generate(&mut rand::rngs::OsRng);
         let pubkey = PubKey::from(key.verifying_key().to_bytes());
         let provider: Arc<dyn NodeProviderExt> = Arc::new(MockProvider { pubkey });
         
@@ -175,7 +140,14 @@ mod tests {
         let (tx, _rx) = tokio::sync::broadcast::channel(16);
         let transport = MockEventTransport { pubkey, tx: tx.clone() };
         
-        let service = crate::network::NetworkService::new_simulated(provider, transport, None, None);
+        let backend = crate::network::NetworkBackend {
+            transport,
+            gossip: None,
+            router: None,
+            peer_stores: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        };
+        let (_, event_rx) = tokio::sync::broadcast::channel(1);
+        let service = crate::network::NetworkService::new(provider, backend, event_rx);
         
         assert_eq!(service.connected_peers().unwrap().len(), 0, "Should start with zero online peers");
         

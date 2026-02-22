@@ -1,54 +1,21 @@
 //! Lattice Networking
 //!
-//! Networking layer using Iroh:
-//! - **Endpoint**: Network identity and connection management
-//! - **Gossip**: Broadcasting changes across the mesh
-//! - **Unicast**: Point-to-point communication for reconciliation
-//! - **Framing**: Length-delimited message framing for QUIC streams
+//! Transport-agnostic networking layer for Lattice:
+//! - **Framing**: Length-delimited message framing
 //! - **Network**: Peer-to-peer join and sync operations
 
-pub mod endpoint;
-pub mod error;
 pub mod framing;
 pub mod network;
 
-pub use endpoint::{IrohTransport, PublicKey, LATTICE_ALPN, IrohBiStream, IrohConnection};
 // Re-export Transport abstraction from lattice-net-types
 pub use lattice_net_types::{Transport, Connection, BiStream, TransportError};
-pub use error::LatticeNetError;
 pub use framing::{MessageSink, MessageStream};
 pub use lattice_kernel::proto::network::{
     JoinRequest, JoinResponse, 
     FetchIntentions, IntentionResponse
 };
-// Re-export NetworkService with default Iroh transport for backward compat.
-// The generic version is available via `network::NetworkService<T>`.
-pub type NetworkService = network::NetworkService<IrohTransport>;
 pub use network::SyncResult;
 pub use lattice_model::types::PubKey;
 
-/// Parse a PublicKey (NodeId) from hex or base32 string
-pub fn parse_node_id(s: &str) -> Result<PublicKey, LatticeNetError> {
-    s.parse().map_err(|e| LatticeNetError::ParseNodeId(format!("{}", e)))
-}
-
-// Traits for conversion to avoid orphan rules
-pub trait ToIroh {
-    fn to_iroh(&self) -> Result<PublicKey, LatticeNetError>;
-}
-
-pub trait ToLattice {
-    fn to_lattice(&self) -> PubKey;
-}
-
-impl ToIroh for PubKey {
-    fn to_iroh(&self) -> Result<PublicKey, LatticeNetError> {
-        PublicKey::from_bytes(&**self).map_err(|e| LatticeNetError::Validation(format!("Invalid Iroh key: {}", e)))
-    }
-}
-
-impl ToLattice for PublicKey {
-    fn to_lattice(&self) -> PubKey {
-        PubKey::from(*self.as_bytes())
-    }
-}
+mod error;
+pub use error::LatticeNetError;

@@ -32,7 +32,7 @@ Decouple `lattice-net` from Iroh-specific types so multi-node networks can be si
 - [ ] **Async Gossip Queue:** Decouple `IntentionStore` ingest from broadcast. Use a bounded channel with backpressure to prevent local ingest latency spikes during network congestion.
 - [x] **Event-Driven Gap Handling:** Replace `GapHandler` callback in `GossipLayer::subscribe` with `SystemEvent::MissingDep` emitted by the store. NetworkService subscribes to the event instead of injecting a closure. Simplifies the gossip trait and decouples gossip from gap recovery.
 - [x] **SessionTracker Decoupling:** Decoupled `SessionTracker` from Iroh-specific gossip events. Introduced `NetworkEvent` stream emitted by the `Transport` and `GossipLayer` traits that `NetworkService` consumes via `spawn_event_listener` to update the abstract session tracker. Concrete network implementations no longer modify core state directly.
-- [ ] **Extract `lattice-net-iroh`:** Move `IrohTransport`, `GossipManager`, and Router setup into a dedicated crate. `lattice-net` becomes fully transport-agnostic, depending only on `lattice-net-types` traits.
+- [x] **Extract `lattice-net-iroh`:** Move `IrohTransport`, `GossipManager`, and Router setup into a dedicated crate. `lattice-net` becomes fully transport-agnostic, depending only on `lattice-net-types` traits.
 
 ### 12B: In-Memory Simulation Harness
 - [x] `ChannelTransport`: In-memory transport using mpsc channels (`lattice-net-sim` crate)

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 lattice-net-types = { workspace = true }
+lattice-net = { workspace = true }
 lattice-model = { workspace = true }
 tokio = { workspace = true, features = ["sync", "io-util"] }
 tokio-util = { workspace = true }

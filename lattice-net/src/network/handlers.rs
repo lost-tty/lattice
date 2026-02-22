@@ -3,19 +3,15 @@
 //! Extracted from NetworkService to keep concerns separated.
 //! These handlers receive only the context they need (provider trait), not the entire service.
 
-use crate::{LatticeNetError};
+use crate::LatticeNetError;
 use crate::framing;
 
-/// Handlers always use iroh streams (inbound connections via Router)
-type MessageSink = framing::MessageSink<iroh::endpoint::SendStream>;
-type MessageStream = framing::MessageStream<iroh::endpoint::RecvStream>;
 use super::service::PeerStoreRegistry;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore, NodeProviderExt};
 use lattice_kernel::proto::network::{peer_message, JoinResponse, PeerMessage, FetchIntentions, IntentionResponse, BootstrapRequest, BootstrapResponse};
-use lattice_kernel::weaver::convert::{intention_to_proto};
+use lattice_kernel::weaver::convert::intention_to_proto;
 use lattice_model::{Uuid, types::{PubKey, Hash}};
 use lattice_kernel::proto::weaver::{WitnessRecord, WitnessContent};
-use iroh::endpoint::Connection;
 use std::sync::Arc;
 use futures_util::StreamExt;
 
@@ -27,49 +23,26 @@ pub fn lookup_store(registry: &dyn NetworkStoreRegistry, store_id: Uuid) -> Resu
 
 // ==================== Inbound Handlers (Server Logic) ====================
 
-/// Handle a single incoming connection (keep accepting streams)
-pub async fn handle_connection(
-    provider: Arc<dyn NodeProviderExt>,
-    peer_stores: PeerStoreRegistry,
-    conn: Connection,
-) -> Result<(), LatticeNetError> {
-    use crate::ToLattice;
-    
-    let remote_id = conn.remote_id();
-    tracing::debug!("[Incoming] {} (ALPN: {})", remote_id.fmt_short(), String::from_utf8_lossy(conn.alpn()));
-    
-    let remote_pubkey: PubKey = remote_id.to_lattice();
-
-    loop {
-        match conn.accept_bi().await {
-            Ok((send, recv)) => {
-                let provider = provider.clone();
-                let peer_stores = peer_stores.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_stream(provider, peer_stores, remote_pubkey, send, recv).await {
-                        tracing::debug!("Stream handler error: {}", e);
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::debug!("Connection closed: {}", e);
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Handle a single bidirectional stream on a connection
-async fn handle_stream(
+/// Generic stream dispatcher — parses PeerMessage and routes to the appropriate handler.
+///
+/// Works over any `AsyncWrite`/`AsyncRead` streams. Transport-specific connection
+/// handling (e.g. iroh connection accept loop) lives in the transport crate.
+///
+/// Returns the writer so the caller can perform transport-specific finalization
+/// (e.g. QUIC `finish()` to avoid abrupt stream resets).
+pub async fn dispatch_stream<W, R>(
     provider: Arc<dyn NodeProviderExt>,
     peer_stores: PeerStoreRegistry,
     remote_pubkey: PubKey,
-    send: iroh::endpoint::SendStream,
-    recv: iroh::endpoint::RecvStream,
-) -> Result<(), LatticeNetError> {
-    let mut sink = MessageSink::new(send);
-    let mut stream = MessageStream::new(recv);
+    send: W,
+    recv: R,
+) -> Result<W, LatticeNetError>
+where
+    W: tokio::io::AsyncWrite + Send + Unpin,
+    R: tokio::io::AsyncRead + Send + Unpin,
+{
+    let mut sink = framing::MessageSink::new(send);
+    let mut stream = framing::MessageStream::new(recv);
     const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
     
     // Dispatch loop - handles multiple messages per stream
@@ -109,12 +82,11 @@ async fn handle_stream(
             }
         }
     }
-    sink.finish().await?;
-    Ok(())
+    Ok(sink.into_inner())
 }
 
 /// Handle a join request from an invited peer
-pub(super) async fn handle_join_request<W: tokio::io::AsyncWrite + Send + Unpin>(
+pub async fn handle_join_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
     req: lattice_kernel::proto::network::JoinRequest,
@@ -141,7 +113,7 @@ pub(super) async fn handle_join_request<W: tokio::io::AsyncWrite + Send + Unpin>
 }
 
 /// Handle an incoming reconcile start message
-pub(super) async fn handle_reconcile_start<W, R>(
+pub async fn handle_reconcile_start<W, R>(
     provider: &dyn NodeProviderExt,
     _peer_stores: PeerStoreRegistry,
     remote_pubkey: &PubKey,
@@ -173,7 +145,7 @@ where
 }
 
 /// Handle a FetchIntentions request - returns requested intentions
-pub(super) async fn handle_fetch_intentions<W: tokio::io::AsyncWrite + Send + Unpin>(
+pub async fn handle_fetch_intentions<W: tokio::io::AsyncWrite + Send + Unpin>(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
     req: FetchIntentions,
@@ -217,7 +189,7 @@ pub(super) async fn handle_fetch_intentions<W: tokio::io::AsyncWrite + Send + Un
 
 
 /// Handle a FetchChain request - walks back history and returns the chain.
-pub(super) async fn handle_fetch_chain<W: tokio::io::AsyncWrite + Send + Unpin>(
+pub async fn handle_fetch_chain<W: tokio::io::AsyncWrite + Send + Unpin>(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
     req: lattice_kernel::proto::network::FetchChain,
@@ -273,7 +245,7 @@ pub(super) async fn handle_fetch_chain<W: tokio::io::AsyncWrite + Send + Unpin>(
 }
 
 /// Handle a BootstrapRequest - streams witness log and intentions
-pub(super) async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
+pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
     req: BootstrapRequest,

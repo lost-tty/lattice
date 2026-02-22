@@ -7,7 +7,7 @@ use crate::StoreHandle;
 use lattice_api::proto::{StoreMeta, StoreRef};
 use lattice_model::weaver::{FloatingIntention, WitnessEntry};
 use lattice_model::types::PubKey;
-use lattice_net::NetworkService;
+use crate::NetworkService;
 use lattice_node::Node;
 use lattice_systemstore::SystemBatch;
 use lattice_model::store_info::PeerStrategy;

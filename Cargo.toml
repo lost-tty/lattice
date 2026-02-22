@@ -20,6 +20,7 @@ members = [
     "lattice-mockkernel",
     "lattice-sync",
     "lattice-net-sim",
+    "lattice-net-iroh",
 ]
 
 # lattice-bindings is excluded from default members to prevent slow linking (cdylib)
@@ -40,6 +41,7 @@ default-members = [
     "lattice-systemstore",
     "lattice-store-base",
     "lattice-net-sim",
+    "lattice-net-iroh",
 ]
 
 [workspace.package]
@@ -62,6 +64,7 @@ lattice-store-base = { path = "lattice-store-base" }
 lattice-mockkernel = { path = "lattice-mockkernel" }
 lattice-sync = { path = "lattice-sync" }
 lattice-net-types = { path = "lattice-net-types" }
+lattice-net-iroh = { path = "lattice-net-iroh" }
 lattice-proto = { path = "lattice-proto" }
 lattice-api = { path = "lattice-api" }
 lattice-runtime = { path = "lattice-runtime" }

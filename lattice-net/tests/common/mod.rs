@@ -80,8 +80,8 @@ impl TestPair {
         let event_rx_a = node_a.subscribe_net_events();
         let event_rx_b = node_b.subscribe_net_events();
 
-        let server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(event_rx_a), None);
-        let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(event_rx_b), None);
+        let server_a = network::NetworkService::new(node_a.clone(), lattice_net_sim::SimBackend::new(transport_a, node_a.clone(), None), event_rx_a);
+        let server_b = network::NetworkService::new(node_b.clone(), lattice_net_sim::SimBackend::new(transport_b, node_b.clone(), None), event_rx_b);
 
         let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store");
         let store_a = node_a.store_manager().get_handle(&store_id).expect("get store a");

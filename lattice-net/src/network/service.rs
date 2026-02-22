@@ -7,7 +7,7 @@
 //! while Iroh-specific infrastructure (Router, GossipManager, event handling)
 //! is implemented only for `NetworkService<IrohTransport>`.
 
-use crate::{MessageSink, MessageStream, IrohTransport, LatticeNetError, LATTICE_ALPN};
+use crate::{MessageSink, MessageStream, LatticeNetError};
 use lattice_net_types::{NetworkStore, NodeProviderExt, GossipLayer};
 use lattice_net_types::transport::{Transport, Connection as TransportConnection, BiStream};
 use lattice_model::{NetEvent, Uuid, UserEvent};
@@ -15,14 +15,12 @@ use lattice_kernel::proto::network::{PeerMessage, peer_message, BootstrapRequest
 use lattice_model::types::{PubKey, Hash};
 use lattice_kernel::store::MissingDep;
 use lattice_kernel::weaver::convert::intention_from_proto;
-use iroh::endpoint::Connection;
-use iroh::protocol::{Router, ProtocolHandler, AcceptError};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use futures_util::future::join_all;
-use std::collections::HashSet;
+
 use std::time::Duration;
 
 
@@ -43,123 +41,70 @@ pub struct NetworkService<T: Transport> {
     provider: Arc<dyn NodeProviderExt>,
     transport: T,
     gossip: Option<Arc<dyn lattice_net_types::GossipLayer>>,
-    peer_stores: PeerStoreRegistry,
+    pub(crate) peer_stores: PeerStoreRegistry,
     sessions: Arc<super::session::SessionTracker>,
-    router: Option<Router>,
+    router: Option<Box<dyn ShutdownHandle>>,
     global_gossip_enabled: Arc<AtomicBool>,
     auto_sync_enabled: Arc<AtomicBool>,
 }
 
-/// Protocol handler for the main LATTICE_ALPN protocol.
-/// This is used with iroh's Router for accepting incoming connections.
-pub struct SyncProtocol {
-    pub(crate) provider: Arc<dyn NodeProviderExt>,
-    pub(crate) peer_stores: PeerStoreRegistry,
+/// Trait for abstract shutdown handles (e.g. iroh Router)
+#[async_trait::async_trait]
+pub trait ShutdownHandle: Send + Sync {
+    async fn shutdown(&self) -> Result<(), String>;
 }
 
-impl std::fmt::Debug for SyncProtocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SyncProtocol").finish()
-    }
-}
-
-impl ProtocolHandler for SyncProtocol {
-    fn accept(&self, conn: Connection) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
-        let provider = self.provider.clone();
-        let peer_stores = self.peer_stores.clone();
-        Box::pin(async move {
-            if let Err(e) = super::handlers::handle_connection(provider, peer_stores, conn).await {
-                tracing::error!(error = %e, "Connection handler error");
-            }
-            Ok(())
-        })
-    }
+/// Bundles the transport-specific components needed by `NetworkService`.
+///
+/// Each transport crate (e.g. `lattice-net-iroh`, `lattice-net-sim`) provides
+/// a constructor that returns a `NetworkBackend`. The runtime passes it to
+/// `NetworkService::new` — swapping transports means swapping one constructor.
+pub struct NetworkBackend<T: Transport> {
+    pub transport: T,
+    pub gossip: Option<Arc<dyn GossipLayer>>,
+    pub router: Option<Box<dyn ShutdownHandle>>,
+    pub peer_stores: PeerStoreRegistry,
 }
 
 // ====================================================================================
-// Iroh-specific: Construction, event handling, join protocol, gossip setup
+// External construction
 // ====================================================================================
 
-impl NetworkService<IrohTransport> {
-    /// Create the NetEvent channel that the network layer owns.
-    /// 
-    /// Returns (sender, receiver):
-    /// - `sender`: Pass to `NodeBuilder::with_net_tx()` so Node can emit events
-    /// - `receiver`: Pass to `NetworkService::new_with_provider()` to handle events
-    /// 
-    /// This pattern ensures the network layer owns the event flow.
-    pub fn create_net_channel() -> (broadcast::Sender<NetEvent>, broadcast::Receiver<NetEvent>) {
-        let (tx, rx) = broadcast::channel(64);
-        (tx, rx)
-    }
-    
-    /// Create a new NetworkService with trait-based provider (decoupled constructor).
-    /// 
-    /// The recommended pattern is:
-    /// ```ignore
-    /// let (net_tx, net_rx) = NetworkService::create_net_channel();
-    /// let node = NodeBuilder::new(data_dir).with_net_tx(net_tx).build()?;
-    /// let endpoint = IrohTransport::new(node.signing_key().clone()).await?;
-    /// let service = NetworkService::new_with_provider(Arc::new(node), endpoint, net_rx).await?;
-    /// ```
-    #[tracing::instrument(skip(provider, endpoint, event_rx))]
-    pub async fn new_with_provider(
+impl<T: Transport> NetworkService<T> {
+    /// Create a NetworkService from a provider and a transport backend.
+    pub fn new(
         provider: Arc<dyn NodeProviderExt>,
-        endpoint: IrohTransport,
+        backend: NetworkBackend<T>,
         event_rx: broadcast::Receiver<NetEvent>,
-    ) -> Result<Arc<Self>, super::error::ServerError> {
+    ) -> Arc<Self> {
         let sessions = Arc::new(super::session::SessionTracker::new());
-        // NetworkService needs a global PeerProvider for tracking online status across stores
-        let pm = Arc::new(super::global_peer_provider::GlobalPeerProvider::new(
-            provider.store_registry()
-        ));
-
-        let gossip_manager = Arc::new(super::gossip_manager::GossipManager::new(&endpoint, pm).await?);
         
-        // Track which stores are registered for networking
-        let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashSet::new()));
-        
-        let sync_protocol = SyncProtocol { 
-            provider: provider.clone(), 
-            peer_stores: peer_stores.clone(),
-        };
-        let router = Router::builder(endpoint.endpoint().clone())
-            .accept(LATTICE_ALPN, sync_protocol)
-            .accept(iroh_gossip::ALPN, gossip_manager.gossip().clone())
-            .spawn();
-            
         Self::spawn_event_listener(
             sessions.clone(),
-            endpoint.network_events(),
-            Some(gossip_manager.network_events()),
+            backend.transport.network_events(),
+            backend.gossip.as_ref().map(|g| g.network_events()),
         );
         
-        let service = Arc::new(Self { 
+        let service = Arc::new(Self {
             provider,
-            transport: endpoint,
-            gossip: Some(gossip_manager as Arc<dyn lattice_net_types::GossipLayer>),
-            peer_stores,
+            transport: backend.transport,
+            gossip: backend.gossip,
+            peer_stores: backend.peer_stores,
             sessions,
-            router: Some(router),
+            router: backend.router,
             global_gossip_enabled: Arc::new(AtomicBool::new(true)),
             auto_sync_enabled: Arc::new(AtomicBool::new(true)),
         });
         
         // Subscribe to network events (NetEvent channel)
-        // Uses the generic event handler from impl<T: Transport>
         let service_clone = service.clone();
         tokio::spawn(async move {
             Self::run_net_event_handler(service_clone, event_rx).await;
         });
-
-        Ok(service)
+        // Incoming connections are handled by the Router (provided via backend.router).
+        
+        service
     }
-    
-    /// Access the underlying endpoint (Iroh-specific)
-    pub fn endpoint(&self) -> &IrohTransport {
-        &self.transport
-    }
-
 }
 
 // ====================================================================================
@@ -193,34 +138,110 @@ impl<T: Transport> NetworkService<T> {
         
         if global_enabled {
             if let Some(gossip) = &self.gossip {
-                let weak_self = Arc::downgrade(self);
-                let store_id_captured = store_id;
-                let store_clone = network_store.clone();
-
-                match gossip.subscribe(network_store.clone()).await {
+                // Gather initial peers
+                let peers = pm.list_peers().iter().map(|p| p.pubkey).collect::<Vec<_>>();
+                
+                match gossip.subscribe(store_id, peers).await {
                     Ok(mut receiver) => {
-                        // Spawn the ingestion task
+                        let weak_self = Arc::downgrade(self);
+                        let store_id_captured = store_id;
+                        let store_clone = network_store.clone();
+                        let pm_clone = pm.clone();
+                        let pm_for_watcher = pm.clone();
+                        
+                        // Task 1: Ingest raw gossip bytes → decode → ingest intention
                         tokio::spawn(async move {
-                            while let Ok((sender_pubkey, intention)) = receiver.recv().await {
+                            while let Ok((sender_pubkey, raw_bytes)) = receiver.recv().await {
                                 let Some(service) = weak_self.upgrade() else { break };
                                 
-                                // 1. Auth check: is this peer allowed to connect/send?
-                                if !pm.can_connect(&sender_pubkey) {
+                                // Auth check
+                                if !pm_clone.can_connect(&sender_pubkey) {
                                     tracing::warn!(store_id = %store_id_captured, sender = %sender_pubkey, "Rejected gossip from unauthorized peer");
                                     continue;
                                 }
 
-                                // 2. Ingest
+                                // Decode: raw bytes → GossipMessage → SignedIntention
+                                use prost::Message;
+                                let gossip_msg = match lattice_kernel::proto::network::GossipMessage::decode(raw_bytes.as_slice()) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "Failed to decode gossip message");
+                                        continue;
+                                    }
+                                };
+                                
+                                let intention = match gossip_msg.content {
+                                    Some(lattice_kernel::proto::network::gossip_message::Content::Intention(proto_intention)) => {
+                                        match lattice_kernel::weaver::convert::intention_from_proto(&proto_intention) {
+                                            Ok(i) => i,
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, "Failed to convert proto intention");
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    _ => continue,
+                                };
+
+                                // Ingest
                                 match store_clone.ingest_intention(intention).await {
                                     Ok(lattice_kernel::store::IngestResult::Applied) => {},
                                     Ok(lattice_kernel::store::IngestResult::MissingDeps(missing_deps)) => {
                                         for missing in missing_deps {
                                             tracing::info!(store_id = %store_id_captured, missing = %missing.prev, "Gossip ingestion gap detected, triggering fetch");
-                                            // 3. Handle gaps
                                             let _ = service.handle_missing_dep(store_id_captured, missing, Some(sender_pubkey)).await;
                                         }
                                     },
                                     Err(e) => tracing::warn!(store_id = %store_id_captured, error = %e, "Failed to ingest gossip intention"),
+                                }
+                            }
+                        });
+                        
+                        // Task 2: Forward local intentions → encode → gossip.broadcast
+                        let gossip_clone = gossip.clone();
+                        let mut intention_rx = network_store.subscribe_intentions();
+                        tokio::spawn(async move {
+                            loop {
+                                match intention_rx.recv().await {
+                                    Ok(intention) => {
+                                        use prost::Message;
+                                        let proto = lattice_kernel::weaver::convert::intention_to_proto(&intention);
+                                        let gossip_msg = lattice_kernel::proto::network::GossipMessage {
+                                            store_id: store_id_captured.as_bytes().to_vec(),
+                                            content: Some(lattice_kernel::proto::network::gossip_message::Content::Intention(proto)),
+                                        };
+                                        let encoded = gossip_msg.encode_to_vec();
+                                        if let Err(e) = gossip_clone.broadcast(store_id_captured, encoded).await {
+                                            tracing::warn!(error = %e, "Failed to broadcast intention via gossip");
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                        tracing::warn!(lagged = n, "Intention forwarder lagged");
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                }
+                            }
+                        });
+                        
+                        // Task 3: Watch for new active peers → gossip.join_peers
+                        let gossip_for_watcher = gossip.clone();
+                        let mut peer_events = pm_for_watcher.subscribe_peer_events();
+                        let store_id_for_watcher = store_id;
+                        tokio::spawn(async move {
+                            use futures_util::StreamExt;
+                            while let Some(event) = peer_events.next().await {
+                                let pubkey = match &event {
+                                    lattice_model::PeerEvent::Added { pubkey, status }
+                                        if *status == lattice_model::PeerStatus::Active => Some(*pubkey),
+                                    lattice_model::PeerEvent::StatusChanged { pubkey, new, .. }
+                                        if *new == lattice_model::PeerStatus::Active => Some(*pubkey),
+                                    _ => None,
+                                };
+                                if let Some(pk) = pubkey {
+                                    tracing::debug!(store_id = %store_id_for_watcher, peer = %pk, "Adding newly-active peer to gossip");
+                                    if let Err(e) = gossip_for_watcher.join_peers(store_id_for_watcher, vec![pk]).await {
+                                        tracing::warn!(error = %e, "Failed to add peer to gossip topic");
+                                    }
                                 }
                             }
                         });
@@ -379,51 +400,6 @@ impl<T: Transport> NetworkService<T> {
                 Ok(())
             }
         }
-    }
-
-    /// Create a simulated NetworkService (no Router, no iroh Gossip).
-    ///
-    /// Suitable for in-memory testing with `ChannelTransport` or any
-    /// non-iroh `Transport` implementation.
-    ///
-    /// Accepts an optional `event_rx` to handle NetEvents (Join, SyncWithPeer, etc.)
-    /// and an optional `gossip` layer (e.g. `BroadcastGossip` for in-memory gossip).
-    pub fn new_simulated(
-        provider: Arc<dyn NodeProviderExt>,
-        transport: T,
-        event_rx: Option<broadcast::Receiver<NetEvent>>,
-        gossip: Option<Arc<dyn lattice_net_types::GossipLayer>>,
-    ) -> Arc<Self> {
-        let has_gossip = gossip.is_some();
-        let sessions = Arc::new(super::session::SessionTracker::new());
-        
-        Self::spawn_event_listener(
-            sessions.clone(),
-            transport.network_events(),
-            gossip.as_ref().map(|g| g.network_events()),
-        );
-
-        let service = Arc::new(Self {
-            provider,
-            transport,
-            gossip,
-            peer_stores: Arc::new(RwLock::new(HashSet::new())),
-            sessions,
-            router: None,
-            global_gossip_enabled: Arc::new(AtomicBool::new(has_gossip)),
-            auto_sync_enabled: Arc::new(AtomicBool::new(true)),
-        });
-
-        // Spawn accept loop
-        { let s = service.clone(); tokio::spawn(async move { s.run_accept_loop().await; }); }
-
-        // Spawn event handler if event_rx provided
-        if let Some(rx) = event_rx {
-            let s = service.clone();
-            tokio::spawn(async move { Self::run_net_event_handler(s, rx).await; });
-        }
-
-        service
     }
 
     /// Spawns a background task to listen for abstract network events
@@ -617,7 +593,7 @@ impl<T: Transport> NetworkService<T> {
             gossip.shutdown().await;
         }
         if let Some(router) = &self.router {
-            router.shutdown().await.map_err(|e| e.to_string())?;
+            router.shutdown().await?;
         }
         Ok(())
     }

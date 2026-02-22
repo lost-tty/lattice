@@ -9,6 +9,7 @@ license.workspace = true
 lattice-node = { workspace = true }
 lattice-kernel = { workspace = true }
 lattice-net = { workspace = true }
+lattice-net-iroh = { workspace = true }
 lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
 lattice-storage = { workspace = true }

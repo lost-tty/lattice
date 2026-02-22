@@ -8,6 +8,8 @@
 
 mod channel_transport;
 mod broadcast_gossip;
+mod sim_backend;
 
 pub use channel_transport::{ChannelTransport, ChannelNetwork, ChannelConnection, ChannelBiStream};
 pub use broadcast_gossip::{BroadcastGossip, GossipNetwork};
+pub use sim_backend::SimBackend;

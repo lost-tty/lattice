@@ -88,8 +88,8 @@ async fn test_partition_repro() {
     let transport_a = ChannelTransport::new(node_a.node_id(), &net).await;
     let transport_b = ChannelTransport::new(node_b.node_id(), &net).await;
 
-    let _server_a = network::NetworkService::new_simulated(node_a.clone(), transport_a, Some(node_a.subscribe_net_events()), None);
-    let server_b = network::NetworkService::new_simulated(node_b.clone(), transport_b, Some(node_b.subscribe_net_events()), None);
+    let _server_a = network::NetworkService::new(node_a.clone(), lattice_net_sim::SimBackend::new(transport_a, node_a.clone(), None), node_a.subscribe_net_events());
+    let server_b = network::NetworkService::new(node_b.clone(), lattice_net_sim::SimBackend::new(transport_b, node_b.clone(), None), node_b.subscribe_net_events());
     server_b.set_global_gossip_enabled(false);
 
     let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store a");

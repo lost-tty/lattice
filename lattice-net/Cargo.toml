@@ -1,6 +1,6 @@
 [package]
 name = "lattice-net"
-description = "Networking layer for Lattice using Iroh"
+description = "Transport-agnostic networking layer for Lattice"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,8 +10,6 @@ lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
 lattice-net-types = { workspace = true }
 lattice-sync = { workspace = true }
-iroh = { workspace = true }
-iroh-gossip = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }
@@ -24,7 +22,6 @@ blake3.workspace = true
 anyhow = "1.0.100"
 futures-lite = "2.6.1"
 regex = "1"
-ed25519-dalek.workspace = true
 async-trait = "0.1"
 
 [dev-dependencies]
@@ -40,3 +37,4 @@ rand = { workspace = true }
 lattice-store-base = { workspace = true }
 lattice-proto = { workspace = true }
 lattice-net-sim = { path = "../lattice-net-sim" }
+ed25519-dalek = { workspace = true }
