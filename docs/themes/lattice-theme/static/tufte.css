@@ -40,6 +40,12 @@
 }
 
 /* Tufte CSS styles */
+:root {
+    --content-width: max(40rem, 55%);
+    --content-width-code: max(40rem, 52.5%);
+    --content-width-list: max(40rem, 50%);
+}
+
 html {
     font-size: 15px;
 }
@@ -93,7 +99,7 @@ h3 {
 hr {
     display: block;
     height: 1px;
-    width: max(40rem, 55%);
+    width: var(--content-width);
     border: 0;
     border-top: 1px solid #ccc;
     margin: 1em 0;
@@ -191,7 +197,7 @@ section>table {
 section>dl,
 section>ol,
 section>ul {
-    width: 50%;
+    width: var(--content-width-list);
     -webkit-padding-start: 5%;
 }
 
@@ -206,7 +212,7 @@ figure {
     font-size: 100%;
     font: inherit;
     vertical-align: baseline;
-    max-width: max(40rem, 55%);
+    max-width: var(--content-width);
     -webkit-margin-start: 0;
     -webkit-margin-end: 0;
     margin: 0 0 3em 0;
@@ -326,7 +332,7 @@ h3>code {
 
 pre>code {
     font-size: 0.9rem;
-    width: max(40rem, 52.5%);
+    width: var(--content-width-code);
     margin-left: 2.5%;
     overflow-x: auto;
     display: block;

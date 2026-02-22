@@ -37,7 +37,7 @@ Decouple `lattice-net` from Iroh-specific types so multi-node networks can be si
 - [x] `ChannelTransport`: In-memory transport using mpsc channels (`lattice-net-sim` crate)
 - [x] All integration tests migrated to `ChannelTransport`, shared helpers in `tests/common/mod.rs`
 - [x] `BroadcastGossip`: In-memory gossip implementation
-- [ ] Document `lattice-net-sim` crate (`ChannelTransport`, `BroadcastGossip`, `GossipNetwork`) in `docs/`
+- [x] Document `lattice-net-sim` crate (`ChannelTransport`, `BroadcastGossip`, `GossipNetwork`) in `docs/`
 - [ ] N-node simulator: configurable topology, round-based sync, convergence metrics
 - [ ] **Fix flaky `test_large_dataset_sync`:** Intermittent partial sync failures (misses items). Likely race between auto_sync boot task and explicit `sync_all_by_id`. Currently mitigated by disabling auto_sync in test.
 - [ ] **Gate:** 20+ node convergence simulation with metrics: rounds to convergence, message count, total bytes, gap recovery count. Runs as a standalone binary (like `weaver-hs`).

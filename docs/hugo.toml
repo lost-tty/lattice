@@ -26,6 +26,11 @@ theme = "lattice-theme"
     parent = "reference"
     weight = 5
   [[menus.main]]
+    name = "Simulation Harness"
+    pageRef = "/simulation"
+    parent = "reference"
+    weight = 7
+  [[menus.main]]
     name = "Roadmap"
     pageRef = "/roadmap"
     parent = "reference"

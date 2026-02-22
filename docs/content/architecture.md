@@ -8,7 +8,7 @@ title: "Architecture"
 
 The heart of Lattice is the **Weaver Protocol**, a hybrid **Merkle DAG + linearized witness log** architecture:
 
-1. **Intentions (DAG):** Every write produces a `SignedIntention` — a BLAKE3-hashed, Ed25519-signed operation that includes explicit `causal_deps` (pointers to prior hashes from the same author and any causally-dependent operations). These form a content-addressed DAG.
+1. **Intentions (DAG):** Every write produces a `SignedIntention` — a BLAKE3-hashed, Ed25519-signed operation that includes a `Condition` (pointers to prior hashes from the same author and any causally-dependent operations). These form a content-addressed DAG.
 2. **Floating resolution:** Out-of-order intentions are buffered as "floating" and indexed by their missing dependency hash. When the dependency arrives, dependents are woken and applied.
 3. **Witness log (linearization):** The local node "witnesses" each applied intention by appending it to a monotonic, cryptographically chained `WitnessRecord` log, establishing a local total order.
 
