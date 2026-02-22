@@ -126,6 +126,10 @@ Manage log growth on long-running nodes via snapshots, pruning, and finality che
 - [x] Support 100M+ intentions without excessive RAM
 
 ### 15E: Advanced Sync Optimization (Future)
+- [ ] **Modular-Add Fingerprints:** Replace XOR-based fingerprints with modular addition (mod 2^256). XOR is linear and cancels duplicates (`a ⊕ a = 0`); mod-add is strictly more robust at identical cost. Affected sites:
+  - `IntentionStore::xor_fingerprint()` / `derive_table_fingerprint()` / `fingerprint_range()` in `lattice-kernel`
+  - `SyncProvider` trait docs in `lattice-kernel/src/sync_provider.rs`
+  - Reconciler mock in `lattice-sync` tests
 - [ ] **Persistent Merkle Index / Range Accumulator:**
   - Avoid O(N) scans for range fingerprints (currently linear)
   - Pre-compute internal node hashes in a B-Tree or Merkle Tree structure

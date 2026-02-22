@@ -21,6 +21,11 @@ theme = "lattice-theme"
     name = "Reference"
     weight = 90
   [[menus.main]]
+    name = "Architecture"
+    pageRef = "/architecture"
+    parent = "reference"
+    weight = 5
+  [[menus.main]]
     name = "Roadmap"
     pageRef = "/roadmap"
     parent = "reference"

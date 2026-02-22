@@ -93,7 +93,7 @@ h3 {
 hr {
     display: block;
     height: 1px;
-    width: 55%;
+    width: max(40rem, 55%);
     border: 0;
     border-top: 1px solid #ccc;
     margin: 1em 0;
@@ -146,23 +146,24 @@ div.epigraph {
     margin: 5em 0;
 }
 
-div.epigraph > blockquote {
+div.epigraph>blockquote {
     margin-top: 3em;
     margin-bottom: 3em;
 }
 
-div.epigraph > blockquote,
-div.epigraph > blockquote > p {
+div.epigraph>blockquote,
+div.epigraph>blockquote>p {
     font-style: italic;
 }
 
-div.epigraph > blockquote > footer {
+div.epigraph>blockquote>footer {
     font-style: normal;
 }
 
-div.epigraph > blockquote > footer > cite {
+div.epigraph>blockquote>footer>cite {
     font-style: italic;
 }
+
 /* end chapter epigraphs styles */
 
 blockquote {
@@ -170,26 +171,26 @@ blockquote {
 }
 
 blockquote p {
-    width: 55%;
+    width: max(40rem, 55%);
     margin-right: 40px;
 }
 
 blockquote footer {
-    width: 55%;
+    width: max(40rem, 55%);
     font-size: 1.1rem;
     text-align: right;
 }
 
-section > p,
-section > footer,
-section > table {
-    width: 55%;
+section>p,
+section>footer,
+section>table {
+    width: max(40rem, 55%);
 }
 
 /* 50 + 5 == 55, to be the same width as paragraph */
-section > dl,
-section > ol,
-section > ul {
+section>dl,
+section>ol,
+section>ul {
     width: 50%;
     -webkit-padding-start: 5%;
 }
@@ -205,7 +206,7 @@ figure {
     font-size: 100%;
     font: inherit;
     vertical-align: baseline;
-    max-width: 55%;
+    max-width: max(40rem, 55%);
     -webkit-margin-start: 0;
     -webkit-margin-end: 0;
     margin: 0 0 3em 0;
@@ -299,43 +300,45 @@ div.table-wrapper {
     letter-spacing: .03em;
 }
 
-code, pre > code {
+code,
+pre>code {
     font-family: Consolas, "Liberation Mono", Menlo, Courier, monospace;
     font-size: 1.0rem;
     line-height: 1.42;
-    -webkit-text-size-adjust: 100%; /* Prevent adjustments of font size after orientation changes in iOS. See https://github.com/edwardtufte/tufte-css/issues/81#issuecomment-261953409 */
+    -webkit-text-size-adjust: 100%;
+    /* Prevent adjustments of font size after orientation changes in iOS. See https://github.com/edwardtufte/tufte-css/issues/81#issuecomment-261953409 */
 }
 
-.sans > code {
+.sans>code {
     font-size: 1.2rem;
 }
 
-h1 > code,
-h2 > code,
-h3 > code {
+h1>code,
+h2>code,
+h3>code {
     font-size: 0.80em;
 }
 
-.marginnote > code,
-.sidenote > code {
+.marginnote>code,
+.sidenote>code {
     font-size: 1rem;
 }
 
-pre > code {
+pre>code {
     font-size: 0.9rem;
-    width: 52.5%;
+    width: max(40rem, 52.5%);
     margin-left: 2.5%;
     overflow-x: auto;
     display: block;
 }
 
-pre.fullwidth > code {
+pre.fullwidth>code {
     width: 90%;
 }
 
 .fullwidth {
     max-width: 90%;
-    clear:both;
+    clear: both;
 }
 
 span.newthought {
@@ -349,7 +352,8 @@ input.margin-toggle {
 
 label.sidenote-number {
     display: inline-block;
-    max-height: 2rem; /* should be less than or equal to paragraph line-height */
+    max-height: 2rem;
+    /* should be less than or equal to paragraph line-height */
 }
 
 label.margin-toggle:not(.sidenote-number) {
@@ -358,7 +362,8 @@ label.margin-toggle:not(.sidenote-number) {
 
 .iframe-wrapper {
     position: relative;
-    padding-bottom: 56.25%; /* 16:9 */
+    padding-bottom: 56.25%;
+    /* 16:9 */
     padding-top: 25px;
     height: 0;
 }
@@ -379,19 +384,19 @@ label.margin-toggle:not(.sidenote-number) {
     }
 
     hr,
-    section > p,
-    section > footer,
-    section > table {
+    section>p,
+    section>footer,
+    section>table {
         width: 100%;
     }
 
-    pre > code {
+    pre>code {
         width: 97%;
     }
 
-    section > dl,
-    section > ol,
-    section > ul {
+    section>dl,
+    section>ol,
+    section>ul {
         width: 90%;
     }
 
@@ -424,8 +429,8 @@ label.margin-toggle:not(.sidenote-number) {
         display: none;
     }
 
-    .margin-toggle:checked + .sidenote,
-    .margin-toggle:checked + .marginnote {
+    .margin-toggle:checked+.sidenote,
+    .margin-toggle:checked+.marginnote {
         display: block;
         float: left;
         left: 1rem;
