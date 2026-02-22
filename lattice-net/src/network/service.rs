@@ -292,8 +292,16 @@ impl<T: Transport> NetworkService<T> {
         store_id: Uuid,
         peer_id: PubKey,
     ) -> Result<u64, LatticeNetError> {
-        let store = self.wait_for_store(store_id).await
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
+        // TODO(15D): Replace polling with Notify-based signaling
+        let store = {
+            let mut s = self.get_store(store_id);
+            for _ in 0..10 {
+                if s.is_some() { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                s = self.get_store(store_id);
+            }
+            s.ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?
+        };
 
         tracing::info!("Bootstrap: connecting to peer {}", peer_id);
 
@@ -693,24 +701,6 @@ impl<T: Transport> NetworkService<T> {
     pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
         self.provider.store_registry().get_network_store(&store_id)
     }
-    
-    /// Wait for a store to be registered (handles async registration race).
-    /// Returns None if store not available after timeout.
-    async fn wait_for_store(&self, store_id: Uuid) -> Option<NetworkStore> {
-        // Try immediately first
-        if let Some(store) = self.get_store(store_id) {
-            return Some(store);
-        }
-        
-        // Poll briefly (async registration should complete quickly)
-        for _ in 0..10 {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            if let Some(store) = self.get_store(store_id) {
-                return Some(store);
-            }
-        }
-        None
-    }
 
     // ==================== Peer Discovery ====================
     
@@ -834,24 +824,37 @@ impl<T: Transport> NetworkService<T> {
     // ==================== Convenience Methods (by ID) ====================
     
     /// Sync with all active peers for a store (by ID).
-    /// Waits briefly for store registration if not immediately available.
     pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, LatticeNetError> {
-        // Wait for store to be registered (async registration from NetEvent::StoreReady)
-        let store = self.wait_for_store(store_id).await
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
+        // TODO(15D): Replace polling with Notify-based signaling
+        let store = {
+            let mut s = self.get_store(store_id);
+            for _ in 0..10 {
+                if s.is_some() { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                s = self.get_store(store_id);
+            }
+            s.ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?
+        };
         self.sync_all(&store).await
     }
     
     /// Sync with a specific peer (by store ID).
-    /// Waits briefly for store registration if not immediately available.
     pub async fn sync_with_peer_by_id(
         &self,
         store_id: Uuid,
         peer_id: PubKey,
         authors: &[PubKey]
     ) -> Result<SyncResult, LatticeNetError> {
-        let store = self.wait_for_store(store_id).await
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
+        // TODO(15D): Replace polling with Notify-based signaling
+        let store = {
+            let mut s = self.get_store(store_id);
+            for _ in 0..10 {
+                if s.is_some() { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                s = self.get_store(store_id);
+            }
+            s.ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?
+        };
         self.sync_with_peer(&store, peer_id, authors).await
     }
 
@@ -865,8 +868,16 @@ impl<T: Transport> NetworkService<T> {
         target_hash: Hash,
         since_hash: Option<Hash>, 
     ) -> Result<usize, LatticeNetError> {
-         let store = self.wait_for_store(store_id).await
-            .ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?;
+         // TODO(15D): Replace polling with Notify-based signaling
+         let store = {
+            let mut s = self.get_store(store_id);
+            for _ in 0..10 {
+                if s.is_some() { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                s = self.get_store(store_id);
+            }
+            s.ok_or_else(|| LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id)))?
+         };
 
          tracing::debug!("FetchChain: connecting to peer");
          let conn = self.transport.connect(&peer_id).await

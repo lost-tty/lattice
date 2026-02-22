@@ -28,7 +28,6 @@ Decouple `lattice-net` from Iroh-specific types so multi-node networks can be si
 - [x] Extract `GossipLayer` trait from `iroh_gossip::Gossip` (subscribe/unsubscribe/shutdown)
 - [x] `IrohTransport` + `IrohGossip`: Production implementations wrapping Iroh QUIC
 - [x] `NetworkService` generic over `Transport` + `GossipLayer`
-- [ ] **Replace Polling with Notify:** `register_store_by_id` and `wait_for_store` use `sleep()` polling loops. Replace with `tokio::sync::Notify` or channel-based signaling.
 - [ ] **Async Gossip Queue:** Decouple `IntentionStore` ingest from broadcast. Use a bounded channel with backpressure to prevent local ingest latency spikes during network congestion.
 - [x] **Event-Driven Gap Handling:** Replace `GapHandler` callback in `GossipLayer::subscribe` with `SystemEvent::MissingDep` emitted by the store. NetworkService subscribes to the event instead of injecting a closure. Simplifies the gossip trait and decouples gossip from gap recovery.
 - [x] **SessionTracker Decoupling:** Decoupled `SessionTracker` from Iroh-specific gossip events. Introduced `NetworkEvent` stream emitted by the `Transport` and `GossipLayer` traits that `NetworkService` consumes via `spawn_event_listener` to update the abstract session tracker. Concrete network implementations no longer modify core state directly.
@@ -120,6 +119,7 @@ Manage log growth on long-running nodes via snapshots, pruning, and finality che
 - [ ] Bootstrapping a child store requires a **Two-Phase Protocol** because Negentropy cannot sync from an implicit zero-genesis if the store has been pruned.
 - [ ] **Phase 1 (Snapshot):** Request the opaque snapshot (`state.db`) from the peer for the discovered child store.
 - [ ] **Phase 2 (Tail Sync):** Run Negentropy to sync floating intentions that occurred *after* the snapshot's causal frontier.
+- [ ] **Replace Polling with Notify:** `register_store_by_id` and boot sync use `sleep()` polling loops. Replace with `tokio::sync::Notify` or channel-based signaling.
 
 ### 15E: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
