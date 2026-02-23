@@ -16,41 +16,7 @@ title: "Roadmap"
 | **M8**           | Reflection & introspection: `lattice-api` crate, deep type schemas, `ReflectValue` structured results, store watchers & FFI stream bindings   |
 | **M10**          | Fractal Store Model: replaced `Mesh` struct with recursive store hierarchy, `TABLE_SYSTEM` with HeadList CRDTs, `RecursiveWatcher` for child discovery, invite/revoke peer management, `PeerStrategy` (Independent/Inherited), flattened `StoreManager`, `NetworkService` (renamed from `MeshService`), proper `Node::shutdown()` |
 | **M11**          | Weaver Migration & Protocol Sync: Intention DAG (`IntentionStore`), Negentropy set reconciliation, Smart Chain Fetch, stream-based Bootstrap (Clone) Protocol without gossip storms |
-
----
-
-## Milestone 12: Network Abstraction & Simulation
-
-Decouple `lattice-net` from Iroh-specific types so multi-node networks can be simulated in-memory. Required before validating Negentropy sync at scale.
-
-### 12A: Transport Abstraction
-- [x] Extract `Transport` trait from `LatticeEndpoint` (connect/accept → MessageSink/MessageStream)
-- [x] Extract `GossipLayer` trait from `iroh_gossip::Gossip` (subscribe/unsubscribe/shutdown)
-- [x] `IrohTransport` + `IrohGossip`: Production implementations wrapping Iroh QUIC
-- [x] `NetworkService` generic over `Transport` + `GossipLayer`
-- [x] **Gossip Lag Tracking:** The gossip forwarder drops messages when lagged. Track per-store gossip stats (drop count, last drop timestamp, whether any successful broadcast occurred since last drop). Use this to inform when a full sync should be triggered (e.g., if drops occurred and no successful gossip since, schedule `sync_all`).
-- [x] **Event-Driven Gap Handling:** Replace `GapHandler` callback in `GossipLayer::subscribe` with `SystemEvent::MissingDep` emitted by the store. NetworkService subscribes to the event instead of injecting a closure. Simplifies the gossip trait and decouples gossip from gap recovery.
-- [x] **SessionTracker Decoupling:** Decoupled `SessionTracker` from Iroh-specific gossip events. Introduced `NetworkEvent` stream emitted by the `Transport` and `GossipLayer` traits that `NetworkService` consumes via `spawn_event_listener` to update the abstract session tracker. Concrete network implementations no longer modify core state directly.
-- [x] **Extract `lattice-net-iroh`:** Move `IrohTransport`, `GossipManager`, and Router setup into a dedicated crate. `lattice-net` becomes fully transport-agnostic, depending only on `lattice-net-types` traits.
-
-### 12B: In-Memory Simulation Harness
-- [x] `ChannelTransport`: In-memory transport using mpsc channels (`lattice-net-sim` crate)
-- [x] All integration tests migrated to `ChannelTransport`, shared helpers in `tests/common/mod.rs`
-- [x] `BroadcastGossip`: In-memory gossip implementation
-- [x] Document `lattice-net-sim` crate (`ChannelTransport`, `BroadcastGossip`, `GossipNetwork`) in `docs/`
-- [ ] N-node simulator: configurable topology, round-based sync, convergence metrics
-- [ ] **Fix flaky `test_large_dataset_sync`:** Intermittent partial sync failures (misses items). Likely race between auto_sync boot task and explicit `sync_all_by_id`. Currently mitigated by disabling auto_sync in test.
-- [ ] **Gate:** 20+ node convergence simulation with metrics: rounds to convergence, message count, total bytes, gap recovery count. Runs as a standalone binary (like `weaver-hs`).
-
----
-
-## Milestone 12C: Symmetric Sync
-
-Negentropy sync is pull-only — only the initiator discovers missing items. The responder sends its data but never computes its own needs, requiring two sync calls for full bidirectional exchange.
-
-- [ ] Compute `need` on both sides during `RangeItemsRequest` processing in `Reconciler`
-- [ ] Fix `test_bidirectional_sync` in `sync_repro.rs` (currently failing)
-- [ ] Verify with ChannelTransport bidirectional test (single sync call)
+| **M12**          | Network Abstraction & Simulation: `Transport`/`GossipLayer` traits, `IrohTransport` extracted to `lattice-net-iroh`, `ChannelTransport`/`BroadcastGossip` in `lattice-net-sim`, gossip lag tracking, event-driven gap handling, `SessionTracker` decoupling, symmetric Negentropy sync |
 
 ---
 
@@ -204,19 +170,31 @@ Replace hardcoded state machines with dynamic Wasm modules.
 
 ---
 
-## Milestone 19: Embedded Proof ("Lattice Nano")
+## Milestone 19: N-Node Simulator
+
+Scriptable simulation framework for testing Lattice networking at scale. Built on the `lattice-net-sim` crate (M12B).
+
+- [ ] **Simulator library** (`Simulator` API): Scriptable — `add_node`, `take_offline`, `bring_online`, `join_store`, `put`, `sync`, `assert_converged`
+- [ ] **Rhai scripting**: Embed Rhai for scenario scripts (loops, conditionals, dynamic topology changes)
+- [ ] **Standalone binary**: CLI that loads and runs `.rhai` scenario files
+- [ ] **Fix flaky `test_large_dataset_sync`:** Intermittent partial sync failures (misses items). Likely race between auto_sync boot task and explicit `sync_all_by_id`. Currently mitigated by disabling auto_sync in test.
+- [ ] **Gate:** 20+ node convergence simulation with metrics: sync calls, items transferred, convergence %, wall-clock time
+
+---
+
+## Milestone 20: Embedded Proof ("Lattice Nano")
 
 Run the kernel on the RP2350.
 
 > Because CLI is already separated from Daemon (M7) and storage is abstracted (M9), only the Daemon needs porting.
 > **Note:** Requires substantial refactoring of `lattice-kernel` to support `no_std`.
 
-### 19A: `no_std` Refactoring
+### 20A: `no_std` Refactoring
 - [ ] Split `lattice-kernel` into `core` (logic) and `std` (IO)
 - [ ] Replace `wasmtime` (JIT) with `wasmi` (Interpreter) for embedded target
 - [ ] Port storage layer to `sequential-storage` (Flash) via `StorageBackend`
 
-### 19B: Hardware Demo
+### 20B: Hardware Demo
 - [ ] Build physical USB stick prototype
 - [ ] Implement BLE/Serial transport
 - [ ] Sync a file from Laptop → Stick → Phone without Internet
