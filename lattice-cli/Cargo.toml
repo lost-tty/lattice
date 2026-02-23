@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 lattice-runtime = { workspace = true }
-rustyline-async = { git = "https://github.com/lost-tty/rustyline-async" }
+rustyline-async = "0.4"
 hex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
