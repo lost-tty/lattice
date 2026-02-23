@@ -182,6 +182,7 @@ impl Lattice {
     pub fn new(_data_dir: Option<String>) -> Arc<Self> {
         // Initialize logging
         let _ = tracing_subscriber::fmt()
+            .with_ansi(false)
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,iroh=warn,iroh_net=warn"))
@@ -521,11 +522,14 @@ impl Lattice {
         }))
     }
 
-    // Events 
-    pub async fn subscribe(&self) -> Result<Arc<LatticeEventStream>, LatticeError> {
-        let r_guard = self.runtime.read().await;
+    // Events
+    // Note: NOT async — must run on self.rt so tokio::spawn in the backend
+    // finds the correct reactor. UniFFI's async executor is separate.
+    pub fn subscribe(&self) -> Result<Arc<LatticeEventStream>, LatticeError> {
+        let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         
+        let _guard = self.rt.enter();
         let rx = r.backend().subscribe().map_err(|e| LatticeError::from_backend(e))?;
         
         Ok(Arc::new(LatticeEventStream {

@@ -166,7 +166,7 @@ message WitnessLogRequest {
 
 // Causal dependency condition — mirrors kernel's Condition enum.
 message Condition {
-  oneof condition {
+  oneof kind {
     CausalDeps v1 = 1;  // Explicit causal dependencies (AND logic)
   }
 }

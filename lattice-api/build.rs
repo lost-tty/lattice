@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ffi_enums = [
             "ErrorCode",
             ".lattice.daemon.v1.NodeEvent.node_event",
-            ".lattice.daemon.v1.Condition.condition",
+            ".lattice.daemon.v1.Condition.kind",
             ".lattice.daemon.v1.SExpr.value",
         ];
         

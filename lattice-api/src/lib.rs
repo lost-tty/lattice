@@ -38,7 +38,7 @@ impl From<lattice_model::weaver::Condition> for proto::Condition {
     fn from(c: lattice_model::weaver::Condition) -> Self {
         match c {
             lattice_model::weaver::Condition::V1(deps) => proto::Condition {
-                condition: Some(proto::condition::Condition::V1(proto::CausalDeps {
+                kind: Some(proto::condition::Kind::V1(proto::CausalDeps {
                     hashes: deps.into_iter()
                         .filter(|h| *h != lattice_model::types::Hash::ZERO)
                         .map(|h| h.to_vec())
@@ -107,8 +107,8 @@ impl From<proto::Hlc> for lattice_model::hlc::HLC {
 
 impl From<proto::Condition> for lattice_model::weaver::Condition {
     fn from(p: proto::Condition) -> Self {
-        match p.condition {
-            Some(proto::condition::Condition::V1(deps)) => {
+        match p.kind {
+            Some(proto::condition::Kind::V1(deps)) => {
                 let hashes = deps.hashes.into_iter().filter_map(|h| {
                     lattice_model::types::Hash::try_from(h.as_slice()).ok()
                 }).collect();
@@ -250,8 +250,8 @@ mod tests {
         let h1 = Hash([0xAA; 32]);
         let cond = Condition::v1(vec![Hash::ZERO, h1]);
         let p: proto::Condition = cond.into();
-        match p.condition.unwrap() {
-            proto::condition::Condition::V1(deps) => {
+        match p.kind.unwrap() {
+            proto::condition::Kind::V1(deps) => {
                 assert_eq!(deps.hashes.len(), 1, "ZERO hash should be filtered out");
                 assert_eq!(deps.hashes[0], h1.to_vec());
             }
@@ -293,8 +293,8 @@ mod tests {
 
         // Condition
         let cond = p.condition.unwrap();
-        match cond.condition.unwrap() {
-            proto::condition::Condition::V1(deps) => {
+        match cond.kind.unwrap() {
+            proto::condition::Kind::V1(deps) => {
                 assert_eq!(deps.hashes.len(), 1);
                 assert_eq!(deps.hashes[0], dep.to_vec());
             }

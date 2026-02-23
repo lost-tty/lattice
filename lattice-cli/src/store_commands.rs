@@ -474,9 +474,9 @@ fn detail_to_sexpr(detail: &lattice_runtime::IntentionDetail) -> SExpr {
     
     // Condition
     if let Some(ref cond) = intention.condition {
-        if let Some(ref c) = cond.condition {
+        if let Some(ref c) = cond.kind {
             match c {
-                lattice_runtime::condition::Condition::V1(deps) => {
+                lattice_runtime::condition::Kind::V1(deps) => {
                     let mut cond_items = vec![SExpr::sym("v1")];
                     for h in &deps.hashes {
                         cond_items.push(SExpr::raw(h.clone()));
@@ -581,8 +581,8 @@ pub async fn cmd_history(backend: &dyn LatticeBackend, store_id: Option<Uuid>, w
         let hash = Hash::try_from(intention.hash.as_slice()).unwrap_or(Hash::ZERO);
         let author = PubKey::try_from(intention.author.as_slice()).unwrap_or(PubKey::default());
         let causal_deps: Vec<Hash> = intention.condition.as_ref()
-            .and_then(|c| match c.condition.as_ref()? {
-                lattice_runtime::condition::Condition::V1(d) => {
+            .and_then(|c| match c.kind.as_ref()? {
+                lattice_runtime::condition::Kind::V1(d) => {
                     Some(d.hashes.iter().filter_map(|h| Hash::try_from(h.as_slice()).ok()).collect())
                 }
             })
