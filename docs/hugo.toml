@@ -31,6 +31,11 @@ theme = "lattice-theme"
     parent = "reference"
     weight = 7
   [[menus.main]]
+    name = "Stability Frontier"
+    pageRef = "/stability-frontier"
+    parent = "reference"
+    weight = 8
+  [[menus.main]]
     name = "Roadmap"
     pageRef = "/roadmap"
     parent = "reference"

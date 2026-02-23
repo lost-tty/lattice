@@ -72,7 +72,7 @@ Remove improper architectural couplings and establish clean abstraction boundari
 Add the "Meet" operator: find the common ancestor of two divergent heads, extract the deltas, and attempt a 3-way merge.
 
 ### 14A: Kernel Primitives
-- [ ] **Store Trait Abstraction:** Decouple `StateMachine` from `redb`. Introduce a generic `Store` trait (get/put/del) that can be implemented by both `RedbStore` (disk) and `MemoryStore` (RAM). This allows replaying history into an ephemeral `MemoryStore` for conflict resolution without persisting changes.
+- [ ] **Store Trait Abstraction:** Decouple `StateMachine` from `redb`. Introduce a generic `Store` trait (get/put/del) that can be implemented by both `RedbStore` (disk) and `MemoryStore` (RAM). This is the shared "ephemeral replay" primitive: replay a subset of intentions into a temporary state without mutating live storage. Used by the Meet operator (replay LCA → each head) and frontier snapshotting in M15B (replay last snapshot → frontier).
 - [ ] **LCA Index:** Maintain an efficient index (likely `Hash -> (Height, Parents)`) to avoid O(N) scans. "Height" allows fast-forwarding the deeper node before scanning for intersection.
 - [ ] **Meet Query (`find_lca`):** `fn find_lca(hash_a, hash_b) -> Result<Hash>`
 - [ ] **Diff Query (`get_path`):** `fn get_path(from, to) -> Result<Vec<Intention>>`
@@ -95,37 +95,45 @@ Add the "Meet" operator: find the common ancestor of two divergent heads, extrac
 
 ## Milestone 15: Log Lifecycle & Pruning
 
-Manage log growth on long-running nodes via snapshots, pruning, and finality checkpoints.
+Manage log growth on long-running nodes via stability frontier, snapshots, pruning, and finality checkpoints.
 
-> **See:** [DAG-Based Pruning Architecture](protocols/pruning.md) for details on Ancestry-based metrics and Log Rewriting.
+> **See:** [Stability Frontier](stability-frontier.md) for the full design.
 
-### 15A: Snapshotting
-- [ ] `state.snapshot()` when log grows large
-- [ ] Store snapshots in `snapshot.db`
-- [ ] Bootstrap new peers from snapshot instead of full log replay
+### 15A: Stability Frontier & Tip Attestations
+- [ ] `SystemOp::TipAttestation { tips: Vec<(PubKey, Hash)> }` — publish changed author tips as SystemOps
+- [ ] Attestation keys in `TABLE_SYSTEM`: `attestation/{attester}/{author} → Hash` (LWW by HLC)
+- [ ] Derive per-author frontier: `frontier[A] = min(tip[A] across all Active peers)`
+- [ ] Attestation triggers: post-sync, batch threshold, periodic heartbeat (~15 min), graceful shutdown
+- [ ] **Lag metric:** Per-peer divergence from local tips, surfaced via `NodeEvent::PeerLagWarning` and `store status`
 
-### 15B: Waterlevel Pruning
-- [ ] Calculate stability frontier (min seq acknowledged by all peers)
-- [ ] `truncate_prefix(seq)` for old log intentions
+### 15B: Snapshotting
+- [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Uses the ephemeral `MemoryStore` from M14A.
+- [ ] Store snapshots in `snapshot.db` (per-store, includes `TABLE_SYSTEM` attestation state)
+- [ ] Bootstrap new peers from snapshot + tail sync instead of full log replay
+- [ ] **Future optimization:** Inverse operations stored in `WitnessRecord` could allow rolling back from current state to frontier in O(head − frontier), avoiding replay. Deferred until profiling shows replay is a bottleneck.
+
+### 15C: Pruning
+- [ ] `truncate_prefix` for all intentions per author up to `frontier[A]`
+- [ ] Discard individual attestation intentions below the frontier (snapshot carries state forward)
 - [ ] Preserve intentions newer than frontier
 
-### 15C: Checkpointing / Finality
+### 15D: Checkpointing / Finality
 - [ ] Periodically finalize state hash (protect against "Deep History Attacks")
 - [ ] Signed checkpoint intentions in sigchain
 - [ ] Nodes reject intentions that contradict finalized checkpoints
 
-### 15D: Recursive Store Bootstrapping (Pruning-Aware)
+### 15E: Recursive Store Bootstrapping (Pruning-Aware)
 - [ ] `RecursiveWatcher` identifies child stores from live state, not just intention logs.
 - [ ] Bootstrapping a child store requires a **Two-Phase Protocol** because Negentropy cannot sync from an implicit zero-genesis if the store has been pruned.
 - [ ] **Phase 1 (Snapshot):** Request the opaque snapshot (`state.db`) from the peer for the discovered child store.
 - [ ] **Phase 2 (Tail Sync):** Run Negentropy to sync floating intentions that occurred *after* the snapshot's causal frontier.
 - [ ] **Replace Polling with Notify:** `register_store_by_id` and boot sync use `sleep()` polling loops. Replace with `tokio::sync::Notify` or channel-based signaling.
 
-### 15E: Hash Index Optimization ✅
+### 15F: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
 - [x] Support 100M+ intentions without excessive RAM
 
-### 15E: Advanced Sync Optimization (Future)
+### 15G: Advanced Sync Optimization (Future)
 - [ ] **Modular-Add Fingerprints:** Replace XOR-based fingerprints with modular addition (mod 2^256). XOR is linear and cancels duplicates (`a ⊕ a = 0`); mod-add is strictly more robust at identical cost. Affected sites:
   - `IntentionStore::xor_fingerprint()` / `derive_table_fingerprint()` / `fingerprint_range()` in `lattice-kernel`
   - `SyncProvider` trait docs in `lattice-kernel/src/sync_provider.rs`
@@ -259,7 +267,11 @@ Run the kernel on the RP2350.
 
 - TTL expiry for long-lived orphans (received_at timestamp now tracked)
 - Mobile clients (iOS/Android)
-- Node key rotation
+- **Root Identity & Key Hierarchy**: Four-layer key model: Seed (24 words, offline) → Root Identity (Ed25519, signs authorizations only) → Device Keys (per-node, sign intentions) → DAG operations. Peers tracked by root identity in SystemStore; each root identity has an authorized device key list. New SystemOps: `DeviceAuthorize(root, device, sig)`, `DeviceRevoke(root, device)`. Device keys validated against authorization chain. Existing DAG/chain/gossip/sync works unchanged at the device-key level.
+- **Seed-Based Disaster Recovery**: BIP-39 mnemonic (24 words) generated during onboarding. Recovery flow: enter seed on fresh device → regenerate identity → connect vault-node → revoke lost device keys → resume. Setup flow includes a recovery drill (verify backup words before setup is complete).
+- **Shamir Key Splitting**: Split recovery seed into N shares, require K to reconstruct (e.g. 3 shares, any 2 recover). Shares printed as QR codes on labeled cards. For high-value / paranoid use cases.
+- **Vault-Node Assisted Recovery**: Physical recovery button or PIN sequence puts vault into pairing mode. Two-factor: physical access + seed/recovery PIN. Optional e-ink challenge-response display.
+- **Vault-Node Autonomous Updates**: Authenticated software update mechanism with rollback for vault-nodes when owner is unreachable. Authenticated against root identity.
 - Secure storage of node key (Keychain, TPM)
 - **Salted Gossip ALPN**: Use `/config/salt` from root store to salt the gossip ALPN per mesh (improves privacy by isolating mesh traffic).
 - **HTTP API**: External access to stores via REST/gRPC-Web (design TBD based on store types)
@@ -279,4 +291,4 @@ Run the kernel on the RP2350.
     - Recover from "not yet bootstrapped" state on restart.
     - Inviter sends list of potential bootstrap peers in `JoinResponse`.
     - Node can bootstrap from any peer in the list, not just the inviter.
-- **Blind Node Relays**: Untrusted VPS relays that only sync the raw Intention DAG (opaque blobs) via Negentropy. No store keys, no Wasm. Offline-first backup without compromising privacy.
+- **Blind Node Relays**: Untrusted VPS relays that sync the raw Intention DAG via Negentropy. No store keys, no Wasm. Can perform graph-based pruning using the `state_independent` flag: prune linear sub-chains below state-independent intentions at the frontier (pure graph operation, no state machine). Full nodes can also push computed snapshots to relays, making them full bootstrap sources. Two-tier pruning: relays do structural pruning (safe by construction), full nodes do semantic pruning (more compact).
