@@ -602,6 +602,16 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
 use crate::store_inspector::StoreInspector;
 
 impl<S: StateMachine + 'static> StoreInspector for Store<S> {
+    fn id(&self) -> Uuid {
+        self.store_id
+    }
+
+    fn author_tips(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, StoreError>> + Send + '_>> {
+        Box::pin(Store::author_tips(self))
+    }
+
     fn intention_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>> {
         Box::pin(Store::intention_count(self))
     }

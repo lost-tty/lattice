@@ -45,13 +45,6 @@ pub trait StoreHandle: Send + Sync {
 
     /// Signal shutdown of the store actor
     fn shutdown(&self);
-
-    /// Get raw witness log entries
-    fn witness_log(
-        &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<lattice_model::weaver::WitnessEntry>> + Send + '_>>;
-
-
 }
 
 // specialized implementation...
@@ -97,14 +90,6 @@ where
     fn shutdown(&self) {
         Store::shutdown(self);
     }
-
-    fn witness_log(
-        &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<lattice_model::weaver::WitnessEntry>> + Send + '_>> {
-        Box::pin(lattice_kernel::StoreInspector::witness_log(self))
-    }
-
-
 }
 
 // =============================================================================

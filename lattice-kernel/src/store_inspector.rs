@@ -4,19 +4,26 @@
 //! Implemented by Store<S> for any StateMachine S.
 
 use crate::store::StoreError;
+use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, SignedIntention, WitnessEntry};
+use lattice_model::Uuid;
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
-use lattice_sync::sync_provider::SyncProvider;
-
-/// Store inspection trait for CLI usage.
+/// Store inspection trait for CLI and diagnostics.
 ///
 /// Provides async methods matching Store<S>'s inherent methods.
 /// Used via `StoreHandle::as_inspector()` for type-erased access.
-pub trait StoreInspector: SyncProvider {
-    // id() and author_tips() are inherited from SyncProvider
+pub trait StoreInspector: Send + Sync {
+    /// Store ID
+    fn id(&self) -> Uuid;
+
+    /// Get author tips (PubKey → latest intention hash) for diagnostics
+    fn author_tips(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, StoreError>> + Send + '_>>;
 
     /// Get number of intentions in the store
     fn intention_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>>;

@@ -34,7 +34,10 @@ pub const RANGE_MAX: Hash = Hash([0xFF; 32]);
 // ---------------------------------------------------------------------------
 
 /// Trait for range queries on a set of hashes.
-/// `IntentionStore` implements all three methods already.
+///
+/// Used by `Reconciler` for set reconciliation. Any `SyncProvider` automatically
+/// implements this trait via a blanket impl. Test mocks can implement it directly
+/// with a custom error type.
 #[async_trait]
 pub trait RangeStore: Sync + Send {
     type Error: std::fmt::Display + Send + Sync + 'static;
@@ -44,6 +47,28 @@ pub trait RangeStore: Sync + Send {
     async fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, Self::Error>;
     /// Global fingerprint of all items in the store (O(1)).
     async fn table_fingerprint(&self) -> Result<Hash, Self::Error>;
+}
+
+/// Blanket impl: any `SyncProvider` automatically satisfies `RangeStore`.
+///
+/// This eliminates the need to implement both traits when a type already
+/// provides the range query methods through `SyncProvider`.
+#[async_trait]
+impl<T: SyncProvider + ?Sized> RangeStore for T {
+    type Error = SyncError;
+
+    async fn count_range(&self, start: &Hash, end: &Hash) -> Result<u64, SyncError> {
+        SyncProvider::count_range(self, start, end).await
+    }
+    async fn fingerprint_range(&self, start: &Hash, end: &Hash) -> Result<Hash, SyncError> {
+        SyncProvider::fingerprint_range(self, start, end).await
+    }
+    async fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, SyncError> {
+        SyncProvider::hashes_in_range(self, start, end).await
+    }
+    async fn table_fingerprint(&self) -> Result<Hash, SyncError> {
+        SyncProvider::table_fingerprint(self).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +370,7 @@ mod tests {
         // A initiates
         let init = ra.initiate().await.unwrap();
         let mut a_outbox: Vec<ReconcileMessage> = vec![init];
-        let mut b_outbox: Vec<ReconcileMessage> = vec![];
+        let mut b_outbox: Vec<ReconcileMessage>;
 
         for _ in 0..20 {
             // B processes A's messages
