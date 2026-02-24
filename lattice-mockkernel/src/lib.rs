@@ -67,7 +67,7 @@ impl<S: StateLogic> Clone for MockWriter<S> {
     }
 }
 
-impl<S: StateLogic> lattice_model::replication::EntryStreamProvider for MockWriter<S> {
+impl<S: StateLogic> lattice_model::replication::StoreEventSource for MockWriter<S> {
     fn subscribe_entries(&self) -> Box<dyn futures_util::Stream<Item = Vec<u8>> + Send + Unpin> {
         let rx = self.entry_tx.subscribe();
         Box::new(tokio_stream::wrappers::BroadcastStream::new(rx)

@@ -1,4 +1,4 @@
-//! Generic Proto Dispatcher Helper
+//! Generic Proto Command Dispatch Helper
 //! 
 //! Reduces boilerplate for mapping DynamicMessage requests to async Rust generic handlers.
 

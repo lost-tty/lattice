@@ -224,9 +224,9 @@ impl<S: Openable + StateLogic> Openable for SystemLayer<S> {
 }
 
 // NOTE: Introspectable is still via blanket (Deref + StateProvider).
-// Dispatcher is now explicit so we can wrap app-data writes in UniversalOp(AppData).
+// CommandHandler is explicit so we can wrap app-data writes in UniversalOp(AppData).
 
-use lattice_store_base::Dispatcher;
+use lattice_store_base::CommandHandler;
 use lattice_model::StateWriter;
 
 /// A StateWriter wrapper that wraps every submit in UniversalOp(AppData(...)).
@@ -248,8 +248,8 @@ impl StateWriter for WrappingWriter<'_> {
     }
 }
 
-impl<S: Dispatcher + Send + Sync> Dispatcher for SystemLayer<S> {
-    fn dispatch<'a>(
+impl<S: CommandHandler + Send + Sync> CommandHandler for SystemLayer<S> {
+    fn handle_command<'a>(
         &'a self,
         writer: &'a dyn StateWriter,
         method_name: &'a str,
@@ -257,7 +257,7 @@ impl<S: Dispatcher + Send + Sync> Dispatcher for SystemLayer<S> {
     ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
         let wrapping = WrappingWriter { inner: writer };
         Box::pin(async move {
-            self.inner.dispatch(&wrapping, method_name, request).await
+            self.inner.handle_command(&wrapping, method_name, request).await
         })
     }
 }

@@ -29,11 +29,9 @@ pub use clock::{Clock, SystemClock, MockClock};
 pub use state_machine::{StateMachine, StateWriter, StateWriterError, Op};
 pub use replication::{
     // Traits
-    SyncProvider, Shutdownable, LocalEventSource,
+    StoreEventSource,
     // Types
-    ReplicationError, IngestResult, SyncState,
-    ChainTip, OrphanInfo, LogFileInfo, LogStats,
-    GapInfo, SyncNeeded, PeerSyncInfo, EntryStream,
+    ReplicationError, IngestResult,
 };
 pub use node_identity::{NodeIdentity, NodeError, PeerStatus, PeerInfo, InviteStatus, InviteInfo};
 pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream, GossipPeer};
@@ -41,7 +39,7 @@ pub use net_event::NetEvent;
 pub use node_provider::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
 pub use store_type::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, CORE_STORE_TYPES, StoreTypeProvider};
 pub use openable::{Openable, OpenError};
-pub use store_info::{StoreInfo, StoreMeta, StoreLink, SystemEvent};
+pub use store_info::{StoreMeta, StoreLink, SystemEvent};
 pub use head::{Head, HeadError};
 pub use merge::Merge;
 pub use sexpr::SExpr;

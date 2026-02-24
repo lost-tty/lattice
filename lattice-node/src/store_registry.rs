@@ -8,7 +8,7 @@
 use crate::{DataDir, MetaStore, Uuid};
 use lattice_kernel::{
     NodeIdentity,
-    store::{OpenedStore, Store, StoreInfo, StateError, StoreHandle},
+    store::{OpenedStore, Store, StoreInfo, StateError, RegistryEntry},
 };
 use lattice_model::StateMachine;
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ pub struct StoreRegistry {
     data_dir: DataDir,
     meta: Arc<MetaStore>,
     node: Arc<NodeIdentity>,
-    stores: RwLock<HashMap<Uuid, Box<dyn StoreHandle>>>,
+    stores: RwLock<HashMap<Uuid, Box<dyn RegistryEntry>>>,
     /// Tracked actor task handles for clean shutdown
     handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }

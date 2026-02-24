@@ -1,29 +1,12 @@
 //! Handle infrastructure for Lattice stores
 //!
 //! Provides:
-//! - `StateProvider` trait with blanket `Introspectable` impl
-//! - `Dispatcher` trait for command routing
+//! - `StateProvider` trait with blanket `Introspectable` and `StreamReflectable` impls
+//! - `CommandHandler` trait for state-level command routing (takes a writer parameter)
 //! - `StreamProvider` trait for stream handlers
-//!
-//! Note: `StreamReflectable` and `CommandDispatcher` require custom logic
-//! per store type (subscribe handling, command routing) so they cannot
-//! use blanket delegation.
 
 use crate::{Introspectable, FieldFormat};
 use std::collections::HashMap;
-
-// =============================================================================
-// HandleWithWriter Marker Trait
-// =============================================================================
-
-/// Marker trait for handle types that wrap a separate writer type.
-/// 
-/// Used to disambiguate blanket `StoreHandle` implementations.
-/// - Wrapper handles (KvHandle, LogHandle) implement this marker
-/// - `Store<S>` does NOT implement this marker
-/// 
-/// This allows both blanket impls and specialized impls to coexist.
-pub trait HandleWithWriter {}
 
 // =============================================================================
 // StateProvider Trait
@@ -79,23 +62,23 @@ where
 }
 
 // =============================================================================
-// Dispatcher Trait - Command routing for state types
+// CommandHandler Trait - State-level command routing
 // =============================================================================
 
 use lattice_model::StateWriter;
 use std::future::Future;
 use std::pin::Pin;
 
-/// Trait for state types that can dispatch commands.
+/// Trait for state types that can handle commands.
 /// 
 /// This trait enables state implementations (KvState, LogState) to handle
-/// commands without needing a wrapper handle. The writer is passed as a
-/// parameter, allowing the state to perform mutations via the provided writer.
+/// commands with an injected writer for mutations. Distinct from `CommandDispatcher`
+/// which is the handle-level trait that owns the writer.
 /// 
 /// # Example
 /// ```ignore
-/// impl Dispatcher for PersistentState<KvState> {
-///     fn dispatch<'a>(
+/// impl CommandHandler for KvState {
+///     fn handle_command<'a>(
 ///         &'a self,
 ///         writer: &'a dyn StateWriter,
 ///         method: &'a str,
@@ -111,9 +94,9 @@ use std::pin::Pin;
 ///     }
 /// }
 /// ```
-pub trait Dispatcher: Send + Sync {
-    /// Dispatch a command, using the provided writer for mutations.
-    fn dispatch<'a>(
+pub trait CommandHandler: Send + Sync {
+    /// Handle a command, using the provided writer for mutations.
+    fn handle_command<'a>(
         &'a self,
         writer: &'a dyn StateWriter,
         method_name: &'a str,
@@ -121,97 +104,21 @@ pub trait Dispatcher: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>;
 }
 
-/// Blanket impl: Any type that derefs to a Dispatcher is also a Dispatcher.
-/// This allows `PersistentState<KvState>` to implement Dispatcher when `KvState` does.
-impl<T> Dispatcher for T
+/// Blanket impl: Any type that derefs to a CommandHandler is also a CommandHandler.
+/// This allows `PersistentState<KvState>` to implement CommandHandler when `KvState` does.
+impl<T> CommandHandler for T
 where
     T: std::ops::Deref + Send + Sync,
-    T::Target: Dispatcher,
+    T::Target: CommandHandler,
 {
-    fn dispatch<'a>(
+    fn handle_command<'a>(
         &'a self,
         writer: &'a dyn StateWriter,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
     ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
-        (**self).dispatch(writer, method_name, request)
+        (**self).handle_command(writer, method_name, request)
     }
-}
-
-// =============================================================================
-// Dispatchable Trait + Blanket CommandDispatcher
-// =============================================================================
-
-use crate::CommandDispatcher;
-
-/// Trait for types that can dispatch commands via an inherent async method.
-/// 
-/// Implementing this trait enables automatic `CommandDispatcher` via blanket impl.
-/// The handle just needs to provide an inherent `dispatch` method.
-/// 
-/// # Example
-/// ```ignore
-/// impl<W: StateWriter + AsRef<...>> LogHandle<W> {
-///     pub async fn dispatch(&self, method: &str, req: DynamicMessage) -> Result<...> { ... }
-/// }
-/// 
-/// impl<W: ...> Dispatchable for LogHandle<W> {
-///     fn dispatch_command<'a>(...) { Box::pin(async move { self.dispatch(...).await }) }
-/// }
-/// // Now LogHandle automatically implements CommandDispatcher
-/// ```
-pub trait Dispatchable: Send + Sync {
-    /// Dispatch a command by method name.
-    fn dispatch_command<'a>(
-        &'a self,
-        method_name: &'a str,
-        request: prost_reflect::DynamicMessage,
-    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>;
-}
-
-/// Blanket impl: Any `Dispatchable + StateProvider` where State is Introspectable
-/// is automatically `CommandDispatcher`.
-impl<T> CommandDispatcher for T 
-where
-    T: Dispatchable + StateProvider,
-    T::State: Introspectable,
-{
-    fn dispatch<'a>(
-        &'a self,
-        method_name: &'a str,
-        request: prost_reflect::DynamicMessage,
-    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
-        self.dispatch_command(method_name, request)
-    }
-}
-
-// =============================================================================
-// Dispatchable Macro
-// =============================================================================
-
-/// Macro to implement `Dispatchable` for a handle type.
-/// 
-/// Requires the handle to have an inherent async `dispatch` method.
-/// 
-/// # Usage
-/// ```ignore
-/// impl_dispatchable!(KvHandle<W> where W: StateWriter + AsRef<PersistentState<KvState>> + Send + Sync);
-/// ```
-#[macro_export]
-macro_rules! impl_dispatchable {
-    ($handle:ty where $($bounds:tt)+) => {
-        impl<$($bounds)+> $crate::Dispatchable for $handle {
-            fn dispatch_command<'a>(
-                &'a self,
-                method_name: &'a str,
-                request: prost_reflect::DynamicMessage,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
-                Box::pin(async move {
-                    self.dispatch(method_name, request).await
-                })
-            }
-        }
-    };
 }
 
 // =============================================================================

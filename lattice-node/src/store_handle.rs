@@ -4,13 +4,11 @@
 //! allowing consumers (like CLI) to work with any store type without
 //! knowing the concrete type.
 //!
-//! A blanket implementation is provided for any handle type that:
-//! - Implements `CommandDispatcher + StreamReflectable + Clone + Send + Sync`
-//! - Derefs to a writer implementing `SyncProvider + StoreInspector + Shutdownable + Identifiable + Clone`
-//! - Implements `StoreInfo` for store type detection
+//! A specialized implementation is provided for `Store<S>` where `S` satisfies
+//! the required trait bounds (StateMachine, Introspectable, CommandHandler, etc.).
 
 use lattice_kernel::{StoreInspector, SyncProvider};
-use lattice_model::{Uuid, Shutdownable};
+use lattice_model::Uuid;
 use lattice_store_base::{CommandDispatcher, StreamReflectable};
 use lattice_systemstore::SystemStore;
 
@@ -56,20 +54,17 @@ pub trait StoreHandle: Send + Sync {
 
 }
 
-// Re-export HandleWithWriter from lattice_store_base for backward compat
-pub use lattice_store_base::HandleWithWriter;
-
 // specialized implementation...
 
 // Specialized Implementation for Store<S>
 use lattice_kernel::Store;
 use lattice_model::StateMachine;
-use lattice_store_base::{Introspectable, Dispatcher, StreamProvider};
+use lattice_store_base::{Introspectable, CommandHandler, StreamProvider};
 use lattice_model::StoreTypeProvider;
 
 impl<S> StoreHandle for Store<S>
 where
-    S: StateMachine + Introspectable + Dispatcher + StreamProvider + StoreTypeProvider + lattice_systemstore::SystemReader + Send + Sync + 'static,
+    S: StateMachine + Introspectable + CommandHandler + StreamProvider + StoreTypeProvider + lattice_systemstore::SystemReader + Send + Sync + 'static,
 {
     fn id(&self) -> Uuid {
         SyncProvider::id(self)
@@ -100,7 +95,7 @@ where
     }
 
     fn shutdown(&self) {
-        Shutdownable::shutdown(self);
+        Store::shutdown(self);
     }
 
     fn witness_log(

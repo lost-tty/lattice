@@ -1,14 +1,7 @@
-//! Replication traits
+//! Replication traits and types
 //!
-//! Three independent traits for different consumers:
-//! - `StateWriter`: Submit operations (StateMachines use this)
-//! - `ReplicationEngine`: Core replication + diagnostics (CLI uses this)
-//! - `SyncProvider`: Subscriptions + peer sync (Network layer uses this)
-//!
-//! All can be implemented by the same struct (ReplicatedState<S>).
+//! - `StoreEventSource`: Subscribe to entries (gossip) and ephemeral system events
 
-use crate::types::{Hash, PubKey};
-use std::path::PathBuf;
 use std::pin::Pin;
 
 // ============================================================================
@@ -54,153 +47,36 @@ impl std::fmt::Display for ReplicationError {
 
 impl std::error::Error for ReplicationError {}
 
-/// Sync state for reconciliation with peers
-#[derive(Debug, Clone, Default)]
-pub struct SyncState {
-    /// Per-author chain tips: (author, sequence, hash)
-    pub author_tips: Vec<(PubKey, u64, Hash)>,
-}
-
-/// Chain tip info for a single author
-#[derive(Debug, Clone)]
-pub struct ChainTip {
-    /// Latest sequence number
-    pub seq: u64,
-    /// Hash of the latest entry
-    pub hash: Hash,
-}
-
-/// Info about an orphaned entry (waiting for parent)
-#[derive(Debug, Clone)]
-pub struct OrphanInfo {
-    /// Author of the orphan
-    pub author: PubKey,
-    /// Sequence number
-    pub seq: u64,
-    /// Hash of the orphan entry
-    pub hash: Hash,
-    /// Hash of the missing parent
-    pub missing_parent: Hash,
-}
-
-/// Log file info for diagnostics
-#[derive(Debug, Clone)]
-pub struct LogFileInfo {
-    /// Author identifier (hex string)
-    pub author_hex: String,
-    /// Number of entries in this log
-    pub entry_count: u64,
-    /// Path to the log file
-    pub path: PathBuf,
-}
-
-/// Log statistics
-#[derive(Debug, Clone, Default)]
-pub struct LogStats {
-    /// Number of authors with logs
-    pub author_count: usize,
-    /// Total entries across all logs
-    pub total_entries: u64,
-    /// Number of orphaned entries
-    pub orphan_count: usize,
-}
-
-/// Info about a gap that needs to be filled
-#[derive(Debug, Clone)]
-pub struct GapInfo {
-    /// Author with the gap
-    pub author: PubKey,
-    /// Start of missing range (exclusive)
-    pub from_seq: u64,
-    /// End of missing range (inclusive)
-    pub to_seq: u64,
-}
-
-/// Notification that sync is needed with a peer
-#[derive(Debug, Clone)]
-pub struct SyncNeeded {
-    /// Peer that has entries we're missing
-    pub peer: PubKey,
-    /// Author whose entries we're missing
-    pub author: PubKey,
-    /// Their sequence (higher than ours)
-    pub their_seq: u64,
-    /// Our sequence
-    pub our_seq: u64,
-}
-
-/// Peer sync state information
-#[derive(Debug, Clone, Default)]
-pub struct PeerSyncInfo {
-    /// The sync state reported by this peer
-    pub sync_state: SyncState,
-    /// When this was last updated (unix timestamp)
-    pub updated_at: u64,
-}
-
 // ============================================================================
 // Traits
 // ============================================================================
 
-/// Trait for signaling shutdown of a store or actor
-pub trait Shutdownable: Send + Sync {
-    /// Request shutdown (non-blocking)
-    fn shutdown(&self);
-}
-
-/// Type alias for boxed async streams
-pub type EntryStream<'a> = Pin<Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + 'a>>;
-
-/// Provider of entry stream (subset of SyncProvider)
-pub trait EntryStreamProvider: Send + Sync {
-    /// Subscribe to new entries
-    fn subscribe_entries(&self) -> Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + Unpin>;
-}
-
-/// Provider of local (ephemeral) system events that are NOT persisted in the intention log.
+/// Provider of store event streams for gossip and system event delivery.
 ///
-/// These events are emitted directly by the node (e.g., sync progress notifications)
-/// and delivered via an in-memory broadcast channel. Used by `SystemWatcher` to merge
-/// ephemeral events with log-derived events into a single stream.
-pub trait LocalEventSource: Send + Sync {
-    fn subscribe_local_events(
-        &self,
-    ) -> Pin<Box<dyn futures_core::Stream<Item = crate::SystemEvent> + Send>>;
-}
-
-/// The SyncProvider trait - subscriptions and peer sync state.
-///
-/// Used by the network layer for gossip and sync coordination.
-/// Independent of StateWriter.
-pub trait SyncProvider: Send + Sync {
-    /// Store ID (UUID bytes)
-    fn id(&self) -> [u8; 16];
-
-    // --- Subscriptions ---
-
+/// Combines entry subscription (for gossip broadcast) with local ephemeral
+/// system events (e.g., sync progress notifications). The local events method
+/// has a default no-op implementation for test mocks that don't need it.
+pub trait StoreEventSource: Send + Sync {
     /// Subscribe to new entries (for gossip broadcast)
     fn subscribe_entries(&self) -> Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + Unpin>;
 
-    /// Subscribe to gap detection events (triggers sync)
-    fn subscribe_gaps(&self) -> Box<dyn futures_core::Stream<Item = GapInfo> + Send + Unpin>;
-
-    /// Subscribe to sync-needed events (peer has entries we're missing)
-    fn subscribe_sync_needed(
+    /// Subscribe to local (ephemeral) system events that are NOT persisted in the intention log.
+    ///
+    /// Default implementation returns an empty stream (suitable for test mocks).
+    fn subscribe_local_events(
         &self,
-    ) -> Box<dyn futures_core::Stream<Item = SyncNeeded> + Send + Unpin>;
-
-    // --- Peer Sync State ---
-
-    /// Store a peer's sync state
-    fn set_peer_sync_state(
-        &self,
-        peer: &PubKey,
-        info: PeerSyncInfo,
-    ) -> Result<(), ReplicationError>;
-
-    /// Get a peer's sync state
-    fn get_peer_sync_state(&self, peer: &PubKey) -> Option<PeerSyncInfo>;
-
-    /// List all peer sync states
-    fn list_peer_sync_states(&self) -> Vec<(PubKey, PeerSyncInfo)>;
+    ) -> Pin<Box<dyn futures_core::Stream<Item = crate::SystemEvent> + Send>> {
+        // Empty stream — yields nothing and completes immediately
+        struct Empty;
+        impl futures_core::Stream for Empty {
+            type Item = crate::SystemEvent;
+            fn poll_next(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Option<Self::Item>> {
+                std::task::Poll::Ready(None)
+            }
+        }
+        Box::pin(Empty)
+    }
 }

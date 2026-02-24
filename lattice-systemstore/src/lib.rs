@@ -7,7 +7,7 @@ pub use helpers::SystemBatch;
 
 use lattice_model::{PeerInfo, StoreLink, StateWriter, Hash, SystemEvent};
 use lattice_model::store_info::PeerStrategy;
-use lattice_model::replication::{EntryStreamProvider, LocalEventSource};
+use lattice_model::replication::StoreEventSource;
 use lattice_store_base::StateProvider;
 use std::pin::Pin;
 use std::future::Future;
@@ -121,11 +121,11 @@ where
     }
 }
 
-/// Any handle implementing `EntryStreamProvider + LocalEventSource` automatically
+/// Any handle implementing `StoreEventSource` automatically
 /// merges log-derived system events with ephemeral local events into a single stream.
 impl<T> SystemWatcher for T
 where
-    T: EntryStreamProvider + LocalEventSource + Send + Sync,
+    T: StoreEventSource + Send + Sync,
 {
     fn subscribe_events(&self) -> Result<Pin<Box<dyn Stream<Item = Result<SystemEvent, String>> + Send>>, String> {
         let log_stream = crate::helpers::subscribe_system_events(self);

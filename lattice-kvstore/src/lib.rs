@@ -3,7 +3,7 @@
 //! This crate provides the key-value state layer implementing
 //! DAG-based conflict resolution and merge strategies.
 //!
-//! - `KvState` implements `StateMachine` and `Dispatcher` traits
+//! - `KvState` implements `StateMachine` and `CommandHandler` traits
 //! - Use `Store<PersistentKvState>` directly with `KvStoreExt` for operations
 
 // Alias the proto module from lattice-proto for internal compatibility

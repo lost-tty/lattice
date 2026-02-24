@@ -336,17 +336,17 @@ impl LogState {
     }
 }
 
-// ==================== Dispatcher Implementation ====================
+// ==================== CommandHandler Implementation ====================
 //
 // Enables LogState to handle commands directly without a wrapper handle.
 // Write operations use the injected StateWriter.
 
-use lattice_store_base::{Dispatcher, dispatch::dispatch_method};
+use lattice_store_base::{CommandHandler, dispatch::dispatch_method};
 use lattice_model::StateWriter;
 use crate::proto::{AppendRequest, AppendResponse, ReadRequest, ReadResponse};
 
-impl Dispatcher for LogState {
-    fn dispatch<'a>(
+impl CommandHandler for LogState {
+    fn handle_command<'a>(
         &'a self,
         writer: &'a dyn StateWriter,
         method_name: &'a str,

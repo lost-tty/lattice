@@ -654,9 +654,9 @@ impl<T: StateLogic + Introspectable> Introspectable for PersistentState<T> {
 // These delegations allow Store<PersistentState<S>> to satisfy StoreHandle
 // requirements by forwarding trait impls from the inner state type.
 //
-// NOTE: Dispatcher is NOT needed here - there's a blanket impl in lattice-store-base
-// for types that Deref to a Dispatcher. PersistentState<T>: Deref<Target = T> so
-// when T: Dispatcher, PersistentState<T> is automatically Dispatcher too.
+// NOTE: CommandHandler is NOT needed here - there's a blanket impl in lattice-store-base
+// for types that Deref to a CommandHandler. PersistentState<T>: Deref<Target = T> so
+// when T: CommandHandler, PersistentState<T> is automatically CommandHandler too.
 
 use std::pin::Pin;
 use std::future::Future;

@@ -526,12 +526,12 @@ impl KvState {
     }
 }
 
-// ==================== Dispatcher Implementation ====================
+// ==================== CommandHandler Implementation ====================
 //
 // Enables PersistentState<KvState> to handle commands directly without a wrapper handle.
 // Write operations use the injected StateWriter.
 
-use lattice_store_base::{Dispatcher, dispatch::dispatch_method};
+use lattice_store_base::{CommandHandler, dispatch::dispatch_method};
 use lattice_model::StateWriter;
 use crate::proto::{PutRequest, PutResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse, ListRequest, ListResponse, BatchRequest, BatchResponse, Operation};
 
@@ -544,8 +544,8 @@ fn validate_key(key: &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Syn
     Ok(())
 }
 
-impl Dispatcher for KvState {
-    fn dispatch<'a>(
+impl CommandHandler for KvState {
+    fn handle_command<'a>(
         &'a self,
         writer: &'a dyn StateWriter,
         method_name: &'a str,

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use tempfile::TempDir;
-use lattice_model::Uuid;
-use lattice_store_base::{Dispatchable, StateProvider, Dispatcher};
-use lattice_kvstore::{PersistentKvState, KvState};
+use lattice_kvstore::{KvState, PersistentKvState};
 use lattice_mockkernel::MockWriter;
+use lattice_model::Uuid;
+use lattice_store_base::{CommandDispatcher, CommandHandler, StateProvider};
 use prost_reflect::DynamicMessage;
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use tempfile::TempDir;
 
 /// A test store that combines PersistentState with a MockWriter.
 /// This mimics key aspects of Store<S> but uses a local MockWriter
@@ -25,7 +25,7 @@ impl TestStore {
         let state = KvState::open(store_id, dir.path()).expect("failed to open state");
         let state = Arc::new(state);
         let writer = MockWriter::new(state.clone());
-        
+
         Self {
             state,
             writer,
@@ -37,21 +37,27 @@ impl TestStore {
 // Implement StateProvider so we get blanket Introspectable and StreamReflectable
 impl StateProvider for TestStore {
     type State = PersistentKvState;
-    
+
     fn state(&self) -> &PersistentKvState {
         &self.state
     }
 }
 
-// Implement Dispatchable so we get blanket CommandDispatcher
-impl Dispatchable for TestStore {
-    fn dispatch_command<'a>(
+// Implement CommandDispatcher directly for test store
+impl CommandDispatcher for TestStore {
+    fn dispatch<'a>(
         &'a self,
         method_name: &'a str,
         request: DynamicMessage,
-    ) -> Pin<Box<dyn Future<Output = Result<DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
-        // Delegate to state's Dispatcher, passing our writer
-        self.state.dispatch(&self.writer, method_name, request)
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<DynamicMessage, Box<dyn std::error::Error + Send + Sync>>>
+                + Send
+                + 'a,
+        >,
+    > {
+        // Delegate to state's CommandHandler, passing our writer
+        self.state
+            .handle_command(&self.writer, method_name, request)
     }
 }
-

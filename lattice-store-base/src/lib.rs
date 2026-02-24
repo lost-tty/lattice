@@ -15,5 +15,5 @@ pub use introspection::{
     StreamError, StreamReflectable,
 };
 
-pub use handle::{StateProvider, Dispatchable, Dispatcher, StreamHandler, StreamProvider, HandleWithWriter, Subscriber};
+pub use handle::{StateProvider, CommandHandler, StreamHandler, StreamProvider, Subscriber};
 pub use invoke::invoke_command;

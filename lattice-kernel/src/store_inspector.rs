@@ -9,16 +9,12 @@ use lattice_model::weaver::{FloatingIntention, SignedIntention, WitnessEntry};
 use std::future::Future;
 use std::pin::Pin;
 
-/// Store inspection trait for CLI usage.
-///
-/// Provides async methods matching Store<S>'s inherent methods.
-/// Used by StoreHandle::as_inspector() for type-erased access.
 use lattice_sync::sync_provider::SyncProvider;
 
 /// Store inspection trait for CLI usage.
 ///
 /// Provides async methods matching Store<S>'s inherent methods.
-/// Used by StoreHandle::as_inspector() for type-erased access.
+/// Used via `StoreHandle::as_inspector()` for type-erased access.
 pub trait StoreInspector: SyncProvider {
     // id() and author_tips() are inherited from SyncProvider
 
@@ -29,11 +25,7 @@ pub trait StoreInspector: SyncProvider {
     fn witness_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>>;
 
     /// Get raw witness log entries
-    fn witness_log(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Vec<WitnessEntry>> + Send + '_>>;
-
-
+    fn witness_log(&self) -> Pin<Box<dyn Future<Output = Vec<WitnessEntry>> + Send + '_>>;
 
     /// Get floating (unwitnessed) intentions with metadata
     fn floating_intentions(

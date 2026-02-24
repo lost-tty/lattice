@@ -28,8 +28,11 @@ pub struct StoreInfo {
 
 use std::any::Any;
 
-/// Marker trait for generic store handles to allow storage in registries
-pub trait StoreHandle: Send + Sync {
+/// Trait for type-erased store handles in the registry.
+///
+/// Enables storing heterogeneous `Store<S>` values in a single collection
+/// with downcasting via `as_any()`.
+pub trait RegistryEntry: Send + Sync {
     fn as_any(&self) -> &dyn Any;
     /// Request actor shutdown
     fn shutdown(&self);
@@ -37,7 +40,7 @@ pub trait StoreHandle: Send + Sync {
     fn emit_system_event(&self, _event: SystemEvent) {}
 }
 
-impl<S: StateMachine + Send + Sync + 'static> StoreHandle for Store<S> {
+impl<S: StateMachine + Send + Sync + 'static> RegistryEntry for Store<S> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -51,21 +54,14 @@ impl<S: StateMachine + Send + Sync + 'static> StoreHandle for Store<S> {
     }
 }
 
-// Implement Shutdownable from lattice-model
-use lattice_model::Shutdownable;
 
-impl<S: StateMachine + Send + Sync + 'static> Shutdownable for Store<S> {
-    fn shutdown(&self) {
-        Store::shutdown(self);
-    }
-}
 
 // =============================================================================
 // Store Handle Traits
 // =============================================================================
 
 use std::ops::Deref;
-use lattice_store_base::{StateProvider, Dispatchable, Dispatcher};
+use lattice_store_base::{StateProvider, CommandHandler, CommandDispatcher, Introspectable};
 use std::pin::Pin;
 use std::future::Future;
 
@@ -83,13 +79,13 @@ impl<S: StateMachine + Send + Sync + 'static> StateProvider for Store<S> {
     }
 }
 
-impl<S: StateMachine + Dispatcher + Send + Sync + 'static> Dispatchable for Store<S> {
-    fn dispatch_command<'a>(
+impl<S: StateMachine + CommandHandler + Introspectable + Send + Sync + 'static> CommandDispatcher for Store<S> {
+    fn dispatch<'a>(
         &'a self,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
     ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
-        self.state().dispatch(self, method_name, request)
+        self.state().handle_command(self, method_name, request)
     }
 }
 
@@ -653,25 +649,13 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
     }
 }
 
-// ==================== LocalEventSource ====================
+// ==================== StoreEventSource ====================
 
-use lattice_model::replication::LocalEventSource;
-use lattice_model::replication::EntryStreamProvider;
+use lattice_model::replication::StoreEventSource;
 use tokio_stream::wrappers::BroadcastStream;
 use futures_util::StreamExt;
 
-impl<S: StateMachine + Send + Sync + 'static> LocalEventSource for Store<S> {
-    fn subscribe_local_events(&self) -> Pin<Box<dyn futures_core::Stream<Item = SystemEvent> + Send>> {
-        let rx = self.local_system_event_tx.subscribe();
-        let stream = BroadcastStream::new(rx)
-            .filter_map(|res| std::future::ready(res.ok()));
-        Box::pin(stream)
-    }
-}
-
-// ==================== EntryStreamProvider (intention-based) ====================
-
-impl<S: StateMachine + Send + Sync + 'static> EntryStreamProvider for Store<S> {
+impl<S: StateMachine + Send + Sync + 'static> StoreEventSource for Store<S> {
     fn subscribe_entries(&self) -> Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + Unpin> {
         let rx = self.intention_tx.subscribe();
         let stream = BroadcastStream::new(rx).filter_map(|res| async move {
@@ -687,6 +671,13 @@ impl<S: StateMachine + Send + Sync + 'static> EntryStreamProvider for Store<S> {
             }
         });
         Box::new(Box::pin(stream))
+    }
+
+    fn subscribe_local_events(&self) -> Pin<Box<dyn futures_core::Stream<Item = SystemEvent> + Send>> {
+        let rx = self.local_system_event_tx.subscribe();
+        let stream = BroadcastStream::new(rx)
+            .filter_map(|res| std::future::ready(res.ok()));
+        Box::pin(stream)
     }
 }
 

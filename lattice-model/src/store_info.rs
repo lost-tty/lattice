@@ -1,7 +1,7 @@
 //! Store metadata and info traits.
 
 use crate::Uuid;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// A pointer to another store in the graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,13 +63,4 @@ pub enum SystemEvent {
     StoreNameUpdated(String),
     PeerNameUpdated(crate::types::PubKey, String),
     BootstrapComplete,
-}
-
-/// Trait for store handles to provide basic store information.
-///
-/// Implement this in store crates to enable automatic `HandleBridge`
-/// implementation in `lattice-node`.
-pub trait StoreInfo {
-    /// The store type string this handle represents (e.g., "core:kvstore")
-    fn store_type(&self) -> &str;
 }

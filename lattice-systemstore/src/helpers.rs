@@ -1,6 +1,6 @@
 use lattice_model::{SystemEvent, StoreLink, PeerStatus as ModelStatus};
 use lattice_model::store_info::PeerStrategy;
-use lattice_model::replication::EntryStreamProvider;
+use lattice_model::replication::StoreEventSource;
 use lattice_proto::storage::{
     SystemOp, system_op, peer_op, hierarchy_op, peer_strategy_op, peer_strategy,
     store_op, SetStoreName,
@@ -357,7 +357,7 @@ impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
 
 pub fn subscribe_system_events<P>(provider: &P) -> Pin<Box<dyn Stream<Item = Result<SystemEvent, String>> + Send>> 
 where
-    P: EntryStreamProvider + ?Sized
+    P: StoreEventSource + ?Sized
 {
     use lattice_model::weaver::Intention;
     
