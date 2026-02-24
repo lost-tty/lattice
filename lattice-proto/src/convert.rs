@@ -9,15 +9,15 @@ use lattice_model::weaver::{Intention, SignedIntention};
 // ==================== SignedIntention ====================
 
 /// Model → Proto (infallible)
-pub fn intention_to_proto(signed: &SignedIntention) -> lattice_proto::weaver::SignedIntention {
-    lattice_proto::weaver::SignedIntention {
+pub fn intention_to_proto(signed: &SignedIntention) -> crate::weaver::SignedIntention {
+    crate::weaver::SignedIntention {
         intention_borsh: signed.intention.to_borsh(),
         signature: signed.signature.0.to_vec(),
     }
 }
 
 /// Proto → Model (fallible: borsh decode + signature length)
-pub fn intention_from_proto(proto: &lattice_proto::weaver::SignedIntention) -> Result<SignedIntention, String> {
+pub fn intention_from_proto(proto: &crate::weaver::SignedIntention) -> Result<SignedIntention, String> {
     let intention = Intention::from_borsh(&proto.intention_borsh)
         .map_err(|e| format!("Borsh decode failed: {}", e))?;
     let sig_bytes: [u8; 64] = proto
@@ -30,4 +30,3 @@ pub fn intention_from_proto(proto: &lattice_proto::weaver::SignedIntention) -> R
         signature: Signature(sig_bytes),
     })
 }
-

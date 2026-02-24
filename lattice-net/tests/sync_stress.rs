@@ -10,7 +10,7 @@
 mod common;
 
 use common::TestPair;
-use lattice_kvstore_client::KvStoreExt;
+use lattice_kvstore_api::KvStoreExt;
 use lattice_net_sim::{ChannelTransport, ChannelNetwork};
 use std::sync::Arc;
 use tokio::sync::Barrier;

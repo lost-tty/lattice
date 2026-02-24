@@ -4,11 +4,8 @@ use std::pin::Pin;
 use std::future::Future;
 use futures_util::StreamExt;
 
-// Re-export types
+// Re-export proto types
 pub use lattice_proto::kv::*;
-
-// Helper implementations for Operation are now in lattice-proto
-
 
 /// Event emitted when a watched key changes
 #[derive(Clone, Debug)]
@@ -36,13 +33,14 @@ pub enum WatchError {
 impl std::fmt::Display for WatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WatchError::InvalidRegex(s) => write!(f, "Invalid regex: {}", s),
+            WatchError::InvalidRegex(s) => write!(f, "Invalid regex: {}",  s),
             WatchError::Storage(s) => write!(f, "Storage error: {}", s),
         }
     }
 }
 
 impl std::error::Error for WatchError {}
+
 
 /// Generic error for KV store dispatch operations.
 /// Used by consumers that interact with stores via trait objects.

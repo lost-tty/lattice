@@ -13,18 +13,16 @@ use crate::{MessageSink, MessageStream};
 use crate::error::LatticeNetError;
 use lattice_model::types::{Hash, PubKey};
 use lattice_net_types::NetworkStore;
-use lattice_kernel::proto::network::{
+use lattice_proto::network::{
     FetchIntentions, IntentionResponse,
     PeerMessage, peer_message,
-};
-use lattice_kernel::weaver::convert::{
-    intention_to_proto, intention_from_proto,
-};
-use lattice_sync::{Reconciler, ReconcileMessage};
-use lattice_kernel::proto::network::{
     reconcile_message::Content as ReconcileContent,
     ReconcilePayload,
 };
+use lattice_proto::convert::{
+    intention_to_proto, intention_from_proto,
+};
+use lattice_sync::{Reconciler, ReconcileMessage};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Result of a sync session

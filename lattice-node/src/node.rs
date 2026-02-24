@@ -59,7 +59,7 @@ pub enum NodeError {
     StoreError(#[from] lattice_kernel::store::StoreError),
     
     #[error("Dispatch error: {0}")]
-    Dispatch(#[from] lattice_kvstore_client::DispatchError),
+    Dispatch(#[from] lattice_kvstore_api::DispatchError),
 
     #[error("StoreManager error: {0}")]
     StoreManager(#[from] crate::StoreManagerError),
@@ -561,7 +561,7 @@ impl NodeProviderExt for Node {
 mod tests {
     use super::*;
     use lattice_model::types::PubKey;
-    use lattice_kvstore_client::KvStoreExt;
+    use lattice_kvstore_api::KvStoreExt;
     use crate::{direct_opener, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
         
     /// Helper to create node builder with openers registered for tests that use mesh/store manager

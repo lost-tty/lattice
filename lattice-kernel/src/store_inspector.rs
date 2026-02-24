@@ -13,7 +13,7 @@ use std::pin::Pin;
 ///
 /// Provides async methods matching Store<S>'s inherent methods.
 /// Used by StoreHandle::as_inspector() for type-erased access.
-use crate::sync_provider::SyncProvider;
+use lattice_sync::sync_provider::SyncProvider;
 
 /// Store inspection trait for CLI usage.
 ///

@@ -6,7 +6,6 @@
 // Re-export the canonical types from lattice-model
 pub use lattice_model::weaver::intention::{Condition, Intention, SignedIntention};
 
-pub mod convert;
 pub mod intention_store;
 pub mod witness;
 

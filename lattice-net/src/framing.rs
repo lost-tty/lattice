@@ -5,7 +5,7 @@
 
 use crate::error::LatticeNetError;
 use futures_util::{SinkExt, StreamExt};
-use lattice_kernel::proto::network::PeerMessage;
+use lattice_proto::network::PeerMessage;
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};

@@ -18,6 +18,8 @@ pub use lattice_proto::network::{
     reconcile_message::Content as ReconcileContent,
     RangeFingerprint, RangeItemsRequest, RangeItemsReply
 };
+pub mod sync_provider;
+pub use sync_provider::{SyncProvider, SyncError};
 
 /// Maximum number of items in a range before we list hashes directly
 /// instead of subdividing further.

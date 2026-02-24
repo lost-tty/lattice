@@ -12,7 +12,6 @@ name = "lattice_bindings"
 uniffi = { workspace = true, features = ["tokio", "cli"] }
 lattice-runtime = { workspace = true }
 lattice-api = { workspace = true, features = ["ffi"] }
-lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }

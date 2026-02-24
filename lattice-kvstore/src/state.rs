@@ -12,7 +12,7 @@ use lattice_storage::{StateBackend, StateDbError, TABLE_DATA, PersistentState, S
 use std::pin::Pin;
 use std::future::Future;
 
-use crate::{WatchEvent, WatchEventKind};
+use lattice_kvstore_api::{WatchEvent, WatchEventKind};
 use lattice_storage::head::Head;
 use lattice_storage::merge::Merge;
 use crate::proto::{operation, KvPayload};
@@ -501,10 +501,10 @@ impl KvState {
                         if !re.is_match(&event.key) { continue; }
                         
                         let kind = match event.kind {
-                            crate::WatchEventKind::Update { value } => {
+                            WatchEventKind::Update { value } => {
                                 Some(crate::proto::watch_event_proto::Kind::Value(value))
                             }
-                            crate::WatchEventKind::Delete => {
+                            WatchEventKind::Delete => {
                                 Some(crate::proto::watch_event_proto::Kind::Deleted(true))
                             }
                         };

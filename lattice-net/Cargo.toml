@@ -6,10 +6,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-lattice-kernel = { workspace = true }
 lattice-model = { workspace = true }
 lattice-net-types = { workspace = true }
 lattice-sync = { workspace = true }
+lattice-proto = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }
@@ -28,13 +28,12 @@ async-trait = "0.1"
 tokio-test = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 lattice-kvstore = { workspace = true }
-lattice-kvstore-client = { workspace = true }
+lattice-kvstore-api = { workspace = true }
 lattice-logstore = { workspace = true }
 lattice-storage = { workspace = true }
 lattice-systemstore = { workspace = true }
 lattice-node = { workspace = true }
 rand = { workspace = true }
-lattice-store-base = { workspace = true }
-lattice-proto = { workspace = true }
+lattice-kernel = { workspace = true }
 lattice-net-sim = { path = "../lattice-net-sim" }
 ed25519-dalek = { workspace = true }

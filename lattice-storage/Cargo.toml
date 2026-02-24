@@ -11,7 +11,6 @@ uuid = { workspace = true }
 blake3 = { workspace = true }
 lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
-lattice-proto = { workspace = true }
 prost.workspace = true
 prost-reflect.workspace = true
 serde = { workspace = true }

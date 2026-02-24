@@ -9,7 +9,8 @@
 //! - Derefs to a writer implementing `SyncProvider + StoreInspector + Shutdownable + Identifiable + Clone`
 //! - Implements `StoreInfo` for store type detection
 
-use lattice_kernel::{SyncProvider, StoreInspector};
+use lattice_kernel::{StoreInspector};
+use lattice_sync::SyncProvider;
 use lattice_model::{Uuid, Shutdownable};
 use lattice_store_base::{CommandDispatcher, StreamReflectable};
 use lattice_systemstore::SystemStore;

@@ -8,7 +8,7 @@ use lattice_logstore::PersistentLogState;
 use lattice_systemstore::system_state::SystemLayer;
 use lattice_net::network;
 use lattice_net_sim::{ChannelTransport, ChannelNetwork};
-use lattice_kvstore_client::KvStoreExt;
+use lattice_kvstore_api::KvStoreExt;
 use std::sync::Arc;
 
 /// Custom builder with logstore opener (not available in common module)
@@ -60,7 +60,7 @@ async fn test_explicit_sync() {
         .expect("B should successfully join A's store");
     
     // A writes entries AFTER B joined
-    lattice_kvstore_client::KvStoreExt::put(&store_a, b"/data".to_vec(), b"test".to_vec()).await.expect("put");
+    lattice_kvstore_api::KvStoreExt::put(&store_a, b"/data".to_vec(), b"test".to_vec()).await.expect("put");
 
     // Verify gap exists (B doesn't have A's data yet - gossip wouldn't have propagated)
     assert!(store_b.get(b"/data".to_vec()).await.unwrap_or(None).is_none(), "B should not have data before sync");
@@ -117,7 +117,7 @@ async fn test_sync_multiple_entries() {
     
     // A writes multiple entries AFTER B joined
     for i in 1..=5 {
-        lattice_kvstore_client::KvStoreExt::put(&store_a, format!("/key{}", i).into_bytes(), format!("value{}", i).into_bytes()).await.expect("put");
+        lattice_kvstore_api::KvStoreExt::put(&store_a, format!("/key{}", i).into_bytes(), format!("value{}", i).into_bytes()).await.expect("put");
     }
     
     // Verify gap exists (B doesn't have A's data yet - gossip wouldn't have propagated)

@@ -1,4 +1,5 @@
-use lattice_kvstore::{KvState, KvPayload, Operation, Head};
+use lattice_kvstore::{KvState, KvPayload, Head};
+use lattice_kvstore_api::Operation;
 use lattice_model::{StateMachine, Op};
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::hlc::HLC;

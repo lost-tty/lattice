@@ -1,10 +1,11 @@
 mod common;
 use common::TestStore;
-use lattice_kvstore_client::{KvStoreExt, WatchEventKind};
+use lattice_kvstore_api::{KvStoreExt, WatchEventKind};
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::hlc::HLC;
 use lattice_model::{Op, StateMachine};
-use lattice_kvstore::{KvPayload, Operation};
+use lattice_kvstore::{KvPayload};
+use lattice_kvstore_api::Operation;
 use prost::Message;
 use futures::StreamExt;
 use std::time::Duration;

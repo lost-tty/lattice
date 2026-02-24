@@ -1,6 +1,6 @@
 mod common;
 use common::TestStore;
-use lattice_kvstore_client::KvStoreExt;
+use lattice_kvstore_api::KvStoreExt;
 
 #[tokio::test]
 async fn test_kv_handle_strict_updates() {

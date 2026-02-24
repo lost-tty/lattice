@@ -19,6 +19,9 @@ Thumbs.db
 # Generated Bindings
 /generated-bindings/
 
+# Generated docs data
+/docs/data/
+
 # Build artifacts
 /LatticeBindings.xcframework/
 /target/merged/

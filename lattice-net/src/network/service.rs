@@ -11,10 +11,10 @@ use crate::{MessageSink, MessageStream, LatticeNetError};
 use lattice_net_types::{NetworkStore, NodeProviderExt, GossipLayer};
 use lattice_net_types::transport::{Transport, Connection as TransportConnection, BiStream};
 use lattice_model::{NetEvent, Uuid, UserEvent};
-use lattice_kernel::proto::network::{PeerMessage, peer_message, BootstrapRequest, FetchChain};
+use lattice_proto::network::{PeerMessage, peer_message, BootstrapRequest, FetchChain};
 use lattice_model::types::{PubKey, Hash};
-use lattice_kernel::store::MissingDep;
-use lattice_kernel::weaver::convert::intention_from_proto;
+use lattice_model::weaver::ingest::MissingDep;
+use lattice_proto::convert::intention_from_proto;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
@@ -204,7 +204,7 @@ impl<T: Transport> NetworkService<T> {
 
                                 // Decode: raw bytes → GossipMessage → SignedIntention
                                 use prost::Message;
-                                let gossip_msg = match lattice_kernel::proto::network::GossipMessage::decode(raw_bytes.as_slice()) {
+                                let gossip_msg = match lattice_proto::network::GossipMessage::decode(raw_bytes.as_slice()) {
                                     Ok(m) => m,
                                     Err(e) => {
                                         tracing::warn!(error = %e, "Failed to decode gossip message");
@@ -213,8 +213,8 @@ impl<T: Transport> NetworkService<T> {
                                 };
                                 
                                 let intention = match gossip_msg.content {
-                                    Some(lattice_kernel::proto::network::gossip_message::Content::Intention(proto_intention)) => {
-                                        match lattice_kernel::weaver::convert::intention_from_proto(&proto_intention) {
+                                    Some(lattice_proto::network::gossip_message::Content::Intention(proto_intention)) => {
+                                        match lattice_proto::convert::intention_from_proto(&proto_intention) {
                                             Ok(i) => i,
                                             Err(e) => {
                                                 tracing::warn!(error = %e, "Failed to convert proto intention");
@@ -227,8 +227,8 @@ impl<T: Transport> NetworkService<T> {
 
                                 // Ingest
                                 match store_clone.ingest_intention(intention).await {
-                                    Ok(lattice_kernel::store::IngestResult::Applied) => {},
-                                    Ok(lattice_kernel::store::IngestResult::MissingDeps(missing_deps)) => {
+                                    Ok(lattice_model::weaver::ingest::IngestResult::Applied) => {},
+                                    Ok(lattice_model::weaver::ingest::IngestResult::MissingDeps(missing_deps)) => {
                                         for missing in missing_deps {
                                             tracing::info!(store_id = %store_id_captured, missing = %missing.prev, "Gossip ingestion gap detected, triggering fetch");
                                             let _ = service.handle_missing_dep(store_id_captured, missing, Some(sender_pubkey)).await;
@@ -248,10 +248,10 @@ impl<T: Transport> NetworkService<T> {
                                 match intention_rx.recv().await {
                                     Ok(intention) => {
                                         use prost::Message;
-                                        let proto = lattice_kernel::weaver::convert::intention_to_proto(&intention);
-                                        let gossip_msg = lattice_kernel::proto::network::GossipMessage {
+                                        let proto = lattice_proto::convert::intention_to_proto(&intention);
+                                        let gossip_msg = lattice_proto::network::GossipMessage {
                                             store_id: store_id_captured.as_bytes().to_vec(),
-                                            content: Some(lattice_kernel::proto::network::gossip_message::Content::Intention(proto)),
+                                            content: Some(lattice_proto::network::gossip_message::Content::Intention(proto)),
                                         };
                                         let encoded = gossip_msg.encode_to_vec();
                                         if let Err(e) = gossip_clone.broadcast(store_id_captured, encoded).await {
@@ -400,7 +400,7 @@ impl<T: Transport> NetworkService<T> {
 
                         if let Some(last_record) = resp.witness_records.last() {
                             use prost::Message;
-                            let content = lattice_kernel::proto::weaver::WitnessContent::decode(last_record.content.as_slice())
+                            let content = lattice_proto::weaver::WitnessContent::decode(last_record.content.as_slice())
                                 .map_err(|e| LatticeNetError::Sync(format!("Failed to decode witness content: {}", e)))?;
                             start_hash = content.intention_hash;
                         }
@@ -561,7 +561,7 @@ impl<T: Transport> NetworkService<T> {
             .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
         let (send, recv) = bi.into_split();
 
-        let req = lattice_kernel::proto::network::JoinRequest {
+        let req = lattice_proto::network::JoinRequest {
             node_pubkey: self.provider.node_id().as_bytes().to_vec(),
             store_id: store_id.as_bytes().to_vec(),
             invite_secret: secret,
@@ -981,8 +981,8 @@ impl<T: Transport> NetworkService<T> {
                 }
                 
                 match store.ingest_batch(valid_intentions).await {
-                     Ok(lattice_kernel::store::IngestResult::Applied) => Ok(count),
-                     Ok(lattice_kernel::store::IngestResult::MissingDeps(missing)) => {
+                     Ok(lattice_model::weaver::ingest::IngestResult::Applied) => Ok(count),
+                     Ok(lattice_model::weaver::ingest::IngestResult::MissingDeps(missing)) => {
                          tracing::warn!(count = missing.len(), "Fetch chain incomplete: still missing dependencies");
                          if let Some(first) = missing.first() {
                               tracing::warn!(first_missing = %first.prev, "First missing dep");

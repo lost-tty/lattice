@@ -61,32 +61,3 @@ Both expose runtime introspection via embedded `prost-reflect` `FileDescriptorSe
 | Signature | Ed25519 | Intention signing, witness signing |
 | Clock | Hybrid Logical Clock (HLC) | Causal ordering, LWW conflict resolution |
 | Identity | Ed25519 keypair (`identity.key`) | Node identity, bound to Iroh QUIC endpoint |
-
-## Dependency Graph (Layered)
-
-```
-lattice-model          (primitives, traits, zero deps)
-    ↓
-lattice-storage        (redb, StateBackend)
-lattice-systemstore    (Y-Adapter, SystemLayer)
-lattice-kvstore        (KvState, LWW CRDT)
-lattice-logstore       (LogState, append-only)
-    ↓
-lattice-kernel         (Weaver, ReplicationController, IntentionStore)
-    ↓
-lattice-net-types      (Transport/GossipLayer traits, NetworkStore)
-lattice-sync           (Negentropy Reconciler)
-    ↓
-lattice-net            (NetworkService, transport-agnostic)
-lattice-net-iroh       (IrohTransport, GossipManager, production QUIC)
-lattice-net-sim        (ChannelTransport, BroadcastGossip, in-memory)
-    ↓
-lattice-node           (Node, StoreManager, RecursiveWatcher)
-    ↓
-lattice-api            (gRPC/UDS, RpcServer/Client)
-lattice-runtime        (RuntimeBuilder, LatticeBackend)
-    ↓
-lattice-bindings       (UniFFI → Swift/Kotlin)
-lattice-cli            (REPL, dynamic Protobuf)
-lattice-daemon         (latticed binary)
-```

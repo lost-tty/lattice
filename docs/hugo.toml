@@ -36,6 +36,11 @@ theme = "lattice-theme"
     parent = "reference"
     weight = 8
   [[menus.main]]
+    name = "Dependencies"
+    pageRef = "/dependencies"
+    parent = "reference"
+    weight = 9
+  [[menus.main]]
     name = "Roadmap"
     pageRef = "/roadmap"
     parent = "reference"

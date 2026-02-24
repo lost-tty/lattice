@@ -6,9 +6,6 @@
 //! - `KvState` implements `StateMachine` and `Dispatcher` traits
 //! - Use `Store<PersistentKvState>` directly with `KvStoreExt` for operations
 
-// Re-export client types for consumers
-pub use lattice_kvstore_client::{KvStoreExt, WatchEvent, WatchEventKind, WatchError, Operation};
-
 // Alias the proto module from lattice-proto for internal compatibility
 pub mod proto {
     pub use lattice_proto::kv::*;

@@ -3,8 +3,8 @@
 //! Combines a SyncProvider (data access) with a PeerProvider (authorization).
 //! Used by lattice-net for sync, gossip, and handlers.
 
-use lattice_kernel::SyncProvider;
-use lattice_kernel::store::{StateError, IngestResult};
+use lattice_sync::sync_provider::{SyncProvider, SyncError};
+use lattice_model::weaver::ingest::IngestResult;
 use lattice_model::{PeerProvider, PubKey};
 use lattice_model::types::Hash;
 use lattice_model::weaver::SignedIntention;
@@ -37,33 +37,31 @@ impl NetworkStore {
         self.id
     }
     
-    pub async fn author_tips(&self) -> Result<HashMap<PubKey, Hash>, StateError> {
+    pub async fn author_tips(&self) -> Result<HashMap<PubKey, Hash>, SyncError> {
         self.sync.author_tips().await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 
     pub fn emit_system_event(&self, event: lattice_model::SystemEvent) {
         self.sync.emit_system_event(event);
     }
 
-    pub async fn ingest_intention(&self, intention: SignedIntention) -> Result<IngestResult, StateError> {
+    pub async fn ingest_intention(&self, intention: SignedIntention) -> Result<IngestResult, SyncError> {
         // Check authorization first
         if !self.peer.can_accept_entry(&intention.intention.author) {
-            return Err(StateError::Unauthorized(format!(
+            return Err(SyncError::Internal(format!(
                 "Author {} not authorized", 
                 hex::encode(&intention.intention.author.0)
             )));
         }
         
         self.sync.ingest_intention(intention).await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 
-    pub async fn ingest_batch(&self, intentions: Vec<SignedIntention>) -> Result<IngestResult, StateError> {
+    pub async fn ingest_batch(&self, intentions: Vec<SignedIntention>) -> Result<IngestResult, SyncError> {
         // Enforce authorization for all intentions in batch
         for intention in &intentions {
             if !self.peer.can_accept_entry(&intention.intention.author) {
-                return Err(StateError::Unauthorized(format!(
+                return Err(SyncError::Internal(format!(
                     "Author {} not authorized", 
                     hex::encode(&intention.intention.author.0)
                 )));
@@ -71,23 +69,20 @@ impl NetworkStore {
         }
         
         self.sync.ingest_batch(intentions).await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
     
     /// Ingest a batch of witness records and intentions (Bootstrap/Clone)
     pub async fn ingest_witness_batch(
         &self, 
-        witness_records: Vec<lattice_kernel::proto::weaver::WitnessRecord>,
+        witness_records: Vec<lattice_proto::weaver::WitnessRecord>,
         intentions: Vec<SignedIntention>,
         peer_id: PubKey,
-    ) -> Result<(), StateError> {
+    ) -> Result<(), SyncError> {
         self.sync.ingest_witness_batch(witness_records, intentions, peer_id).await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 
-    pub async fn fetch_intentions(&self, hashes: Vec<Hash>) -> Result<Vec<SignedIntention>, StateError> {
+    pub async fn fetch_intentions(&self, hashes: Vec<Hash>) -> Result<Vec<SignedIntention>, SyncError> {
         self.sync.fetch_intentions(hashes).await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
     
     pub fn subscribe_intentions(&self) -> broadcast::Receiver<SignedIntention> {
@@ -96,24 +91,20 @@ impl NetworkStore {
     
     // --- Range Queries ---
 
-    pub async fn count_range(&self, start: &Hash, end: &Hash) -> Result<u64, StateError> {
+    pub async fn count_range(&self, start: &Hash, end: &Hash) -> Result<u64, SyncError> {
         self.sync.count_range(start, end).await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 
-    pub async fn fingerprint_range(&self, start: &Hash, end: &Hash) -> Result<Hash, StateError> {
+    pub async fn fingerprint_range(&self, start: &Hash, end: &Hash) -> Result<Hash, SyncError> {
         self.sync.fingerprint_range(start, end).await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 
-    pub async fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, StateError> {
+    pub async fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, SyncError> {
         self.sync.hashes_in_range(start, end).await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 
-    pub async fn table_fingerprint(&self) -> Result<Hash, StateError> {
+    pub async fn table_fingerprint(&self) -> Result<Hash, SyncError> {
         self.sync.table_fingerprint().await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
     
     // ==================== PeerProvider delegation ====================
@@ -143,7 +134,7 @@ impl NetworkStore {
 
 #[async_trait]
 impl RangeStore for NetworkStore {
-    type Error = StateError;
+    type Error = SyncError;
 
     async fn count_range(&self, start: &Hash, end: &Hash) -> Result<u64, Self::Error> {
         self.count_range(start, end).await
@@ -168,9 +159,8 @@ impl NetworkStore {
         target: Hash,
         since: Option<Hash>,
         limit: usize,
-    ) -> Result<Vec<SignedIntention>, StateError> {
+    ) -> Result<Vec<SignedIntention>, SyncError> {
         self.sync.walk_back_until(target, since, limit).await
-            .map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 
 
@@ -179,12 +169,8 @@ impl NetworkStore {
         &self,
         start_hash: Option<Hash>,
         limit: usize,
-    ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, StateError>> + Send + '_>> {
-        // Map StoreError to StateError in the stream
-        let stream = self.sync.scan_witness_log(start_hash, limit);
-        Box::pin(futures_util::StreamExt::map(stream, move |res| {
-            res.map_err(|e| StateError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
-        }))
+    ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, SyncError>> + Send + '_>> {
+        self.sync.scan_witness_log(start_hash, limit)
     }
 }
 

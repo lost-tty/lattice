@@ -24,11 +24,11 @@ title: "Roadmap"
 
 Remove improper architectural couplings and establish clean abstraction boundaries between crates.
 
-- [ ] **Bindings & Model:** Remove `lattice-store-base` and `lattice-model` from `lattice-bindings`.
-- [ ] **Network Isolation:** Remove `lattice-kernel` from `lattice-net` and related networking crates to make the transport abstraction fully generic.
-- [ ] **Network Types Isolation:** Investigate and remove `lattice-kernel` from `lattice-net-types` (elevate `IngestResult` or related types to `store-base`).
+- [x] **Bindings → Model:** Removed phantom `lattice-model` from `lattice-bindings` (zero imports). `lattice-store-base` stays (used for `StreamDescriptor`).
+- [ ] **Network Isolation:** Remove `lattice-kernel` from `lattice-net` — move proto types to `lattice-proto`, move `intention_from_proto`/`intention_to_proto` converters, elevate `MissingDep`/`StateError`/`PeerSyncInfo` to `lattice-store-base`.
+- [ ] **Network Types Isolation:** Remove `lattice-kernel` from `lattice-net-types` — elevate `SyncProvider`, `IngestResult`, `StateError` to `lattice-store-base`.
 - [ ] **Store Hierarchy:** Investigate and abstract `lattice-systemstore` dependency on `lattice-kernel`.
-- [ ] **API Boundary:** Investigate `lattice-api` direct dependencies on `lattice-net`.
+- [x] **API Boundary:** Removed phantom `lattice-net` from `lattice-api` (zero imports).
 - [ ] **Node Boundary:** Investigate `lattice-node` direct concrete store dependencies.
 
 ---

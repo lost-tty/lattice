@@ -10,7 +10,7 @@ pub mod network;
 // Re-export Transport abstraction from lattice-net-types
 pub use lattice_net_types::{Transport, Connection, BiStream, TransportError};
 pub use framing::{MessageSink, MessageStream};
-pub use lattice_kernel::proto::network::{
+pub use lattice_proto::network::{
     JoinRequest, JoinResponse, 
     FetchIntentions, IntentionResponse
 };

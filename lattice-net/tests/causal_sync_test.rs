@@ -3,7 +3,7 @@ mod common;
 use lattice_node::{Invite, NodeEvent, STORE_TYPE_KVSTORE};
 use lattice_net::network;
 use lattice_net_sim::{ChannelTransport, ChannelNetwork};
-use lattice_kvstore_client::KvStoreExt;
+use lattice_kvstore_api::KvStoreExt;
 use lattice_model::Uuid;
 use tokio::time::{timeout, Duration, sleep};
 use futures_util::StreamExt;

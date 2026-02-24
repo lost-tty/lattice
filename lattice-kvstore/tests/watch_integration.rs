@@ -1,6 +1,6 @@
 mod common;
 use common::TestStore;
-use lattice_kvstore_client::{KvStoreExt, WatchEventKind};
+use lattice_kvstore_api::{KvStoreExt, WatchEventKind};
 use futures::StreamExt;
 use std::time::Duration;
 use tokio::time::sleep;

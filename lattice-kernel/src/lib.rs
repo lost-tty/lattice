@@ -8,7 +8,6 @@
 
 pub mod proto;
 pub mod store;
-pub mod sync_provider;
 pub mod store_inspector;
 pub mod weaver;
 
@@ -18,5 +17,4 @@ pub use lattice_model::{NodeError, NodeIdentity, PeerStatus};
 // Store exports (replication engine)
 pub use store::{OpenedStore, Store, StoreInfo, StateError};
 pub use store::{ReplicationController, ReplicationControllerCmd, ReplicationControllerError};
-pub use sync_provider::SyncProvider;
 pub use store_inspector::StoreInspector;

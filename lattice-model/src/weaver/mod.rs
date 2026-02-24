@@ -4,8 +4,10 @@
 //! See `docs/design/weaver_protocol.md` for the full specification.
 
 pub mod intention;
+pub mod ingest;
 
 pub use intention::{Condition, FloatingIntention, Intention, SignedIntention};
+pub use ingest::{IngestResult, MissingDep};
 
 use crate::types::Hash;
 

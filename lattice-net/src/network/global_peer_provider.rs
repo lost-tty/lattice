@@ -80,9 +80,9 @@ impl PeerProvider for GlobalPeerProvider {
                 for peer in store.peer_provider().list_peers() {
                     // Just keep the highest privilege status if there are duplicates
                     all_peers.entry(peer.pubkey)
-                        .and_modify(|existing_status: &mut lattice_kernel::PeerStatus| {
-                            if existing_status == &lattice_kernel::PeerStatus::Dormant && peer.status == lattice_kernel::PeerStatus::Active {
-                                *existing_status = lattice_kernel::PeerStatus::Active;
+                        .and_modify(|existing_status: &mut lattice_model::PeerStatus| {
+                            if existing_status == &lattice_model::PeerStatus::Dormant && peer.status == lattice_model::PeerStatus::Active {
+                                *existing_status = lattice_model::PeerStatus::Active;
                             }
                         })
                         .or_insert(peer.status);

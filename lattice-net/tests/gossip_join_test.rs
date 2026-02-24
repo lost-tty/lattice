@@ -8,7 +8,7 @@ mod common;
 use lattice_node::{NodeEvent, Invite, StoreHandle, STORE_TYPE_KVSTORE};
 use lattice_net::network;
 use lattice_net_sim::{ChannelTransport, ChannelNetwork, BroadcastGossip, GossipNetwork};
-use lattice_kvstore_client::KvStoreExt;
+use lattice_kvstore_api::KvStoreExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;

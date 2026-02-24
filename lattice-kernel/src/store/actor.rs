@@ -403,7 +403,7 @@ impl<S: StateMachine> ReplicationController<S> {
         &mut self,
         store: &mut crate::weaver::IntentionStore,
         candidate: Option<&SignedIntention>,
-    ) -> Result<Option<crate::store::ingest_result::MissingDep>, ReplicationControllerError> {
+    ) -> Result<Option<crate::store::MissingDep>, ReplicationControllerError> {
         loop {
             let mut applied_any = false;
 
@@ -453,7 +453,7 @@ impl<S: StateMachine> ReplicationController<S> {
             if prev != Hash::ZERO && !store.contains(&prev)? {
                  let author = signed.intention.author;
                  let since = store.author_tip(&author);
-                 return Ok(Some(crate::store::ingest_result::MissingDep {
+                 return Ok(Some(crate::store::MissingDep {
                      prev,
                      since,
                      author,

@@ -9,10 +9,9 @@
 mod actor;
 mod error;
 mod handle;
-mod ingest_result;
 
 // Public API - types needed by consumers
-pub use ingest_result::{IngestResult, MissingDep};
+pub use lattice_model::weaver::ingest::{IngestResult, MissingDep};
 pub use actor::{ReplicationController, ReplicationControllerCmd, ReplicationControllerError};
 pub use error::{StoreError, StateError};
 pub use handle::{OpenedStore, Store, StoreInfo, StoreHandle, ActorRunner};

@@ -1,5 +1,5 @@
-use lattice_kernel::proto::storage::PeerSyncInfo;
-use lattice_kernel::store::StateError;
+use lattice_proto::storage::PeerSyncInfo;
+use crate::error::LatticeNetError;
 use lattice_model::types::PubKey;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -22,19 +22,19 @@ impl PeerSyncStore {
         &self,
         peer: &PubKey,
         info: PeerSyncInfo,
-    ) -> Result<(), StateError> {
-        let mut cache = self.cache.write().map_err(|_| StateError::Backend("Lock poisoned".into()))?;
+    ) -> Result<(), LatticeNetError> {
+        let mut cache = self.cache.write().map_err(|_| LatticeNetError::Sync("Lock poisoned".into()))?;
         cache.insert(*peer, info);
         Ok(())
     }
 
-    pub fn get_peer_sync_state(&self, peer: &PubKey) -> Result<Option<PeerSyncInfo>, StateError> {
-        let cache = self.cache.read().map_err(|_| StateError::Backend("Lock poisoned".into()))?;
+    pub fn get_peer_sync_state(&self, peer: &PubKey) -> Result<Option<PeerSyncInfo>, LatticeNetError> {
+        let cache = self.cache.read().map_err(|_| LatticeNetError::Sync("Lock poisoned".into()))?;
         Ok(cache.get(peer).cloned())
     }
 
-    pub fn list_peer_sync_states(&self) -> Result<Vec<(PubKey, PeerSyncInfo)>, StateError> {
-        let cache = self.cache.read().map_err(|_| StateError::Backend("Lock poisoned".into()))?;
+    pub fn list_peer_sync_states(&self) -> Result<Vec<(PubKey, PeerSyncInfo)>, LatticeNetError> {
+        let cache = self.cache.read().map_err(|_| LatticeNetError::Sync("Lock poisoned".into()))?;
         Ok(cache.iter().map(|(k, v)| (*k, v.clone())).collect())
     }
 }

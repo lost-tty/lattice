@@ -8,10 +8,10 @@ use crate::framing;
 
 use super::service::PeerStoreRegistry;
 use lattice_net_types::{NetworkStoreRegistry, NetworkStore, NodeProviderExt};
-use lattice_kernel::proto::network::{peer_message, JoinResponse, PeerMessage, FetchIntentions, IntentionResponse, BootstrapRequest, BootstrapResponse};
-use lattice_kernel::weaver::convert::intention_to_proto;
+use lattice_proto::network::{peer_message, JoinResponse, PeerMessage, FetchIntentions, IntentionResponse, BootstrapRequest, BootstrapResponse};
+use lattice_proto::convert::intention_to_proto;
 use lattice_model::{Uuid, types::{PubKey, Hash}};
-use lattice_kernel::proto::weaver::{WitnessRecord, WitnessContent};
+use lattice_proto::weaver::{WitnessRecord, WitnessContent};
 use std::sync::Arc;
 use futures_util::StreamExt;
 
@@ -89,7 +89,7 @@ where
 pub async fn handle_join_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
-    req: lattice_kernel::proto::network::JoinRequest,
+    req: lattice_proto::network::JoinRequest,
     sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
     tracing::debug!("[Join] Got JoinRequest from {}", hex::encode(&req.node_pubkey));
@@ -117,7 +117,7 @@ pub async fn handle_reconcile_start<W, R>(
     provider: &dyn NodeProviderExt,
     _peer_stores: PeerStoreRegistry,
     remote_pubkey: &PubKey,
-    req: lattice_kernel::proto::network::ReconcilePayload,
+    req: lattice_proto::network::ReconcilePayload,
     sink: &mut framing::MessageSink<W>,
     stream: &mut framing::MessageStream<R>,
 ) -> Result<(), LatticeNetError>
@@ -192,7 +192,7 @@ pub async fn handle_fetch_intentions<W: tokio::io::AsyncWrite + Send + Unpin>(
 pub async fn handle_fetch_chain<W: tokio::io::AsyncWrite + Send + Unpin>(
     provider: &dyn NodeProviderExt,
     remote_pubkey: &PubKey,
-    req: lattice_kernel::proto::network::FetchChain,
+    req: lattice_proto::network::FetchChain,
     sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
     let store_id = Uuid::from_slice(&req.store_id)

@@ -1,7 +1,7 @@
 mod common;
 
 use common::TestPair;
-use lattice_kvstore_client::KvStoreExt;
+use lattice_kvstore_api::KvStoreExt;
 use lattice_model::types::Hash;
 
 #[tokio::test]

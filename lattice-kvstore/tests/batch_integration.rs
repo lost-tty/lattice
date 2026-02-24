@@ -1,7 +1,7 @@
 mod common;
 use common::TestStore;
 use lattice_model::Hash;
-use lattice_kvstore_client::KvStoreExt;
+use lattice_kvstore_api::KvStoreExt;
 
 #[tokio::test]
 async fn test_batch_atomic() {

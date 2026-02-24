@@ -10,7 +10,7 @@ members = [
     "lattice-api",
     "lattice-model",
     "lattice-kvstore",
-    "lattice-kvstore-client",
+    "lattice-kvstore-api",
     "lattice-logstore",
     "lattice-runtime",
     "lattice-bindings",
@@ -56,7 +56,7 @@ lattice-node = { path = "lattice-node" }
 lattice-net = { path = "lattice-net" }
 lattice-model = { path = "lattice-model" }
 lattice-kvstore = { path = "lattice-kvstore" }
-lattice-kvstore-client = { path = "lattice-kvstore-client" }
+lattice-kvstore-api = { path = "lattice-kvstore-api" }
 lattice-logstore = { path = "lattice-logstore" }
 lattice-storage = { path = "lattice-storage" }
 lattice-systemstore = { path = "lattice-systemstore" }

@@ -440,7 +440,15 @@ impl<S: StateMachine> StateWriter for Store<S> {
 
 // ==================== SyncProvider implementation ====================
 
-use crate::sync_provider::SyncProvider;
+use lattice_sync::sync_provider::{SyncProvider, SyncError};
+
+/// Map internal StoreError to the trait-level SyncError
+fn store_to_sync(e: StoreError) -> SyncError {
+    match e {
+        StoreError::ChannelClosed => SyncError::ChannelClosed,
+        StoreError::Store(se) => SyncError::Internal(se.to_string()),
+    }
+}
 
 impl<S: StateMachine + 'static> SyncProvider for Store<S> {
     fn id(&self) -> Uuid {
@@ -453,22 +461,22 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
 
     fn author_tips(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, StoreError>> + Send + '_>> {
-        Box::pin(Store::author_tips(self))
+    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, SyncError>> + Send + '_>> {
+        Box::pin(async move { Store::author_tips(self).await.map_err(store_to_sync) })
     }
 
     fn ingest_intention(
         &self,
         intention: SignedIntention,
-    ) -> Pin<Box<dyn Future<Output = Result<IngestResult, StoreError>> + Send + '_>> {
-        Box::pin(Store::ingest_intention(self, intention))
+    ) -> Pin<Box<dyn Future<Output = Result<IngestResult, SyncError>> + Send + '_>> {
+        Box::pin(async move { Store::ingest_intention(self, intention).await.map_err(store_to_sync) })
     }
 
     fn ingest_batch(
         &self,
         intentions: Vec<SignedIntention>,
-    ) -> Pin<Box<dyn Future<Output = Result<IngestResult, StoreError>> + Send + '_>> {
-        Box::pin(Store::ingest_batch(self, intentions))
+    ) -> Pin<Box<dyn Future<Output = Result<IngestResult, SyncError>> + Send + '_>> {
+        Box::pin(async move { Store::ingest_batch(self, intentions).await.map_err(store_to_sync) })
     }
 
     fn ingest_witness_batch(
@@ -476,15 +484,15 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         witness_records: Vec<lattice_proto::weaver::WitnessRecord>,
         intentions: Vec<SignedIntention>,
         peer_id: PubKey,
-    ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>> {
-        Box::pin(Store::ingest_witness_batch(self, witness_records, intentions, peer_id))
+    ) -> Pin<Box<dyn Future<Output = Result<(), SyncError>> + Send + '_>> {
+        Box::pin(async move { Store::ingest_witness_batch(self, witness_records, intentions, peer_id).await.map_err(store_to_sync) })
     }
 
     fn fetch_intentions(
         &self,
         hashes: Vec<Hash>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, StoreError>> + Send + '_>> {
-        Box::pin(Store::fetch_intentions(self, hashes))
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, SyncError>> + Send + '_>> {
+        Box::pin(async move { Store::fetch_intentions(self, hashes).await.map_err(store_to_sync) })
     }
 
     fn subscribe_intentions(&self) -> broadcast::Receiver<SignedIntention> {
@@ -495,29 +503,29 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         &self,
         start: &Hash,
         end: &Hash,
-    ) -> Pin<Box<dyn Future<Output = Result<u64, StoreError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<u64, SyncError>> + Send + '_>> {
         let store = self.intention_store.clone();
         let start = *start;
         let end = *end;
-        run_store_read(store, move |guard| guard.count_range(&start, &end))
+        Box::pin(async move { run_store_read(store, move |guard| guard.count_range(&start, &end)).await.map_err(store_to_sync) })
     }
 
     fn fingerprint_range(
         &self,
         start: &Hash,
         end: &Hash,
-    ) -> Pin<Box<dyn Future<Output = Result<Hash, StoreError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Hash, SyncError>> + Send + '_>> {
         let store = self.intention_store.clone();
         let start = *start;
         let end = *end;
-        run_store_read(store, move |guard| guard.fingerprint_range(&start, &end))
+        Box::pin(async move { run_store_read(store, move |guard| guard.fingerprint_range(&start, &end)).await.map_err(store_to_sync) })
     }
 
     fn scan_witness_log(
         &self,
         start_hash: Option<Hash>,
         limit: usize,
-    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, StoreError>> + Send + '_>> {
+    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, SyncError>> + Send + '_>> {
         let store = self.intention_store.clone();
         
         Box::pin(async_stream::try_stream! {
@@ -531,7 +539,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
                 // Fetch a batch in a blocking task
                 let batch = run_store_read(store.clone(), move |guard| {
                     guard.scan_witness_log(current_start, fetch_limit)
-                }).await?;
+                }).await.map_err(store_to_sync)?;
 
                 if batch.is_empty() {
                     break;
@@ -567,16 +575,16 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         &self,
         start: &Hash,
         end: &Hash,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Hash>, StoreError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Hash>, SyncError>> + Send + '_>> {
         let store = self.intention_store.clone();
         let start = *start;
         let end = *end;
-        run_store_read(store, move |guard| guard.hashes_in_range(&start, &end))
+        Box::pin(async move { run_store_read(store, move |guard| guard.hashes_in_range(&start, &end)).await.map_err(store_to_sync) })
     }
 
-    fn table_fingerprint(&self) -> Pin<Box<dyn Future<Output = Result<Hash, StoreError>> + Send + '_>> {
+    fn table_fingerprint(&self) -> Pin<Box<dyn Future<Output = Result<Hash, SyncError>> + Send + '_>> {
         let store = self.intention_store.clone();
-        run_store_read(store, move |guard| Ok(guard.table_fingerprint()))
+        Box::pin(async move { run_store_read(store, move |guard| Ok(guard.table_fingerprint())).await.map_err(store_to_sync) })
     }
 
     fn walk_back_until(
@@ -584,9 +592,9 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         target: Hash,
         since: Option<Hash>,
         limit: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, StoreError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, SyncError>> + Send + '_>> {
         let store = self.intention_store.clone();
-        run_store_read(store, move |guard| guard.walk_back_until(&target, since.as_ref(), limit))
+        Box::pin(async move { run_store_read(store, move |guard| guard.walk_back_until(&target, since.as_ref(), limit)).await.map_err(store_to_sync) })
     }
 
     // We move scan_witness_log to SyncProvider primitive
