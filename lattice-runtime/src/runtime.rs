@@ -2,14 +2,13 @@
 
 use crate::backend_inprocess::InProcessBackend;
 use crate::{LatticeBackend, NetworkService, Node, NodeBuilder, RpcServer};
-use lattice_node::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, direct_opener};
-use lattice_storage::PersistentState;
-use lattice_systemstore::SystemLayer;
-use lattice_kvstore::KvState;
-use lattice_logstore::LogState;
+use lattice_node::{StoreOpener, StoreRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
+
+/// Type alias for opener factory closures (matches NodeBuilder's signature).
+type OpenerFactory = Box<dyn FnOnce(Arc<StoreRegistry>) -> Box<dyn StoreOpener> + Send>;
 
 /// A running Lattice runtime with Node, network, and optional RPC server.
 pub struct Runtime {
@@ -55,6 +54,7 @@ pub struct RuntimeBuilder {
     data_dir: Option<PathBuf>,
     with_rpc: bool,
     name: Option<String>,
+    opener_factories: Vec<(String, OpenerFactory)>,
 }
 
 impl RuntimeBuilder {
@@ -63,6 +63,7 @@ impl RuntimeBuilder {
             data_dir: None,
             with_rpc: false,
             name: None,
+            opener_factories: Vec::new(),
         }
     }
     
@@ -82,7 +83,49 @@ impl RuntimeBuilder {
         self.name = Some(name);
         self
     }
-    
+
+    /// Register a store opener factory for a given store type.
+    ///
+    /// This is the generic plugin mechanism — any crate can define a custom
+    /// store type and register it here without forking `lattice-runtime`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// Runtime::builder()
+    ///     .with_opener("custom:mystore", |registry| {
+    ///         direct_opener::<SystemLayer<PersistentState<MyState>>>(registry)
+    ///     })
+    ///     .build().await
+    /// ```
+    pub fn with_opener<F>(mut self, store_type: impl Into<String>, factory: F) -> Self
+    where
+        F: FnOnce(Arc<StoreRegistry>) -> Box<dyn StoreOpener> + Send + 'static,
+    {
+        self.opener_factories.push((store_type.into(), Box::new(factory)));
+        self
+    }
+
+    /// Register the built-in core store types (kvstore, logstore).
+    ///
+    /// This is a convenience method for the common case. If you need to
+    /// customise which store types are available, use `with_opener()` instead.
+    #[cfg(feature = "core-stores")]
+    pub fn with_core_stores(self) -> Self {
+        use lattice_node::direct_opener;
+        use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
+        use lattice_systemstore::SystemLayer;
+        use lattice_storage::PersistentState;
+        use lattice_kvstore::KvState;
+        use lattice_logstore::LogState;
+
+        self.with_opener(STORE_TYPE_KVSTORE, |registry| {
+                direct_opener::<SystemLayer<PersistentState<KvState>>>(registry)
+            })
+            .with_opener(STORE_TYPE_LOGSTORE, |registry| {
+                direct_opener::<SystemLayer<PersistentState<LogState>>>(registry)
+            })
+    }
+
     /// Build and start the runtime.
     pub async fn build(self) -> Result<Runtime, RuntimeError> {
         // Create net channel
@@ -100,15 +143,12 @@ impl RuntimeBuilder {
         
         let data_dir = lattice_node::data_dir::DataDir::new(data_path);
 
-        // Build node with openers (using handle-less pattern)
+        // Build node with registered openers
         let mut builder = NodeBuilder::new(data_dir)
-            .with_net_tx(net_tx)
-            .with_opener(STORE_TYPE_KVSTORE, |registry| {
-                direct_opener::<SystemLayer<PersistentState<KvState>>>(registry)
-            })
-            .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-                direct_opener::<SystemLayer<PersistentState<LogState>>>(registry)
-            });
+            .with_net_tx(net_tx);
+        for (store_type, factory) in self.opener_factories {
+            builder = builder.with_opener(store_type, factory);
+        }
         if let Some(name) = self.name {
             builder = builder.with_name(name);
         }

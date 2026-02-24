@@ -26,6 +26,9 @@ pub use lattice_store_base::FieldFormat;
 pub use lattice_model::types::{PubKey, Hash};
 pub use lattice_model::SExpr;
 
+// Re-export store plugin types for custom store registration
+pub use lattice_node::{StoreOpener, StoreRegistry, direct_opener};
+
 // Internal re-exports (not public API)
 pub(crate) type NetworkService = lattice_net::network::NetworkService<lattice_net_iroh::IrohTransport>;
 pub(crate) use lattice_node::{Node, NodeBuilder, StoreHandle};

@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["core-stores"]
+core-stores = ["dep:lattice-kvstore", "dep:lattice-logstore"]
+
 [dependencies]
 lattice-node = { workspace = true }
 lattice-net = { workspace = true }
@@ -15,8 +19,8 @@ lattice-storage = { workspace = true }
 lattice-systemstore = { workspace = true }
 lattice-api = { workspace = true }
 lattice-proto = { workspace = true }
-lattice-kvstore = { workspace = true }
-lattice-logstore = { workspace = true }
+lattice-kvstore = { workspace = true, optional = true }
+lattice-logstore = { workspace = true, optional = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

@@ -6,7 +6,8 @@
 
 mod common;
 
-use lattice_node::{Invite, STORE_TYPE_KVSTORE};
+use lattice_node::Invite;
+use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network;
 use lattice_net_sim::{ChannelTransport, ChannelNetwork, BroadcastGossip, GossipNetwork};
 use std::sync::Arc;

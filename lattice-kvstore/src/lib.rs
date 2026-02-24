@@ -11,6 +11,22 @@ pub mod proto {
     pub use lattice_proto::kv::*;
 }
 
+/// Event emitted when a watched key changes
+#[derive(Clone, Debug)]
+pub struct WatchEvent {
+    pub key: Vec<u8>,
+    pub kind: WatchEventKind,
+}
+
+/// Kind of watch event
+#[derive(Clone, Debug)]
+pub enum WatchEventKind {
+    /// Key was updated - carries the resolved LWW value
+    Update { value: Vec<u8> },
+    /// Key was deleted
+    Delete,
+}
+
 // Internal modules
 pub mod state;
 pub use state::KvState;

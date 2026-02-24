@@ -8,6 +8,7 @@ license.workspace = true
 lattice-store-base = { workspace = true }
 lattice-model = { workspace = true }
 lattice-proto = { workspace = true }
+lattice-kvstore = { workspace = true }
 bytes = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true }

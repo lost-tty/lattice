@@ -2,7 +2,8 @@
 
 mod common;
 
-use lattice_node::{NodeBuilder, Invite, direct_opener, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
+use lattice_node::{NodeBuilder, Invite, direct_opener};
+use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
 use lattice_kvstore::PersistentKvState;
 use lattice_logstore::PersistentLogState;
 use lattice_systemstore::system_state::SystemLayer;

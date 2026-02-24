@@ -7,21 +7,8 @@ use futures_util::StreamExt;
 // Re-export proto types
 pub use lattice_proto::kv::*;
 
-/// Event emitted when a watched key changes
-#[derive(Clone, Debug)]
-pub struct WatchEvent {
-    pub key: Vec<u8>,
-    pub kind: WatchEventKind,
-}
-
-/// Kind of watch event
-#[derive(Clone, Debug)]
-pub enum WatchEventKind {
-    /// Key was updated - carries the resolved LWW value
-    Update { value: Vec<u8> },
-    /// Key was deleted
-    Delete,
-}
+// Re-export watch types from lattice-kvstore (canonical definitions)
+pub use lattice_kvstore::{WatchEvent, WatchEventKind};
 
 /// Error when creating a watcher
 #[derive(Debug)]

@@ -58,9 +58,6 @@ pub enum NodeError {
     #[error("Store error: {0}")]
     StoreError(#[from] lattice_kernel::store::StoreError),
     
-    #[error("Dispatch error: {0}")]
-    Dispatch(#[from] lattice_kvstore_api::DispatchError),
-
     #[error("StoreManager error: {0}")]
     StoreManager(#[from] crate::StoreManagerError),
 
@@ -308,8 +305,8 @@ impl Node {
             // 1. Open the store (resolve type from disk)
             let (handle, store_type) = if let Ok((handle, store_type)) = self.store_manager.open_existing(store_id) {
                 (handle, store_type)
-            } else if let Ok(handle) = self.store_manager.open(store_id, crate::STORE_TYPE_KVSTORE) {
-                (handle, crate::STORE_TYPE_KVSTORE.to_string())
+            } else if let Ok(handle) = self.store_manager.open(store_id, lattice_model::STORE_TYPE_KVSTORE) {
+                (handle, lattice_model::STORE_TYPE_KVSTORE.to_string())
             } else {
                  tracing::warn!("Failed to open root store {}", store_id);
                  continue;
@@ -406,7 +403,7 @@ impl Node {
         })?;
         
         // Workaround: Use open() then configure.
-        let handle = self.store_manager.open(store_id, crate::STORE_TYPE_KVSTORE)
+        let handle = self.store_manager.open(store_id, lattice_model::STORE_TYPE_KVSTORE)
             .map_err(|e| NodeError::StoreManager(e))?;
             
         // 2. Configure System Table
@@ -421,7 +418,7 @@ impl Node {
             peer_manager.add_bootstrap_peer(*peer);
         }
 
-        self.store_manager.register(store_id, handle.clone(), crate::STORE_TYPE_KVSTORE, peer_manager)?;
+        self.store_manager.register(store_id, handle.clone(), lattice_model::STORE_TYPE_KVSTORE, peer_manager)?;
         
         // Start watching
         self.store_manager.start_watching(store_id).map_err(NodeError::StoreManager)?;
@@ -567,7 +564,8 @@ mod tests {
     use super::*;
     use lattice_model::types::PubKey;
     use lattice_kvstore_api::KvStoreExt;
-    use crate::{direct_opener, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
+    use crate::direct_opener;
+    use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
         
     /// Helper to create node builder with openers registered for tests that use mesh/store manager
     fn test_node_builder(data_dir: DataDir) -> NodeBuilder {

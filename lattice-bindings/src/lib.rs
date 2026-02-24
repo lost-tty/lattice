@@ -207,7 +207,7 @@ impl Lattice {
             return Ok(());
         }
         
-        let mut builder = lattice_runtime::Runtime::builder();
+        let mut builder = lattice_runtime::Runtime::builder().with_core_stores();
         if let Some(path) = data_dir {
             builder = builder.data_dir(std::path::PathBuf::from(path));
         }

@@ -231,7 +231,7 @@ async fn run_embedded_mode() {
     let _ = writeln!(&mut writer.clone(), "Type 'help' for commands, 'quit' to exit.\n");
     
     // Start runtime (Node + NetworkService + backend)
-    let runtime = match lattice_runtime::Runtime::builder().build().await {
+    let runtime = match lattice_runtime::Runtime::builder().with_core_stores().build().await {
         Ok(r) => r,
         Err(e) => {
             let _ = writeln!(&mut writer.clone(), "Failed to start: {}", e);

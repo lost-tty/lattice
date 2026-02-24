@@ -26,9 +26,6 @@ pub use store_openers::direct_opener;
 pub use store_registry::StoreRegistry;
 pub use store_handle::StoreHandle;
 
-// Re-export store type constants from lattice-model (canonical location)
-pub use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, CORE_STORE_TYPES};
-
 // Re-export from lattice-kernel (replication engine)
 pub use lattice_kernel::{
     NodeIdentity, PeerStatus,

@@ -1,7 +1,8 @@
 mod common;
 
 use common::TestPair;
-use lattice_node::{Invite, StoreHandle, STORE_TYPE_KVSTORE};
+use lattice_node::{Invite, StoreHandle};
+use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network;
 use lattice_net_sim::{ChannelTransport, ChannelNetwork};
 use lattice_model::{types::{Hash, PubKey}};

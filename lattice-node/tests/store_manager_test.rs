@@ -1,4 +1,5 @@
-use lattice_node::{Node, NodeBuilder, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, direct_opener};
+use lattice_node::{Node, NodeBuilder, direct_opener};
+use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
 use lattice_node::data_dir::DataDir;
 use lattice_model::NodeIdentity;
 use std::sync::Arc;

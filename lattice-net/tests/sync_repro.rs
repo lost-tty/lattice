@@ -77,7 +77,8 @@ async fn test_large_sync() {
 
 #[tokio::test]
 async fn test_partition_repro() {
-    use lattice_node::{Invite, STORE_TYPE_KVSTORE};
+    use lattice_node::Invite;
+    use lattice_model::STORE_TYPE_KVSTORE;
     use lattice_net::network;
     use lattice_net_sim::{ChannelTransport, ChannelNetwork};
 

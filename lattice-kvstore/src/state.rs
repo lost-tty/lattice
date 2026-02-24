@@ -12,7 +12,7 @@ use lattice_storage::{StateBackend, StateDbError, TABLE_DATA, PersistentState, S
 use std::pin::Pin;
 use std::future::Future;
 
-use lattice_kvstore_api::{WatchEvent, WatchEventKind};
+use crate::{WatchEvent, WatchEventKind};
 use lattice_storage::head::Head;
 use lattice_storage::merge::Merge;
 use crate::proto::{operation, KvPayload};

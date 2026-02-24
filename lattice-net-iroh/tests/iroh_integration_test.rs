@@ -6,7 +6,8 @@
 //! 3. Two nodes can discover each other (via stored NodeAddr)
 //! 4. Store creation, invite, join, and sync work through iroh transport
 
-use lattice_node::{NodeBuilder, Node, Invite, direct_opener, STORE_TYPE_KVSTORE, NodeEvent};
+use lattice_node::{NodeBuilder, Node, Invite, direct_opener, NodeEvent};
+use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net_iroh::IrohBackend;
 use lattice_net_types::GossipLayer;
 use std::sync::Arc;

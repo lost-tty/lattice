@@ -1,6 +1,7 @@
 mod common;
 
-use lattice_node::{Invite, STORE_TYPE_KVSTORE};
+use lattice_node::Invite;
+use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_model::PeerStatus;
 use lattice_net::network;
 use lattice_net_sim::{ChannelTransport, ChannelNetwork};

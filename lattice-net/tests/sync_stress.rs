@@ -119,7 +119,8 @@ async fn test_interleaved_modifications() {
 
 #[tokio::test]
 async fn test_partition_recovery() {
-    use lattice_node::{Invite, STORE_TYPE_KVSTORE};
+    use lattice_node::Invite;
+    use lattice_model::STORE_TYPE_KVSTORE;
     use lattice_net::network;
 
     const COUNT: usize = 10;

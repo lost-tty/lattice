@@ -5,7 +5,8 @@
 
 mod common;
 
-use lattice_node::{NodeEvent, Invite, STORE_TYPE_KVSTORE};
+use lattice_node::{NodeEvent, Invite};
+use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network::{self, GossipLagStats};
 use lattice_net_sim::{ChannelTransport, ChannelNetwork, BroadcastGossip, GossipNetwork};
 use lattice_kvstore_api::KvStoreExt;

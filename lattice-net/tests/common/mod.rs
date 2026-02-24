@@ -3,7 +3,8 @@
 #![allow(dead_code)]
 //! Shared test utilities for lattice-net integration tests.
 
-use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, Uuid, direct_opener, StoreHandle, STORE_TYPE_KVSTORE};
+use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, Uuid, direct_opener, StoreHandle};
+use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network;
 use lattice_net_sim::{ChannelTransport, ChannelNetwork};
 use lattice_model::types::PubKey;
