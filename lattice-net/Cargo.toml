@@ -31,6 +31,7 @@ lattice-kvstore = { workspace = true }
 lattice-kvstore-api = { workspace = true }
 lattice-logstore = { workspace = true }
 lattice-storage = { workspace = true }
+lattice-store-base = { workspace = true }
 lattice-systemstore = { workspace = true }
 lattice-node = { workspace = true }
 rand = { workspace = true }

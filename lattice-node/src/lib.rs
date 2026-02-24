@@ -35,7 +35,7 @@ pub use lattice_kernel::{
     StateError, Store, StoreInfo,
     ReplicationController, ReplicationControllerCmd, ReplicationControllerError,
 };
-pub use lattice_sync::SyncProvider;
+pub use lattice_kernel::SyncProvider;
 
 // Re-export from lattice-net-types (network layer types)
 pub use lattice_net_types::{NetworkStore, NetworkStoreRegistry, NodeProviderExt};

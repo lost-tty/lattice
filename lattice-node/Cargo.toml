@@ -11,7 +11,6 @@ lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
 lattice-kvstore-api = { workspace = true }
 lattice-net-types = { workspace = true }
-lattice-sync = { workspace = true }
 lattice-storage = { workspace = true }
 lattice-systemstore = { workspace = true }
 ed25519-dalek = { workspace = true }
@@ -37,5 +36,6 @@ tokio-stream = "0.1"
 [dev-dependencies]
 lattice-logstore = { workspace = true }
 lattice-kvstore = { workspace = true }
+lattice-proto = { workspace = true }
 tokio-test = { workspace = true }
 tempfile = "3"

@@ -18,3 +18,7 @@ pub use lattice_model::{NodeError, NodeIdentity, PeerStatus};
 pub use store::{OpenedStore, Store, StoreInfo, StateError};
 pub use store::{ReplicationController, ReplicationControllerCmd, ReplicationControllerError};
 pub use store_inspector::StoreInspector;
+
+// Sync trait facade - canonical definition in lattice-sync,
+// re-exported here since Store<S> implements it.
+pub use lattice_sync::sync_provider::{SyncProvider, SyncError};
