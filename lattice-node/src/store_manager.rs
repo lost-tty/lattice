@@ -352,7 +352,6 @@ impl StoreManager {
     
     /// Create a one-time join token for a store (using its system table).
     pub async fn create_invite(&self, store_id: Uuid, inviter: lattice_model::types::PubKey) -> Result<String, StoreManagerError> {
-        use rand::RngCore;
         use lattice_model::InviteStatus;
         use crate::Invite;
         
@@ -362,9 +361,8 @@ impl StoreManager {
         let system = handle.as_system()
              .ok_or_else(|| StoreManagerError::Store("Store must support SystemStore".to_string()))?;
 
-        let mut secret = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut secret);
-        let hash = blake3::hash(&secret);
+        let secret = lattice_model::crypto::generate_secret();
+        let hash = lattice_model::crypto::content_hash(&secret);
         
         SystemBatch::new(system.as_ref())
             .set_invite_status(hash.as_bytes(), InviteStatus::Valid)
@@ -390,7 +388,7 @@ impl StoreManager {
         use lattice_model::InviteStatus;
         
         // Hash secret first
-        let hash = blake3::hash(secret);
+        let hash = lattice_model::crypto::content_hash(secret);
         
         let handle = self.get_handle(&store_id)
             .ok_or(StoreManagerError::NotFound(store_id))?;

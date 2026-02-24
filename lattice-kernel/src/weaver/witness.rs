@@ -3,6 +3,8 @@
 //! Operates on the proto-generated `WitnessRecord` and `WitnessContent` types
 //! from `lattice-proto`. Signature covers `blake3(content_bytes)`.
 
+use lattice_model::crypto;
+use lattice_model::types::{Signature};
 use lattice_proto::weaver::{WitnessContent, WitnessRecord};
 use prost::Message;
 
@@ -13,12 +15,11 @@ pub fn sign_witness(
     content_bytes: Vec<u8>,
     signing_key: &ed25519_dalek::SigningKey,
 ) -> WitnessRecord {
-    use ed25519_dalek::Signer;
-    let digest = blake3::hash(&content_bytes);
-    let signature = signing_key.sign(digest.as_bytes());
+    let hash = crypto::content_hash(&content_bytes);
+    let sig = crypto::sign_hash(signing_key, &hash);
     WitnessRecord {
         content: content_bytes,
-        signature: signature.to_bytes().to_vec(),
+        signature: sig.0.to_vec(),
     }
 }
 
@@ -29,13 +30,16 @@ pub fn verify_witness(
     record: &WitnessRecord,
     verifying_key: &ed25519_dalek::VerifyingKey,
 ) -> Result<WitnessContent, WitnessError> {
-    use ed25519_dalek::Verifier;
-    let sig_bytes: [u8; 64] = record.signature.clone().try_into()
+    let sig_bytes: [u8; 64] = record
+        .signature
+        .clone()
+        .try_into()
         .map_err(|_| WitnessError::InvalidSignature("bad sig length".into()))?;
-    let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-    let digest = blake3::hash(&record.content);
-    verifying_key.verify(digest.as_bytes(), &signature)
-        .map_err(|e| WitnessError::InvalidSignature(format!("{e}")))?;
+    let hash = crypto::content_hash(&record.content);
+    let pubkey = lattice_model::types::PubKey::from(verifying_key.to_bytes());
+    let sig = Signature(sig_bytes);
+    crypto::verify_hash(&pubkey, &hash, &sig)
+        .map_err(|e| WitnessError::InvalidSignature(e.to_string()))?;
     WitnessContent::decode(record.content.as_slice())
         .map_err(|e| WitnessError::InvalidContent(format!("{e}")))
 }

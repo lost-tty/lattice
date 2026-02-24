@@ -41,7 +41,7 @@ pub use lattice_kernel::SyncProvider;
 pub use lattice_net_types::{NetworkStore, NetworkStoreRegistry, NodeProviderExt};
 
 // Re-export from lattice-model (types)
-pub use lattice_model::{Uuid, SigningKey};
+pub use lattice_model::Uuid;
 pub use lattice_model::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
 
 // Node-level exports

@@ -17,6 +17,7 @@ use lattice_net_types::transport::{
     Transport, Connection as TransportConnection, BiStream, TransportError,
 };
 use lattice_model::types::PubKey;
+use lattice_model::NodeIdentity;
 
 /// ALPN protocol identifier for Lattice sync
 pub const LATTICE_ALPN: &[u8] = b"lattice-sync/1";
@@ -39,10 +40,10 @@ impl std::fmt::Debug for IrohTransport {
 }
 
 impl IrohTransport {
-    /// Create a new endpoint from Ed25519 signing key (from NodeIdentity)
+    /// Create a new endpoint from a `NodeIdentity`.
     /// Enables both DNS discovery (internet) and mDNS discovery (local network)
-    pub async fn new(signing_key: ed25519_dalek::SigningKey) -> Result<Self, BindError> {
-        let secret_key = iroh::SecretKey::from(signing_key.to_bytes());
+    pub async fn new(identity: &NodeIdentity) -> Result<Self, BindError> {
+        let secret_key = iroh::SecretKey::from(identity.signing_key().to_bytes());
         
         // Static provider for direct peer address addition (highest priority)
         let static_discovery = StaticProvider::new();

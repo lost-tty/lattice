@@ -10,7 +10,6 @@ lattice-store-base = { workspace = true }
 lattice-storage = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true }
-blake3 = { workspace = true }
 once_cell = { workspace = true }
 redb = { workspace = true }
 thiserror = { workspace = true }

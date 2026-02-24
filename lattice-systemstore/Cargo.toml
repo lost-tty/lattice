@@ -15,7 +15,6 @@ bytes = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 redb = { workspace = true }
-blake3 = { workspace = true }
 prost-reflect = { workspace = true }
 futures-util = { workspace = true }
 hex.workspace = true

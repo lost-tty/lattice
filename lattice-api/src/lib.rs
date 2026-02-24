@@ -234,7 +234,7 @@ pub use backend::{
 mod tests {
     use super::proto;
     use lattice_model::hlc::HLC;
-    use lattice_model::types::{Hash, PubKey};
+    use lattice_model::types::Hash;
     use lattice_model::weaver::{Condition, Intention, SignedIntention};
 
     #[test]
@@ -260,8 +260,8 @@ mod tests {
 
     #[test]
     fn signed_intention_to_proto_roundtrips() {
-        let key = lattice_model::SigningKey::from_bytes(&[42u8; 32]);
-        let pk = PubKey(key.verifying_key().to_bytes());
+        let identity = lattice_model::NodeIdentity::generate();
+        let pk = identity.public_key();
         let store_id = uuid::Uuid::from_bytes([0xBB; 16]);
         let prev = Hash([0xCC; 32]);
         let dep = Hash([0xDD; 32]);
@@ -275,7 +275,7 @@ mod tests {
             ops: vec![1, 2, 3, 4],
         };
         let hash = intention.hash();
-        let signed = SignedIntention::sign(intention, &key);
+        let signed = SignedIntention::sign(intention, identity.signing_key());
 
         let p: proto::SignedIntention = signed.into();
 

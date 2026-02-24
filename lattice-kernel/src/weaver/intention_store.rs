@@ -12,13 +12,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::witness::sign_witness;
 use lattice_model::types::{Hash, PubKey};
+pub use lattice_model::weaver::WitnessEntry;
 use lattice_model::weaver::{FloatingIntention, Intention, SignedIntention};
 use lattice_proto::weaver::{FloatingMeta, WitnessContent, WitnessRecord};
-pub use lattice_model::weaver::WitnessEntry;
-use super::witness::sign_witness;
 use prost::Message;
-use redb::{Database, MultimapTableDefinition, TableDefinition, ReadableTable, ReadableTableMetadata};
+use redb::{
+    Database, MultimapTableDefinition, ReadableTable, ReadableTableMetadata, TableDefinition,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -38,7 +40,8 @@ const TABLE_AUTHOR_TIPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("a
 const TABLE_FLOATING: TableDefinition<&[u8], &[u8]> = TableDefinition::new("floating");
 
 /// Reverse index: store_prev hash → intention hash (multimap, multiple authors can share a prev)
-const TABLE_FLOATING_BY_PREV: MultimapTableDefinition<&[u8], &[u8]> = MultimapTableDefinition::new("floating_by_prev");
+const TABLE_FLOATING_BY_PREV: MultimapTableDefinition<&[u8], &[u8]> =
+    MultimapTableDefinition::new("floating_by_prev");
 
 /// Maximum number of hashes to return in `hashes_in_range` to prevent DoS.
 const MAX_RANGE_HASHES: usize = 2048;
@@ -67,7 +70,7 @@ pub enum IntentionStoreError {
 
 pub struct IntentionStore {
     db: Database,
-    
+
     /// The UUID of the store this IntentionStore belongs to.
     store_id: Uuid,
 
@@ -155,7 +158,9 @@ impl IntentionStore {
     fn decode_signed(bytes: &[u8]) -> Result<SignedIntention, IntentionStoreError> {
         let proto = lattice_proto::weaver::SignedIntention::decode(bytes)?;
         let intention = Intention::from_borsh(&proto.intention_borsh)?;
-        let sig_bytes: [u8; 64] = proto.signature.try_into()
+        let sig_bytes: [u8; 64] = proto
+            .signature
+            .try_into()
             .map_err(|_| IntentionStoreError::InvalidData("bad signature length".into()))?;
         Ok(SignedIntention {
             intention,
@@ -179,14 +184,15 @@ impl IntentionStore {
 
             let record = WitnessRecord::decode(v.value())
                 .map_err(|e| IntentionStoreError::InvalidData(format!("witness proto: {e}")))?;
-            self.last_witness_hash = Hash(*blake3::hash(&record.content).as_bytes());
+            self.last_witness_hash = lattice_model::crypto::content_hash(&record.content);
         }
 
         let tips = read_txn.open_table(TABLE_AUTHOR_TIPS)?;
         for entry in tips.iter()? {
             let (k, v) = entry?;
-            let pk = PubKey(k.value().try_into()
-                .map_err(|_| IntentionStoreError::InvalidData("bad pubkey in author_tips".into()))?);
+            let pk = PubKey(k.value().try_into().map_err(|_| {
+                IntentionStoreError::InvalidData("bad pubkey in author_tips".into())
+            })?);
             let hash = Hash::try_from(v.value())
                 .map_err(|_| IntentionStoreError::InvalidData("bad hash in author_tips".into()))?;
             self.author_tips.insert(pk, hash);
@@ -222,33 +228,42 @@ impl IntentionStore {
 
                 let record = WitnessRecord::decode(v.value())
                     .map_err(|e| IntentionStoreError::InvalidData(format!("witness proto: {e}")))?;
-                let content = WitnessContent::decode(record.content.as_slice())
-                    .map_err(|e| IntentionStoreError::InvalidData(format!("witness content: {e}")))?;
+                let content = WitnessContent::decode(record.content.as_slice()).map_err(|e| {
+                    IntentionStoreError::InvalidData(format!("witness content: {e}"))
+                })?;
 
                 // Verify hash chain
-                let actual_prev = Hash::try_from(content.prev_hash.as_slice())
-                    .map_err(|_| IntentionStoreError::InvalidData(format!(
+                let actual_prev = Hash::try_from(content.prev_hash.as_slice()).map_err(|_| {
+                    IntentionStoreError::InvalidData(format!(
                         "CORRUPTION: Witness seq {} has invalid prev_hash length ({})",
-                        seq, content.prev_hash.len()
-                    )))?;
+                        seq,
+                        content.prev_hash.len()
+                    ))
+                })?;
                 if actual_prev != expected_prev {
                     return Err(IntentionStoreError::InvalidData(format!(
                         "CORRUPTION: Witness chain broken at seq {}: prev_hash {} != expected {}",
                         seq, actual_prev, expected_prev,
                     )));
                 }
-                expected_prev = Hash(*blake3::hash(&record.content).as_bytes());
+                expected_prev = lattice_model::crypto::content_hash(&record.content);
 
-                let intention_hash = Hash::try_from(content.intention_hash.as_slice())
-                    .map_err(|_| IntentionStoreError::InvalidData("bad intention_hash in witness".into()))?;
+                let intention_hash =
+                    Hash::try_from(content.intention_hash.as_slice()).map_err(|_| {
+                        IntentionStoreError::InvalidData("bad intention_hash in witness".into())
+                    })?;
 
-                let intent_val = intention_table.get(intention_hash.as_bytes().as_slice())?
-                    .ok_or_else(|| IntentionStoreError::InvalidData(format!(
+                let intent_val = intention_table
+                    .get(intention_hash.as_bytes().as_slice())?
+                    .ok_or_else(|| {
+                        IntentionStoreError::InvalidData(format!(
                         "CORRUPTION: Witness seq {} references intention {} which does not exist",
                         seq, intention_hash,
-                    )))?;
+                    ))
+                    })?;
                 let signed = Self::decode_signed(intent_val.value())?;
-                self.author_tips.insert(signed.intention.author, intention_hash);
+                self.author_tips
+                    .insert(signed.intention.author, intention_hash);
 
                 // Backfill witness index
                 let seq_key = seq.to_be_bytes();
@@ -304,7 +319,10 @@ impl IntentionStore {
             floating.insert(hash.as_bytes().as_slice(), meta_bytes.as_slice())?;
 
             let mut by_prev = write_txn.open_multimap_table(TABLE_FLOATING_BY_PREV)?;
-            by_prev.insert(intention.store_prev.as_bytes().as_slice(), hash.as_bytes().as_slice())?;
+            by_prev.insert(
+                intention.store_prev.as_bytes().as_slice(),
+                hash.as_bytes().as_slice(),
+            )?;
         }
         write_txn.commit()?;
 
@@ -320,15 +338,18 @@ impl IntentionStore {
         let table = read_txn.open_table(TABLE_INTENTIONS)?;
 
         match table.get(hash.as_bytes().as_slice())? {
-            Some(v) => {
-                Ok(Some(Self::decode_signed(v.value())?))
-            }
+            Some(v) => Ok(Some(Self::decode_signed(v.value())?)),
             None => Ok(None),
         }
     }
 
     /// Encode a `WitnessContent` proto and return the raw bytes.
-    fn encode_witness_content(intention_hash: &Hash, wall_time: u64, store_id: &Uuid, prev_hash: &Hash) -> Vec<u8> {
+    fn encode_witness_content(
+        intention_hash: &Hash,
+        wall_time: u64,
+        store_id: &Uuid,
+        prev_hash: &Hash,
+    ) -> Vec<u8> {
         let content = WitnessContent {
             intention_hash: intention_hash.as_bytes().to_vec(),
             wall_time,
@@ -350,13 +371,14 @@ impl IntentionStore {
         if self.is_witnessed(&hash)? {
             return Err(IntentionStoreError::AlreadyWitnessed(hash));
         }
-        let content_bytes = Self::encode_witness_content(&hash, wall_time, &self.store_id, &self.last_witness_hash);
+        let content_bytes =
+            Self::encode_witness_content(&hash, wall_time, &self.store_id, &self.last_witness_hash);
         let record = sign_witness(content_bytes.clone(), &self.signing_key);
         let proto_bytes = record.encode_to_vec();
 
         let seq = self.witness_seq + 1;
         let seq_key = seq.to_be_bytes();
-        let new_witness_hash = Hash(*blake3::hash(&content_bytes).as_bytes());
+        let new_witness_hash = lattice_model::crypto::content_hash(&content_bytes);
 
         let write_txn = self.db.begin_write()?;
         {
@@ -367,7 +389,6 @@ impl IntentionStore {
             let mut witness_idx = write_txn.open_table(TABLE_WITNESS_INDEX)?;
             witness_idx.insert(hash.as_bytes().as_slice(), seq_key.as_slice())?;
 
-
             let mut tips = write_txn.open_table(TABLE_AUTHOR_TIPS)?;
             tips.insert(intention.author.0.as_slice(), hash.as_bytes().as_slice())?;
 
@@ -376,7 +397,10 @@ impl IntentionStore {
             floating.remove(hash.as_bytes().as_slice())?;
 
             let mut by_prev = write_txn.open_multimap_table(TABLE_FLOATING_BY_PREV)?;
-            by_prev.remove(intention.store_prev.as_bytes().as_slice(), hash.as_bytes().as_slice())?;
+            by_prev.remove(
+                intention.store_prev.as_bytes().as_slice(),
+                hash.as_bytes().as_slice(),
+            )?;
         }
         write_txn.commit()?;
 
@@ -390,10 +414,7 @@ impl IntentionStore {
 
     /// Get the current tip hash for an author, or `Hash::ZERO` if none.
     pub fn author_tip(&self, author: &PubKey) -> Hash {
-        self.author_tips
-            .get(author)
-            .copied()
-            .unwrap_or(Hash::ZERO)
+        self.author_tips.get(author).copied().unwrap_or(Hash::ZERO)
     }
 
     /// Get all current author tips.
@@ -422,7 +443,10 @@ impl IntentionStore {
     }
 
     /// Look up all floating intentions whose `store_prev` matches the given hash.
-    pub fn floating_by_prev(&self, prev: &Hash) -> Result<Vec<SignedIntention>, IntentionStoreError> {
+    pub fn floating_by_prev(
+        &self,
+        prev: &Hash,
+    ) -> Result<Vec<SignedIntention>, IntentionStoreError> {
         let read_txn = self.db.begin_read()?;
         let by_prev = read_txn.open_multimap_table(TABLE_FLOATING_BY_PREV)?;
         let intention_table = read_txn.open_table(TABLE_INTENTIONS)?;
@@ -480,7 +504,9 @@ impl IntentionStore {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_INTENTIONS)?;
         let mut range = table.range(start.as_bytes().as_slice()..end.as_bytes().as_slice())?;
-        range.try_fold(0u64, |acc, item| item.map(|_| acc + 1).map_err(IntentionStoreError::from))
+        range.try_fold(0u64, |acc, item| {
+            item.map(|_| acc + 1).map_err(IntentionStoreError::from)
+        })
     }
 
     /// XOR fingerprint of all intention hashes in the range [start, end).
@@ -502,11 +528,15 @@ impl IntentionStore {
     /// List all intention hashes in the range [start, end).
     /// Intended for small leaf ranges during Negentropy reconciliation.
     /// Returns an error if the range contains more than `MAX_RANGE_HASHES` items to prevent DoS.
-    pub fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, IntentionStoreError> {
+    pub fn hashes_in_range(
+        &self,
+        start: &Hash,
+        end: &Hash,
+    ) -> Result<Vec<Hash>, IntentionStoreError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_INTENTIONS)?;
         let range = table.range(start.as_bytes().as_slice()..end.as_bytes().as_slice())?;
-        
+
         let mut results = Vec::new();
         for (i, entry) in range.enumerate() {
             if i >= MAX_RANGE_HASHES {
@@ -516,8 +546,9 @@ impl IntentionStore {
                 )));
             }
             let (k, _) = entry?;
-            results.push(Hash::try_from(k.value())
-                .map_err(|_| IntentionStoreError::InvalidData("bad hash key in intentions table".into()))?);
+            results.push(Hash::try_from(k.value()).map_err(|_| {
+                IntentionStoreError::InvalidData("bad hash key in intentions table".into())
+            })?);
         }
         Ok(results)
     }
@@ -541,15 +572,15 @@ impl IntentionStore {
         let read_txn = self.db.begin_read()?;
         let index = read_txn.open_table(TABLE_WITNESS_INDEX)?;
         match index.get(hash.as_bytes().as_slice())? {
-            Some(v) => Ok(Some(u64::from_be_bytes(v.value().try_into().map_err(|_| {
-                IntentionStoreError::InvalidData("invalid witness seq length".into())
-            })?))),
+            Some(v) => Ok(Some(u64::from_be_bytes(v.value().try_into().map_err(
+                |_| IntentionStoreError::InvalidData("invalid witness seq length".into()),
+            )?))),
             None => Ok(None),
         }
     }
 
     /// Scan witness log from a given start point.
-    /// 
+    ///
     /// If `start_hash` is provided:
     /// - If `Hash::ZERO`, starts from genesis (seq 1).
     /// - If found, starts from the entry *after* it.
@@ -563,35 +594,37 @@ impl IntentionStore {
     ) -> Result<Vec<WitnessEntry>, IntentionStoreError> {
         let start_seq = match start_hash {
             Some(h) if h != Hash::ZERO => {
-                 self.get_witness_seq(&h)?
-                     .ok_or_else(|| IntentionStoreError::InvalidData(format!("witness hash {} not found", h)))? 
-                     + 1 // Start scanning AFTER the known hash (inclusive start = seq + 1)
-            },
+                self.get_witness_seq(&h)?.ok_or_else(|| {
+                    IntentionStoreError::InvalidData(format!("witness hash {} not found", h))
+                })? + 1 // Start scanning AFTER the known hash (inclusive start = seq + 1)
+            }
             _ => 1, // Genesis starts at 1
         };
 
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_WITNESS)?;
-        
+
         let mut results = Vec::new();
         let start_bytes = start_seq.to_be_bytes();
-        
+
         // Use range iterator: start_seq..
         for res in table.range(start_bytes.as_slice()..)? {
             let (key, value) = res?;
-            let seq = u64::from_be_bytes(key.value().try_into().map_err(|_| {
-                IntentionStoreError::InvalidData("bad witness key".into())
-            })?);
+            let seq = u64::from_be_bytes(
+                key.value()
+                    .try_into()
+                    .map_err(|_| IntentionStoreError::InvalidData("bad witness key".into()))?,
+            );
             let record = WitnessRecord::decode(value.value())
                 .map_err(|e| IntentionStoreError::InvalidData(format!("proto: {e}")))?;
-            let content_hash = Hash(*blake3::hash(&record.content).as_bytes());
+            let content_hash = lattice_model::crypto::content_hash(&record.content);
             results.push(WitnessEntry {
                 seq,
                 content_hash,
                 content: record.content,
                 signature: record.signature,
             });
-            
+
             if results.len() >= limit {
                 break;
             }
@@ -620,7 +653,10 @@ impl IntentionStore {
     /// Find all intentions whose hash starts with the given prefix.
     ///
     /// Uses redb range queries for efficient lookup — does NOT scan the full table.
-    pub fn get_by_prefix(&self, prefix: &[u8]) -> Result<Vec<SignedIntention>, IntentionStoreError> {
+    pub fn get_by_prefix(
+        &self,
+        prefix: &[u8],
+    ) -> Result<Vec<SignedIntention>, IntentionStoreError> {
         // If prefix is exactly 32 bytes, do direct lookup
         if prefix.len() == 32 {
             let hash = Hash::try_from(prefix)
@@ -684,21 +720,23 @@ impl IntentionStore {
             match current_hash {
                 // Success: Found the ancestor (exclusive)
                 h if h == *since_hash => return Ok(results),
-                
+
                 // Failure: Hit Genesis without finding ancestor
-                Hash::ZERO => return Err(IntentionStoreError::InvalidData(format!(
-                    "Hit Genesis without finding ancestor {}", since_hash
-                ))),
-                
+                Hash::ZERO => {
+                    return Err(IntentionStoreError::InvalidData(format!(
+                        "Hit Genesis without finding ancestor {}",
+                        since_hash
+                    )))
+                }
+
                 // Continue: Fetch and advance
                 hash => {
-                    let val = table.get(hash.as_bytes().as_slice())? 
-                        .ok_or_else(|| IntentionStoreError::InvalidData(
-                            format!("Missing link in chain: {}", hash)
-                        ))?;
+                    let val = table.get(hash.as_bytes().as_slice())?.ok_or_else(|| {
+                        IntentionStoreError::InvalidData(format!("Missing link in chain: {}", hash))
+                    })?;
 
                     let signed = Self::decode_signed(val.value())?;
-                    
+
                     // Advance
                     current_hash = signed.intention.store_prev;
                     results.push(signed);
@@ -716,8 +754,8 @@ impl IntentionStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::witness::verify_witness;
+    use super::*;
     use lattice_model::hlc::HLC;
     use lattice_model::weaver::Condition;
 
@@ -843,13 +881,16 @@ mod tests {
         let h = i.hash();
         let s = SignedIntention::sign(i.clone(), &key);
         store.insert(&s).unwrap();
-        
+
         let record = store.witness(&i, 1_700_000_000_000).unwrap();
         // Tip is set by insert, not witness
         assert_eq!(store.author_tip(&pk), h);
-        
+
         let content = verify_witness(&record, &test_signing_key().verifying_key()).unwrap();
-        assert_eq!(Uuid::from_slice(&content.store_id).unwrap(), test_store_id());
+        assert_eq!(
+            Uuid::from_slice(&content.store_id).unwrap(),
+            test_store_id()
+        );
         // First witness in log: prev_hash must be all-zeros (genesis)
         assert_eq!(content.prev_hash, Hash::ZERO.as_bytes().to_vec());
     }
@@ -868,11 +909,20 @@ mod tests {
         assert_eq!(log.len(), 1);
         let entry = &log[0];
         assert_eq!(entry.seq, 1);
-        let record = WitnessRecord { content: entry.content.clone(), signature: entry.signature.clone() };
+        let record = WitnessRecord {
+            content: entry.content.clone(),
+            signature: entry.signature.clone(),
+        };
         let content = verify_witness(&record, &test_signing_key().verifying_key()).unwrap();
-        assert_eq!(Hash::try_from(content.intention_hash.as_slice()).unwrap(), h);
+        assert_eq!(
+            Hash::try_from(content.intention_hash.as_slice()).unwrap(),
+            h
+        );
         assert_eq!(content.wall_time, 42_000);
-        assert_eq!(Uuid::from_slice(&content.store_id).unwrap(), test_store_id());
+        assert_eq!(
+            Uuid::from_slice(&content.store_id).unwrap(),
+            test_store_id()
+        );
         assert_eq!(content.prev_hash, Hash::ZERO.as_bytes().to_vec());
     }
 
@@ -909,10 +959,20 @@ mod tests {
 
             // First entry: prev_hash is genesis zero
             assert_eq!(c0.prev_hash, Hash::ZERO.as_bytes().to_vec());
-            // Second entry: prev_hash == blake3(first record's content)
-            assert_eq!(c1.prev_hash, blake3::hash(&log[0].content).as_bytes().to_vec());
-            // Third entry: prev_hash == blake3(second record's content)
-            assert_eq!(c2.prev_hash, blake3::hash(&log[1].content).as_bytes().to_vec());
+            // Second entry: prev_hash == content_hash(first record's content)
+            assert_eq!(
+                c1.prev_hash,
+                lattice_model::crypto::content_hash(&log[0].content)
+                    .as_bytes()
+                    .to_vec()
+            );
+            // Third entry: prev_hash == content_hash(second record's content)
+            assert_eq!(
+                c2.prev_hash,
+                lattice_model::crypto::content_hash(&log[1].content)
+                    .as_bytes()
+                    .to_vec()
+            );
         }
 
         // Reopen and verify chain verification passes + last_witness_hash is correct
@@ -920,7 +980,11 @@ mod tests {
         assert_eq!(store.witness_count().unwrap(), 3);
 
         // Can continue the chain after reopen
-        let i4 = make_intention(pk, make_intention(pk, make_intention(pk, Hash::ZERO, vec![1]).hash(), vec![2]).hash(), vec![4]);
+        let i4 = make_intention(
+            pk,
+            make_intention(pk, make_intention(pk, Hash::ZERO, vec![1]).hash(), vec![2]).hash(),
+            vec![4],
+        );
         let s4 = SignedIntention::sign(i4.clone(), &key);
         store.insert(&s4).unwrap();
         store.witness(&i4, 400).unwrap();
@@ -929,9 +993,13 @@ mod tests {
         let log = store.witness_log().unwrap();
         assert_eq!(log.len(), 4);
         let c3 = WitnessContent::decode(log[3].content.as_slice()).unwrap();
-        assert_eq!(c3.prev_hash, blake3::hash(&log[2].content).as_bytes().to_vec());
+        assert_eq!(
+            c3.prev_hash,
+            lattice_model::crypto::content_hash(&log[2].content)
+                .as_bytes()
+                .to_vec()
+        );
     }
-
 
     #[test]
     fn rebuild_after_reopen() {
@@ -989,9 +1057,15 @@ mod tests {
 
         {
             let mut store = open_store(dir.path());
-            store.insert(&SignedIntention::sign(a1.clone(), &key)).unwrap();
-            store.insert(&SignedIntention::sign(a2.clone(), &key)).unwrap();
-            store.insert(&SignedIntention::sign(a3.clone(), &key)).unwrap();
+            store
+                .insert(&SignedIntention::sign(a1.clone(), &key))
+                .unwrap();
+            store
+                .insert(&SignedIntention::sign(a2.clone(), &key))
+                .unwrap();
+            store
+                .insert(&SignedIntention::sign(a3.clone(), &key))
+                .unwrap();
 
             store.witness(&a1, 100).unwrap();
             assert_eq!(store.author_tip(&pk), a1.hash());
@@ -1197,11 +1271,21 @@ mod tests {
         let b2 = make_intention_with_condition(bob, b1.hash(), vec![0xB2], vec![a2.hash()]);
 
         // Insert all (order shouldn't matter for correctness)
-        store.insert(&SignedIntention::sign(a1.clone(), &alice_key)).unwrap();
-        store.insert(&SignedIntention::sign(a2.clone(), &alice_key)).unwrap();
-        store.insert(&SignedIntention::sign(a3.clone(), &alice_key)).unwrap();
-        store.insert(&SignedIntention::sign(b1.clone(), &bob_key)).unwrap();
-        store.insert(&SignedIntention::sign(b2.clone(), &bob_key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(a1.clone(), &alice_key))
+            .unwrap();
+        store
+            .insert(&SignedIntention::sign(a2.clone(), &alice_key))
+            .unwrap();
+        store
+            .insert(&SignedIntention::sign(a3.clone(), &alice_key))
+            .unwrap();
+        store
+            .insert(&SignedIntention::sign(b1.clone(), &bob_key))
+            .unwrap();
+        store
+            .insert(&SignedIntention::sign(b2.clone(), &bob_key))
+            .unwrap();
 
         // All 5 should be floating
         assert_eq!(store.floating().unwrap().len(), 5);
@@ -1248,15 +1332,26 @@ mod tests {
 
         for i in 1..5 {
             let c = WitnessContent::decode(log[i].content.as_slice()).unwrap();
-            assert_eq!(c.prev_hash, blake3::hash(&log[i - 1].content).as_bytes().to_vec());
+            assert_eq!(
+                c.prev_hash,
+                lattice_model::crypto::content_hash(&log[i - 1].content)
+                    .as_bytes()
+                    .to_vec()
+            );
         }
 
         // Verify the witness entries reference the correct intentions
-        let intention_hashes: Vec<Hash> = log.iter().map(|e| {
-            let c = WitnessContent::decode(e.content.as_slice()).unwrap();
-            Hash::try_from(c.intention_hash.as_slice()).unwrap()
-        }).collect();
-        assert_eq!(intention_hashes, vec![a1.hash(), b1.hash(), a2.hash(), b2.hash(), a3.hash()]);
+        let intention_hashes: Vec<Hash> = log
+            .iter()
+            .map(|e| {
+                let c = WitnessContent::decode(e.content.as_slice()).unwrap();
+                Hash::try_from(c.intention_hash.as_slice()).unwrap()
+            })
+            .collect();
+        assert_eq!(
+            intention_hashes,
+            vec![a1.hash(), b1.hash(), a2.hash(), b2.hash(), a3.hash()]
+        );
 
         // Verify total intention count
         assert_eq!(store.intention_count().unwrap(), 5);
@@ -1297,15 +1392,22 @@ mod tests {
             {
                 let mut table = write_txn.open_table(TABLE_WITNESS).unwrap();
                 let seq2_key = 2u64.to_be_bytes();
-                table.insert(seq2_key.as_slice(), b"CORRUPTED".as_slice()).unwrap();
+                table
+                    .insert(seq2_key.as_slice(), b"CORRUPTED".as_slice())
+                    .unwrap();
             }
             write_txn.commit().unwrap();
 
             // Clear author tips (separate txn to avoid borrow conflicts)
             let read_txn = db.begin_read().unwrap();
             let tips = read_txn.open_table(TABLE_AUTHOR_TIPS).unwrap();
-            let keys: Vec<Vec<u8>> = tips.iter().unwrap()
-                .map(|e| { let (k, _) = e.unwrap(); k.value().to_vec() })
+            let keys: Vec<Vec<u8>> = tips
+                .iter()
+                .unwrap()
+                .map(|e| {
+                    let (k, _) = e.unwrap();
+                    k.value().to_vec()
+                })
                 .collect();
             drop(tips);
             drop(read_txn);
@@ -1343,11 +1445,15 @@ mod tests {
         let mut store = open_store(dir.path());
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
-        store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i1.clone(), &key))
+            .unwrap();
         store.witness(&i1, u64::MAX).unwrap();
 
         let i2 = make_intention(pk, i1.hash(), vec![2]);
-        store.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i2.clone(), &key))
+            .unwrap();
         store.witness(&i2, 0).unwrap();
 
         assert_eq!(store.author_tip(&pk), i2.hash());
@@ -1369,7 +1475,9 @@ mod tests {
         let mut store = open_store(dir.path());
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
-        store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i1.clone(), &key))
+            .unwrap();
         store.witness(&i1, 100).unwrap();
 
         // Second witness of same intention should fail
@@ -1441,7 +1549,10 @@ mod tests {
                 expected_fp[i] ^= h.as_bytes()[i];
             }
         }
-        assert_eq!(store.fingerprint_range(&lo, &hi).unwrap(), Hash(expected_fp));
+        assert_eq!(
+            store.fingerprint_range(&lo, &hi).unwrap(),
+            Hash(expected_fp)
+        );
     }
 
     #[test]
@@ -1452,11 +1563,17 @@ mod tests {
 
         // Insert several intentions
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
-        store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i1.clone(), &key))
+            .unwrap();
         let i2 = make_intention(pk, i1.hash(), vec![2]);
-        store.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i2.clone(), &key))
+            .unwrap();
         let i3 = make_intention(pk, i2.hash(), vec![3]);
-        store.insert(&SignedIntention::sign(i3.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i3.clone(), &key))
+            .unwrap();
 
         // Collect and sort all hashes
         let lo = Hash([0x00; 32]);
@@ -1489,13 +1606,20 @@ mod tests {
         for i in 0..32 {
             recombined[i] = fp_below.as_bytes()[i] ^ fp_above.as_bytes()[i];
         }
-        assert_eq!(Hash(recombined), fp_all, "XOR fingerprints should be additively composable");
+        assert_eq!(
+            Hash(recombined),
+            fp_all,
+            "XOR fingerprints should be additively composable"
+        );
 
         // Gap probe: boundary key that doesn't exist but falls between items
         let mut probe_bytes = all[0].0;
         probe_bytes[31] = probe_bytes[31].wrapping_add(1);
         let probe = Hash(probe_bytes);
-        assert!(!all.contains(&probe), "probe should not collide with any stored hash");
+        assert!(
+            !all.contains(&probe),
+            "probe should not collide with any stored hash"
+        );
 
         // [lo, probe) should contain only the first hash
         assert_eq!(store.count_range(&lo, &probe).unwrap(), 1);
@@ -1503,7 +1627,10 @@ mod tests {
 
         // [probe, hi) should contain the remaining two
         assert_eq!(store.count_range(&probe, &hi).unwrap(), 2);
-        assert_eq!(store.hashes_in_range(&probe, &hi).unwrap(), vec![all[1], all[2]]);
+        assert_eq!(
+            store.hashes_in_range(&probe, &hi).unwrap(),
+            vec![all[1], all[2]]
+        );
     }
 
     #[test]
@@ -1513,7 +1640,9 @@ mod tests {
         let mut store = open_store(dir.path());
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
-        store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i1.clone(), &key))
+            .unwrap();
 
         let h = i1.hash();
 
@@ -1554,12 +1683,16 @@ mod tests {
 
         // Insert first intention
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
-        store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i1.clone(), &key))
+            .unwrap();
         assert_eq!(store.table_fingerprint(), i1.hash());
 
         // Insert second — fingerprint is XOR of both
         let i2 = make_intention(pk, i1.hash(), vec![2]);
-        store.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i2.clone(), &key))
+            .unwrap();
 
         let mut expected = [0u8; 32];
         for (i, byte) in i1.hash().as_bytes().iter().enumerate() {
@@ -1594,9 +1727,13 @@ mod tests {
         let mut store = open_store(dir.path());
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
-        store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i1.clone(), &key))
+            .unwrap();
         let i2 = make_intention(pk, i1.hash(), vec![2]);
-        store.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+        store
+            .insert(&SignedIntention::sign(i2.clone(), &key))
+            .unwrap();
 
         let lo = Hash([0x00; 32]);
         let hi = Hash([0xFF; 32]);
@@ -1613,10 +1750,14 @@ mod tests {
         {
             let mut store = open_store(dir.path());
             let i1 = make_intention(pk, Hash::ZERO, vec![1]);
-            store.insert(&SignedIntention::sign(i1.clone(), &key)).unwrap();
+            store
+                .insert(&SignedIntention::sign(i1.clone(), &key))
+                .unwrap();
             store.witness(&i1, 100).unwrap();
             let i2 = make_intention(pk, i1.hash(), vec![2]);
-            store.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+            store
+                .insert(&SignedIntention::sign(i2.clone(), &key))
+                .unwrap();
             // i2 is floating (not witnessed) — fingerprint still covers both
             fp_before = store.table_fingerprint();
             assert_ne!(fp_before, Hash::ZERO);
@@ -1645,11 +1786,15 @@ mod tests {
 
         // Diverge: only store_a gets i2
         let i2 = make_intention(pk, i1.hash(), vec![2]);
-        store_a.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+        store_a
+            .insert(&SignedIntention::sign(i2.clone(), &key))
+            .unwrap();
         assert_ne!(store_a.table_fingerprint(), store_b.table_fingerprint());
 
         // Converge: store_b also gets i2
-        store_b.insert(&SignedIntention::sign(i2.clone(), &key)).unwrap();
+        store_b
+            .insert(&SignedIntention::sign(i2.clone(), &key))
+            .unwrap();
         assert_eq!(store_a.table_fingerprint(), store_b.table_fingerprint());
     }
 }

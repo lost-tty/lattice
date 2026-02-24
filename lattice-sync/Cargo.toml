@@ -8,7 +8,7 @@ lattice-model = { workspace = true }
 lattice-proto = { workspace = true }
 async-trait = "0.1"
 serde = { workspace = true, features = ["derive"] }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-core = "0.3"
 thiserror = { workspace = true }
 

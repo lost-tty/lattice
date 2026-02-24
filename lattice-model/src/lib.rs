@@ -4,6 +4,7 @@
 //! storage engines, network stacks, and replication logs.
 
 pub mod types;
+pub mod crypto;
 pub mod hlc;
 pub mod clock;
 pub mod state_machine;
@@ -22,7 +23,6 @@ pub mod sexpr;
 
 // Re-exports from dependencies
 pub use uuid::Uuid;
-pub use ed25519_dalek::SigningKey;
 pub use types::{Hash, PubKey, Signature};
 pub use hlc::HLC;
 pub use clock::{Clock, SystemClock, MockClock};

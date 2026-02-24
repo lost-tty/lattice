@@ -52,8 +52,8 @@ impl NodeProviderExt for MockProvider {
     fn get_peer_provider(&self, _store_id: &Uuid) -> Option<Arc<dyn PeerProvider>> { None }
 }
 
-fn make_provider(key: &ed25519_dalek::SigningKey) -> Arc<dyn NodeProviderExt> {
-    let pubkey = PubKey::from(key.verifying_key().to_bytes());
+fn make_provider(identity: &lattice_model::NodeIdentity) -> Arc<dyn NodeProviderExt> {
+    let pubkey = identity.public_key();
     Arc::new(MockProvider { pubkey })
 }
 
@@ -61,12 +61,12 @@ fn make_provider(key: &ed25519_dalek::SigningKey) -> Arc<dyn NodeProviderExt> {
 
 #[tokio::test]
 async fn test_iroh_backend_creates_transport_and_gossip() {
-    let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-    let provider = make_provider(&key);
+    let identity = lattice_model::NodeIdentity::generate();
+    let provider = make_provider(&identity);
     
     let (_net_tx, net_rx) = tokio::sync::broadcast::channel(64);
     
-    let backend = lattice_net_iroh::IrohBackend::new(key, provider.clone())
+    let backend = lattice_net_iroh::IrohBackend::new(&identity, provider.clone())
         .await
         .expect("IrohBackend::new should succeed");
     
@@ -88,22 +88,22 @@ async fn test_iroh_backend_creates_transport_and_gossip() {
 #[tokio::test]
 async fn test_two_iroh_nodes_can_discover_each_other() {
     // Create two nodes
-    let key_a = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-    let key_b = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-    let provider_a = make_provider(&key_a);
-    let provider_b = make_provider(&key_b);
+    let identity_a = lattice_model::NodeIdentity::generate();
+    let identity_b = lattice_model::NodeIdentity::generate();
+    let provider_a = make_provider(&identity_a);
+    let provider_b = make_provider(&identity_b);
     
     let (_, rx_a) = tokio::sync::broadcast::channel(64);
     let (_, rx_b) = tokio::sync::broadcast::channel(64);
     
-    let backend_a = lattice_net_iroh::IrohBackend::new(key_a, provider_a.clone())
+    let backend_a = lattice_net_iroh::IrohBackend::new(&identity_a, provider_a.clone())
         .await
         .expect("Backend A");
     
     // Grab A's address before consuming the backend
     let addr_a = backend_a.transport.addr();
     
-    let backend_b = lattice_net_iroh::IrohBackend::new(key_b, provider_b.clone())
+    let backend_b = lattice_net_iroh::IrohBackend::new(&identity_b, provider_b.clone())
         .await
         .expect("Backend B");
     

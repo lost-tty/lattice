@@ -17,14 +17,18 @@ members = [
     "lattice-storage",
     "lattice-systemstore",
     "lattice-store-base",
-    "lattice-mockkernel",
+    "lattice-proto",
     "lattice-sync",
-    "lattice-net-sim",
     "lattice-net-iroh",
+    # Test-only crates (no production dependents, compiled transitively via dev-deps)
+    "lattice-mockkernel",
+    "lattice-net-sim",
 ]
 
-# lattice-bindings is excluded from default members to prevent slow linking (cdylib)
-# during normal development. Build it explicitly with `-p lattice-bindings`.
+# Excluded from default-members:
+# - lattice-bindings: slow cdylib linking; build explicitly with `-p lattice-bindings`
+# - lattice-mockkernel, lattice-net-sim: test-only crates with no tests of their own;
+#   compiled transitively when dependents run tests
 default-members = [
     "lattice-kernel",
     "lattice-node",
@@ -35,12 +39,14 @@ default-members = [
     "lattice-api",
     "lattice-model",
     "lattice-kvstore",
+    "lattice-kvstore-api",
     "lattice-logstore",
     "lattice-runtime",
     "lattice-storage",
     "lattice-systemstore",
     "lattice-store-base",
-    "lattice-net-sim",
+    "lattice-proto",
+    "lattice-sync",
     "lattice-net-iroh",
 ]
 

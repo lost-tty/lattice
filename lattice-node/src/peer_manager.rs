@@ -10,7 +10,6 @@ use crate::auth::{PeerEvent, PeerProvider};
 use lattice_kernel::PeerStatus;
 use lattice_model::{PeerInfo, PubKey, SystemEvent, InviteStatus, Uuid};
 use lattice_systemstore::{SystemStore, SystemBatch};
-use rand::RngCore;
 use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
 use tokio::sync::broadcast;
@@ -248,10 +247,8 @@ impl PeerManager {
 
     /// Create a one-time join token.
     pub async fn create_invite(&self, inviter: PubKey, store_id: Uuid) -> Result<String, PeerManagerError> {
-        let mut secret = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut secret);
-        
-        let hash = blake3::hash(&secret);
+        let secret = lattice_model::crypto::generate_secret();
+        let hash = lattice_model::crypto::content_hash(&secret);
         
         SystemBatch::new(&*self.store)
             .set_invite_status(hash.as_bytes(), InviteStatus::Valid)

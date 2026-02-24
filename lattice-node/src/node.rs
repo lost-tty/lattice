@@ -242,6 +242,11 @@ impl Node {
         self.net_tx.subscribe()
     }
     
+    /// Get the node's identity (keypair wrapper).
+    pub fn identity(&self) -> &NodeIdentity {
+        &self.node
+    }
+
     /// Get the signing key for Iroh integration (same Ed25519 key).
     /// Use `.to_bytes()` when raw bytes are needed.
     pub fn signing_key(&self) -> &ed25519_dalek::SigningKey {

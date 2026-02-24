@@ -132,8 +132,8 @@ mod tests {
     /// Test that SessionTracker correctly updates via abstract NetworkEvent stream
     #[tokio::test]
     async fn test_session_tracker_network_events() {
-        let key = lattice_model::SigningKey::generate(&mut rand::rngs::OsRng);
-        let pubkey = PubKey::from(key.verifying_key().to_bytes());
+        let identity = lattice_model::NodeIdentity::generate();
+        let pubkey = identity.public_key();
         let provider: Arc<dyn NodeProviderExt> = Arc::new(MockProvider { pubkey });
         
         // Control the events emitted by the fake transport

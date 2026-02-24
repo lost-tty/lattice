@@ -10,8 +10,6 @@ use lattice_model::types::Hash;
 use lattice_model::types::PubKey;
 use lattice_model::weaver::{Condition, FloatingIntention, Intention, SignedIntention, WitnessEntry};
 use lattice_proto::weaver::WitnessRecord;
-use ed25519_dalek::VerifyingKey;
-
 use lattice_model::{NodeIdentity, StateMachine};
 use uuid::Uuid;
 
@@ -304,7 +302,7 @@ impl<S: StateMachine> ReplicationController<S> {
            intention_map.insert(intention.intention.hash(), intention);
        }
        
-       let verifying_key = VerifyingKey::from_bytes(peer_id.as_bytes())
+       let verifying_key = lattice_model::crypto::verifying_key(&peer_id)
             .map_err(|_| ReplicationControllerError::State(StateError::Unauthorized("Invalid peer public key".to_string())))?;
 
        // 2. Iterate witness records

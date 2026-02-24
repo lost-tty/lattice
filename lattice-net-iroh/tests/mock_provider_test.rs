@@ -55,13 +55,13 @@ impl NodeProviderExt for MockProvider {
 
 #[tokio::test]
 async fn test_iroh_stack_with_mock_provider() {
-    let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-    let pubkey = PubKey::from(key.verifying_key().to_bytes());
+    let identity = lattice_model::NodeIdentity::generate();
+    let pubkey = identity.public_key();
     let provider: Arc<dyn NodeProviderExt> = Arc::new(MockProvider { pubkey });
 
     let (_net_tx, net_rx) = tokio::sync::broadcast::channel(64);
 
-    let backend = lattice_net_iroh::IrohBackend::new(key, provider.clone())
+    let backend = lattice_net_iroh::IrohBackend::new(&identity, provider.clone())
         .await
         .expect("Failed to create iroh backend");
 

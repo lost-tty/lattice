@@ -68,10 +68,10 @@ pub struct IrohBackend;
 impl IrohBackend {
     /// Create a complete Iroh networking stack.
     pub async fn new(
-        signing_key: ed25519_dalek::SigningKey,
+        identity: &lattice_model::NodeIdentity,
         provider: Arc<dyn NodeProviderExt>,
     ) -> Result<NetworkBackend<IrohTransport>, lattice_net_types::GossipError> {
-        let transport = IrohTransport::new(signing_key)
+        let transport = IrohTransport::new(identity)
             .await
             .map_err(|e| lattice_net_types::GossipError::Setup(e.to_string()))?;
         

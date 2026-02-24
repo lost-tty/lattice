@@ -13,14 +13,11 @@ iroh = { workspace = true }
 iroh-gossip = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
-blake3.workspace = true
-ed25519-dalek.workspace = true
 uuid = { workspace = true }
 futures-util = { workspace = true }
 async-trait = "0.1"
 
 [dev-dependencies]
-rand = { workspace = true }
 tokio = { workspace = true, features = ["full", "macros"] }
 futures-util = { workspace = true }
 async-trait = "0.1"

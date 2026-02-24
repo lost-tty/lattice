@@ -10,9 +10,9 @@
 //!
 //! See `docs/design/weaver_protocol.md` for the canonical specification.
 
-use borsh::{BorshSerialize, BorshDeserialize};
 use crate::hlc::HLC;
 use crate::types::{Hash, PubKey, Signature as Sig};
+use borsh::{BorshDeserialize, BorshSerialize};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ impl Intention {
     /// and is what gets signed to produce a `SignedIntention`.
     pub fn hash(&self) -> Hash {
         let borsh_bytes = borsh::to_vec(self).expect("borsh serialization cannot fail");
-        Hash(blake3::hash(&borsh_bytes).into())
+        crate::crypto::content_hash(&borsh_bytes)
     }
 
     /// Serialize to canonical Borsh bytes.
@@ -130,22 +130,18 @@ pub struct SignedIntention {
 impl SignedIntention {
     /// Create a signed intention from an unsigned body and a signing key.
     pub fn sign(intention: Intention, signing_key: &ed25519_dalek::SigningKey) -> Self {
-        use ed25519_dalek::Signer;
         let hash = intention.hash();
-        let signature = signing_key.sign(hash.as_bytes());
+        let signature = crate::crypto::sign_hash(signing_key, &hash);
         SignedIntention {
             intention,
-            signature: Sig(signature.to_bytes()),
+            signature,
         }
     }
 
-    /// Verify the signature against the intention's content hash.
-    pub fn verify(&self) -> Result<(), ed25519_dalek::SignatureError> {
-        use ed25519_dalek::{Signature, VerifyingKey};
+    /// Verify the signature against the intention's content hash (strict).
+    pub fn verify(&self) -> Result<(), crate::crypto::CryptoError> {
         let hash = self.intention.hash();
-        let vk = VerifyingKey::from_bytes(&self.intention.author.0)?;
-        let sig = Signature::from_bytes(&self.signature.0);
-        vk.verify_strict(hash.as_bytes(), &sig)
+        crate::crypto::verify_hash_strict(&self.intention.author, &hash, &self.signature)
     }
 
     /// Get the content hash of the inner intention.

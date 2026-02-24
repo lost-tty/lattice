@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, RwLock};
 /// Derive a gossip topic from a store ID
 pub fn topic_for_store(store_id: uuid::Uuid) -> iroh_gossip::TopicId {
     iroh_gossip::TopicId::from_bytes(
-        *blake3::hash(format!("lattice/{}", store_id).as_bytes()).as_bytes()
+        lattice_model::crypto::content_hash(format!("lattice/{}", store_id).as_bytes()).0
     )
 }
 

@@ -16,7 +16,6 @@ prost = { workspace = true }
 prost-reflect = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
-blake3 = { workspace = true }
 borsh = { workspace = true }
 hex = { workspace = true }
 redb = { workspace = true }

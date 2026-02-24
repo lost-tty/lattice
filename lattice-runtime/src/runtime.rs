@@ -117,7 +117,7 @@ impl RuntimeBuilder {
         
         // --- Create networking stack ---
         
-        let backend = lattice_net_iroh::IrohBackend::new(node.signing_key().clone(), node.clone())
+        let backend = lattice_net_iroh::IrohBackend::new(node.identity(), node.clone())
             .await
             .map_err(|e| RuntimeError::Network(e.to_string()))?;
         
