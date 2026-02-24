@@ -157,8 +157,19 @@ pub trait EntryStreamProvider: Send + Sync {
     fn subscribe_entries(&self) -> Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + Unpin>;
 }
 
+/// Provider of local (ephemeral) system events that are NOT persisted in the intention log.
+///
+/// These events are emitted directly by the node (e.g., sync progress notifications)
+/// and delivered via an in-memory broadcast channel. Used by `SystemWatcher` to merge
+/// ephemeral events with log-derived events into a single stream.
+pub trait LocalEventSource: Send + Sync {
+    fn subscribe_local_events(
+        &self,
+    ) -> Pin<Box<dyn futures_core::Stream<Item = crate::SystemEvent> + Send>>;
+}
+
 /// The SyncProvider trait - subscriptions and peer sync state.
-/// 
+///
 /// Used by the network layer for gossip and sync coordination.
 /// Independent of StateWriter.
 pub trait SyncProvider: Send + Sync {
@@ -174,12 +185,18 @@ pub trait SyncProvider: Send + Sync {
     fn subscribe_gaps(&self) -> Box<dyn futures_core::Stream<Item = GapInfo> + Send + Unpin>;
 
     /// Subscribe to sync-needed events (peer has entries we're missing)
-    fn subscribe_sync_needed(&self) -> Box<dyn futures_core::Stream<Item = SyncNeeded> + Send + Unpin>;
+    fn subscribe_sync_needed(
+        &self,
+    ) -> Box<dyn futures_core::Stream<Item = SyncNeeded> + Send + Unpin>;
 
     // --- Peer Sync State ---
 
     /// Store a peer's sync state
-    fn set_peer_sync_state(&self, peer: &PubKey, info: PeerSyncInfo) -> Result<(), ReplicationError>;
+    fn set_peer_sync_state(
+        &self,
+        peer: &PubKey,
+        info: PeerSyncInfo,
+    ) -> Result<(), ReplicationError>;
 
     /// Get a peer's sync state
     fn get_peer_sync_state(&self, peer: &PubKey) -> Option<PeerSyncInfo>;

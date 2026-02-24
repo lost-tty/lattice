@@ -17,19 +17,7 @@ title: "Roadmap"
 | **M10**          | Fractal Store Model: replaced `Mesh` struct with recursive store hierarchy, `TABLE_SYSTEM` with HeadList CRDTs, `RecursiveWatcher` for child discovery, invite/revoke peer management, `PeerStrategy` (Independent/Inherited), flattened `StoreManager`, `NetworkService` (renamed from `MeshService`), proper `Node::shutdown()` |
 | **M11**          | Weaver Migration & Protocol Sync: Intention DAG (`IntentionStore`), Negentropy set reconciliation, Smart Chain Fetch, stream-based Bootstrap (Clone) Protocol without gossip storms |
 | **M12**          | Network Abstraction & Simulation: `Transport`/`GossipLayer` traits, `IrohTransport` extracted to `lattice-net-iroh`, `ChannelTransport`/`BroadcastGossip` in `lattice-net-sim`, gossip lag tracking, event-driven gap handling, `SessionTracker` decoupling, symmetric Negentropy sync |
-
----
-
-## Milestone 13: Crate Dependency Architecture
-
-Remove improper architectural couplings and establish clean abstraction boundaries between crates.
-
-- [x] **Bindings → Model:** Removed phantom `lattice-model` from `lattice-bindings` (zero imports). `lattice-store-base` stays (used for `StreamDescriptor`).
-- [ ] **Network Isolation:** Remove `lattice-kernel` from `lattice-net` — move proto types to `lattice-proto`, move `intention_from_proto`/`intention_to_proto` converters, elevate `MissingDep`/`StateError`/`PeerSyncInfo` to `lattice-store-base`.
-- [ ] **Network Types Isolation:** Remove `lattice-kernel` from `lattice-net-types` — elevate `SyncProvider`, `IngestResult`, `StateError` to `lattice-store-base`.
-- [ ] **Store Hierarchy:** Investigate and abstract `lattice-systemstore` dependency on `lattice-kernel`.
-- [x] **API Boundary:** Removed phantom `lattice-net` from `lattice-api` (zero imports).
-- [ ] **Node Boundary:** Investigate `lattice-node` direct concrete store dependencies.
+| **M13**          | Crate Dependency Architecture: removed `lattice-kernel` from `lattice-net`, `lattice-net-types`, `lattice-systemstore`; moved proto types to `lattice-proto`; elevated shared types to `lattice-store-base`; removed phantom deps from `lattice-bindings` and `lattice-api` |
 
 ---
 

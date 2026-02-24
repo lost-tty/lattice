@@ -299,7 +299,9 @@ impl<S: StreamProvider + 'static + Sync> Subscriber<SystemLayer<S>> for SystemLa
     }
 }
 
-// Implement StateProvider to opt-in to blanket implementations
+// StateProvider enables blanket Introspectable, CommandDispatcher, and StreamReflectable.
+// This does NOT conflict with SystemLayer's own SystemReader impl because the SystemReader
+// blanket in lib.rs additionally requires StateWriter, which SystemLayer does not implement.
 impl<S: StateLogic> lattice_store_base::StateProvider for SystemLayer<S> {
     type State = S;
 

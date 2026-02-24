@@ -653,11 +653,23 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
     }
 }
 
-// ==================== EntryStreamProvider (intention-based) ====================
+// ==================== LocalEventSource ====================
 
+use lattice_model::replication::LocalEventSource;
 use lattice_model::replication::EntryStreamProvider;
 use tokio_stream::wrappers::BroadcastStream;
 use futures_util::StreamExt;
+
+impl<S: StateMachine + Send + Sync + 'static> LocalEventSource for Store<S> {
+    fn subscribe_local_events(&self) -> Pin<Box<dyn futures_core::Stream<Item = SystemEvent> + Send>> {
+        let rx = self.local_system_event_tx.subscribe();
+        let stream = BroadcastStream::new(rx)
+            .filter_map(|res| std::future::ready(res.ok()));
+        Box::pin(stream)
+    }
+}
+
+// ==================== EntryStreamProvider (intention-based) ====================
 
 impl<S: StateMachine + Send + Sync + 'static> EntryStreamProvider for Store<S> {
     fn subscribe_entries(&self) -> Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + Unpin> {

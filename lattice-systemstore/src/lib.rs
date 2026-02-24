@@ -7,6 +7,8 @@ pub use helpers::SystemBatch;
 
 use lattice_model::{PeerInfo, StoreLink, StateWriter, Hash, SystemEvent};
 use lattice_model::store_info::PeerStrategy;
+use lattice_model::replication::{EntryStreamProvider, LocalEventSource};
+use lattice_store_base::StateProvider;
 use std::pin::Pin;
 use std::future::Future;
 use futures_util::{Stream, StreamExt};
@@ -56,12 +58,21 @@ pub trait SystemStore: SystemReader + SystemWriter + SystemWatcher {}
 impl<T: SystemReader + SystemWriter + SystemWatcher> SystemStore for T {}
 
 
-// ==================== Implementations ====================
+// ==================== Blanket Implementations ====================
+//
+// These blanket impls allow any handle type that satisfies the trait bounds
+// to automatically implement SystemReader/SystemWriter/SystemWatcher.
+// This decouples lattice-systemstore from lattice-kernel.
 
-/// Blanket implementation for lattice_kernel::Store<S>
-impl<S> SystemReader for lattice_kernel::Store<S> 
+// Any handle providing `StateProvider + StateWriter` whose inner state implements
+// `SystemReader` automatically delegates all system reads to the inner state.
+//
+// The `StateWriter` bound distinguishes full handles (like `Store<S>`) from raw state
+// machines (like `SystemLayer<S>`) which have their own direct `SystemReader` impl.
+impl<T> SystemReader for T
 where
-    S: lattice_model::StateMachine + SystemReader + Send + Sync + 'static,
+    T: StateProvider + StateWriter + Send + Sync,
+    T::State: SystemReader,
 {
     fn get_peer(&self, pubkey: &lattice_model::PubKey) -> Result<Option<PeerInfo>, String> {
         self.state().get_peer(pubkey)
@@ -96,30 +107,29 @@ where
     }
 }
 
-impl<S> SystemWriter for lattice_kernel::Store<S> 
+/// Any handle implementing `StateWriter + Clone` automatically delegates
+/// system writes to the `submit()` method.
+impl<T> SystemWriter for T
 where
-    S: lattice_model::StateMachine + Send + Sync + 'static,
+    T: StateWriter + Clone + Send + Sync + 'static,
 {
     fn _submit_entry(&self, payload: Vec<u8>, deps: Vec<Hash>) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
-        let store = self.clone();
+        let handle = self.clone();
         Box::pin(async move {
-             store.submit(payload, deps).await.map(|_| ()).map_err(|e| e.to_string())
+            handle.submit(payload, deps).await.map(|_| ()).map_err(|e| e.to_string())
         })
     }
 }
 
-impl<S> SystemWatcher for lattice_kernel::Store<S> 
+/// Any handle implementing `EntryStreamProvider + LocalEventSource` automatically
+/// merges log-derived system events with ephemeral local events into a single stream.
+impl<T> SystemWatcher for T
 where
-    S: lattice_model::StateMachine + Send + Sync + 'static,
-    lattice_kernel::Store<S>: lattice_model::replication::EntryStreamProvider, 
+    T: EntryStreamProvider + LocalEventSource + Send + Sync,
 {
     fn subscribe_events(&self) -> Result<Pin<Box<dyn Stream<Item = Result<SystemEvent, String>> + Send>>, String> {
         let log_stream = crate::helpers::subscribe_system_events(self);
-        let local_rx = self.subscribe_local_system_events();
-        
-        let local_stream = tokio_stream::wrappers::BroadcastStream::new(local_rx)
-            .filter_map(|res| std::future::ready(res.ok().map(Ok)));
-            
+        let local_stream = self.subscribe_local_events().map(Ok);
         Ok(Box::pin(futures_util::stream::select(log_stream, Box::pin(local_stream))))
     }
 }

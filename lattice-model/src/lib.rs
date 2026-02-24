@@ -29,7 +29,7 @@ pub use clock::{Clock, SystemClock, MockClock};
 pub use state_machine::{StateMachine, StateWriter, StateWriterError, Op};
 pub use replication::{
     // Traits
-    SyncProvider, Shutdownable,
+    SyncProvider, Shutdownable, LocalEventSource,
     // Types
     ReplicationError, IngestResult, SyncState,
     ChainTip, OrphanInfo, LogFileInfo, LogStats,
