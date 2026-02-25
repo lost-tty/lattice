@@ -17,33 +17,53 @@ title: "Roadmap"
 | **M10**          | Fractal Store Model: replaced `Mesh` struct with recursive store hierarchy, `TABLE_SYSTEM` with HeadList CRDTs, `RecursiveWatcher` for child discovery, invite/revoke peer management, `PeerStrategy` (Independent/Inherited), flattened `StoreManager`, `NetworkService` (renamed from `MeshService`), proper `Node::shutdown()` |
 | **M11**          | Weaver Migration & Protocol Sync: Intention DAG (`IntentionStore`), Negentropy set reconciliation, Smart Chain Fetch, stream-based Bootstrap (Clone) Protocol without gossip storms |
 | **M12**          | Network Abstraction & Simulation: `Transport`/`GossipLayer` traits, `IrohTransport` extracted to `lattice-net-iroh`, `ChannelTransport`/`BroadcastGossip` in `lattice-net-sim`, gossip lag tracking, event-driven gap handling, `SessionTracker` decoupling, symmetric Negentropy sync |
-| **M13**          | Crate Dependency Architecture: removed `lattice-kernel` from `lattice-net`, `lattice-net-types`, `lattice-systemstore`; moved proto types to `lattice-proto`; elevated shared types to `lattice-store-base`; removed phantom deps from `lattice-bindings` and `lattice-api` |
+| **M13**          | Crate Dependency Architecture: removed `lattice-kernel` from `lattice-net`, `lattice-net-types`, `lattice-systemstore`; moved proto types to `lattice-proto`; elevated shared types to `lattice-store-base`; removed phantom deps from `lattice-bindings` and `lattice-api`; moved `WatchEvent`/`WatchEventKind` from `kvstore-api` to `kvstore` (flipped dependency); `kvstore-api` demoted to dev-dep in `lattice-node`; `RuntimeBuilder::with_opener()` plugin mechanism with `core-stores` feature flag; store type constants removed from `lattice-node` re-exports |
 
 ---
 
-## Milestone 14: Intelligent Reconciliation ("Meet" Operator)
+## Milestone 14: Slim Down Persistent State
 
-Add the "Meet" operator: find the common ancestor of two divergent heads, extract the deltas, and attempt a 3-way merge.
+Reduce what state machines store per conflict domain. Currently each key persists a full `HeadList` with duplicated values, HLC, author, and tombstone flags per head. Replace with: a materialized value (the resolved projection) plus a list of intention hashes (pointers into the DAG). Values, timestamps, and authorship live in the DAG — the state machine stores just enough to track conflicts and build `causal_deps`.
 
-### 14A: Kernel Primitives
-- [ ] **Store Trait Abstraction:** Decouple `StateMachine` from `redb`. Introduce a generic `Store` trait (get/put/del) that can be implemented by both `RedbStore` (disk) and `MemoryStore` (RAM). This is the shared "ephemeral replay" primitive: replay a subset of intentions into a temporary state without mutating live storage. Used by the Meet operator (replay LCA → each head) and frontier snapshotting in M15B (replay last snapshot → frontier).
-- [ ] **LCA Index:** Maintain an efficient index (likely `Hash -> (Height, Parents)`) to avoid O(N) scans. "Height" allows fast-forwarding the deeper node before scanning for intersection.
-- [ ] **Meet Query (`find_lca`):** `fn find_lca(hash_a, hash_b) -> Result<Hash>`
-- [ ] **Diff Query (`get_path`):** `fn get_path(from, to) -> Result<Vec<Intention>>`
-    - Returns the list of operations to replay from the Meet (common ancestor) to the Head.
-    - Usage: `get_path(LCA, Head_A)` yields Alice's local changes; `get_path(LCA, Head_B)` yields Bob's.
+> **See:** [Conflict Resolution Architecture](questions/meet-vs-crdt/) for the full design analysis.
+>
+> **Key insight:** The `Head` struct duplicates data that already exists in the intention DAG. Each head's value is a copy of the intention payload; its HLC, author, and hash are copies of intention metadata. By storing only intention hashes per conflict domain, state machines become thinner while retaining the ability to detect conflicts, build `causal_deps`, and surface branch information to clients. Conflict semantics (what constitutes a conflict domain, how to resolve) remain store-specific — the kernel provides DAG primitives, each state machine decides how to use them.
 
-### 14B: The "Meet" Operator (Core Logic)
-- [ ] **Computation:** When two divergent Heads (A and B) are detected, use `find_lca` to locate M.
-- [ ] **Delta Extraction:** Use `get_path` to compute ΔA (`M->A`) and ΔB (`M->B`).
-- [ ] **3-Way Merge:** Attempt to apply both ΔA and ΔB to M.
-    - **Non-Conflicting:** If they touch different fields, both are applied. The DAG collapses from 2 heads back to 1.
-    - **Conflicting:** If they touch the exact same field, the conflict is surfaced to the user.
+### 14A: DAG Query Primitives
+- [ ] **`DagQueries` trait.** Defines the interface state machines use to query the intention DAG. Keeps state machines decoupled from `IntentionStore` internals. Mockable for testing.
+- [ ] **`get_intention(&self, hash: &Hash) → Op`:** Dereferences an intention hash into an `Op` (the same type `apply` receives). State machines use this to read conflicting values and metadata from head hashes.
+- [ ] **`store_heads(&self) → Vec<Hash>`:** All DAG tips for a store — intentions with no causal descendants. Currently implicit in per-author tip tracking; make explicit.
+- [ ] **`find_lca(&self, a: &Hash, b: &Hash) → Hash`:** Lowest common ancestor. Alternating bidirectional BFS over `Condition::V1` causal edges. Unique because the DAG has a single genesis.
+- [ ] **`get_path(&self, from: &Hash, to: &Hash) → impl Iterator<Item = Op>`:** Yields intentions between two DAG points in topological order. Reverse BFS + Kahn's. Lazy — caller consumes as needed.
+- [ ] **`is_ancestor(&self, ancestor: &Hash, descendant: &Hash) → bool`:** DAG reachability query.
+- [ ] **Implement `DagQueries` on `IntentionStore`.** Synchronous over redb. Async wrapper on `Store<S>` for the actor boundary.
+- [ ] **LCA Index (deferred):** Height field on intentions for O(log N) LCA. Not needed until BFS becomes a bottleneck.
 
-### 14C: Store Integration (`lattice-kvstore`)
-- [ ] **Patch/Delta Operations:** Introduce operations that describe mutations (e.g., "increment field X", "set field Y") instead of simple overwrites.
-- [ ] **Read-Time Merge:** Update `get()` to check for conflicting Heads and invoke meet logic dynamically.
-- [ ] **Snapshotting:** Cache values at specific "Checkpoints" (common ancestors) so calculating the state at M doesn't require replaying the entire history.
+### 14B: `KVTable` — Unified State Engine
+- [ ] **Extract a generic `KVTable` from KvState and SystemTable.** Both implement identical `apply_head()` logic — causal subsumption, idempotency check, deterministic sort, encode/store. Both use the same underlying format (`TableDefinition<&[u8], &[u8]>` with protobuf-encoded `HeadList` values). Pure refactor — no format change, same behavior, shared code.
+- [ ] **`KVTable::apply()`:** Wraps the existing `apply_head()` logic. Takes key, new head, causal_deps. One implementation replaces the duplicate in KvState and SystemTable.
+- [ ] **`KVTable::get()`:** Returns decoded `HeadList` for a key (same as current behavior, just shared).
+- [ ] **`KVTable::heads()`:** Returns head hashes for a key. Used for `causal_deps` on writes and conflict surfacing.
+- [ ] **KvState uses `KVTable`.** `mutate()` decodes `KvPayload`, calls `KVTable::apply()` per put/delete. `get()` delegates to `KVTable::get()`. `apply_head()` removed.
+- [ ] **SystemTable uses `KVTable`.** All `set_*`/`add_*`/`remove_*` methods construct the string key and encoded value, then call `KVTable::apply()`. `apply_head()` removed. The typed accessor methods stay — they provide the key schema and value encoding — but the engine underneath is shared.
+- [ ] **Future store types get `KVTable` for free.** A document store, filesystem metadata store, or any KV-shaped conflict domain uses the same engine out of the box.
+
+### 14C: Slim Down Storage Format
+- [ ] **New `KVTable` storage format.** Replace `HeadList { heads: [Head { value, hlc, author, hash, tombstone }, ...] }` with `{ value: Option<Vec<u8>>, hlc: HLC, author: PubKey, heads: Vec<Hash> }`. Value is the LWW winner resolved at apply time. `None` for tombstones. Heads are intention hashes only — values, timestamps, and authorship for non-winning heads are read from the DAG on demand.
+- [ ] **LWW at apply time.** Move resolution from read time (`.lww()` on every `get()`) to apply time. `KVTable::apply()` compares incoming HLC against stored HLC, updates materialized value if incoming wins. `get()` returns the value directly.
+- [ ] **Storage format migration.** On open, detect old `HeadList` proto format, extract LWW winner as materialized value, extract head hashes, rewrite in new format.
+
+### 14D: Remove Legacy Types
+- [ ] **Remove `Head` struct from `lattice-model`.** No longer persisted. Intention metadata (HLC, author) is accessed from the DAG when needed (conflict reads, HITL).
+- [ ] **Remove `Merge` trait from `lattice-model`.** `lww()`, `fww()`, `all()` operate on `[Head]` slices which no longer exist. LWW resolution is inlined in `KVTable::apply()` as an HLC comparison. FWW / multi-value can be added later as apply-time strategies if needed.
+- [ ] **Remove `HeadList`/`HeadInfo` proto messages from `storage.proto`.** Replace with a simpler proto for the new `KVTable` format.
+- [ ] **Update tests.** `crdt_correctness.rs`, `sync_compliance.rs`, `state.rs` unit tests assert on `Vec<Head>` from `get()`. Rewrite to assert on resolved values and conflict hash counts.
+- [ ] **Update `architecture.md`.** State Machines section references `HeadList`, LWW-at-read-time, `Head` tracking. Rewrite to reflect `KVTable` engine and apply-time resolution.
+
+### 14E: Conflict Surfacing
+- [ ] **Conflict detection on read.** `get(key)` returns the materialized value. If `heads.len() > 1`, flag the response as conflicted. Cheap — no DAG query needed.
+- [ ] **Conflict detail query.** Client can dereference the head hashes into the DAG to get full intention metadata: payloads (the conflicting values), authors, timestamps, causal deps. This is the slow path, only used for HITL or debugging.
+- [ ] **Branch inspection.** Given head hashes, the kernel provides LCA (fork point), paths from fork to each head, branch metadata. Uses 14A primitives.
 
 ---
 
@@ -61,7 +81,7 @@ Manage log growth on long-running nodes via stability frontier, snapshots, pruni
 - [ ] **Lag metric:** Per-peer divergence from local tips, surfaced via `NodeEvent::PeerLagWarning` and `store status`
 
 ### 15B: Snapshotting
-- [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Uses the ephemeral `MemoryStore` from M14A.
+- [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Options: tempfile-based replay (works today, heavy on I/O) or in-memory `StateBackend` variant (cleaner, requires refactoring `StateLogic`/`PersistentState`).
 - [ ] Store snapshots in `snapshot.db` (per-store, includes `TABLE_SYSTEM` attestation state)
 - [ ] Bootstrap new peers from snapshot + tail sync instead of full log replay
 - [ ] **Future optimization:** Inverse operations stored in `WitnessRecord` could allow rolling back from current state to frontier in O(head − frontier), avoiding replay. Deferred until profiling shows replay is a bottleneck.

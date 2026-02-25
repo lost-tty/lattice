@@ -45,3 +45,12 @@ theme = "lattice-theme"
     pageRef = "/roadmap"
     parent = "reference"
     weight = 10
+  [[menus.main]]
+    identifier = "design-notes"
+    name = "Design Notes"
+    weight = 100
+  [[menus.main]]
+    name = "Conflict Resolution Architecture"
+    pageRef = "/questions/meet-vs-crdt"
+    parent = "design-notes"
+    weight = 10
