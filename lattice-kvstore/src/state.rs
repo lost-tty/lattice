@@ -8,30 +8,33 @@
 //! - kv: Vec<u8> → HeadList (multi-head DAG tips per key)
 
 // Internal table names
-use lattice_storage::{StateBackend, StateDbError, TABLE_DATA, PersistentState, StateLogic, StateFactory, setup_persistent_state};
-use std::pin::Pin;
+use lattice_storage::{
+    setup_persistent_state, PersistentState, StateBackend, StateDbError, StateFactory, StateLogic,
+    TABLE_DATA,
+};
 use std::future::Future;
+use std::pin::Pin;
 
+use crate::proto::{operation, KvPayload};
 use crate::{WatchEvent, WatchEventKind};
+use lattice_model::{Hash, Op, Uuid};
+use lattice_proto::storage::{HeadInfo as ProtoHeadInfo, HeadList};
 use lattice_storage::head::Head;
 use lattice_storage::merge::Merge;
-use crate::proto::{operation, KvPayload};
-use lattice_proto::storage::{HeadInfo as ProtoHeadInfo, HeadList};
-use lattice_model::{Op, Uuid, Hash};
-use lattice_store_base::{Introspectable, FieldFormat};
+use lattice_store_base::{FieldFormat, Introspectable};
 use prost::Message;
 use prost_reflect::{DescriptorPool, ReflectMessage};
+use redb::{Database, ReadableTable};
+use regex::bytes::Regex;
 use std::collections::HashSet;
 use std::path::Path;
-use redb::{Database, ReadableTable};
 use tokio::sync::broadcast;
-use regex::bytes::Regex;
 
 /// Persistent state for KV with DAG conflict resolution.
-/// 
+///
 /// This is a derived materialized view - the actual source of truth is
 /// the intention log managed by the replication layer.
-/// 
+///
 /// KvState is the logic component. Consumers interact with `PersistentState<KvState>`.
 pub struct KvState {
     backend: StateBackend,
@@ -53,19 +56,25 @@ struct HeadChange {
 // KvState is the logic. PersistentState<KvState> is the StateMachine.
 impl KvState {
     /// Open or create a KvState in the given directory.
-    pub fn open(id: Uuid, state_dir: impl AsRef<Path>) -> Result<PersistentState<Self>, StateDbError> {
+    pub fn open(
+        id: Uuid,
+        state_dir: impl AsRef<Path>,
+    ) -> Result<PersistentState<Self>, StateDbError> {
         setup_persistent_state(id, state_dir.as_ref(), |backend| {
             let (watcher_tx, _) = broadcast::channel(1024);
-            Self { backend, watcher_tx }
+            Self {
+                backend,
+                watcher_tx,
+            }
         })
     }
-    
+
     /// Get a reference to the underlying database.
     /// Used by extension traits for additional operations.
     pub fn db(&self) -> &Database {
         self.backend.db()
     }
-    
+
     /// Subscribe to state changes.
     pub fn subscribe(&self) -> broadcast::Receiver<WatchEvent> {
         self.watcher_tx.subscribe()
@@ -86,13 +95,14 @@ impl KvState {
                 let bytes = v.value().to_vec();
                 let list = HeadList::decode(bytes.as_slice())
                     .map_err(|e| StateDbError::Conversion(e.to_string()))?;
-                list.heads.into_iter()
+                list.heads
+                    .into_iter()
                     .map(|h| Head::try_from(h).map_err(|e| StateDbError::Conversion(e.to_string())))
                     .collect::<Result<Vec<_>, StateDbError>>()?
             }
             None => Vec::new(),
         };
-        
+
         // Idempotency: skip if this entry was already applied
         if heads.iter().any(|h| h.hash == new_head.hash) {
             return Ok(None);
@@ -101,24 +111,22 @@ impl KvState {
         // Filter out ancestors
         let parent_set: HashSet<Hash> = parent_hashes.iter().cloned().collect();
         heads.retain(|h| !parent_set.contains(&h.hash));
-        
+
         // Add new head
         heads.push(new_head);
-        
+
         // Sort heads deterministically (Newest HLC first, tie-break by Author)
         // This ensures the HeadList binary encoding is identical regardless of insert order.
         heads.sort_by(|a, b| b.hlc.cmp(&a.hlc).then_with(|| b.author.cmp(&a.author)));
-        
+
         // Encode back to proto for storage
         let proto_heads: Vec<ProtoHeadInfo> = heads.iter().map(|h| h.clone().into()).collect();
         let encoded = HeadList { heads: proto_heads }.encode_to_vec();
-        
+
         table.insert(key, encoded.as_slice())?;
-        Ok(Some(HeadChange {
-            new_heads: heads,
-        }))
+        Ok(Some(HeadChange { new_heads: heads }))
     }
-    
+
     /// Get all heads for a key (for conflict inspection).
     /// Heads are sorted deterministically: highest HLC first, ties broken by author.
     pub fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateDbError> {
@@ -128,34 +136,33 @@ impl KvState {
             Err(redb::TableError::TableDoesNotExist(_)) => None,
             Err(e) => return Err(e.into()),
         };
-        
+
         match val {
-             Some(v) => {
+            Some(v) => {
                 let proto_heads = HeadList::decode(v.as_slice())
-                    .map_err(|e| StateDbError::Conversion(e.to_string()))?.heads;
-                let mut heads: Vec<Head> = proto_heads.into_iter()
+                    .map_err(|e| StateDbError::Conversion(e.to_string()))?
+                    .heads;
+                let mut heads: Vec<Head> = proto_heads
+                    .into_iter()
                     .map(|h| Head::try_from(h).map_err(|e| StateDbError::Conversion(e.to_string())))
                     .collect::<Result<Vec<_>, StateDbError>>()?;
-                    
-                heads.sort_by(|a, b| {
-                    b.hlc.cmp(&a.hlc)
-                        .then_with(|| b.author.cmp(&a.author))
-                });
+
+                heads.sort_by(|a, b| b.hlc.cmp(&a.hlc).then_with(|| b.author.cmp(&a.author)));
                 Ok(heads)
             }
             None => Ok(Vec::new()),
         }
     }
-    
+
     /// Check if a put operation is needed given current heads.
     /// Returns false if a live head already has the same value.
     pub fn needs_put(heads: &[Head], value: &[u8]) -> bool {
         match heads.lww_head() {
             Some(winner) => winner.value != value,
-            None => true,  // No live heads = need put
+            None => true, // No live heads = need put
         }
     }
-    
+
     /// Check if a delete operation is needed given current heads.
     /// Returns false if no live heads exist.
     pub fn needs_delete(heads: &[Head]) -> bool {
@@ -165,8 +172,14 @@ impl KvState {
     /// Scan keys with optional prefix and regex filter.
     /// Calls visitor for each matching entry.
     /// Visitor returns Ok(true) to continue, Ok(false) to stop.
-    pub fn scan<F>(&self, prefix: &[u8], regex: Option<Regex>, mut visitor: F) -> Result<(), StateDbError> 
-    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateDbError>
+    pub fn scan<F>(
+        &self,
+        prefix: &[u8],
+        regex: Option<Regex>,
+        mut visitor: F,
+    ) -> Result<(), StateDbError>
+    where
+        F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateDbError>,
     {
         let txn = self.backend.db().begin_read()?;
         let table = match txn.open_table(TABLE_DATA) {
@@ -174,40 +187,44 @@ impl KvState {
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        
+
         let mut range = table.range(prefix..)?;
-        
+
         while let Some(result) = range.next() {
             let (k_access, v_access) = result?;
             let k_bytes = k_access.value();
-            
+
             if !k_bytes.starts_with(prefix) {
-                break; 
+                break;
             }
-            
+
             if let Some(re) = &regex {
-                 if !re.is_match(k_bytes) {
-                     continue;
-                 }
+                if !re.is_match(k_bytes) {
+                    continue;
+                }
             }
-            
+
             let v_bytes = v_access.value();
             match HeadList::decode(v_bytes) {
-                 Ok(list) => {
-                     let heads_res: Result<Vec<Head>, _> = list.heads.into_iter()
-                        .map(|h| Head::try_from(h).map_err(|e| StateDbError::Conversion(e.to_string())))
+                Ok(list) => {
+                    let heads_res: Result<Vec<Head>, _> = list
+                        .heads
+                        .into_iter()
+                        .map(|h| {
+                            Head::try_from(h).map_err(|e| StateDbError::Conversion(e.to_string()))
+                        })
                         .collect();
-                     
-                     match heads_res {
-                         Ok(heads) => {
-                             if !visitor(k_bytes.to_vec(), heads)? {
-                                 break;
-                             }
-                         },
-                         Err(_) => continue, 
-                     }
-                 },
-                 Err(_) => continue,
+
+                    match heads_res {
+                        Ok(heads) => {
+                            if !visitor(k_bytes.to_vec(), heads)? {
+                                break;
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                Err(_) => continue,
             }
         }
         Ok(())
@@ -232,7 +249,7 @@ impl StateLogic for KvState {
         // Decode payload
         let kv_payload = KvPayload::decode(op.payload.as_ref())
             .map_err(|e| StateDbError::Conversion(e.to_string()))?;
-        
+
         let mut updates: Vec<(Vec<u8>, Vec<Head>)> = Vec::new();
 
         // Apply KV operations (in reverse order for "last op wins" within batch)
@@ -241,13 +258,17 @@ impl StateLogic for KvState {
                 match op_type {
                     operation::OpType::Put(put) => {
                         let new_head = Head::from_op(op, put.value.clone());
-                        if let Some(change) = self.apply_head(table, &put.key, new_head, &op.causal_deps)? {
+                        if let Some(change) =
+                            self.apply_head(table, &put.key, new_head, &op.causal_deps)?
+                        {
                             updates.push((put.key.clone(), change.new_heads));
                         }
                     }
                     operation::OpType::Delete(del) => {
                         let tombstone = Head::tombstone(op);
-                        if let Some(change) = self.apply_head(table, &del.key, tombstone, &op.causal_deps)? {
+                        if let Some(change) =
+                            self.apply_head(table, &del.key, tombstone, &op.causal_deps)?
+                        {
                             updates.push((del.key.clone(), change.new_heads));
                         }
                     }
@@ -276,7 +297,10 @@ impl StateLogic for KvState {
 impl StateFactory for KvState {
     fn create(backend: StateBackend) -> Self {
         let (watcher_tx, _) = broadcast::channel(1024);
-        Self { backend, watcher_tx }
+        Self {
+            backend,
+            watcher_tx,
+        }
     }
 }
 
@@ -302,15 +326,21 @@ fn get_descriptor_pool() -> &'static DescriptorPool {
 // Implement Introspectable for KvState
 impl Introspectable for KvState {
     fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
-        get_descriptor_pool().get_service_by_name("lattice.kv.KvStore").expect("Service definition missing")
+        get_descriptor_pool()
+            .get_service_by_name("lattice.kv.KvStore")
+            .expect("Service definition missing")
     }
 
-    fn decode_payload(&self, payload: &[u8]) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+    fn decode_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
         // Decode using KvPayload from kv_store.proto (package lattice.kv)
         let pool = get_descriptor_pool();
-        let msg_desc = pool.get_message_by_name("lattice.kv.KvPayload")
+        let msg_desc = pool
+            .get_message_by_name("lattice.kv.KvPayload")
             .ok_or("KvPayload not in descriptor")?;
-        
+
         let mut dynamic = prost_reflect::DynamicMessage::new(msg_desc);
         {
             use prost_reflect::prost::Message;
@@ -339,74 +369,88 @@ impl Introspectable for KvState {
         formats.insert("GetResponse.value".to_string(), FieldFormat::Utf8);
         formats.insert("DeleteRequest.key".to_string(), FieldFormat::Utf8);
         formats.insert("ListRequest.prefix".to_string(), FieldFormat::Utf8);
-        
+
         // List Item hints
         formats.insert("KeyValuePair.key".to_string(), FieldFormat::Utf8);
         formats.insert("KeyValuePair.value".to_string(), FieldFormat::Utf8);
-        
+
         // Payload/Op hints (for log inspection)
         formats.insert("PutOp.value".to_string(), FieldFormat::Utf8);
         formats.insert("DeleteOp.key".to_string(), FieldFormat::Utf8);
-        
+
         formats
     }
 
     fn matches_filter(&self, payload: &prost_reflect::DynamicMessage, filter: &str) -> bool {
-         // KV Logic: matches if payload is a KvPayload and any op key matches filter
-         if payload.descriptor().name() != "KvPayload" {
-             return false;
-         }
-         
-         let Some(ops) = payload.get_field_by_name("ops") else { return false; };
-         let prost_reflect::Value::List(op_list) = ops.as_ref() else { return false; };
+        // KV Logic: matches if payload is a KvPayload and any op key matches filter
+        if payload.descriptor().name() != "KvPayload" {
+            return false;
+        }
 
-         for op in op_list {
-             let prost_reflect::Value::Message(op_msg) = op else { continue; };
-             
-             // Check "put" or "delete" fields directly (oneof variants are fields)
-             let inner_op = if let Some(put) = op_msg.get_field_by_name("put") {
-                 put
-             } else if let Some(del) = op_msg.get_field_by_name("delete") {
-                 del
-             } else {
-                 continue;
-             };
+        let Some(ops) = payload.get_field_by_name("ops") else {
+            return false;
+        };
+        let prost_reflect::Value::List(op_list) = ops.as_ref() else {
+            return false;
+        };
 
-             let prost_reflect::Value::Message(inner) = inner_op.as_ref() else { continue; };
-             
-             // Check for "key" field in PutOp or DeleteOp
-             if let Some(key_val) = inner.get_field_by_name("key") {
-                  match key_val.as_ref() {
-                      prost_reflect::Value::Bytes(b) if b == filter.as_bytes() => return true,
-                      prost_reflect::Value::String(s) if s == filter => return true,
-                      _ => {}
-                  }
-             }
-         }
-         
-         false
+        for op in op_list {
+            let prost_reflect::Value::Message(op_msg) = op else {
+                continue;
+            };
+
+            // Check "put" or "delete" fields directly (oneof variants are fields)
+            let inner_op = if let Some(put) = op_msg.get_field_by_name("put") {
+                put
+            } else if let Some(del) = op_msg.get_field_by_name("delete") {
+                del
+            } else {
+                continue;
+            };
+
+            let prost_reflect::Value::Message(inner) = inner_op.as_ref() else {
+                continue;
+            };
+
+            // Check for "key" field in PutOp or DeleteOp
+            if let Some(key_val) = inner.get_field_by_name("key") {
+                match key_val.as_ref() {
+                    prost_reflect::Value::Bytes(b) if b == filter.as_bytes() => return true,
+                    prost_reflect::Value::String(s) if s == filter => return true,
+                    _ => {}
+                }
+            }
+        }
+
+        false
     }
-    
-    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<lattice_model::SExpr> {
+
+    fn summarize_payload(
+        &self,
+        payload: &prost_reflect::DynamicMessage,
+    ) -> Vec<lattice_model::SExpr> {
         payload_summary::summarize(payload)
     }
 }
 
 mod payload_summary {
-    use prost_reflect::{DynamicMessage, Value};
     use lattice_model::SExpr;
+    use prost_reflect::{DynamicMessage, Value};
 
     pub fn summarize(payload: &DynamicMessage) -> Vec<SExpr> {
         if let Some(Value::List(ops)) = payload.get_field_by_name("ops").map(|v| v.into_owned()) {
             let entries: Vec<_> = ops.iter().filter_map(summarize_op).collect();
-            if !entries.is_empty() { return entries; }
+            if !entries.is_empty() {
+                return entries;
+            }
         }
         format_entry(payload, false).into_iter().collect()
     }
 
     fn summarize_op(op: &Value) -> Option<SExpr> {
         let Value::Message(m) = op else { return None };
-        get_msg(m, "delete").and_then(|d| format_entry(&d, true))
+        get_msg(m, "delete")
+            .and_then(|d| format_entry(&d, true))
             .or_else(|| get_msg(m, "put").and_then(|p| format_entry(&p, false)))
     }
 
@@ -422,7 +466,11 @@ mod payload_summary {
             let v = get_bytes(msg, "value")
                 .map(|b| String::from_utf8_lossy(&b).to_string())
                 .unwrap_or_default();
-            Some(SExpr::list(vec![SExpr::sym("put"), SExpr::str(k), SExpr::str(v)]))
+            Some(SExpr::list(vec![
+                SExpr::sym("put"),
+                SExpr::str(k),
+                SExpr::str(v),
+            ]))
         }
     }
 
@@ -442,15 +490,17 @@ mod payload_summary {
 }
 
 // Implement StreamProvider for KvState - enables blanket StreamReflectable on handles
-use lattice_store_base::{StreamProvider, StreamHandler, StreamDescriptor, StreamError, BoxByteStream, Subscriber};
+use lattice_store_base::{
+    BoxByteStream, StreamDescriptor, StreamError, StreamHandler, StreamProvider, Subscriber,
+};
 
 struct KvSubscriber;
 
 impl Subscriber<KvState> for KvSubscriber {
     fn subscribe<'a>(
-        &'a self, 
-        state: &'a KvState, 
-        params: &'a [u8]
+        &'a self,
+        state: &'a KvState,
+        params: &'a [u8],
     ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
         state.subscribe_watch(params)
     }
@@ -458,69 +508,69 @@ impl Subscriber<KvState> for KvSubscriber {
 
 impl StreamProvider for KvState {
     fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
-        vec![
-            StreamHandler {
-                descriptor: StreamDescriptor {
-                    name: "watch".to_string(),
-                    description: "Subscribe to key changes matching a regex pattern".to_string(),
-                    param_schema: Some("lattice.kv.WatchParams".to_string()),
-                    event_schema: Some("lattice.kv.WatchEventProto".to_string()),
-                },
-                subscriber: Box::new(KvSubscriber),
-            }
-        ]
+        vec![StreamHandler {
+            descriptor: StreamDescriptor {
+                name: "watch".to_string(),
+                description: "Subscribe to key changes matching a regex pattern".to_string(),
+                param_schema: Some("lattice.kv.WatchParams".to_string()),
+                event_schema: Some("lattice.kv.WatchEventProto".to_string()),
+            },
+            subscriber: Box::new(KvSubscriber),
+        }]
     }
 }
 
 impl KvState {
     /// Subscribe to key changes matching a regex pattern.
     /// Subscribe to key changes matching a regex pattern.
-    pub fn subscribe_watch<'a>(&'a self, params: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+    pub fn subscribe_watch<'a>(
+        &'a self,
+        params: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
         let params = params.to_vec();
         Box::pin(async move {
             use prost::Message;
 
-        
-        // Decode WatchParams to get pattern
-        let watch_params = crate::proto::WatchParams::decode(params.as_slice())
-            .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
-        let pattern = watch_params.pattern;
-        
-        // Compile regex for filtering
-        let re = Regex::new(&pattern)
-            .map_err(|e| StreamError::InvalidParams(format!("Invalid regex: {}", e)))?;
-        
-        // Subscribe to state's broadcast channel
-        let mut state_rx = self.subscribe();
-        
-        // Use async_stream for cleaner async handling
-        let stream = async_stream::stream! {
-            loop {
-                match state_rx.recv().await {
-                    Ok(event) => {
-                        if !re.is_match(&event.key) { continue; }
-                        
-                        let kind = match event.kind {
-                            WatchEventKind::Update { value } => {
-                                Some(crate::proto::watch_event_proto::Kind::Value(value))
+            // Decode WatchParams to get pattern
+            let watch_params = crate::proto::WatchParams::decode(params.as_slice())
+                .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
+            let pattern = watch_params.pattern;
+
+            // Compile regex for filtering
+            let re = Regex::new(&pattern)
+                .map_err(|e| StreamError::InvalidParams(format!("Invalid regex: {}", e)))?;
+
+            // Subscribe to state's broadcast channel
+            let mut state_rx = self.subscribe();
+
+            // Use async_stream for cleaner async handling
+            let stream = async_stream::stream! {
+                loop {
+                    match state_rx.recv().await {
+                        Ok(event) => {
+                            if !re.is_match(&event.key) { continue; }
+
+                            let kind = match event.kind {
+                                WatchEventKind::Update { value } => {
+                                    Some(crate::proto::watch_event_proto::Kind::Value(value))
+                                }
+                                WatchEventKind::Delete => {
+                                    Some(crate::proto::watch_event_proto::Kind::Deleted(true))
+                                }
+                            };
+
+                            let proto_event = crate::proto::WatchEventProto { key: event.key.clone(), kind };
+                            let mut buf = Vec::new();
+                            if proto_event.encode(&mut buf).is_ok() {
+                                yield buf;
                             }
-                            WatchEventKind::Delete => {
-                                Some(crate::proto::watch_event_proto::Kind::Deleted(true))
-                            }
-                        };
-                        
-                        let proto_event = crate::proto::WatchEventProto { key: event.key.clone(), kind };
-                        let mut buf = Vec::new();
-                        if proto_event.encode(&mut buf).is_ok() {
-                            yield buf;
                         }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
-            }
-        };
-        
+            };
+
             Ok(Box::pin(stream) as BoxByteStream)
         })
     }
@@ -531,9 +581,12 @@ impl KvState {
 // Enables PersistentState<KvState> to handle commands directly without a wrapper handle.
 // Write operations use the injected StateWriter.
 
-use lattice_store_base::{CommandHandler, dispatch::dispatch_method};
+use crate::proto::{
+    BatchRequest, BatchResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse,
+    ListRequest, ListResponse, Operation, PutRequest, PutResponse,
+};
 use lattice_model::StateWriter;
-use crate::proto::{PutRequest, PutResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse, ListRequest, ListResponse, BatchRequest, BatchResponse, Operation};
+use lattice_store_base::{dispatch::dispatch_method, CommandHandler};
 
 /// Validate a key for KV operations (build-time validation).
 /// Returns error if key is empty.
@@ -550,15 +603,44 @@ impl CommandHandler for KvState {
         writer: &'a dyn StateWriter,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
-    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
         let desc = self.service_descriptor();
         Box::pin(async move {
             match method_name {
-                "Put" => dispatch_method(method_name, request, desc, |req| self.handle_put(writer, req)).await,
-                "Delete" => dispatch_method(method_name, request, desc, |req| self.handle_delete(writer, req)).await,
-                "Get" => dispatch_method(method_name, request, desc, |req| self.handle_get(req)).await,
-                "List" => dispatch_method(method_name, request, desc, |req| self.handle_list(req)).await,
-                "Batch" => dispatch_method(method_name, request, desc, |req| self.handle_batch(writer, req)).await,
+                "Put" => {
+                    dispatch_method(method_name, request, desc, |req| {
+                        self.handle_put(writer, req)
+                    })
+                    .await
+                }
+                "Delete" => {
+                    dispatch_method(method_name, request, desc, |req| {
+                        self.handle_delete(writer, req)
+                    })
+                    .await
+                }
+                "Get" => {
+                    dispatch_method(method_name, request, desc, |req| self.handle_get(req)).await
+                }
+                "List" => {
+                    dispatch_method(method_name, request, desc, |req| self.handle_list(req)).await
+                }
+                "Batch" => {
+                    dispatch_method(method_name, request, desc, |req| {
+                        self.handle_batch(writer, req)
+                    })
+                    .await
+                }
                 _ => Err(format!("Unknown method: {}", method_name).into()),
             }
         })
@@ -566,73 +648,102 @@ impl CommandHandler for KvState {
 }
 
 impl KvState {
-    async fn handle_put(&self, writer: &dyn StateWriter, req: PutRequest) -> Result<PutResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_put(
+        &self,
+        writer: &dyn StateWriter,
+        req: PutRequest,
+    ) -> Result<PutResponse, Box<dyn std::error::Error + Send + Sync>> {
         validate_key(&req.key)?;
 
         // Fetch current heads to build causal dependency graph
-        let heads = self.get(&req.key).map_err(|e| format!("State error: {}", e))?;
+        let heads = self
+            .get(&req.key)
+            .map_err(|e| format!("State error: {}", e))?;
         let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
 
         let op = Operation::put(req.key, req.value);
         let kv_payload = KvPayload { ops: vec![op] };
         let payload = kv_payload.encode_to_vec();
-        
+
         let hash = writer.submit(payload, causal_deps).await?;
-        Ok(PutResponse { hash: hash.to_vec() })
+        Ok(PutResponse {
+            hash: hash.to_vec(),
+        })
     }
 
-    async fn handle_delete(&self, writer: &dyn StateWriter, req: DeleteRequest) -> Result<DeleteResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_delete(
+        &self,
+        writer: &dyn StateWriter,
+        req: DeleteRequest,
+    ) -> Result<DeleteResponse, Box<dyn std::error::Error + Send + Sync>> {
         validate_key(&req.key)?;
 
         // Fetch current heads for causal deps
-        let heads = self.get(&req.key).map_err(|e| format!("State error: {}", e))?;
+        let heads = self
+            .get(&req.key)
+            .map_err(|e| format!("State error: {}", e))?;
         let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
 
         let op = Operation::delete(req.key);
         let kv_payload = KvPayload { ops: vec![op] };
         let payload = kv_payload.encode_to_vec();
-        
+
         let hash = writer.submit(payload, causal_deps).await?;
-        Ok(DeleteResponse { hash: hash.to_vec() })
+        Ok(DeleteResponse {
+            hash: hash.to_vec(),
+        })
     }
 
-    async fn handle_get(&self, req: GetRequest) -> Result<GetResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let heads = self.get(&req.key).map_err(|e| format!("State error: {}", e))?;
+    async fn handle_get(
+        &self,
+        req: GetRequest,
+    ) -> Result<GetResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let heads = self
+            .get(&req.key)
+            .map_err(|e| format!("State error: {}", e))?;
         let value = heads.lww();
         Ok(GetResponse { value })
     }
 
-    async fn handle_list(&self, req: ListRequest) -> Result<ListResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_list(
+        &self,
+        req: ListRequest,
+    ) -> Result<ListResponse, Box<dyn std::error::Error + Send + Sync>> {
         let mut items = Vec::new();
         let prefix = req.prefix;
-        
+
         self.scan(&prefix, None, |key, heads| {
             if let Some(val) = heads.lww() {
                 items.push(crate::proto::KeyValuePair { key, value: val });
             }
             Ok(true)
-        }).map_err(|e| format!("State error: {}", e))?;
+        })
+        .map_err(|e| format!("State error: {}", e))?;
         Ok(ListResponse { items })
     }
 
-    async fn handle_batch(&self, writer: &dyn StateWriter, req: BatchRequest) -> Result<BatchResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_batch(
+        &self,
+        writer: &dyn StateWriter,
+        req: BatchRequest,
+    ) -> Result<BatchResponse, Box<dyn std::error::Error + Send + Sync>> {
         if req.ops.is_empty() {
             return Err("Batch cannot be empty".into());
         }
-        
+
         // Validation: check keys
         for op in &req.ops {
             if let Some(key) = op.key() {
-                 if key.is_empty() {
-                     return Err("Empty key not allowed".into());
-                 }
+                if key.is_empty() {
+                    return Err("Empty key not allowed".into());
+                }
             }
         }
 
         // Dedupe: keep only the last op per key
         let mut seen_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
         let mut deduped_ops: Vec<Operation> = Vec::new();
-        
+
         for op in req.ops.into_iter().rev() {
             if let Some(key) = op.key() {
                 if seen_keys.insert(key.to_vec()) {
@@ -641,7 +752,7 @@ impl KvState {
             }
         }
         deduped_ops.reverse();
-        
+
         // Collect causal deps from all affected keys
         let mut causal_deps = Vec::new();
         for op in &deduped_ops {
@@ -655,12 +766,14 @@ impl KvState {
                 }
             }
         }
-        
+
         let kv_payload = KvPayload { ops: deduped_ops };
         let payload = kv_payload.encode_to_vec();
-        
+
         let hash = writer.submit(payload, causal_deps).await?;
-        Ok(BatchResponse { hash: hash.to_vec() })
+        Ok(BatchResponse {
+            hash: hash.to_vec(),
+        })
     }
 }
 
@@ -668,9 +781,9 @@ impl KvState {
 mod tests {
     use super::*;
     use crate::proto::Operation;
-    use lattice_model::StateMachine;
     use lattice_model::hlc::HLC;
     use lattice_model::PubKey;
+    use lattice_model::StateMachine;
     use tempfile::tempdir;
 
     /// Test that StateMachine::apply works correctly for put operations
@@ -682,7 +795,7 @@ mod tests {
         // Create an Op with a Put payload
         let key = b"test/key";
         let value = b"hello world";
-        
+
         // Build KvPayload with a Put operation using the helper
         let kv_payload = KvPayload {
             ops: vec![Operation::put(key.as_slice(), value.as_slice())],
@@ -693,7 +806,7 @@ mod tests {
         let op_hash = Hash::from([1u8; 32]);
         let author = PubKey::from([2u8; 32]);
         let deps: Vec<Hash> = vec![];
-        
+
         let op = Op {
             id: op_hash,
             causal_deps: &deps,
@@ -721,7 +834,7 @@ mod tests {
         let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
 
         let key = b"shared/key";
-        
+
         // First put from author A
         let author_a = PubKey::from([10u8; 32]);
         let hash_a = Hash::from([11u8; 32]);
@@ -758,7 +871,7 @@ mod tests {
         let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
 
         let key = b"to/delete";
-        
+
         // First put a value
         let author = PubKey::from([5u8; 32]);
         let put_hash = Hash::from([6u8; 32]);
@@ -782,17 +895,24 @@ mod tests {
     }
 
     // Helper to create a Put Op
-    fn make_put_op(key: &[u8], value: &[u8], hash: Hash, author: PubKey, deps: &[Hash], prev_hash: Hash) -> Op<'static> {
+    fn make_put_op(
+        key: &[u8],
+        value: &[u8],
+        hash: Hash,
+        author: PubKey,
+        deps: &[Hash],
+        prev_hash: Hash,
+    ) -> Op<'static> {
         let payload = KvPayload {
             ops: vec![Operation::put(key, value)],
         };
         let payload_bytes: Vec<u8> = payload.encode_to_vec();
         let deps_vec: Vec<Hash> = deps.to_vec();
-        
+
         // Leak to get 'static lifetime (fine for tests)
         let payload_static: &'static [u8] = Box::leak(payload_bytes.into_boxed_slice());
         let deps_static: &'static [Hash] = Box::leak(deps_vec.into_boxed_slice());
-        
+
         Op {
             id: hash,
             causal_deps: deps_static,
@@ -804,16 +924,22 @@ mod tests {
     }
 
     // Helper to create a Delete Op
-    fn make_delete_op(key: &[u8], hash: Hash, author: PubKey, deps: &[Hash], prev_hash: Hash) -> Op<'static> {
+    fn make_delete_op(
+        key: &[u8],
+        hash: Hash,
+        author: PubKey,
+        deps: &[Hash],
+        prev_hash: Hash,
+    ) -> Op<'static> {
         let payload = KvPayload {
             ops: vec![Operation::delete(key)],
         };
         let payload_bytes: Vec<u8> = payload.encode_to_vec();
         let deps_vec: Vec<Hash> = deps.to_vec();
-        
+
         let payload_static: &'static [u8] = Box::leak(payload_bytes.into_boxed_slice());
         let deps_static: &'static [Hash] = Box::leak(deps_vec.into_boxed_slice());
-        
+
         Op {
             id: hash,
             causal_deps: deps_static,
@@ -823,16 +949,22 @@ mod tests {
             prev_hash,
         }
     }
-    
+
     // Helper to create an Op with multiple ops in payload (for testing reverse iteration)
-    fn make_multi_op(ops: Vec<Operation>, hash: Hash, author: PubKey, deps: &[Hash], prev_hash: Hash) -> Op<'static> {
+    fn make_multi_op(
+        ops: Vec<Operation>,
+        hash: Hash,
+        author: PubKey,
+        deps: &[Hash],
+        prev_hash: Hash,
+    ) -> Op<'static> {
         let payload = KvPayload { ops };
         let payload_bytes: Vec<u8> = payload.encode_to_vec();
         let deps_vec: Vec<Hash> = deps.to_vec();
-        
+
         let payload_static: &'static [u8] = Box::leak(payload_bytes.into_boxed_slice());
         let deps_static: &'static [Hash] = Box::leak(deps_vec.into_boxed_slice());
-        
+
         Op {
             id: hash,
             causal_deps: deps_static,
@@ -842,17 +974,17 @@ mod tests {
             prev_hash,
         }
     }
-    
+
     /// Test that apply_op with duplicate keys in payload uses last-wins (reverse iteration)
     #[test]
     fn test_apply_op_duplicate_keys_last_wins() {
         let dir = tempdir().unwrap();
         let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
-        
+
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
         let hash = Hash::from([2u8; 32]);
-        
+
         // Create payload with same key twice: first=v1, second=v2
         // With reverse iteration, last (v2) should win
         let ops = vec![
@@ -861,23 +993,23 @@ mod tests {
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
         StateMachine::apply(&store, &op).unwrap();
-        
+
         // Second put should win
         let heads = store.get(key).unwrap();
         assert_eq!(heads.len(), 1);
         assert_eq!(heads[0].value, b"second");
     }
-    
+
     /// Test that apply_op with put then delete on same key results in deletion
     #[test]
     fn test_apply_op_put_then_delete_same_key() {
         let dir = tempdir().unwrap();
         let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
-        
+
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
         let hash = Hash::from([2u8; 32]);
-        
+
         // Create payload: put then delete same key
         let ops = vec![
             Operation::put(key.as_slice(), b"value"),
@@ -885,23 +1017,23 @@ mod tests {
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
         StateMachine::apply(&store, &op).unwrap();
-        
+
         // Delete should win (last op)
         let heads = store.get(key).unwrap();
         assert_eq!(heads.len(), 1);
         assert!(heads[0].tombstone, "Expected tombstone");
     }
-    
+
     /// Test that apply_op with delete then put on same key results in value
     #[test]
     fn test_apply_op_delete_then_put_same_key() {
         let dir = tempdir().unwrap();
         let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
-        
+
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
         let hash = Hash::from([2u8; 32]);
-        
+
         // Create payload: delete then put same key
         let ops = vec![
             Operation::delete(key.as_slice()),
@@ -909,30 +1041,30 @@ mod tests {
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
         StateMachine::apply(&store, &op).unwrap();
-        
+
         // Put should win (last op)
         let heads = store.get(key).unwrap();
         assert_eq!(heads.len(), 1);
         assert!(!heads[0].tombstone, "Expected live value, not tombstone");
         assert_eq!(heads[0].value, b"resurrected");
     }
-    
+
     /// Test that empty keys are applied at apply_op level (validation is build-time only).
     /// This ensures deterministic replay - once signed, always apply.
     #[test]
     fn test_apply_op_empty_key_allowed() {
         let dir = tempdir().unwrap();
         let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
-        
+
         let author = PubKey::from([1u8; 32]);
         let hash = Hash::from([2u8; 32]);
-        
+
         // Create payload with empty key - should be applied (weird but deterministic)
         let ops = vec![Operation::put(b"".as_slice(), b"value")];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
-        
+
         StateMachine::apply(&store, &op).expect("Empty key should be applied at apply_op level");
-        
+
         // Verify it was stored
         let heads = store.get(b"").unwrap();
         assert_eq!(heads.len(), 1);
