@@ -31,7 +31,6 @@ pub enum WatchEventKind {
 pub mod state;
 pub use state::KvState;
 pub use lattice_storage::head::{Head, HeadError};
-pub use lattice_storage::merge::Merge;
 pub use proto::KvPayload;
 
 /// Type alias for KV store state wrapped in PersistentState for use with direct_opener()  

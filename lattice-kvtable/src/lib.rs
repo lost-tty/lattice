@@ -9,6 +9,7 @@
 //! pass in their own `TABLE_DATA` or `TABLE_SYSTEM` table reference.
 
 use std::collections::HashSet;
+use std::ops::RangeBounds;
 
 use lattice_model::head::Head;
 use lattice_model::types::Hash;
@@ -48,6 +49,28 @@ pub fn decode_heads(raw: &[u8]) -> Result<Vec<Head>, KvTableError> {
 pub fn encode_heads(heads: &[Head]) -> Vec<u8> {
     let proto_heads: Vec<ProtoHeadInfo> = heads.iter().map(|h| h.clone().into()).collect();
     HeadList { heads: proto_heads }.encode_to_vec()
+}
+
+/// Decode raw bytes and resolve to the LWW winner in one step.
+/// Convenience for range-scan call sites that have raw `HeadList` bytes.
+///
+/// Returns `None` for tombstones or empty head lists.
+pub fn decode_lww(raw: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
+    let heads = decode_heads(raw)?;
+    Ok(lww(&heads))
+}
+
+/// LWW resolution: pick the head with highest HLC (tie-break by author).
+/// Returns `None` if the winner is a tombstone or if heads is empty.
+pub fn lww(heads: &[Head]) -> Option<Vec<u8>> {
+    let winner = heads
+        .iter()
+        .max_by(|a, b| a.hlc.cmp(&b.hlc).then_with(|| a.author.cmp(&b.author)))?;
+    if winner.tombstone {
+        None
+    } else {
+        Some(winner.value.clone())
+    }
 }
 
 /// Deterministic sort order for heads: descending HLC, then descending author.
@@ -119,8 +142,15 @@ impl<'a, 'txn> KVTable<'a, 'txn> {
         Ok(Some(heads))
     }
 
+    /// Get the materialized LWW value for a key.
+    /// Returns `None` for missing keys or tombstone-only.
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
+        let heads = self.get_heads(key)?;
+        Ok(lww(&heads))
+    }
+
     /// Read and decode heads for a key (from the write transaction).
-    pub fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, KvTableError> {
+    fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, KvTableError> {
         match self.table.get(key)? {
             Some(v) => {
                 let mut heads = decode_heads(v.value())?;
@@ -155,8 +185,15 @@ impl<T: ReadableTable<&'static [u8], &'static [u8]>> ReadOnlyKVTable<T> {
         Self { table }
     }
 
+    /// Get the materialized LWW value for a key.
+    /// Returns `None` for missing keys or tombstone-only.
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
+        let heads = self.get_heads(key)?;
+        Ok(lww(&heads))
+    }
+
     /// Read and decode heads for a key.
-    pub fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, KvTableError> {
+    fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, KvTableError> {
         match self.table.get(key)? {
             Some(v) => {
                 let mut heads = decode_heads(v.value())?;
@@ -170,5 +207,55 @@ impl<T: ReadableTable<&'static [u8], &'static [u8]>> ReadOnlyKVTable<T> {
     /// Return just the head hashes for a key.
     pub fn heads(&self, key: &[u8]) -> Result<Vec<Hash>, KvTableError> {
         Ok(self.get_heads(key)?.into_iter().map(|h| h.hash).collect())
+    }
+
+    /// Iterate a key range, yielding `(key_bytes, Option<value>)` per entry.
+    ///
+    /// Each value is LWW-resolved: `Some(bytes)` for live entries, `None` for
+    /// tombstones. Callers never see raw `HeadList` encoding.
+    pub fn range<'a, KR>(
+        &self,
+        range: impl RangeBounds<KR> + 'a,
+    ) -> Result<LwwRange<'_>, KvTableError>
+    where
+        KR: std::borrow::Borrow<<&'static [u8] as redb::Value>::SelfType<'a>> + 'a,
+    {
+        let inner = self.table.range(range)?;
+        Ok(LwwRange { inner })
+    }
+
+    /// Iterate all entries, yielding `(key_bytes, Option<value>)` per entry.
+    pub fn iter(&self) -> Result<LwwRange<'_>, KvTableError> {
+        let inner = self.table.iter()?;
+        Ok(LwwRange { inner })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LwwRange — LWW-resolving iterator adapter
+// ---------------------------------------------------------------------------
+
+/// Iterator that wraps a redb `Range`, decoding and LWW-resolving each value.
+///
+/// Yields `(Vec<u8>, Option<Vec<u8>>)`: owned key bytes and the resolved value
+/// (`None` for tombstones).
+pub struct LwwRange<'a> {
+    inner: redb::Range<'a, &'static [u8], &'static [u8]>,
+}
+
+impl Iterator for LwwRange<'_> {
+    type Item = Result<(Vec<u8>, Option<Vec<u8>>), KvTableError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = self.inner.next()?;
+        Some(
+            result
+                .map_err(|e| KvTableError::Storage(e.into()))
+                .and_then(|(k, v)| {
+                    let key = k.value().to_vec();
+                    let value = decode_lww(v.value())?;
+                    Ok((key, value))
+                }),
+        )
     }
 }

@@ -393,6 +393,6 @@ impl<S: StateLogic + Send + Sync> SystemReader for SystemLayer<S> {
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
             Err(e) => return Err(e.to_string()),
         };
-        crate::tables::ReadOnlySystemTable::new(table).get_deps(key)
+        crate::tables::ReadOnlySystemTable::new(table).head_hashes(key)
     }
 }

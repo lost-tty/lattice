@@ -111,12 +111,9 @@ fn test_concurrent_genesis_merge() {
     state.apply(&op1).unwrap();
     state.apply(&op2).unwrap();
     
-    let heads = state.get(key).expect("key missing");
-    assert_eq!(heads.len(), 2, "Should preserve both genesis heads");
-    
-    let values: Vec<&[u8]> = heads.iter().map(|h| h.value.as_slice()).collect();
-    assert!(values.contains(&&b"val_a"[..]));
-    assert!(values.contains(&&b"val_b"[..]));
+    // Two concurrent heads — LWW picks one, but both should be tracked
+    assert_eq!(state.head_hashes(key).unwrap().len(), 2, "Should preserve both genesis heads");
+    assert!(state.get(key).unwrap().is_some(), "LWW should resolve to a value");
 }
 
 #[test]
@@ -136,13 +133,8 @@ fn test_concurrent_writes_produce_multi_heads() {
     state.apply(&op1).unwrap();
     state.apply(&op2).unwrap();
     
-
-    let heads = state.get(key).expect("key missing");
-    assert_eq!(heads.len(), 2, "Expected 2 concurrent heads");
-    
-    let values: Vec<&[u8]> = heads.iter().map(|h| h.value.as_slice()).collect();
-    assert!(values.contains(&&b"val1"[..]));
-    assert!(values.contains(&&b"val2"[..]));
+    assert_eq!(state.head_hashes(key).unwrap().len(), 2, "Expected 2 concurrent heads");
+    assert!(state.get(key).unwrap().is_some(), "LWW should resolve to a value");
 }
 
 #[test]
@@ -158,9 +150,8 @@ fn test_causal_dependency_chain() {
     let op1 = create_test_op(key, b"v1", author, hash1, hlc1, Hash::ZERO, &[]);
     state.apply(&op1).unwrap();
     
-    let heads = state.get(key).unwrap();
-    assert_eq!(heads.len(), 1);
-    assert_eq!(heads[0].hash, hash1);
+    assert_eq!(state.head_hashes(key).unwrap(), vec![hash1]);
+    assert_eq!(state.get(key).unwrap(), Some(b"v1".to_vec()));
     
     // 2. Child (points to hash1, later time)
     let hlc2 = next_hlc(hlc1);
@@ -168,10 +159,8 @@ fn test_causal_dependency_chain() {
     let op2 = create_test_op(key, b"v2", author, hash2, hlc2, hash1, &[hash1]); // Prev=hash1, Deps=[hash1]
     state.apply(&op2).unwrap();
     
-    let heads = state.get(key).unwrap();
-    assert_eq!(heads.len(), 1, "Op2 should supersede Op1");
-    assert_eq!(heads[0].hash, hash2);
-    assert_eq!(heads[0].value, b"v2");
+    assert_eq!(state.head_hashes(key).unwrap(), vec![hash2], "Op2 should supersede Op1");
+    assert_eq!(state.get(key).unwrap(), Some(b"v2".to_vec()));
 }
 
 #[test]
@@ -200,22 +189,9 @@ fn test_concurrent_put_and_delete_conflict() {
     state.apply(&op2a).unwrap();
     state.apply(&op2b).unwrap();
     
-    let heads = state.get(key).unwrap();
-    assert_eq!(heads.len(), 2, "Expected conflict between Put and Delete");
-
-    let has_val = heads.iter().any(|h| h.value == b"v2" && !h.tombstone);
-    let has_tomb = heads.iter().any(|h| h.tombstone);
-    
-    assert!(has_val, "Value head missing");
-    assert!(has_tomb, "Tombstone head missing");
-    
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let _resolved = rt.block_on(async {
-        store.get(key.to_vec()).await.unwrap()
-    });
+    assert_eq!(state.head_hashes(key).unwrap().len(), 2, "Expected conflict between Put and Delete");
+    // Same HLC, tiebreak by author: author2 ([2u8;32]) > author1 ([1u8;32]), and author2 did the delete
+    assert_eq!(state.get(key).unwrap(), None, "LWW tiebreak: author2 (delete) wins");
 }
 
 #[test]
@@ -244,9 +220,6 @@ fn test_resurrection_causality() {
     
     state.apply(&op3).unwrap();
     
-    let heads = state.get(key).unwrap();
-    assert_eq!(heads.len(), 1, "Resurrection should simply advance the chain");
-    
-    assert_eq!(heads[0].value, b"v2");
-    assert!(!heads[0].tombstone);
+    assert_eq!(state.head_hashes(key).unwrap().len(), 1, "Resurrection should simply advance the chain");
+    assert_eq!(state.get(key).unwrap(), Some(b"v2".to_vec()));
 }

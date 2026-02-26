@@ -14,7 +14,6 @@ use std::future::Future;
 
 use crate::{WatchEvent, WatchEventKind};
 use lattice_storage::head::Head;
-use lattice_storage::merge::Merge;
 use crate::proto::{operation, KvPayload};
 use lattice_model::{Op, Uuid, Hash};
 use lattice_store_base::{Introspectable, FieldFormat};
@@ -42,8 +41,10 @@ impl std::fmt::Debug for KvState {
     }
 }
 
-struct HeadChange {
-    new_heads: Vec<Head>,
+/// Result of a successful apply_head: the LWW-resolved value for watcher notifications.
+/// `None` means the key is now a tombstone (deleted).
+struct ApplyResult {
+    value: Option<Vec<u8>>,
 }
 
 // ==================== Openable Implementation ====================
@@ -71,24 +72,37 @@ impl KvState {
 
     /// Apply a new head to a key, removing ancestor heads (idempotent).
     /// Delegates to `lattice_kvtable::KVTable`.
+    /// Returns the LWW-resolved value on mutation, `None` on idempotent skip.
     fn apply_head(
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         key: &[u8],
         new_head: Head,
         parent_hashes: &[Hash],
-    ) -> Result<Option<HeadChange>, StateDbError> {
+    ) -> Result<Option<ApplyResult>, StateDbError> {
         let mut kvt = lattice_kvtable::KVTable::new(table);
         match kvt.apply_head(key, new_head, parent_hashes) {
-            Ok(Some(new_heads)) => Ok(Some(HeadChange { new_heads })),
+            Ok(Some(new_heads)) => Ok(Some(ApplyResult { value: lattice_kvtable::lww(&new_heads) })),
             Ok(None) => Ok(None),
             Err(e) => Err(StateDbError::Conversion(e.to_string())),
         }
     }
     
-    /// Get all heads for a key (for conflict inspection).
-    /// Heads are sorted deterministically: highest HLC first, ties broken by author.
-    pub fn get(&self, key: &[u8]) -> Result<Vec<Head>, StateDbError> {
+    /// Get the materialized LWW value for a key.
+    /// Returns `None` for missing keys or tombstone-only.
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateDbError> {
+        let txn = self.backend.db().begin_read()?;
+        let table = match txn.open_table(TABLE_DATA) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
+        ro.get(key).map_err(|e| StateDbError::Conversion(e.to_string()))
+    }
+    
+    /// Return the head hashes for a key (for causal deps and conflict counting).
+    pub fn head_hashes(&self, key: &[u8]) -> Result<Vec<Hash>, StateDbError> {
         let txn = self.backend.db().begin_read()?;
         let table = match txn.open_table(TABLE_DATA) {
             Ok(t) => t,
@@ -96,29 +110,14 @@ impl KvState {
             Err(e) => return Err(e.into()),
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
-        ro.get_heads(key).map_err(|e| StateDbError::Conversion(e.to_string()))
-    }
-    
-    /// Check if a put operation is needed given current heads.
-    /// Returns false if a live head already has the same value.
-    pub fn needs_put(heads: &[Head], value: &[u8]) -> bool {
-        match heads.lww_head() {
-            Some(winner) => winner.value != value,
-            None => true,  // No live heads = need put
-        }
-    }
-    
-    /// Check if a delete operation is needed given current heads.
-    /// Returns false if no live heads exist.
-    pub fn needs_delete(heads: &[Head]) -> bool {
-        heads.lww_head().is_some()
+        ro.heads(key).map_err(|e| StateDbError::Conversion(e.to_string()))
     }
 
     /// Scan keys with optional prefix and regex filter.
-    /// Calls visitor for each matching entry.
+    /// Calls visitor for each matching entry with the LWW-resolved value.
     /// Visitor returns Ok(true) to continue, Ok(false) to stop.
     pub fn scan<F>(&self, prefix: &[u8], regex: Option<Regex>, mut visitor: F) -> Result<(), StateDbError> 
-    where F: FnMut(Vec<u8>, Vec<Head>) -> Result<bool, StateDbError>
+    where F: FnMut(Vec<u8>, Option<Vec<u8>>) -> Result<bool, StateDbError>
     {
         let txn = self.backend.db().begin_read()?;
         let table = match txn.open_table(TABLE_DATA) {
@@ -126,31 +125,23 @@ impl KvState {
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
             Err(e) => return Err(e.into()),
         };
+        let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
         
-        let mut range = table.range(prefix..)?;
-        
-        while let Some(result) = range.next() {
-            let (k_access, v_access) = result?;
-            let k_bytes = k_access.value();
+        for result in ro.range(prefix..).map_err(|e| StateDbError::Conversion(e.to_string()))? {
+            let (key, value) = result.map_err(|e| StateDbError::Conversion(e.to_string()))?;
             
-            if !k_bytes.starts_with(prefix) {
+            if !key.starts_with(prefix) {
                 break; 
             }
             
             if let Some(re) = &regex {
-                 if !re.is_match(k_bytes) {
+                 if !re.is_match(&key) {
                      continue;
                  }
             }
             
-            let v_bytes = v_access.value();
-            match lattice_kvtable::decode_heads(v_bytes) {
-                Ok(heads) => {
-                    if !visitor(k_bytes.to_vec(), heads)? {
-                        break;
-                    }
-                }
-                Err(_) => continue,
+            if !visitor(key, value)? {
+                break;
             }
         }
         Ok(())
@@ -160,7 +151,7 @@ impl KvState {
 // ==================== StateLogic trait implementation ====================
 
 impl StateLogic for KvState {
-    type Updates = Vec<(Vec<u8>, Vec<Head>)>;
+    type Updates = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
     fn backend(&self) -> &StateBackend {
         &self.backend
@@ -176,7 +167,7 @@ impl StateLogic for KvState {
         let kv_payload = KvPayload::decode(op.payload.as_ref())
             .map_err(|e| StateDbError::Conversion(e.to_string()))?;
         
-        let mut updates: Vec<(Vec<u8>, Vec<Head>)> = Vec::new();
+        let mut updates: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
 
         // Apply KV operations (in reverse order for "last op wins" within batch)
         for kv_op in kv_payload.ops.iter().rev() {
@@ -184,14 +175,14 @@ impl StateLogic for KvState {
                 match op_type {
                     operation::OpType::Put(put) => {
                         let new_head = Head::from_op(op, put.value.clone());
-                        if let Some(change) = self.apply_head(table, &put.key, new_head, &op.causal_deps)? {
-                            updates.push((put.key.clone(), change.new_heads));
+                        if let Some(result) = self.apply_head(table, &put.key, new_head, &op.causal_deps)? {
+                            updates.push((put.key.clone(), result.value));
                         }
                     }
                     operation::OpType::Delete(del) => {
                         let tombstone = Head::tombstone(op);
-                        if let Some(change) = self.apply_head(table, &del.key, tombstone, &op.causal_deps)? {
-                            updates.push((del.key.clone(), change.new_heads));
+                        if let Some(result) = self.apply_head(table, &del.key, tombstone, &op.causal_deps)? {
+                            updates.push((del.key.clone(), result.value));
                         }
                     }
                 }
@@ -203,13 +194,10 @@ impl StateLogic for KvState {
 
     /// Notify watchers of changes.
     fn notify(&self, updates: Self::Updates) {
-        for (key, heads) in updates {
-            let kind = if heads.is_empty() || heads.iter().all(|h| h.tombstone) {
-                WatchEventKind::Delete
-            } else {
-                // Resolve to LWW value for the public event
-                let value = heads.lww().unwrap_or_default();
-                WatchEventKind::Update { value }
+        for (key, value) in updates {
+            let kind = match value {
+                Some(v) => WatchEventKind::Update { value: v },
+                None => WatchEventKind::Delete,
             };
             let _ = self.watcher_tx.send(WatchEvent { key, kind });
         }
@@ -512,9 +500,7 @@ impl KvState {
     async fn handle_put(&self, writer: &dyn StateWriter, req: PutRequest) -> Result<PutResponse, Box<dyn std::error::Error + Send + Sync>> {
         validate_key(&req.key)?;
 
-        // Fetch current heads to build causal dependency graph
-        let heads = self.get(&req.key).map_err(|e| format!("State error: {}", e))?;
-        let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
+        let causal_deps = self.head_hashes(&req.key).map_err(|e| format!("State error: {}", e))?;
 
         let op = Operation::put(req.key, req.value);
         let kv_payload = KvPayload { ops: vec![op] };
@@ -527,9 +513,7 @@ impl KvState {
     async fn handle_delete(&self, writer: &dyn StateWriter, req: DeleteRequest) -> Result<DeleteResponse, Box<dyn std::error::Error + Send + Sync>> {
         validate_key(&req.key)?;
 
-        // Fetch current heads for causal deps
-        let heads = self.get(&req.key).map_err(|e| format!("State error: {}", e))?;
-        let causal_deps: Vec<Hash> = heads.iter().map(|h| h.hash).collect();
+        let causal_deps = self.head_hashes(&req.key).map_err(|e| format!("State error: {}", e))?;
 
         let op = Operation::delete(req.key);
         let kv_payload = KvPayload { ops: vec![op] };
@@ -540,8 +524,7 @@ impl KvState {
     }
 
     async fn handle_get(&self, req: GetRequest) -> Result<GetResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let heads = self.get(&req.key).map_err(|e| format!("State error: {}", e))?;
-        let value = heads.lww();
+        let value = self.get(&req.key).map_err(|e| format!("State error: {}", e))?;
         Ok(GetResponse { value })
     }
 
@@ -549,8 +532,8 @@ impl KvState {
         let mut items = Vec::new();
         let prefix = req.prefix;
         
-        self.scan(&prefix, None, |key, heads| {
-            if let Some(val) = heads.lww() {
+        self.scan(&prefix, None, |key, value| {
+            if let Some(val) = value {
                 items.push(crate::proto::KeyValuePair { key, value: val });
             }
             Ok(true)
@@ -589,10 +572,10 @@ impl KvState {
         let mut causal_deps = Vec::new();
         for op in &deduped_ops {
             if let Some(key) = op.key() {
-                if let Ok(heads) = self.get(key) {
-                    for head in heads {
-                        if !causal_deps.contains(&head.hash) {
-                            causal_deps.push(head.hash);
+                if let Ok(hashes) = self.head_hashes(key) {
+                    for hash in hashes {
+                        if !causal_deps.contains(&hash) {
+                            causal_deps.push(hash);
                         }
                     }
                 }
@@ -650,11 +633,8 @@ mod tests {
         StateMachine::apply(&store, &op).unwrap();
 
         // Verify the value is stored
-        let heads = store.get(key).unwrap();
-        assert_eq!(heads.len(), 1);
-        assert_eq!(heads[0].value, value);
-        assert_eq!(heads[0].author, author);
-        assert_eq!(heads[0].hash, op_hash);
+        assert_eq!(store.get(key).unwrap(), Some(value.to_vec()));
+        assert_eq!(store.head_hashes(key).unwrap(), vec![op_hash]);
     }
 
     /// Test that multiple puts to same key creates proper head list
@@ -678,8 +658,7 @@ mod tests {
         StateMachine::apply(&store, &op_b).unwrap();
 
         // Should have 2 concurrent heads
-        let heads = store.get(key).unwrap();
-        assert_eq!(heads.len(), 2, "Expected 2 concurrent heads");
+        assert_eq!(store.head_hashes(key).unwrap().len(), 2, "Expected 2 concurrent heads");
 
         // Third put that supersedes both (has both as deps)
         let author_c = PubKey::from([30u8; 32]);
@@ -689,9 +668,8 @@ mod tests {
         StateMachine::apply(&store, &op_c).unwrap();
 
         // Should now have only 1 head (the merge)
-        let heads = store.get(key).unwrap();
-        assert_eq!(heads.len(), 1, "Expected 1 head after merge");
-        assert_eq!(heads[0].value, b"merged");
+        assert_eq!(store.head_hashes(key).unwrap(), vec![hash_c]);
+        assert_eq!(store.get(key).unwrap(), Some(b"merged".to_vec()));
     }
 
     /// Test delete operation via StateMachine trait
@@ -709,19 +687,16 @@ mod tests {
         StateMachine::apply(&store, &put_op).unwrap();
 
         // Verify it exists
-        let heads = store.get(key).unwrap();
-        assert_eq!(heads.len(), 1);
-        assert!(!heads[0].tombstone);
+        assert_eq!(store.get(key).unwrap(), Some(b"exists".to_vec()));
 
         // Now delete it
         let del_hash = Hash::from([7u8; 32]);
         let del_op = make_delete_op(key, del_hash, author, &[put_hash], put_hash);
         StateMachine::apply(&store, &del_op).unwrap();
 
-        // Should have tombstone head
-        let heads = store.get(key).unwrap();
-        assert_eq!(heads.len(), 1);
-        assert!(heads[0].tombstone, "Expected tombstone after delete");
+        // Should be deleted (tombstone → get returns None)
+        assert_eq!(store.get(key).unwrap(), None);
+        assert_eq!(store.head_hashes(key).unwrap().len(), 1, "Tombstone head should still exist");
     }
 
     // Helper to create a Put Op
@@ -805,10 +780,9 @@ mod tests {
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
         StateMachine::apply(&store, &op).unwrap();
         
-        // Second put should win
-        let heads = store.get(key).unwrap();
-        assert_eq!(heads.len(), 1);
-        assert_eq!(heads[0].value, b"second");
+        // Second put should win, single head
+        assert_eq!(store.get(key).unwrap(), Some(b"second".to_vec()));
+        assert_eq!(store.head_hashes(key).unwrap().len(), 1);
     }
     
     /// Test that apply_op with put then delete on same key results in deletion
@@ -829,10 +803,9 @@ mod tests {
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
         StateMachine::apply(&store, &op).unwrap();
         
-        // Delete should win (last op)
-        let heads = store.get(key).unwrap();
-        assert_eq!(heads.len(), 1);
-        assert!(heads[0].tombstone, "Expected tombstone");
+        // Delete should win (last op), single head
+        assert_eq!(store.get(key).unwrap(), None);
+        assert_eq!(store.head_hashes(key).unwrap().len(), 1);
     }
     
     /// Test that apply_op with delete then put on same key results in value
@@ -853,11 +826,9 @@ mod tests {
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
         StateMachine::apply(&store, &op).unwrap();
         
-        // Put should win (last op)
-        let heads = store.get(key).unwrap();
-        assert_eq!(heads.len(), 1);
-        assert!(!heads[0].tombstone, "Expected live value, not tombstone");
-        assert_eq!(heads[0].value, b"resurrected");
+        // Put should win (last op), single head
+        assert_eq!(store.get(key).unwrap(), Some(b"resurrected".to_vec()));
+        assert_eq!(store.head_hashes(key).unwrap().len(), 1);
     }
     
     /// Test that empty keys are applied at apply_op level (validation is build-time only).
@@ -877,8 +848,7 @@ mod tests {
         StateMachine::apply(&store, &op).expect("Empty key should be applied at apply_op level");
         
         // Verify it was stored
-        let heads = store.get(b"").unwrap();
-        assert_eq!(heads.len(), 1);
-        assert_eq!(heads[0].value, b"value");
+        assert_eq!(store.get(b"").unwrap(), Some(b"value".to_vec()));
+        assert_eq!(store.head_hashes(b"").unwrap().len(), 1);
     }
 }

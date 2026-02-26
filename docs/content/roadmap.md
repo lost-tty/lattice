@@ -47,21 +47,28 @@ Reduce what state machines store per conflict domain. Currently each key persist
 - [x] **SystemTable uses `KVTable`.** All `set_*`/`add_*`/`remove_*` methods construct the string key and encoded value, then call `KVTable::apply()`. `apply_head()` removed. The typed accessor methods stay — they provide the key schema and value encoding — but the engine underneath is shared.
 - [x] **Future store types get `KVTable` for free.** A document store, filesystem metadata store, or any KV-shaped conflict domain uses the same engine out of the box.
 
-### 14C: Slim Down Storage Format
-- [ ] **New `KVTable` storage format.** Replace `HeadList { heads: [Head { value, hlc, author, hash, tombstone }, ...] }` with `{ value: Option<Vec<u8>>, hlc: HLC, author: PubKey, heads: Vec<Hash> }`. Value is the LWW winner resolved at apply time. `None` for tombstones. Heads are intention hashes only — values, timestamps, and authorship for non-winning heads are read from the DAG on demand.
-- [ ] **LWW at apply time.** Move resolution from read time (`.lww()` on every `get()`) to apply time. `KVTable::apply()` compares incoming HLC against stored HLC, updates materialized value if incoming wins. `get()` returns the value directly.
-- [ ] **Storage format migration.** On open, detect old `HeadList` proto format, extract LWW winner as materialized value, extract head hashes, rewrite in new format.
+### 14C: KVTable API
+- [x] **`KVTable::get()` returns materialized value.** `get() -> Option<Vec<u8>>` instead of `Vec<Head>`. `None` for missing keys or tombstone-only. Callers no longer call `.lww()`.
+- [ ] **Migrate KvState callers.** `handle_get` uses `get()` directly. `handle_put`/`handle_delete`/`handle_batch` use `heads()` for causal deps. Remove `.lww()` calls. `scan()` returns `(key, Option<value>)` instead of `(key, Vec<Head>)`.
+- [x] **Migrate SystemTable callers.** `ReadOnlySystemTable` owns a `ReadOnlyKVTable` (not a raw redb table). Point lookups delegate to `get()`/`heads()`. `get_deps()` removed — callers use `head_hashes()` directly. Range sites (`get_peers`, `get_children`, `list_all`) use `ReadOnlyKVTable::range()`/`iter()` via `LwwRange` iterator. No crate outside `lattice-kvtable` calls `decode_heads` or `decode_lww`.
+- [x] **`ReadOnlyKVTable::range()` and `iter()`.** `LwwRange` iterator adapter wraps redb `Range`, decodes `HeadList` and LWW-resolves each value internally. Yields `(Vec<u8>, Option<Vec<u8>>)` — owned key bytes and resolved value (`None` for tombstones). Callers never see raw proto encoding.
+- [x] **`KvState::mutate()` returns resolved values.** `apply_head()` returns `ApplyResult { value: Option<Vec<u8>> }` (LWW-resolved) instead of `HeadChange { new_heads: Vec<Head> }`. Write-path callers no longer call `lww()` on results.
 
-### 14D: Clean Up `StateMachine` Interface
+### 14D: Slim Down Storage Format
+- [ ] **`KVTable::apply()` resolves LWW at write time.** Compare incoming HLC against current winner, update materialized value. `get()` returns the value directly — no more read-time resolution.
+- [ ] **New on-disk format.** Replace `HeadList { heads: [Head { value, hlc, author, hash, tombstone }, ...] }` with `{ value: Option<Vec<u8>>, hlc: HLC, author: PubKey, heads: Vec<Hash> }`. Value is the LWW winner. `None` for tombstones. Non-winning head metadata read from DAG on demand.
+- [ ] **Storage format migration.** On open, detect old `HeadList` proto format, extract LWW winner as materialized value, extract head hashes, rewrite in new format.
+- [ ] **Remove `HeadList`/`HeadInfo` proto messages from `storage.proto`.** After the new format lands, these protos are dead code — no crate outside `kvtable` references them (14C already eliminated all external `decode_heads`/`lww` calls). The replacement on-disk encoding is `kvtable`'s internal concern (minimal proto, borsh, or raw layout). This may drop `kvtable`'s dependency on `lattice-proto` entirely.
+
+### 14E: Clean Up `StateMachine` Interface
 - [ ] **Change `apply` signature.** Replace `apply(&self, op: &Op)` with `apply(&self, info: &IntentionInfo, causal_deps: &[Hash])`. Separates intention data from DAG plumbing. `Op` struct remains temporarily for the kernel's internal use (`verify_and_update_tip` needs `prev_hash`).
-- [ ] **Remove `Op` from `StateMachine` trait surface.** After 14C, `KVTable` handles `causal_deps` internally. The state machine receives only `IntentionInfo`. The kernel passes `causal_deps` to `KVTable::apply()` directly. `apply` becomes `apply(&self, info: &IntentionInfo)`.
+- [ ] **Remove `Op` from `StateMachine` trait surface.** After 14D, `KVTable` handles `causal_deps` internally. The state machine receives only `IntentionInfo`. The kernel passes `causal_deps` to `KVTable::apply()` directly. `apply` becomes `apply(&self, info: &IntentionInfo)`.
 - [ ] **Remove `Head` struct from `lattice-model`.** No longer persisted. Intention metadata (HLC, author) is accessed from the DAG when needed (conflict reads, HITL).
 - [ ] **Remove `Merge` trait from `lattice-model`.** `lww()`, `fww()`, `all()` operate on `[Head]` slices which no longer exist. LWW resolution is inlined in `KVTable::apply()` as an HLC comparison. FWW / multi-value can be added later as apply-time strategies if needed.
-- [ ] **Remove `HeadList`/`HeadInfo` proto messages from `storage.proto`.** Replace with a simpler proto for the new `KVTable` format.
 - [ ] **Update tests.** `crdt_correctness.rs`, `sync_compliance.rs`, `state.rs` unit tests assert on `Vec<Head>` from `get()`. Rewrite to assert on resolved values and conflict hash counts.
 - [ ] **Update `architecture.md`.** State Machines section references `HeadList`, LWW-at-read-time, `Head` tracking. Rewrite to reflect `KVTable` engine and apply-time resolution.
 
-### 14E: Conflict Surfacing
+### 14F: Conflict Surfacing
 - [ ] **Conflict detection on read.** `get(key)` returns the materialized value. If `heads.len() > 1`, flag the response as conflicted. Cheap — no DAG query needed.
 - [ ] **Conflict detail query.** Client can dereference the head hashes into the DAG to get full intention metadata: payloads (the conflicting values), authors, timestamps, causal deps. This is the slow path, only used for HITL or debugging.
 - [ ] **Branch inspection.** Given head hashes, the kernel provides LCA (fork point), paths from fork to each head, branch metadata. Uses 14A primitives.

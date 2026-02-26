@@ -69,9 +69,7 @@ fn test_snapshot_restore() {
         .unwrap();
 
     // Verify Data
-    let heads = state2.get(b"snap_key").unwrap();
-    assert_eq!(heads.len(), 1);
-    assert_eq!(heads[0].value, b"snap_val");
+    assert_eq!(state2.get(b"snap_key").unwrap(), Some(b"snap_val".to_vec()));
 
     // Take another snapshot - should be byte-identical to original
     let snapshot2_bytes = snapshot_bytes(&state2);
@@ -113,33 +111,15 @@ fn test_convergence_concurrent_operations() {
     state2.apply(&op2).unwrap();
     state2.apply(&op1).unwrap();
 
-    // Convergence Check: HeadLists should be identical regardless of apply order
-    let heads1 = state1.get(b"key1").unwrap();
-    let heads2 = state2.get(b"key1").unwrap();
+    // Convergence Check: both nodes should have same LWW value and same head hashes
+    assert_eq!(state1.get(b"key1").unwrap(), state2.get(b"key1").unwrap());
 
-    assert_eq!(heads1.len(), 2);
-    assert_eq!(heads1.len(), heads2.len());
-
-    // Since we sorted heads in apply_head, they should match exactly in order
-    assert_eq!(heads1[0].hash, heads2[0].hash);
-    assert_eq!(heads1[1].hash, heads2[1].hash);
-
-    // Check encoded heads are byte-identical (proves deterministic serialization)
+    let hashes1 = state1.head_hashes(b"key1").unwrap();
+    let hashes2 = state2.head_hashes(b"key1").unwrap();
+    assert_eq!(hashes1.len(), 2);
     assert_eq!(
-        lattice_kvtable::encode_heads(&heads1),
-        lattice_kvtable::encode_heads(&heads2)
-    );
-
-    // Verify the Tie-Breaker Policy (Descending sort)
-    // Author 2 ([2, 2...]) > Author 1 ([1, 1...]).
-    // Since HLCs are equal, Author 2 should be first (index 0).
-    assert_eq!(
-        heads1[0].hash, hash2,
-        "Expected Author2 (higher ID) to be sorted first"
-    );
-    assert_eq!(
-        heads1[1].hash, hash1,
-        "Expected Author1 (lower ID) to be sorted second"
+        hashes1, hashes2,
+        "Head hashes should be identical regardless of apply order"
     );
 }
 
@@ -157,7 +137,7 @@ fn test_restore_overwrites_existing_data() {
     let op1 = create_test_op(b"key_old", b"val_old", author, hash1, start_hlc, Hash::ZERO);
     state.apply(&op1).unwrap();
 
-    assert!(state.get(b"key_old").unwrap().len() > 0);
+    assert!(state.get(b"key_old").unwrap().is_some());
 
     // 2. Prepare a Snapshot that ONLY has "key_new"
     let dir_snap = tempdir().unwrap();
@@ -178,13 +158,12 @@ fn test_restore_overwrites_existing_data() {
     // - key_old should be GONE
     // - key_new should represent the state
 
-    assert!(
-        state.get(b"key_old").unwrap().is_empty(),
+    assert_eq!(
+        state.get(b"key_old").unwrap(),
+        None,
         "Ghost key_old remained after restore!"
     );
-    let heads_new = state.get(b"key_new").unwrap();
-    assert_eq!(heads_new.len(), 1);
-    assert_eq!(heads_new[0].value, b"val_new");
+    assert_eq!(state.get(b"key_new").unwrap(), Some(b"val_new".to_vec()));
 
     // Snapshot after restore should match original
     let snapshot_bytes_after = snapshot_bytes(&state);
@@ -207,9 +186,8 @@ fn test_delete_correctness() {
     let op1 = create_test_op(b"del_key", b"val", author, hash1, start_hlc, Hash::ZERO);
     state.apply(&op1).unwrap();
 
-    let heads1 = state.get(b"del_key").unwrap();
-    assert_eq!(heads1.len(), 1);
-    assert!(!heads1[0].tombstone);
+    assert_eq!(state.get(b"del_key").unwrap(), Some(b"val".to_vec()));
+    assert_eq!(state.head_hashes(b"del_key").unwrap().len(), 1);
 
     // 2. Delete (Add Tombstone) - must have causal_dep on hash1 to supersede it
     let hash2 = Hash::from([0xB2; 32]);
@@ -229,13 +207,13 @@ fn test_delete_correctness() {
     };
     state.apply(&op2).unwrap();
 
-    let heads2 = state.get(b"del_key").unwrap();
+    // Tombstone: get returns None, but head still exists
+    assert_eq!(state.get(b"del_key").unwrap(), None);
     assert_eq!(
-        heads2.len(),
+        state.head_hashes(b"del_key").unwrap().len(),
         1,
         "Tombstone with causal dep should supersede the put"
     );
-    assert!(heads2[0].tombstone);
 }
 
 #[test]

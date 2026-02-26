@@ -1,5 +1,4 @@
 use lattice_model::head::Head;
-use lattice_model::merge::Merge;
 use lattice_model::{Hash, InviteInfo, InviteStatus as ModelInviteStatus, Op, PubKey};
 use lattice_proto::storage::{
     InviteStatus as ProtoInviteStatus, PeerStrategy, SetInviteClaimedBy, SetInviteInvitedBy,
@@ -7,7 +6,7 @@ use lattice_proto::storage::{
 };
 use lattice_storage::StateDbError;
 use prost::Message;
-use redb::{ReadableTable, Table};
+use redb::Table;
 
 /// Wrapper around the raw system table to enforce typed access and CRDT rules.
 pub struct SystemTable<'a> {
@@ -213,7 +212,7 @@ impl<'a> SystemTable<'a> {
 
 /// Wrapper around a read-only system table.
 pub struct ReadOnlySystemTable<'a> {
-    table: redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
+    table: lattice_kvtable::ReadOnlyKVTable<redb::ReadOnlyTable<&'static [u8], &'static [u8]>>,
     // Bind the lifetime 'a from the transaction to the table wrapper
     _marker: std::marker::PhantomData<&'a ()>,
 }
@@ -221,33 +220,26 @@ pub struct ReadOnlySystemTable<'a> {
 impl<'a> ReadOnlySystemTable<'a> {
     pub fn new(table: redb::ReadOnlyTable<&'static [u8], &'static [u8]>) -> Self {
         Self {
-            table,
+            table: lattice_kvtable::ReadOnlyKVTable::new(table),
             _marker: std::marker::PhantomData,
         }
     }
 
-    /// Decode raw bytes to heads
-    fn decode_heads(bytes: &[u8]) -> Result<Vec<Head>, String> {
-        lattice_kvtable::decode_heads(bytes).map_err(|e| e.to_string())
+    /// Get the LWW-resolved value for a key. Returns `None` if missing or tombstone.
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        self.table.get(key).map_err(|e| e.to_string())
     }
 
-    /// Get heads for a key
-    fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, String> {
-        match self.table.get(key).map_err(|e| e.to_string())? {
-            Some(val) => Self::decode_heads(val.value()),
-            None => Ok(Vec::new()),
-        }
+    /// Return head hashes for a key (for causal deps).
+    pub(crate) fn head_hashes(&self, key: &[u8]) -> Result<Vec<Hash>, String> {
+        self.table.heads(key).map_err(|e| e.to_string())
     }
 
     /// Get a single peer by pubkey (O(1) lookup)
     pub fn get_peer(&self, pubkey: &PubKey) -> Result<Option<lattice_model::PeerInfo>, String> {
         let key = format!("peer/{}/status", hex::encode(pubkey.as_slice())).into_bytes();
-        let heads = self.get_heads(&key)?;
 
-        let name_key = format!("peer/{}/name", hex::encode(pubkey.as_slice())).into_bytes();
-        let name_heads = self.get_heads(&name_key)?;
-
-        if let Some(value) = heads.lww() {
+        if let Some(value) = self.get(&key)? {
             let mut info = lattice_model::PeerInfo {
                 pubkey: *pubkey,
                 name: None,
@@ -262,7 +254,8 @@ impl<'a> ReadOnlySystemTable<'a> {
                 }
             }
 
-            if let Some(name_bytes) = name_heads.lww() {
+            let name_key = format!("peer/{}/name", hex::encode(pubkey.as_slice())).into_bytes();
+            if let Some(name_bytes) = self.get(&name_key)? {
                 if !name_bytes.is_empty() {
                     info.name = String::from_utf8(name_bytes).ok();
                 }
@@ -281,8 +274,8 @@ impl<'a> ReadOnlySystemTable<'a> {
             .range(b"peer/".as_slice()..b"peer0".as_slice())
             .map_err(|e| e.to_string())?
         {
-            let (key, val) = result.map_err(|e| e.to_string())?;
-            let key_str = std::str::from_utf8(key.value()).map_err(|_| "Invalid key")?;
+            let (key_bytes, value) = result.map_err(|e| e.to_string())?;
+            let key_str = std::str::from_utf8(&key_bytes).map_err(|_| "Invalid key")?;
 
             // Parse peer/{pk_hex}/status
             let parts: Vec<&str> = key_str.split('/').collect();
@@ -294,7 +287,7 @@ impl<'a> ReadOnlySystemTable<'a> {
             let pk_bytes = hex::decode(pk_hex).map_err(|_| "Invalid hex pubkey")?;
             let pubkey = PubKey::try_from(pk_bytes.as_slice()).map_err(|_| "Invalid pubkey")?;
 
-            if let Some(value) = Self::decode_heads(val.value())?.lww() {
+            if let Some(value) = value {
                 let mut info = lattice_model::PeerInfo {
                     pubkey,
                     name: None,
@@ -312,15 +305,13 @@ impl<'a> ReadOnlySystemTable<'a> {
             }
         }
 
-        // Enrich with names (separate pass because we iterate keys, could optimize to single pass but range keys are status)
+        // Enrich with names
         for peer in &mut peers {
             let name_key =
                 format!("peer/{}/name", hex::encode(peer.pubkey.as_slice())).into_bytes();
-            if let Ok(heads) = self.get_heads(&name_key) {
-                if let Some(name_bytes) = heads.lww() {
-                    if !name_bytes.is_empty() {
-                        peer.name = String::from_utf8(name_bytes).ok();
-                    }
+            if let Some(name_bytes) = self.get(&name_key)? {
+                if !name_bytes.is_empty() {
+                    peer.name = String::from_utf8(name_bytes).ok();
                 }
             }
         }
@@ -340,8 +331,7 @@ impl<'a> ReadOnlySystemTable<'a> {
             .range(prefix.as_slice()..prefix_end.as_slice())
             .map_err(|e| e.to_string())?
         {
-            let (key, val) = result.map_err(|e| e.to_string())?;
-            let key_bytes = key.value();
+            let (key_bytes, value) = result.map_err(|e| e.to_string())?;
 
             // Expected format: "child/" + uuid-string(36) + "/name"
             if !key_bytes.ends_with(b"/name") {
@@ -367,7 +357,7 @@ impl<'a> ReadOnlySystemTable<'a> {
                 Err(_) => continue,
             };
 
-            if let Some(value) = Self::decode_heads(val.value())?.lww() {
+            if let Some(value) = value {
                 let alias = if value.is_empty() {
                     None
                 } else {
@@ -378,11 +368,7 @@ impl<'a> ReadOnlySystemTable<'a> {
                 let status_key = format!("child/{}/status", id).into_bytes();
                 let mut status = lattice_model::store_info::ChildStatus::Active;
 
-                if let Some(val) = self
-                    .table
-                    .get(status_key.as_slice())
-                    .map_err(|e| e.to_string())?
-                {
+                if let Some(v_bytes) = self.get(&status_key)? {
                     fn get_status_int(bytes: &[u8]) -> Result<i32, StateDbError> {
                         if bytes.len() < 4 {
                             return Err(StateDbError::Conversion(
@@ -392,26 +378,18 @@ impl<'a> ReadOnlySystemTable<'a> {
                         Ok(i32::from_le_bytes(bytes[0..4].try_into().unwrap_or([0; 4])))
                     }
 
-                    if let Some(v_bytes) = Self::decode_heads(val.value())?.lww() {
-                        let s_int = get_status_int(&v_bytes).map_err(|e| e.to_string())?;
-                        let proto = lattice_proto::storage::ChildStatus::try_from(s_int)
-                            .unwrap_or(lattice_proto::storage::ChildStatus::CsUnknown);
-                        status = crate::helpers::map_to_model_status(proto);
-                    }
+                    let s_int = get_status_int(&v_bytes).map_err(|e| e.to_string())?;
+                    let proto = lattice_proto::storage::ChildStatus::try_from(s_int)
+                        .unwrap_or(lattice_proto::storage::ChildStatus::CsUnknown);
+                    status = crate::helpers::map_to_model_status(proto);
                 }
 
                 // Fetch type
                 let type_key = format!("child/{}/type", id).into_bytes();
                 let mut store_type = None;
-                if let Some(val) = self
-                    .table
-                    .get(type_key.as_slice())
-                    .map_err(|e| e.to_string())?
-                {
-                    if let Some(v_bytes) = Self::decode_heads(val.value())?.lww() {
-                        if !v_bytes.is_empty() {
-                            store_type = String::from_utf8(v_bytes).ok();
-                        }
+                if let Some(v_bytes) = self.get(&type_key)? {
+                    if !v_bytes.is_empty() {
+                        store_type = String::from_utf8(v_bytes).ok();
                     }
                 }
 
@@ -429,7 +407,7 @@ impl<'a> ReadOnlySystemTable<'a> {
     pub fn get_peer_strategy(
         &self,
     ) -> Result<Option<lattice_model::store_info::PeerStrategy>, String> {
-        if let Some(value) = self.get_heads(b"strategy")?.lww() {
+        if let Some(value) = self.get(b"strategy")? {
             if let Ok(proto_strat) = PeerStrategy::decode(value.as_slice()) {
                 return map_peer_strategy(proto_strat).map(Some);
             }
@@ -438,7 +416,7 @@ impl<'a> ReadOnlySystemTable<'a> {
     }
 
     pub fn get_name(&self) -> Result<Option<String>, String> {
-        if let Some(value) = self.get_heads(b"name")?.lww() {
+        if let Some(value) = self.get(b"name")? {
             if let Ok(set_name) = SetStoreName::decode(value.as_slice()) {
                 return Ok(Some(set_name.name));
             }
@@ -446,16 +424,10 @@ impl<'a> ReadOnlySystemTable<'a> {
         Ok(None)
     }
 
-    pub(crate) fn get_deps(&self, key: &[u8]) -> Result<Vec<Hash>, String> {
-        let heads = self.get_heads(key)?;
-        Ok(heads.into_iter().map(|h| h.hash).collect())
-    }
-
     pub fn get_invite(&self, token_hash: &[u8]) -> Result<Option<InviteInfo>, String> {
         let key = format!("invite/{}/status", hex::encode(token_hash)).into_bytes();
-        let heads = self.get_heads(&key)?;
 
-        if let Some(value) = heads.lww() {
+        if let Some(value) = self.get(&key)? {
             let mut info = InviteInfo {
                 token_hash: token_hash.to_vec(),
                 status: ModelInviteStatus::Valid,
@@ -472,7 +444,7 @@ impl<'a> ReadOnlySystemTable<'a> {
             // Fetch invited_by
             let invited_by_key =
                 format!("invite/{}/invited_by", hex::encode(token_hash)).into_bytes();
-            if let Some(v_bytes) = self.get_heads(&invited_by_key)?.lww() {
+            if let Some(v_bytes) = self.get(&invited_by_key)? {
                 if let Ok(set) = SetInviteInvitedBy::decode(v_bytes.as_slice()) {
                     if let Ok(pk) = PubKey::try_from(set.inviter_pubkey.as_slice()) {
                         info.invited_by = Some(pk);
@@ -483,7 +455,7 @@ impl<'a> ReadOnlySystemTable<'a> {
             // Fetch claimed_by
             let claimed_by_key =
                 format!("invite/{}/claimed_by", hex::encode(token_hash)).into_bytes();
-            if let Some(v_bytes) = self.get_heads(&claimed_by_key)?.lww() {
+            if let Some(v_bytes) = self.get(&claimed_by_key)? {
                 if let Ok(set) = SetInviteClaimedBy::decode(v_bytes.as_slice()) {
                     if let Ok(pk) = PubKey::try_from(set.claimer_pubkey.as_slice()) {
                         info.claimed_by = Some(pk);
@@ -503,11 +475,10 @@ impl<'a> ReadOnlySystemTable<'a> {
 
         // Iterate over all keys in the table
         for result in self.table.iter().map_err(|e| e.to_string())? {
-            let (key, val) = result.map_err(|e| e.to_string())?;
-            let key_str = String::from_utf8_lossy(key.value()).to_string();
+            let (key_bytes, value) = result.map_err(|e| e.to_string())?;
+            let key_str = String::from_utf8_lossy(&key_bytes).to_string();
 
-            // Get the LWW value from heads
-            if let Some(value) = Self::decode_heads(val.value())?.lww() {
+            if let Some(value) = value {
                 entries.push((key_str, value));
             }
         }

@@ -18,7 +18,6 @@ pub mod store_type;
 pub mod openable;
 pub mod store_info;
 pub mod head;
-pub mod merge;
 pub mod weaver;
 pub mod sexpr;
 
@@ -43,5 +42,4 @@ pub use store_type::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, CORE_STORE_TYPES, 
 pub use openable::{Openable, OpenError};
 pub use store_info::{StoreMeta, StoreLink, SystemEvent};
 pub use head::{Head, HeadError};
-pub use merge::Merge;
 pub use sexpr::SExpr;
