@@ -1,0 +1,13 @@
+[package]
+name = "lattice-kvtable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unified head-tracking engine for KV-shaped conflict domains"
+
+[dependencies]
+lattice-model = { workspace = true }
+lattice-proto = { workspace = true }
+redb = { workspace = true }
+prost = { workspace = true }
+thiserror = { workspace = true }

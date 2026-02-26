@@ -1,4 +1,4 @@
-use lattice_kvstore::{Head, KvPayload, KvState};
+use lattice_kvstore::{KvPayload, KvState};
 use lattice_kvstore_api::Operation;
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
@@ -7,9 +7,6 @@ use lattice_model::{Op, StateMachine};
 use prost::Message;
 use std::io::Read;
 use tempfile::tempdir;
-
-// Access generated proto structs via public module
-use lattice_proto::storage::{HeadInfo, HeadList};
 
 fn create_test_op(
     key: &[u8],
@@ -30,11 +27,6 @@ fn create_test_op(
         timestamp,
         prev_hash,
     }
-}
-
-fn encode_heads(heads: &[Head]) -> Vec<u8> {
-    let proto_heads: Vec<HeadInfo> = heads.iter().map(|h| h.clone().into()).collect();
-    HeadList { heads: proto_heads }.encode_to_vec()
 }
 
 /// Helper: take snapshot and return bytes
@@ -133,7 +125,10 @@ fn test_convergence_concurrent_operations() {
     assert_eq!(heads1[1].hash, heads2[1].hash);
 
     // Check encoded heads are byte-identical (proves deterministic serialization)
-    assert_eq!(encode_heads(&heads1), encode_heads(&heads2));
+    assert_eq!(
+        lattice_kvtable::encode_heads(&heads1),
+        lattice_kvtable::encode_heads(&heads2)
+    );
 
     // Verify the Tie-Breaker Policy (Descending sort)
     // Author 2 ([2, 2...]) > Author 1 ([1, 1...]).

@@ -17,6 +17,7 @@ members = [
     "lattice-storage",
     "lattice-systemstore",
     "lattice-store-base",
+    "lattice-kvtable",
     "lattice-proto",
     "lattice-sync",
     "lattice-net-iroh",
@@ -45,6 +46,7 @@ default-members = [
     "lattice-storage",
     "lattice-systemstore",
     "lattice-store-base",
+    "lattice-kvtable",
     "lattice-proto",
     "lattice-sync",
     "lattice-net-iroh",
@@ -72,6 +74,7 @@ lattice-sync = { path = "lattice-sync" }
 lattice-net-types = { path = "lattice-net-types" }
 lattice-net-iroh = { path = "lattice-net-iroh" }
 lattice-proto = { path = "lattice-proto" }
+lattice-kvtable = { path = "lattice-kvtable" }
 lattice-api = { path = "lattice-api" }
 lattice-runtime = { path = "lattice-runtime" }
 clap = { version = "4", features = ["derive"] }

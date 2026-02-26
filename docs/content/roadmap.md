@@ -39,13 +39,13 @@ Reduce what state machines store per conflict domain. Currently each key persist
 - [x] **Implemented on `IntentionStore`.** Synchronous over redb. Shared `dag_parents()` helper eliminates duplication across methods. No async wrapper needed — state machines run synchronously inside the actor which already holds the `IntentionStore`.
 
 ### 14B: `KVTable` — Unified State Engine
-- [ ] **Extract a generic `KVTable` from KvState and SystemTable.** Both implement identical `apply_head()` logic — causal subsumption, idempotency check, deterministic sort, encode/store. Both use the same underlying format (`TableDefinition<&[u8], &[u8]>` with protobuf-encoded `HeadList` values). Pure refactor — no format change, same behavior, shared code.
-- [ ] **`KVTable::apply()`:** Wraps the existing `apply_head()` logic. Takes key, new head, causal_deps. One implementation replaces the duplicate in KvState and SystemTable.
-- [ ] **`KVTable::get()`:** Returns decoded `HeadList` for a key (same as current behavior, just shared).
-- [ ] **`KVTable::heads()`:** Returns head hashes for a key. Used for `causal_deps` on writes and conflict surfacing.
-- [ ] **KvState uses `KVTable`.** `mutate()` decodes `KvPayload`, calls `KVTable::apply()` per put/delete. `get()` delegates to `KVTable::get()`. `apply_head()` removed.
-- [ ] **SystemTable uses `KVTable`.** All `set_*`/`add_*`/`remove_*` methods construct the string key and encoded value, then call `KVTable::apply()`. `apply_head()` removed. The typed accessor methods stay — they provide the key schema and value encoding — but the engine underneath is shared.
-- [ ] **Future store types get `KVTable` for free.** A document store, filesystem metadata store, or any KV-shaped conflict domain uses the same engine out of the box.
+- [x] **Extract a generic `KVTable` from KvState and SystemTable.** Both implement identical `apply_head()` logic — causal subsumption, idempotency check, deterministic sort, encode/store. Both use the same underlying format (`TableDefinition<&[u8], &[u8]>` with protobuf-encoded `HeadList` values). Pure refactor — no format change, same behavior, shared code.
+- [x] **`KVTable::apply()`:** Wraps the existing `apply_head()` logic. Takes key, new head, causal_deps. One implementation replaces the duplicate in KvState and SystemTable.
+- [x] **`KVTable::get()`:** Returns decoded `HeadList` for a key (same as current behavior, just shared).
+- [x] **`KVTable::heads()`:** Returns head hashes for a key. Used for `causal_deps` on writes and conflict surfacing.
+- [x] **KvState uses `KVTable`.** `mutate()` decodes `KvPayload`, calls `KVTable::apply()` per put/delete. `get()` delegates to `KVTable::get()`. `apply_head()` removed.
+- [x] **SystemTable uses `KVTable`.** All `set_*`/`add_*`/`remove_*` methods construct the string key and encoded value, then call `KVTable::apply()`. `apply_head()` removed. The typed accessor methods stay — they provide the key schema and value encoding — but the engine underneath is shared.
+- [x] **Future store types get `KVTable` for free.** A document store, filesystem metadata store, or any KV-shaped conflict domain uses the same engine out of the box.
 
 ### 14C: Slim Down Storage Format
 - [ ] **New `KVTable` storage format.** Replace `HeadList { heads: [Head { value, hlc, author, hash, tombstone }, ...] }` with `{ value: Option<Vec<u8>>, hlc: HLC, author: PubKey, heads: Vec<Hash> }`. Value is the LWW winner resolved at apply time. `None` for tombstones. Heads are intention hashes only — values, timestamps, and authorship for non-winning heads are read from the DAG on demand.

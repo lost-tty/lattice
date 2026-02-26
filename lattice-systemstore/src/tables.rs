@@ -2,9 +2,8 @@ use lattice_model::head::Head;
 use lattice_model::merge::Merge;
 use lattice_model::{Hash, InviteInfo, InviteStatus as ModelInviteStatus, Op, PubKey};
 use lattice_proto::storage::{
-    HeadInfo as ProtoHeadInfo, HeadList, InviteStatus as ProtoInviteStatus, PeerStrategy,
-    SetInviteClaimedBy, SetInviteInvitedBy, SetInviteStatus, SetPeerAddedAt, SetPeerAddedBy,
-    SetPeerStatus, SetStoreName,
+    InviteStatus as ProtoInviteStatus, PeerStrategy, SetInviteClaimedBy, SetInviteInvitedBy,
+    SetInviteStatus, SetPeerAddedAt, SetPeerAddedBy, SetPeerStatus, SetStoreName,
 };
 use lattice_storage::StateDbError;
 use prost::Message;
@@ -196,45 +195,17 @@ impl<'a> SystemTable<'a> {
     // ==================== Core CRDT Logic ====================
 
     /// Apply a Head to the table using CRDT merge logic.
+    /// Delegates to `lattice_kvtable::KVTable`.
     pub fn apply_head(
         &mut self,
         key: &[u8],
         new_head: Head,
         parent_hashes: &[Hash],
     ) -> Result<(), StateDbError> {
-        let mut heads: Vec<Head> = match self.table.get(key)? {
-            Some(v) => {
-                let bytes = v.value().to_vec();
-                let list = HeadList::decode(bytes.as_slice())
-                    .map_err(|e| StateDbError::Conversion(e.to_string()))?;
-                list.heads
-                    .into_iter()
-                    .map(|h| Head::try_from(h).map_err(StateDbError::Conversion))
-                    .collect::<Result<Vec<_>, StateDbError>>()?
-            }
-            None => Vec::new(),
-        };
-
-        // Idempotency check
-        if heads.iter().any(|h| h.hash == new_head.hash) {
-            return Ok(());
-        }
-
-        // Causal supersession: remove heads that are in the parent_set (deps of new head)
-        let parent_set: std::collections::HashSet<Hash> = parent_hashes.iter().cloned().collect();
-        heads.retain(|h| !parent_set.contains(&h.hash));
-
-        // Add new head and sort
-        heads.push(new_head);
-        heads.sort_by(|a, b| b.hlc.cmp(&a.hlc).then_with(|| b.author.cmp(&a.author)));
-
-        // Encode and store
-        let proto_heads: Vec<ProtoHeadInfo> = heads.into_iter().map(|h| h.into()).collect();
-        let encoded = HeadList { heads: proto_heads }.encode_to_vec();
-
-        self.table.insert(key, encoded.as_slice())?;
-
-        Ok(())
+        let mut kvt = lattice_kvtable::KVTable::new(&mut self.table);
+        kvt.apply_head(key, new_head, parent_hashes)
+            .map(|_| ())
+            .map_err(|e| StateDbError::Conversion(e.to_string()))
     }
 }
 
@@ -257,12 +228,7 @@ impl<'a> ReadOnlySystemTable<'a> {
 
     /// Decode raw bytes to heads
     fn decode_heads(bytes: &[u8]) -> Result<Vec<Head>, String> {
-        let list = HeadList::decode(bytes).map_err(|e| e.to_string())?;
-        Ok(list
-            .heads
-            .into_iter()
-            .filter_map(|h| Head::try_from(h).ok())
-            .collect())
+        lattice_kvtable::decode_heads(bytes).map_err(|e| e.to_string())
     }
 
     /// Get heads for a key
@@ -481,17 +447,8 @@ impl<'a> ReadOnlySystemTable<'a> {
     }
 
     pub(crate) fn get_deps(&self, key: &[u8]) -> Result<Vec<Hash>, String> {
-        if let Some(val) = self.table.get(key).map_err(|e| e.to_string())? {
-            let list = HeadList::decode(val.value()).map_err(|e| e.to_string())?;
-            // Depend on ALL heads to causally supersede them
-            Ok(list
-                .heads
-                .into_iter()
-                .map(|h| Hash::try_from(h.hash.as_slice()).unwrap_or(Hash::ZERO))
-                .collect())
-        } else {
-            Ok(Vec::new())
-        }
+        let heads = self.get_heads(key)?;
+        Ok(heads.into_iter().map(|h| h.hash).collect())
     }
 
     pub fn get_invite(&self, token_hash: &[u8]) -> Result<Option<InviteInfo>, String> {
