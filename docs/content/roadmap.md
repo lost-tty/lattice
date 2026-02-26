@@ -29,15 +29,14 @@ Reduce what state machines store per conflict domain. Currently each key persist
 >
 > **Key insight:** The `Head` struct duplicates data that already exists in the intention DAG. Each head's value is a copy of the intention payload; its HLC, author, and hash are copies of intention metadata. By storing only intention hashes per conflict domain, state machines become thinner while retaining the ability to detect conflicts, build `causal_deps`, and surface branch information to clients. Conflict semantics (what constitutes a conflict domain, how to resolve) remain store-specific — the kernel provides DAG primitives, each state machine decides how to use them.
 
-### 14A: DAG Query Primitives
-- [ ] **`DagQueries` trait.** Defines the interface state machines use to query the intention DAG. Keeps state machines decoupled from `IntentionStore` internals. Mockable for testing.
-- [ ] **`get_intention(&self, hash: &Hash) → Op`:** Dereferences an intention hash into an `Op` (the same type `apply` receives). State machines use this to read conflicting values and metadata from head hashes.
-- [ ] **`store_heads(&self) → Vec<Hash>`:** All DAG tips for a store — intentions with no causal descendants. Currently implicit in per-author tip tracking; make explicit.
-- [ ] **`find_lca(&self, a: &Hash, b: &Hash) → Hash`:** Lowest common ancestor. Alternating bidirectional BFS over `Condition::V1` causal edges. Unique because the DAG has a single genesis.
-- [ ] **`get_path(&self, from: &Hash, to: &Hash) → impl Iterator<Item = Op>`:** Yields intentions between two DAG points in topological order. Reverse BFS + Kahn's. Lazy — caller consumes as needed.
-- [ ] **`is_ancestor(&self, ancestor: &Hash, descendant: &Hash) → bool`:** DAG reachability query.
-- [ ] **Implement `DagQueries` on `IntentionStore`.** Synchronous over redb. Async wrapper on `Store<S>` for the actor boundary.
-- [ ] **LCA Index (deferred):** Height field on intentions for O(log N) LCA. Not needed until BFS becomes a bottleneck.
+### 14A: DAG Query Primitives ✅
+- [x] **`DagQueries` trait.** Defined in `lattice-model/src/dag_queries.rs`. Interface for state machines to query the intention DAG without depending on `IntentionStore` internals. Mockable for testing.
+- [x] **`IntentionInfo` struct.** `{ hash, payload, timestamp, author }` — owned intention data without DAG plumbing. Return type for DAG queries.
+- [x] **`get_intention(hash) → IntentionInfo`:** Dereferences an intention hash into its data.
+- [x] **`find_lca(a, b) → Hash`:** Lowest common ancestor via alternating bidirectional BFS over `Condition::V1` deps + `store_prev` edges.
+- [x] **`get_path(from, to) → Vec<IntentionInfo>`:** Intentions between two DAG points in topological order. Reverse BFS to discover subgraph + Kahn's sort.
+- [x] **`is_ancestor(ancestor, descendant) → bool`:** DAG reachability via backward BFS from descendant.
+- [x] **Implemented on `IntentionStore`.** Synchronous over redb. Shared `dag_parents()` helper eliminates duplication across methods. No async wrapper needed — state machines run synchronously inside the actor which already holds the `IntentionStore`.
 
 ### 14B: `KVTable` — Unified State Engine
 - [ ] **Extract a generic `KVTable` from KvState and SystemTable.** Both implement identical `apply_head()` logic — causal subsumption, idempotency check, deterministic sort, encode/store. Both use the same underlying format (`TableDefinition<&[u8], &[u8]>` with protobuf-encoded `HeadList` values). Pure refactor — no format change, same behavior, shared code.
@@ -53,7 +52,9 @@ Reduce what state machines store per conflict domain. Currently each key persist
 - [ ] **LWW at apply time.** Move resolution from read time (`.lww()` on every `get()`) to apply time. `KVTable::apply()` compares incoming HLC against stored HLC, updates materialized value if incoming wins. `get()` returns the value directly.
 - [ ] **Storage format migration.** On open, detect old `HeadList` proto format, extract LWW winner as materialized value, extract head hashes, rewrite in new format.
 
-### 14D: Remove Legacy Types
+### 14D: Clean Up `StateMachine` Interface
+- [ ] **Change `apply` signature.** Replace `apply(&self, op: &Op)` with `apply(&self, info: &IntentionInfo, causal_deps: &[Hash])`. Separates intention data from DAG plumbing. `Op` struct remains temporarily for the kernel's internal use (`verify_and_update_tip` needs `prev_hash`).
+- [ ] **Remove `Op` from `StateMachine` trait surface.** After 14C, `KVTable` handles `causal_deps` internally. The state machine receives only `IntentionInfo`. The kernel passes `causal_deps` to `KVTable::apply()` directly. `apply` becomes `apply(&self, info: &IntentionInfo)`.
 - [ ] **Remove `Head` struct from `lattice-model`.** No longer persisted. Intention metadata (HLC, author) is accessed from the DAG when needed (conflict reads, HITL).
 - [ ] **Remove `Merge` trait from `lattice-model`.** `lww()`, `fww()`, `all()` operate on `[Head]` slices which no longer exist. LWW resolution is inlined in `KVTable::apply()` as an HLC comparison. FWW / multi-value can be added later as apply-time strategies if needed.
 - [ ] **Remove `HeadList`/`HeadInfo` proto messages from `storage.proto`.** Replace with a simpler proto for the new `KVTable` format.
@@ -219,6 +220,7 @@ Run the kernel on the RP2350.
 - [ ] **Payload Validation Strategy**: Decide where semantic validation occurs and what happens on failure. Options: build-time only, versioned rules, intention replacement, or separate chain/payload advancement. See `test_rejected_entry_breaks_chain` in `lattice-kvstore/src/kv.rs`.
 - [ ] **Signer Trait**: Introduce a `Signer` trait (sign hash → signature) to avoid passing raw `SigningKey` through the stack. Affects intention creation (`SignedIntention::sign`), witness signing (`WitnessRecord::sign`), and the M11 migration path.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
+- [ ] **DAG Reachability Index**: `DagQueries` methods (`find_lca`, `is_ancestor`, `get_path`) use naive BFS. For large DAGs, add generation numbers (prune impossible ancestors by depth) or bloom filters (compact ancestor summaries) for O(log N) reachability. Not needed until BFS becomes a bottleneck.
 - [ ] **Sync Trigger & Bootstrap Controller Review**: Review how and when sync is triggered (currently ad-hoc in `active_peer_ids` or `complete_join_handshake`). Consider introducing a dedicated `BootstrapController` to manage initial sync state, retry logic, and transition to steady-state gossip/sync.
 
 ---

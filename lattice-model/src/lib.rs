@@ -8,6 +8,7 @@ pub mod crypto;
 pub mod hlc;
 pub mod clock;
 pub mod state_machine;
+pub mod dag_queries;
 pub mod replication;
 pub mod node_identity;
 pub mod peer_provider;
@@ -27,6 +28,7 @@ pub use types::{Hash, PubKey, Signature};
 pub use hlc::HLC;
 pub use clock::{Clock, SystemClock, MockClock};
 pub use state_machine::{StateMachine, StateWriter, StateWriterError, Op};
+pub use dag_queries::{DagQueries, IntentionInfo};
 pub use replication::{
     // Traits
     StoreEventSource,

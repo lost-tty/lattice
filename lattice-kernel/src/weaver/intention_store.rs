@@ -752,6 +752,266 @@ impl IntentionStore {
     }
 }
 
+impl IntentionStore {
+    /// Read an intention from an open table and return its parent edges
+    /// (`Condition::V1` deps + `store_prev`). Returns `None` for `Hash::ZERO`.
+    fn dag_parents(
+        table: &redb::ReadOnlyTable<&[u8], &[u8]>,
+        hash: &Hash,
+    ) -> Result<Vec<Hash>, IntentionStoreError> {
+        if *hash == Hash::ZERO {
+            return Ok(vec![]);
+        }
+        let val = table.get(hash.as_bytes().as_slice())?.ok_or_else(|| {
+            IntentionStoreError::InvalidData(format!("dag: missing intention {}", hash))
+        })?;
+        let signed = Self::decode_signed(val.value())?;
+        let lattice_model::weaver::Condition::V1(mut parents) = signed.intention.condition;
+        if signed.intention.store_prev != Hash::ZERO {
+            parents.push(signed.intention.store_prev);
+        }
+        Ok(parents)
+    }
+
+    /// Read an intention from an open table and return the decoded `SignedIntention`
+    /// along with its parent edges. Returns `None` for `Hash::ZERO`.
+    fn dag_parents_with_signed(
+        table: &redb::ReadOnlyTable<&[u8], &[u8]>,
+        hash: &Hash,
+    ) -> Result<(SignedIntention, Vec<Hash>), IntentionStoreError> {
+        let val = table.get(hash.as_bytes().as_slice())?.ok_or_else(|| {
+            IntentionStoreError::InvalidData(format!("dag: missing intention {}", hash))
+        })?;
+        let signed = Self::decode_signed(val.value())?;
+        let lattice_model::weaver::Condition::V1(ref deps) = signed.intention.condition;
+        let mut parents = deps.clone();
+        if signed.intention.store_prev != Hash::ZERO {
+            parents.push(signed.intention.store_prev);
+        }
+        Ok((signed, parents))
+    }
+}
+
+impl lattice_model::DagQueries for IntentionStore {
+    type Error = IntentionStoreError;
+
+    fn get_intention(&self, hash: &Hash) -> Result<lattice_model::IntentionInfo, Self::Error> {
+        let signed = self.get(hash)?.ok_or_else(|| {
+            IntentionStoreError::InvalidData(format!("intention not found: {}", hash))
+        })?;
+        let intention = signed.intention;
+        Ok(lattice_model::IntentionInfo {
+            hash: intention.hash(),
+            payload: intention.ops,
+            timestamp: intention.timestamp,
+            author: intention.author,
+        })
+    }
+
+    fn find_lca(&self, a: &Hash, b: &Hash) -> Result<Hash, Self::Error> {
+        use std::collections::{HashSet, VecDeque};
+
+        if a == b {
+            return Ok(*a);
+        }
+
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+
+        let mut frontier_a: VecDeque<Hash> = VecDeque::new();
+        let mut frontier_b: VecDeque<Hash> = VecDeque::new();
+        let mut visited_a: HashSet<Hash> = HashSet::new();
+        let mut visited_b: HashSet<Hash> = HashSet::new();
+
+        frontier_a.push_back(*a);
+        visited_a.insert(*a);
+        frontier_b.push_back(*b);
+        visited_b.insert(*b);
+
+        // Check if starting nodes are already in the other set
+        if visited_b.contains(a) {
+            return Ok(*a);
+        }
+        if visited_a.contains(b) {
+            return Ok(*b);
+        }
+
+        const MAX_ITERATIONS: usize = 100_000;
+
+        for _ in 0..MAX_ITERATIONS {
+            // Expand side A (one level)
+            if !frontier_a.is_empty() {
+                let level_size = frontier_a.len();
+                for _ in 0..level_size {
+                    let node = frontier_a.pop_front().unwrap();
+                    for parent in Self::dag_parents(&table, &node)? {
+                        if visited_b.contains(&parent) {
+                            return Ok(parent);
+                        }
+                        if visited_a.insert(parent) {
+                            frontier_a.push_back(parent);
+                        }
+                    }
+                }
+            }
+
+            // Expand side B (one level)
+            if !frontier_b.is_empty() {
+                let level_size = frontier_b.len();
+                for _ in 0..level_size {
+                    let node = frontier_b.pop_front().unwrap();
+                    for parent in Self::dag_parents(&table, &node)? {
+                        if visited_a.contains(&parent) {
+                            return Ok(parent);
+                        }
+                        if visited_b.insert(parent) {
+                            frontier_b.push_back(parent);
+                        }
+                    }
+                }
+            }
+
+            if frontier_a.is_empty() && frontier_b.is_empty() {
+                break;
+            }
+        }
+
+        Err(IntentionStoreError::InvalidData(format!(
+            "find_lca: no common ancestor found for {} and {}",
+            a, b
+        )))
+    }
+
+    fn get_path(
+        &self,
+        from: &Hash,
+        to: &Hash,
+    ) -> Result<Vec<lattice_model::IntentionInfo>, Self::Error> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        if from == to {
+            return Ok(vec![]);
+        }
+
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+
+        // Phase 1: Reverse BFS from `to` back to `from` to discover the subgraph.
+        let mut subgraph: HashMap<Hash, (SignedIntention, Vec<Hash>)> = HashMap::new();
+        let mut frontier: VecDeque<Hash> = VecDeque::new();
+        let mut visited: HashSet<Hash> = HashSet::new();
+
+        frontier.push_back(*to);
+        visited.insert(*to);
+        visited.insert(*from); // exclusive boundary
+
+        const MAX_NODES: usize = 100_000;
+
+        while let Some(node) = frontier.pop_front() {
+            if subgraph.len() >= MAX_NODES {
+                return Err(IntentionStoreError::InvalidData(
+                    "get_path: subgraph too large".into(),
+                ));
+            }
+            if node == Hash::ZERO || node == *from {
+                continue;
+            }
+
+            let (signed, parents) = Self::dag_parents_with_signed(&table, &node)?;
+            for &p in &parents {
+                if visited.insert(p) {
+                    frontier.push_back(p);
+                }
+            }
+            subgraph.insert(node, (signed, parents));
+        }
+
+        if subgraph.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Phase 2: Kahn's topological sort over the subgraph.
+        let subgraph_keys: HashSet<Hash> = subgraph.keys().copied().collect();
+        let mut in_degree: HashMap<Hash, usize> = HashMap::new();
+        let mut children: HashMap<Hash, Vec<Hash>> = HashMap::new();
+
+        for (&hash, (_, parents)) in &subgraph {
+            in_degree.entry(hash).or_insert(0);
+            for &parent in parents {
+                if subgraph_keys.contains(&parent) {
+                    *in_degree.entry(hash).or_insert(0) += 1;
+                    children.entry(parent).or_default().push(hash);
+                }
+            }
+        }
+
+        let mut queue: VecDeque<Hash> = in_degree
+            .iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(&h, _)| h)
+            .collect();
+
+        let mut result: Vec<lattice_model::IntentionInfo> = Vec::with_capacity(subgraph.len());
+
+        while let Some(hash) = queue.pop_front() {
+            if let Some((signed, _)) = subgraph.get(&hash) {
+                let intention = &signed.intention;
+                result.push(lattice_model::IntentionInfo {
+                    hash: intention.hash(),
+                    payload: intention.ops.clone(),
+                    timestamp: intention.timestamp,
+                    author: intention.author,
+                });
+            }
+            if let Some(kids) = children.get(&hash) {
+                for &child in kids {
+                    if let Some(deg) = in_degree.get_mut(&child) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(child);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn is_ancestor(&self, ancestor: &Hash, descendant: &Hash) -> Result<bool, Self::Error> {
+        use std::collections::{HashSet, VecDeque};
+
+        if ancestor == descendant {
+            return Ok(true);
+        }
+        if *ancestor == Hash::ZERO {
+            return Ok(true);
+        }
+
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+
+        let mut frontier: VecDeque<Hash> = VecDeque::new();
+        let mut visited: HashSet<Hash> = HashSet::new();
+
+        frontier.push_back(*descendant);
+        visited.insert(*descendant);
+
+        while let Some(node) = frontier.pop_front() {
+            for parent in Self::dag_parents(&table, &node)? {
+                if parent == *ancestor {
+                    return Ok(true);
+                }
+                if visited.insert(parent) {
+                    frontier.push_back(parent);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::witness::verify_witness;
@@ -1083,21 +1343,7 @@ mod tests {
         assert!(store.is_witnessed(&a3.hash()).unwrap());
     }
 
-    fn make_intention_with_condition(
-        author: PubKey,
-        store_prev: Hash,
-        ops: Vec<u8>,
-        deps: Vec<Hash>,
-    ) -> Intention {
-        Intention {
-            author,
-            timestamp: HLC::new(1000, 0),
-            store_id: uuid::Uuid::from_bytes([0xAA; 16]),
-            store_prev,
-            condition: Condition::v1(deps),
-            ops,
-        }
-    }
+    // Replaced by make_intention_with_deps in the DAG query test section.
 
     #[test]
     fn floating_blocked_by_missing_store_prev() {
@@ -1136,7 +1382,7 @@ mod tests {
 
         // Intention with a causal dep on a nonexistent hash
         let missing_dep = Hash([0xDD; 32]);
-        let i = make_intention_with_condition(pk, Hash::ZERO, vec![1], vec![missing_dep]);
+        let i = make_intention_with_deps(pk, Hash::ZERO, vec![missing_dep], vec![1]);
         let signed = SignedIntention::sign(i, &key);
         let hash = store.insert(&signed).unwrap();
 
@@ -1268,7 +1514,7 @@ mod tests {
         let a3 = make_intention(alice, a2.hash(), vec![0xA3]);
 
         let b1 = make_intention(bob, Hash::ZERO, vec![0xB1]);
-        let b2 = make_intention_with_condition(bob, b1.hash(), vec![0xB2], vec![a2.hash()]);
+        let b2 = make_intention_with_deps(bob, b1.hash(), vec![a2.hash()], vec![0xB2]);
 
         // Insert all (order shouldn't matter for correctness)
         store
@@ -1796,5 +2042,515 @@ mod tests {
             .insert(&SignedIntention::sign(i2.clone(), &key))
             .unwrap();
         assert_eq!(store_a.table_fingerprint(), store_b.table_fingerprint());
+    }
+
+    // -----------------------------------------------------------------------
+    // DAG Query tests (DagQueries trait)
+    // -----------------------------------------------------------------------
+
+    use lattice_model::DagQueries;
+
+    fn make_key_2() -> (ed25519_dalek::SigningKey, PubKey) {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+        let pk = PubKey(key.verifying_key().to_bytes());
+        (key, pk)
+    }
+
+    fn make_intention_with_deps(
+        author: PubKey,
+        store_prev: Hash,
+        deps: Vec<Hash>,
+        ops: Vec<u8>,
+    ) -> Intention {
+        Intention {
+            author,
+            timestamp: HLC::new(1000, 0),
+            store_id: uuid::Uuid::from_bytes([0xAA; 16]),
+            store_prev,
+            condition: Condition::v1(deps),
+            ops,
+        }
+    }
+
+    /// Build a diamond DAG and return the store + hashes:
+    ///
+    /// ```text
+    ///     A        (author1, store_prev=ZERO, deps=[])
+    ///    / \
+    ///   B   C      (B: author1, prev=A; C: author2, prev=ZERO, deps=[A])
+    ///    \ /
+    ///     D        (author1, prev=B, deps=[C])
+    /// ```
+    fn build_diamond_dag() -> (IntentionStore, Hash, Hash, Hash, Hash) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open_store(dir.path());
+        let (key1, pk1) = make_key();
+        let (key2, pk2) = make_key_2();
+
+        let int_a = make_intention(pk1, Hash::ZERO, vec![0xA]);
+        let signed_a = SignedIntention::sign(int_a.clone(), &key1);
+        let hash_a = store.insert(&signed_a).unwrap();
+
+        let int_b = make_intention(pk1, hash_a, vec![0xB]);
+        let signed_b = SignedIntention::sign(int_b.clone(), &key1);
+        let hash_b = store.insert(&signed_b).unwrap();
+
+        let int_c = make_intention_with_deps(pk2, Hash::ZERO, vec![hash_a], vec![0xC]);
+        let signed_c = SignedIntention::sign(int_c.clone(), &key2);
+        let hash_c = store.insert(&signed_c).unwrap();
+
+        let int_d = make_intention_with_deps(pk1, hash_b, vec![hash_c], vec![0xD]);
+        let signed_d = SignedIntention::sign(int_d.clone(), &key1);
+        let hash_d = store.insert(&signed_d).unwrap();
+
+        std::mem::forget(dir);
+        (store, hash_a, hash_b, hash_c, hash_d)
+    }
+
+    /// Build a linear chain A → B → C → D and return the store + hashes.
+    fn build_linear_chain() -> (IntentionStore, Hash, Hash, Hash, Hash) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open_store(dir.path());
+        let (key, pk) = make_key();
+
+        let int_a = make_intention(pk, Hash::ZERO, vec![0xA]);
+        let signed_a = SignedIntention::sign(int_a.clone(), &key);
+        let hash_a = store.insert(&signed_a).unwrap();
+
+        let int_b = make_intention(pk, hash_a, vec![0xB]);
+        let signed_b = SignedIntention::sign(int_b.clone(), &key);
+        let hash_b = store.insert(&signed_b).unwrap();
+
+        let int_c = make_intention(pk, hash_b, vec![0xC]);
+        let signed_c = SignedIntention::sign(int_c.clone(), &key);
+        let hash_c = store.insert(&signed_c).unwrap();
+
+        let int_d = make_intention(pk, hash_c, vec![0xD]);
+        let signed_d = SignedIntention::sign(int_d.clone(), &key);
+        let hash_d = store.insert(&signed_d).unwrap();
+
+        std::mem::forget(dir);
+        (store, hash_a, hash_b, hash_c, hash_d)
+    }
+
+    /// Build a double-diamond DAG (merge, fork, merge):
+    ///
+    /// ```text
+    ///       A           (author1, root)
+    ///      / \
+    ///     B   C         (B: author1; C: author2, deps=[A])
+    ///      \ /
+    ///       D           (author1, prev=B, deps=[C])  — first merge
+    ///      / \
+    ///     E   F         (E: author1; F: author2, deps=[D])
+    ///      \ /
+    ///       G           (author1, prev=E, deps=[F])  — second merge
+    /// ```
+    fn build_double_diamond() -> (IntentionStore, [Hash; 7]) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open_store(dir.path());
+        let (key1, pk1) = make_key();
+        let (key2, pk2) = make_key_2();
+
+        let int_a = make_intention(pk1, Hash::ZERO, vec![0xA]);
+        let ha = store
+            .insert(&SignedIntention::sign(int_a.clone(), &key1))
+            .unwrap();
+
+        let int_b = make_intention(pk1, ha, vec![0xB]);
+        let hb = store
+            .insert(&SignedIntention::sign(int_b.clone(), &key1))
+            .unwrap();
+
+        let int_c = make_intention_with_deps(pk2, Hash::ZERO, vec![ha], vec![0xC]);
+        let hc = store
+            .insert(&SignedIntention::sign(int_c.clone(), &key2))
+            .unwrap();
+
+        let int_d = make_intention_with_deps(pk1, hb, vec![hc], vec![0xD]);
+        let hd = store
+            .insert(&SignedIntention::sign(int_d.clone(), &key1))
+            .unwrap();
+
+        let int_e = make_intention(pk1, hd, vec![0xE]);
+        let he = store
+            .insert(&SignedIntention::sign(int_e.clone(), &key1))
+            .unwrap();
+
+        let int_f = make_intention_with_deps(pk2, hc, vec![hd], vec![0xF]);
+        let hf = store
+            .insert(&SignedIntention::sign(int_f.clone(), &key2))
+            .unwrap();
+
+        let int_g = make_intention_with_deps(pk1, he, vec![hf], vec![0x77]);
+        let hg = store
+            .insert(&SignedIntention::sign(int_g.clone(), &key1))
+            .unwrap();
+
+        std::mem::forget(dir);
+        (store, [ha, hb, hc, hd, he, hf, hg])
+    }
+
+    /// Build an asymmetric DAG where one branch is much longer:
+    ///
+    /// ```text
+    ///     A
+    ///    / \
+    ///   B   C → D → E → F    (long branch via author2)
+    ///   (short branch, author1)
+    /// ```
+    fn build_asymmetric_dag() -> (IntentionStore, Hash, Hash, Hash, Hash, Hash, Hash) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open_store(dir.path());
+        let (key1, pk1) = make_key();
+        let (key2, pk2) = make_key_2();
+
+        let int_a = make_intention(pk1, Hash::ZERO, vec![0xA]);
+        let ha = store
+            .insert(&SignedIntention::sign(int_a.clone(), &key1))
+            .unwrap();
+
+        // Short branch
+        let int_b = make_intention(pk1, ha, vec![0xB]);
+        let hb = store
+            .insert(&SignedIntention::sign(int_b.clone(), &key1))
+            .unwrap();
+
+        // Long branch
+        let int_c = make_intention_with_deps(pk2, Hash::ZERO, vec![ha], vec![0xC]);
+        let hc = store
+            .insert(&SignedIntention::sign(int_c.clone(), &key2))
+            .unwrap();
+
+        let int_d = make_intention(pk2, hc, vec![0xD]);
+        let hd = store
+            .insert(&SignedIntention::sign(int_d.clone(), &key2))
+            .unwrap();
+
+        let int_e = make_intention(pk2, hd, vec![0xE]);
+        let he = store
+            .insert(&SignedIntention::sign(int_e.clone(), &key2))
+            .unwrap();
+
+        let int_f = make_intention(pk2, he, vec![0xF]);
+        let hf = store
+            .insert(&SignedIntention::sign(int_f.clone(), &key2))
+            .unwrap();
+
+        std::mem::forget(dir);
+        (store, ha, hb, hc, hd, he, hf)
+    }
+
+    // -- get_intention tests --
+
+    #[test]
+    fn get_intention_basic() {
+        let (store, hash_a, _, _, _) = build_diamond_dag();
+        let info = store.get_intention(&hash_a).unwrap();
+        assert_eq!(info.hash, hash_a);
+        assert_eq!(info.payload, vec![0xA]);
+    }
+
+    #[test]
+    fn get_intention_preserves_author() {
+        let (store, _, _, hash_c, _) = build_diamond_dag();
+        let (_, pk2) = make_key_2();
+        let info = store.get_intention(&hash_c).unwrap();
+        assert_eq!(info.author, pk2);
+        assert_eq!(info.payload, vec![0xC]);
+    }
+
+    #[test]
+    fn get_intention_missing_hash() {
+        let (store, _, _, _, _) = build_diamond_dag();
+        let bogus = Hash([0xFF; 32]);
+        assert!(store.get_intention(&bogus).is_err());
+    }
+
+    // -- find_lca tests --
+
+    #[test]
+    fn find_lca_same_node() {
+        let (store, hash_a, _, _, _) = build_diamond_dag();
+        assert_eq!(store.find_lca(&hash_a, &hash_a).unwrap(), hash_a);
+    }
+
+    #[test]
+    fn find_lca_parent_child() {
+        let (store, hash_a, hash_b, _, _) = build_diamond_dag();
+        assert_eq!(store.find_lca(&hash_a, &hash_b).unwrap(), hash_a);
+        // Symmetric
+        assert_eq!(store.find_lca(&hash_b, &hash_a).unwrap(), hash_a);
+    }
+
+    #[test]
+    fn find_lca_siblings() {
+        let (store, hash_a, hash_b, hash_c, _) = build_diamond_dag();
+        assert_eq!(store.find_lca(&hash_b, &hash_c).unwrap(), hash_a);
+    }
+
+    #[test]
+    fn find_lca_diamond_tips() {
+        let (store, _, hash_b, hash_c, hash_d) = build_diamond_dag();
+        assert_eq!(store.find_lca(&hash_d, &hash_c).unwrap(), hash_c);
+        assert_eq!(store.find_lca(&hash_d, &hash_b).unwrap(), hash_b);
+    }
+
+    #[test]
+    fn find_lca_linear_chain() {
+        let (store, ha, hb, hc, hd) = build_linear_chain();
+        // In a linear chain, LCA is always the earlier node
+        assert_eq!(store.find_lca(&ha, &hd).unwrap(), ha);
+        assert_eq!(store.find_lca(&hb, &hd).unwrap(), hb);
+        assert_eq!(store.find_lca(&hb, &hc).unwrap(), hb);
+        assert_eq!(store.find_lca(&hd, &ha).unwrap(), ha);
+    }
+
+    #[test]
+    fn find_lca_asymmetric_depths() {
+        let (store, ha, hb, _hc, _hd, _he, hf) = build_asymmetric_dag();
+        // B (depth 1) and F (depth 4) — LCA should be A
+        assert_eq!(store.find_lca(&hb, &hf).unwrap(), ha);
+        assert_eq!(store.find_lca(&hf, &hb).unwrap(), ha);
+    }
+
+    #[test]
+    fn find_lca_double_diamond() {
+        let (store, [ha, _hb, _hc, hd, he, hf, hg]) = build_double_diamond();
+        // E and F are siblings forked from D
+        assert_eq!(store.find_lca(&he, &hf).unwrap(), hd);
+        // G merges E and F — LCA(G, E) = E
+        assert_eq!(store.find_lca(&hg, &he).unwrap(), he);
+        // Across both diamonds: LCA(G, A) = A
+        assert_eq!(store.find_lca(&hg, &ha).unwrap(), ha);
+    }
+
+    #[test]
+    fn find_lca_missing_hash() {
+        let (store, hash_a, _, _, _) = build_diamond_dag();
+        let bogus = Hash([0xFF; 32]);
+        assert!(store.find_lca(&hash_a, &bogus).is_err());
+        assert!(store.find_lca(&bogus, &hash_a).is_err());
+    }
+
+    // -- is_ancestor tests --
+
+    #[test]
+    fn is_ancestor_self() {
+        let (store, hash_a, _, _, _) = build_diamond_dag();
+        assert!(store.is_ancestor(&hash_a, &hash_a).unwrap());
+    }
+
+    #[test]
+    fn is_ancestor_genesis() {
+        let (store, _, _, _, hash_d) = build_diamond_dag();
+        assert!(store.is_ancestor(&Hash::ZERO, &hash_d).unwrap());
+    }
+
+    #[test]
+    fn is_ancestor_direct_parent() {
+        let (store, hash_a, hash_b, _, _) = build_diamond_dag();
+        assert!(store.is_ancestor(&hash_a, &hash_b).unwrap());
+        assert!(!store.is_ancestor(&hash_b, &hash_a).unwrap());
+    }
+
+    #[test]
+    fn is_ancestor_transitive() {
+        let (store, hash_a, _, _, hash_d) = build_diamond_dag();
+        assert!(store.is_ancestor(&hash_a, &hash_d).unwrap());
+    }
+
+    #[test]
+    fn is_ancestor_siblings_not_ancestors() {
+        let (store, _, hash_b, hash_c, _) = build_diamond_dag();
+        assert!(!store.is_ancestor(&hash_b, &hash_c).unwrap());
+        assert!(!store.is_ancestor(&hash_c, &hash_b).unwrap());
+    }
+
+    #[test]
+    fn is_ancestor_linear_chain() {
+        let (store, ha, hb, hc, hd) = build_linear_chain();
+        assert!(store.is_ancestor(&ha, &hd).unwrap());
+        assert!(store.is_ancestor(&hb, &hd).unwrap());
+        assert!(store.is_ancestor(&ha, &hb).unwrap());
+        assert!(!store.is_ancestor(&hd, &ha).unwrap());
+        assert!(!store.is_ancestor(&hc, &hb).unwrap());
+    }
+
+    #[test]
+    fn is_ancestor_through_causal_dep() {
+        let (store, hash_a, _, hash_c, hash_d) = build_diamond_dag();
+        // A is ancestor of D through the causal dep path: A → C → D
+        assert!(store.is_ancestor(&hash_a, &hash_d).unwrap());
+        assert!(store.is_ancestor(&hash_c, &hash_d).unwrap());
+    }
+
+    #[test]
+    fn is_ancestor_double_diamond() {
+        let (store, [ha, hb, hc, hd, he, hf, hg]) = build_double_diamond();
+        // Every earlier node is ancestor of G
+        for h in [ha, hb, hc, hd, he, hf] {
+            assert!(
+                store.is_ancestor(&h, &hg).unwrap(),
+                "expected {} to be ancestor of G",
+                h
+            );
+        }
+        // G is not ancestor of any earlier node
+        for h in [ha, hb, hc, hd, he, hf] {
+            assert!(
+                !store.is_ancestor(&hg, &h).unwrap(),
+                "G should not be ancestor of {}",
+                h
+            );
+        }
+    }
+
+    #[test]
+    fn is_ancestor_missing_hash() {
+        let (store, hash_a, _, _, _) = build_diamond_dag();
+        let bogus = Hash([0xFF; 32]);
+        // bogus as descendant — BFS will try to look it up and fail
+        assert!(store.is_ancestor(&hash_a, &bogus).is_err());
+    }
+
+    // -- get_path tests --
+
+    #[test]
+    fn get_path_same_node() {
+        let (store, hash_a, _, _, _) = build_diamond_dag();
+        let path = store.get_path(&hash_a, &hash_a).unwrap();
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn get_path_direct_parent() {
+        let (store, hash_a, hash_b, _, _) = build_diamond_dag();
+        let path = store.get_path(&hash_a, &hash_b).unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0].hash, hash_b);
+    }
+
+    #[test]
+    fn get_path_diamond() {
+        let (store, hash_a, hash_b, hash_c, hash_d) = build_diamond_dag();
+        let path = store.get_path(&hash_a, &hash_d).unwrap();
+        assert_eq!(path.len(), 3);
+
+        let hashes: Vec<Hash> = path.iter().map(|i| i.hash).collect();
+        assert!(hashes.contains(&hash_b));
+        assert!(hashes.contains(&hash_c));
+        assert_eq!(*hashes.last().unwrap(), hash_d);
+    }
+
+    #[test]
+    fn get_path_partial() {
+        let (store, _, hash_b, hash_c, hash_d) = build_diamond_dag();
+        let path = store.get_path(&hash_b, &hash_d).unwrap();
+        let hashes: Vec<Hash> = path.iter().map(|i| i.hash).collect();
+        assert!(hashes.contains(&hash_d));
+        // C is included because D causally depends on it
+        assert!(hashes.contains(&hash_c));
+    }
+
+    #[test]
+    fn get_path_linear_chain() {
+        let (store, ha, hb, hc, hd) = build_linear_chain();
+        // Full chain
+        let path = store.get_path(&ha, &hd).unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0].hash, hb);
+        assert_eq!(path[1].hash, hc);
+        assert_eq!(path[2].hash, hd);
+
+        // Partial chain
+        let path = store.get_path(&hb, &hd).unwrap();
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].hash, hc);
+        assert_eq!(path[1].hash, hd);
+    }
+
+    #[test]
+    fn get_path_topo_invariant() {
+        // In the returned path, every node must appear after all its parents.
+        let (store, [ha, _hb, _hc, _hd, _he, _hf, hg]) = build_double_diamond();
+        let path = store.get_path(&ha, &hg).unwrap();
+        let hashes: Vec<Hash> = path.iter().map(|i| i.hash).collect();
+
+        // Build position map
+        let pos: std::collections::HashMap<Hash, usize> =
+            hashes.iter().enumerate().map(|(i, h)| (*h, i)).collect();
+
+        // For each node in the path, verify all its in-subgraph parents
+        // appear earlier. We re-derive parents by reading from the store.
+        for info in &path {
+            let signed = store.get(&info.hash).unwrap().unwrap();
+            let Condition::V1(ref deps) = signed.intention.condition;
+            let mut parents: Vec<Hash> = deps.clone();
+            if signed.intention.store_prev != Hash::ZERO {
+                parents.push(signed.intention.store_prev);
+            }
+            let my_pos = pos[&info.hash];
+            for parent in parents {
+                if let Some(&parent_pos) = pos.get(&parent) {
+                    assert!(
+                        parent_pos < my_pos,
+                        "topo violation: parent {} at pos {} but child {} at pos {}",
+                        parent,
+                        parent_pos,
+                        info.hash,
+                        my_pos
+                    );
+                }
+                // Parents outside the subgraph (e.g. `from`) are fine
+            }
+        }
+    }
+
+    #[test]
+    fn get_path_double_diamond() {
+        let (store, [ha, hb, hc, hd, he, hf, hg]) = build_double_diamond();
+        let path = store.get_path(&ha, &hg).unwrap();
+        assert_eq!(path.len(), 6); // everything except A
+
+        let hashes: Vec<Hash> = path.iter().map(|i| i.hash).collect();
+        for h in [hb, hc, hd, he, hf, hg] {
+            assert!(hashes.contains(&h), "path should contain {}", h);
+        }
+        assert_eq!(*hashes.last().unwrap(), hg);
+    }
+
+    #[test]
+    fn get_path_unrelated_from() {
+        // `from` is not an ancestor of `to` — the BFS from `to` will
+        // never hit `from`, so the subgraph extends back to genesis.
+        let (store, _ha, hash_b, hash_c, _hd) = build_diamond_dag();
+        // B and C are siblings. get_path(B, C) — C doesn't descend from B.
+        // The BFS from C goes: C → deps=[A]. A != B, so A is explored.
+        // A → no parents (store_prev=ZERO). Subgraph = {C, A} minus
+        // boundary {B}. A is included since it's not B.
+        let path = store.get_path(&hash_b, &hash_c).unwrap();
+        let hashes: Vec<Hash> = path.iter().map(|i| i.hash).collect();
+        // C must be in the path (it's `to`)
+        assert!(hashes.contains(&hash_c));
+    }
+
+    #[test]
+    fn get_path_missing_hash() {
+        let (store, hash_a, _, _, _) = build_diamond_dag();
+        let bogus = Hash([0xFF; 32]);
+        assert!(store.get_path(&hash_a, &bogus).is_err());
+    }
+
+    #[test]
+    fn get_path_payload_preserved() {
+        // Verify IntentionInfo fields are correct, not just hashes
+        let (store, hash_a, hash_b, _, _) = build_diamond_dag();
+        let path = store.get_path(&hash_a, &hash_b).unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0].hash, hash_b);
+        assert_eq!(path[0].payload, vec![0xB]);
+        let (_, pk1) = make_key();
+        assert_eq!(path[0].author, pk1);
     }
 }
