@@ -4,8 +4,6 @@ status: resolved
 resolution: "Approach A, slimmed down. State machines keep per-conflict-domain head tracking, but store only intention hashes — not duplicated values, HLC, or author metadata. Values are resolved at apply time (LWW). Conflict details (payloads, authors, timestamps) are read from the DAG on demand. Each store type defines its own conflict domains and resolution semantics. The kernel provides DAG query primitives (LCA, paths, ancestry) but does not own conflict tracking — that remains store-specific."
 ---
 
-# Conflict Resolution Architecture
-
 ## Definitions
 
 Let <span class="math">(H, &lt;)</span> be a DAG of intentions where <span class="math">h₁ &lt; h₂</span> iff <span class="math">h₁</span> is in <span class="math">deps(h₂)</span> (transitive causal dependency). Each intention <span class="math">h ∈ H</span> carries:
