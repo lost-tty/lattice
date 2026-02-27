@@ -43,6 +43,70 @@ Both expose runtime introspection via embedded `prost-reflect` `FileDescriptorSe
 - **Fractal Store Model:** Stores form a recursive hierarchy. Root stores are pinned locally; child stores are declared as CRDT entries in the parent's `SystemStore`. A `RecursiveWatcher` subscribes to `ChildAdded` system events and automatically instantiates child stores on the local node.
 - **Peer Governance:** Access control is replicated data — peer `Active`/`Revoked`/`Dormant` status lives in the `SystemStore` as CRDTs. Invite tokens use hashed-secret validation. Authorization checks are embedded in `NetworkStore` wrappers so the network layer cannot bypass them.
 
+## Component Layers
+
+```mermaid
+graph TB
+    subgraph "Clients"
+        CLI["lattice-cli<br/>(gRPC client)"]
+        MOBILE["lattice-bindings<br/>(UniFFI Swift/Kotlin)"]
+    end
+    
+    subgraph "Core Daemon"
+        DAEMON["lattice-daemon<br/>(latticed orchestrator)"]
+    end
+    
+    subgraph "Engine"
+        NODE["lattice-node<br/>(StoreManager & MetaStore)"]
+        NET["lattice-net<br/>(NetworkService)"]
+        RPC["lattice-api<br/>(gRPC server)"]
+    end
+    
+    subgraph "State Machinery"
+        KERNEL["lattice-kernel<br/>(ReplicationController)"]
+        KV["lattice-kvstore<br/>(KvState)"]
+        LOG["lattice-logstore<br/>(LogState)"]
+        SYS["lattice-systemstore<br/>(SystemLayer)"]
+    end
+    
+    subgraph "Foundation"
+        MODEL["lattice-model<br/>(Primitives & Weaver)"]
+        STORAGE["lattice-storage<br/>(Redb ACID)"]
+    end
+    
+    CLI --> RPC
+    MOBILE -->|InProcessBackend| NODE
+    DAEMON --> KERNEL
+    NODE --> KERNEL
+    NODE --> KV
+    NODE --> LOG
+    NET --> NODE
+    KERNEL --> MODEL
+    KERNEL --> STORAGE
+    SYS --> KV
+    SYS --> LOG
+```
+
+## Security Model
+
+The `NetworkService` operates as a **"dumb bouncer"**:
+
+1. **Explicit Registration:** If a store is not registered with the `NetworkService`, all network requests for it are dropped. There is no API to enumerate private databases.
+2. **Contextual Authorization:** When receiving data, the network layer asks the registered `NetworkStore` wrapper: *"Is this peer allowed to sync with this store?"* Authorization lives in the `SystemStore`, not the connection layer.
+3. **Transport Isolation:** The network layer handles QUIC connections, NAT traversal, and peer discovery (via Iroh), but never interprets application data.
+
+By delegating permission checks to the store boundary rather than the connection boundary, Lattice secures data at the ingestion point.
+
+## Bootstrap Protocol
+
+When a node joins a store for the first time via an invite token:
+
+1. **Handshake:** The joiner connects to the inviter and presents the token. The inviter validates and adds the peer to the store's `SystemStore`.
+2. **Initial Clone:** The inviter streams its entire **Witness Log** (the linearized intention sequence) to the joiner. This is more efficient than range-based reconciliation when the joiner has nothing.
+3. **Active Sync:** Once the log finishes, the joiner transitions to `Active` state and begins normal Negentropy synchronization with discovered peers.
+
+For child stores discovered via the fractal hierarchy, the `RecursiveWatcher` automatically triggers bootstrap in the background.
+
 ## Runtime & Interfaces
 
 - **`lattice-runtime`:** Composition root. `RuntimeBuilder` wires up `Node` + `NetworkService` + optional `RpcServer`. Exposes `LatticeBackend` trait with two implementations:

@@ -16,6 +16,42 @@ theme = "lattice-theme"
     name = "Home"
     pageRef = "/"
     weight = 10
+
+  [[menus.main]]
+    identifier = "concepts"
+    name = "Concepts"
+    weight = 20
+  [[menus.main]]
+    name = "Weaver & Intention DAG"
+    pageRef = "/concepts/weaver"
+    parent = "concepts"
+    weight = 10
+  [[menus.main]]
+    name = "Fractal Stores"
+    pageRef = "/concepts/fractal-stores"
+    parent = "concepts"
+    weight = 20
+
+  [[menus.main]]
+    identifier = "protocol"
+    name = "Protocol"
+    weight = 30
+  [[menus.main]]
+    name = "Weaver Spec (v1)"
+    pageRef = "/protocol/weaver"
+    parent = "protocol"
+    weight = 10
+
+  [[menus.main]]
+    identifier = "guides"
+    name = "Guides"
+    weight = 40
+  [[menus.main]]
+    name = "Native FFI Bindings"
+    pageRef = "/guides/ffi"
+    parent = "guides"
+    weight = 10
+
   [[menus.main]]
     identifier = "reference"
     name = "Reference"
@@ -45,12 +81,58 @@ theme = "lattice-theme"
     pageRef = "/roadmap"
     parent = "reference"
     weight = 10
+
   [[menus.main]]
-    identifier = "design-notes"
+    identifier = "design"
     name = "Design Notes"
     weight = 100
   [[menus.main]]
     name = "Conflict Resolution Architecture"
-    pageRef = "/questions/meet-vs-crdt"
-    parent = "design-notes"
+    pageRef = "/design/meet-vs-crdt"
+    parent = "design"
     weight = 10
+  [[menus.main]]
+    name = "Fractal Store ADR"
+    pageRef = "/design/fractal-store-adr"
+    parent = "design"
+    weight = 20
+  [[menus.main]]
+    name = "Store Identity & Lifecycle"
+    pageRef = "/design/store-identity"
+    parent = "design"
+    weight = 30
+  [[menus.main]]
+    name = "KV Watch Design"
+    pageRef = "/design/kv-watch-design"
+    parent = "design"
+    weight = 40
+  [[menus.main]]
+    name = "CAS Design"
+    pageRef = "/design/cas"
+    parent = "design"
+    weight = 50
+  [[menus.main]]
+    name = "Service Architecture"
+    pageRef = "/design/services"
+    parent = "design"
+    weight = 60
+  [[menus.main]]
+    name = "Research & Protocol Evolution"
+    pageRef = "/design/research"
+    parent = "design"
+    weight = 70
+
+  [[menus.main]]
+    identifier = "examples"
+    name = "Examples"
+    weight = 110
+  [[menus.main]]
+    name = "PN-Counter CRDT"
+    pageRef = "/examples/pn-counter"
+    parent = "examples"
+    weight = 10
+  [[menus.main]]
+    name = "ChatRoom App"
+    pageRef = "/examples/chatroom"
+    parent = "examples"
+    weight = 20

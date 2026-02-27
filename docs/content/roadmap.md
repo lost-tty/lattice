@@ -25,7 +25,7 @@ title: "Roadmap"
 
 Reduce what state machines store per conflict domain. Currently each key persists a full `HeadList` with duplicated values, HLC, author, and tombstone flags per head. Replace with: a materialized value (the resolved projection) plus a list of intention hashes (pointers into the DAG). Values, timestamps, and authorship live in the DAG — the state machine stores just enough to track conflicts and build `causal_deps`.
 
-> **See:** [Conflict Resolution Architecture](questions/meet-vs-crdt/) for the full design analysis.
+> **See:** [Conflict Resolution Architecture](design/meet-vs-crdt/) for the full design analysis.
 >
 > **Key insight:** The `Head` struct duplicates data that already exists in the intention DAG. Each head's value is a copy of the intention payload; its HLC, author, and hash are copies of intention metadata. By storing only intention hashes per conflict domain, state machines become thinner while retaining the ability to detect conflicts, build `causal_deps`, and surface branch information to clients. Conflict semantics (what constitutes a conflict domain, how to resolve) remain store-specific — the kernel provides DAG primitives, each state machine decides how to use them.
 
@@ -229,32 +229,6 @@ Run the kernel on the RP2350.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
 - [ ] **DAG Reachability Index**: `DagQueries` methods (`find_lca`, `is_ancestor`, `get_path`) use naive BFS. For large DAGs, add generation numbers (prune impossible ancestors by depth) or bloom filters (compact ancestor summaries) for O(log N) reachability. Not needed until BFS becomes a bottleneck.
 - [ ] **Sync Trigger & Bootstrap Controller Review**: Review how and when sync is triggered (currently ad-hoc in `active_peer_ids` or `complete_join_handshake`). Consider introducing a dedicated `BootstrapController` to manage initial sync state, retry logic, and transition to steady-state gossip/sync.
-
----
-
-## Active Migrations & Backfills
-
-- [x] **System Table Type Backfill** (`backfill_child_types` in `mesh.rs`)
-  - **Purpose**: Populates `store_type` in System Table for legacy stores that have `type="unknown"`.
-  - **Mechanism**: On startup, checks local disk headers for unknown stores and issues `ChildAdd` op.
-  - **Completion Condition**: Can be removed once all nodes have cycled and updated the System Table.
-
-- [ ] **Legacy Root Store Data Migration** (`migrate_legacy_data` in `mesh.rs`)
-  - **Purpose**: Moves root store declarations from `/stores/` keys to System Table.
-  - **Mechanism**: One-time migration on startup.
-  - **Destructive**: Deletes legacy keys after successful migration.
-
-- [x] **Legacy Peer Data Migration** (`migrate_legacy_peer_data` in `mesh.rs`)
-  - **Purpose**: Moves peer status/metadata from raw keys to System Table.
-  - **Mechanism**: One-time migration on startup.
-
-- [ ] **StateDB Table Renaming** (`state_db.rs`)
-  - **Purpose**: Renames legacy "kv" or "log" redb tables to standard "data" table.
-  - **Mechanism**: Checked on every `StateBackend` open.
-
-- [ ] **Legacy Store Type Aliases** (`lattice-model`, `lattice-runtime`)
-  - **Purpose**: Supports opening stores with legacy type strings ("kvstore", "logstore").
-  - **Mechanism**: `StoreRegistry` maps these to modern equivalents.
 
 ---
 
