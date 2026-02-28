@@ -23,11 +23,13 @@ fn create_test_op(
     let payload = KvPayload { ops: vec![kv_op] }.encode_to_vec();
 
     Op {
-        id,
+        info: lattice_model::IntentionInfo {
+            hash: id,
+            payload: std::borrow::Cow::Owned(payload),
+            timestamp,
+            author,
+        },
         causal_deps: &[],
-        payload: Box::leak(payload.into_boxed_slice()),
-        author,
-        timestamp,
         prev_hash,
     }
 }
@@ -205,11 +207,13 @@ fn test_delete_correctness() {
     let kv_op = Operation::delete(b"del_key");
     let payload = KvPayload { ops: vec![kv_op] }.encode_to_vec();
     let op2 = Op {
-        id: hash2,
+        info: lattice_model::IntentionInfo {
+            hash: hash2,
+            payload: std::borrow::Cow::Owned(payload),
+            timestamp: later_hlc,
+            author,
+        },
         causal_deps: &[hash1], // Causally supersedes hash1
-        payload: Box::leak(payload.into_boxed_slice()),
-        author,
-        timestamp: later_hlc,
         prev_hash: hash1,
     };
     state.apply(&op2, &NULL_DAG).unwrap();

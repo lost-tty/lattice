@@ -798,11 +798,13 @@ fn replay_intentions<S: StateMachine>(
                 Condition::V1(deps) => deps,
             };
             let op = Op {
-                id: hash,
+                info: lattice_model::IntentionInfo {
+                    hash,
+                    payload: std::borrow::Cow::Borrowed(&intention.ops),
+                    timestamp: intention.timestamp,
+                    author: intention.author,
+                },
                 causal_deps,
-                payload: &intention.ops,
-                author: intention.author,
-                timestamp: intention.timestamp,
                 prev_hash: intention.store_prev,
             };
             state

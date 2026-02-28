@@ -1,23 +1,25 @@
-use crate::{DagQueries, Hash, PubKey, HLC};
+use crate::{DagQueries, Hash, IntentionInfo, PubKey};
 use std::error::Error;
 
 /// An operation to be applied to a state machine.
 ///
-/// Contains all context needed for applying: identity, causality, and payload.
+/// Wraps `IntentionInfo` (the data state machines care about) with DAG
+/// plumbing (`causal_deps`, `prev_hash`) needed by the storage layer.
 #[derive(Debug, Clone)]
 pub struct Op<'a> {
-    /// Hash of the operation (for deduplication and history tracking)
-    pub id: Hash,
+    /// Intention identity and payload — the same type returned by `DagQueries`.
+    pub info: IntentionInfo<'a>,
     /// Parent hashes this operation supersedes (for DAG conflict resolution)
     pub causal_deps: &'a [Hash],
-    /// The opaque payload data (state-machine specific)
-    pub payload: &'a [u8],
-    /// Author who signed this operation
-    pub author: PubKey,
-    /// Logical timestamp (for conflict resolution)
-    pub timestamp: HLC,
     /// Previous operation hash in the author's chain (for integrity validation)
     pub prev_hash: Hash,
+}
+
+impl<'a> Op<'a> {
+    /// Shorthand for `self.info.hash`.
+    pub fn id(&self) -> Hash {
+        self.info.hash
+    }
 }
 
 /// A StateMachine applies ordered operations to materialize a state.

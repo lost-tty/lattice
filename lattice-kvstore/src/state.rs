@@ -159,7 +159,7 @@ impl StateLogic for KvState {
         dag: &dyn lattice_model::DagQueries,
     ) -> Result<Self::Updates, StateDbError> {
         // Decode payload
-        let kv_payload = KvPayload::decode(op.payload.as_ref())
+        let kv_payload = KvPayload::decode(op.info.payload.as_ref())
             .map_err(|e| StateDbError::Conversion(e.to_string()))?;
 
         let mut kvt = lattice_kvtable::KVTable::new(table);
@@ -172,7 +172,7 @@ impl StateLogic for KvState {
                     operation::OpType::Put(put) => (&put.key, put.value.clone(), false),
                     operation::OpType::Delete(del) => (&del.key, Vec::new(), true),
                 };
-                match kvt.apply_head(key, op, value, tombstone, dag) {
+                match kvt.apply_head(key, &op.info, op.causal_deps, value, tombstone, dag) {
                     Ok(Some(winner)) => {
                         updates.push((key.clone(), winner));
                     }
@@ -709,11 +709,13 @@ mod tests {
         let deps: Vec<Hash> = vec![];
 
         let op = Op {
-            id: op_hash,
+            info: lattice_model::IntentionInfo {
+                hash: op_hash,
+                payload: std::borrow::Cow::Borrowed(&payload_bytes),
+                timestamp: HLC::now(),
+                author,
+            },
             causal_deps: &deps,
-            payload: &payload_bytes,
-            author,
-            timestamp: HLC::now(),
             prev_hash: Hash::ZERO,
         };
 
@@ -811,19 +813,17 @@ mod tests {
         let payload = KvPayload {
             ops: vec![Operation::put(key, value)],
         };
-        let payload_bytes: Vec<u8> = payload.encode_to_vec();
-        let deps_vec: Vec<Hash> = deps.to_vec();
-
-        // Leak to get 'static lifetime (fine for tests)
-        let payload_static: &'static [u8] = Box::leak(payload_bytes.into_boxed_slice());
-        let deps_static: &'static [Hash] = Box::leak(deps_vec.into_boxed_slice());
+        let payload_bytes = payload.encode_to_vec();
+        let deps_static: &'static [Hash] = Box::leak(deps.to_vec().into_boxed_slice());
 
         Op {
-            id: hash,
+            info: lattice_model::IntentionInfo {
+                hash,
+                payload: std::borrow::Cow::Owned(payload_bytes),
+                timestamp: HLC::now(),
+                author,
+            },
             causal_deps: deps_static,
-            payload: payload_static,
-            author,
-            timestamp: HLC::now(),
             prev_hash,
         }
     }
@@ -839,18 +839,17 @@ mod tests {
         let payload = KvPayload {
             ops: vec![Operation::delete(key)],
         };
-        let payload_bytes: Vec<u8> = payload.encode_to_vec();
-        let deps_vec: Vec<Hash> = deps.to_vec();
-
-        let payload_static: &'static [u8] = Box::leak(payload_bytes.into_boxed_slice());
-        let deps_static: &'static [Hash] = Box::leak(deps_vec.into_boxed_slice());
+        let payload_bytes = payload.encode_to_vec();
+        let deps_static: &'static [Hash] = Box::leak(deps.to_vec().into_boxed_slice());
 
         Op {
-            id: hash,
+            info: lattice_model::IntentionInfo {
+                hash,
+                payload: std::borrow::Cow::Owned(payload_bytes),
+                timestamp: HLC::now(),
+                author,
+            },
             causal_deps: deps_static,
-            payload: payload_static,
-            author,
-            timestamp: HLC::now(),
             prev_hash,
         }
     }
@@ -864,18 +863,17 @@ mod tests {
         prev_hash: Hash,
     ) -> Op<'static> {
         let payload = KvPayload { ops };
-        let payload_bytes: Vec<u8> = payload.encode_to_vec();
-        let deps_vec: Vec<Hash> = deps.to_vec();
-
-        let payload_static: &'static [u8] = Box::leak(payload_bytes.into_boxed_slice());
-        let deps_static: &'static [Hash] = Box::leak(deps_vec.into_boxed_slice());
+        let payload_bytes = payload.encode_to_vec();
+        let deps_static: &'static [Hash] = Box::leak(deps.to_vec().into_boxed_slice());
 
         Op {
-            id: hash,
+            info: lattice_model::IntentionInfo {
+                hash,
+                payload: std::borrow::Cow::Owned(payload_bytes),
+                timestamp: HLC::now(),
+                author,
+            },
             causal_deps: deps_static,
-            payload: payload_static,
-            author,
-            timestamp: HLC::now(),
             prev_hash,
         }
     }

@@ -6,7 +6,6 @@
 pub mod clock;
 pub mod crypto;
 pub mod dag_queries;
-pub mod head;
 pub mod hlc;
 pub mod net_event;
 pub mod node_identity;
@@ -24,7 +23,6 @@ pub mod weaver;
 // Re-exports from dependencies
 pub use clock::{Clock, MockClock, SystemClock};
 pub use dag_queries::{DagQueries, HashMapDag, IntentionInfo, NullDag};
-pub use head::{Head, HeadError};
 pub use hlc::HLC;
 pub use net_event::NetEvent;
 pub use node_identity::{InviteInfo, InviteStatus, NodeError, NodeIdentity, PeerInfo, PeerStatus};

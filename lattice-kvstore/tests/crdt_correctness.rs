@@ -28,11 +28,13 @@ fn create_test_op(
     let deps_leaked = Box::leak(deps.to_vec().into_boxed_slice());
 
     Op {
-        id,
+        info: lattice_model::IntentionInfo {
+            hash: id,
+            payload: std::borrow::Cow::Owned(payload),
+            timestamp,
+            author,
+        },
         causal_deps: deps_leaked,
-        payload: Box::leak(payload.into_boxed_slice()),
-        author,
-        timestamp,
         prev_hash,
     }
 }
@@ -51,11 +53,13 @@ fn create_delete_op(
     let deps_leaked = Box::leak(deps.to_vec().into_boxed_slice());
 
     Op {
-        id,
+        info: lattice_model::IntentionInfo {
+            hash: id,
+            payload: std::borrow::Cow::Owned(payload),
+            timestamp,
+            author,
+        },
         causal_deps: deps_leaked,
-        payload: Box::leak(payload.into_boxed_slice()),
-        author,
-        timestamp,
         prev_hash,
     }
 }

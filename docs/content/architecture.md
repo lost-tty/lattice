@@ -18,13 +18,17 @@ Serialization is **dual-format**: Borsh for deterministic canonical hashing/sign
 
 - **`lattice-storage` / `StateBackend`:** Wraps `redb` (embedded ACID KV store in pure Rust). Provides DAG-chain verification (`verify_and_update_tip`), atomic multi-table transactions, and BLAKE3-checksummed snapshot streaming.
 - **`lattice-kernel` / `IntentionStore`:** Manages four redb tables — `TABLE_INTENTIONS` (content-addressed ops), `TABLE_WITNESS` (linearized log), `TABLE_FLOATING` (unresolved deps), `TABLE_AUTHOR_TIPS` (per-author DAG tips). The `ReplicationController` actor serializes all writes through an `mpsc` channel while permitting concurrent MVCC reads for sync queries.
-- **`lattice-systemstore` / `SystemLayer<S>`:** A **Y-Adapter middleware** that intercepts `UniversalOp` envelopes — routing `SystemOp` (peer governance, store hierarchy, invites) to a reserved `TABLE_SYSTEM` with its own LWW-CRDT merge semantics, and unwrapping `AppData` ops to the inner `StateMachine`.
+- **`lattice-systemstore` / `SystemLayer<S>`:** A **Y-Adapter middleware** that intercepts `UniversalOp` envelopes — routing `SystemOp` (peer governance, store hierarchy, invites) to a reserved `TABLE_SYSTEM` backed by `KVTable` with LWW-CRDT merge semantics, and unwrapping `AppData` ops to the inner `StateMachine`.
 
 ## State Machines (Pluggable CRDTs)
 
-State machines are pluggable via the `StateMachine` trait (defined in `lattice-model`). Two ship:
+State machines are pluggable via the `StateMachine` trait (defined in `lattice-model`). The `Op` passed to `apply()` embeds an `IntentionInfo` (hash, payload, timestamp, author) plus `causal_deps` and `prev_hash`. State machines also receive `&dyn DagQueries` to look up intention metadata from the DAG when needed (e.g. for LWW comparison during concurrent writes).
 
-- **`lattice-kvstore` (KvState):** Multi-head DAG-CRDT key-value store. Each key maps to a `HeadList` tracking all concurrent tips. Reads resolve via LWW over Hybrid Logical Clocks (HLC), with author pubkey as deterministic tiebreaker. Supports `watch` streams (regex-filtered) and batch transactions.
+**`lattice-kvtable` (KVTable)** is the shared conflict-domain engine used by both KV and System stores. Each key stores a materialized value plus a list of intention hashes (pointers into the DAG). LWW resolution happens at **write time** — `apply_head()` compares the incoming intention's HLC/author against the current winner via DAG lookup and updates the materialized value in place. Reads return the resolved value directly with no merge step. HLC, author, and payload are not duplicated on disk — they live in the DAG and are dereferenced on demand.
+
+Two state machines ship:
+
+- **`lattice-kvstore` (KvState):** DAG-CRDT key-value store built on `KVTable`. Supports `watch` streams (regex-filtered) and batch transactions.
 - **`lattice-logstore` (LogState):** Append-only log with composite keys `[HLC-BE || PubKey]` giving chronological-then-author ordering. Supports tailing via broadcast channels.
 
 Both expose runtime introspection via embedded `prost-reflect` `FileDescriptorSet`, enabling the CLI and bindings to discover and invoke store methods dynamically without compile-time knowledge.

@@ -194,7 +194,7 @@ impl<'a, 'dag> SystemTable<'a, 'dag> {
         tombstone: bool,
     ) -> Result<(), StateDbError> {
         let mut kvt = lattice_kvtable::KVTable::new(&mut self.table);
-        kvt.apply_head(key, op, value, tombstone, self.dag)
+        kvt.apply_head(key, &op.info, op.causal_deps, value, tombstone, self.dag)
             .map(|_| ())
             .map_err(|e| StateDbError::Conversion(e.to_string()))
     }

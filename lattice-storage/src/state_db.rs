@@ -583,9 +583,12 @@ pub trait StateLogic: Send + Sync {
         let write_txn = self.backend().db().begin_write()?;
 
         // 0. Validate Chain Integrity (and idempotence)
-        let should_apply =
-            self.backend()
-                .verify_and_update_tip(&write_txn, &op.author, op.id, op.prev_hash)?;
+        let should_apply = self.backend().verify_and_update_tip(
+            &write_txn,
+            &op.info.author,
+            op.id(),
+            op.prev_hash,
+        )?;
         if !should_apply {
             // Idempotent duplicate, just return success
             return Ok(());

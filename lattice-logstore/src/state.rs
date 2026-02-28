@@ -180,16 +180,16 @@ impl StateLogic for LogState {
         _dag: &dyn lattice_model::DagQueries,
     ) -> Result<Self::Updates, StateDbError> {
         // Validate payload
-        if op.payload.is_empty() {
+        if op.info.payload.is_empty() {
             return Err(StateDbError::Conversion("Empty payload".into()));
         }
 
         // Key: HLC (8 bytes, big-endian) + Author (32 bytes) for chronological ordering
-        let key = Self::make_key(op.timestamp.wall_time, &op.author);
+        let key = Self::make_key(op.info.timestamp.wall_time, &op.info.author);
         let entry = LogEntry {
-            timestamp: op.timestamp.wall_time,
-            author: op.author,
-            content: op.payload.to_vec(),
+            timestamp: op.info.timestamp.wall_time,
+            author: op.info.author,
+            content: op.info.payload.to_vec(),
         };
         let value = Self::encode_entry(&entry);
 
@@ -201,7 +201,7 @@ impl StateLogic for LogState {
         }
         table.insert(key.as_slice(), value.as_slice())?;
 
-        Ok(op.payload.to_vec())
+        Ok(op.info.payload.to_vec())
     }
 
     /// Notify watchers of new entry.
@@ -458,15 +458,17 @@ mod tests {
         let state = LogState::open(id, dir.path()).unwrap();
 
         let op = Op {
-            id: Hash::from([42u8; 32]),
+            info: lattice_model::IntentionInfo {
+                hash: Hash::from([42u8; 32]),
+                payload: std::borrow::Cow::Borrowed(b"hello world"),
+                timestamp: HLC {
+                    wall_time: 1000,
+                    counter: 1,
+                },
+                author,
+            },
             prev_hash: Hash::ZERO,
             causal_deps: &[],
-            author,
-            timestamp: HLC {
-                wall_time: 1000,
-                counter: 1,
-            },
-            payload: b"hello world",
         };
 
         StateMachine::apply(&state, &op, &NULL_DAG).unwrap();
@@ -491,41 +493,47 @@ mod tests {
 
         // Insert out of order: third, first, second
         let op3 = Op {
-            id: Hash::from([3u8; 32]),
+            info: lattice_model::IntentionInfo {
+                hash: Hash::from([3u8; 32]),
+                payload: std::borrow::Cow::Borrowed(b"third"),
+                timestamp: HLC {
+                    wall_time: 3000,
+                    counter: 0,
+                },
+                author: author2,
+            },
             prev_hash: Hash::ZERO,
             causal_deps: &causal_deps,
-            author: author2,
-            timestamp: HLC {
-                wall_time: 3000,
-                counter: 0,
-            },
-            payload: b"third",
         };
         StateMachine::apply(&state, &op3, &NULL_DAG).unwrap();
 
         let op1 = Op {
-            id: Hash::from([1u8; 32]),
+            info: lattice_model::IntentionInfo {
+                hash: Hash::from([1u8; 32]),
+                payload: std::borrow::Cow::Borrowed(b"first"),
+                timestamp: HLC {
+                    wall_time: 1000,
+                    counter: 0,
+                },
+                author: author1,
+            },
             prev_hash: Hash::ZERO,
             causal_deps: &causal_deps,
-            author: author1,
-            timestamp: HLC {
-                wall_time: 1000,
-                counter: 0,
-            },
-            payload: b"first",
         };
         StateMachine::apply(&state, &op1, &NULL_DAG).unwrap();
 
         let op2 = Op {
-            id: Hash::from([2u8; 32]),
+            info: lattice_model::IntentionInfo {
+                hash: Hash::from([2u8; 32]),
+                payload: std::borrow::Cow::Borrowed(b"second"),
+                timestamp: HLC {
+                    wall_time: 2000,
+                    counter: 0,
+                },
+                author: author1,
+            },
             prev_hash: Hash::from([1u8; 32]), // Chain to op1
             causal_deps: &causal_deps,
-            author: author1,
-            timestamp: HLC {
-                wall_time: 2000,
-                counter: 0,
-            },
-            payload: b"second",
         };
         StateMachine::apply(&state, &op2, &NULL_DAG).unwrap();
 
@@ -554,12 +562,14 @@ mod tests {
         let author = PubKey::from([1u8; 32]);
         let start_hlc = HLC::now();
         let op = Op {
-            id: Hash::from([1u8; 32]),
+            info: lattice_model::IntentionInfo {
+                hash: Hash::from([1u8; 32]),
+                payload: std::borrow::Cow::Borrowed(b"log_entry_1"),
+                timestamp: start_hlc,
+                author,
+            },
             prev_hash: Hash::ZERO,
             causal_deps: &[],
-            author,
-            timestamp: start_hlc,
-            payload: b"log_entry_1",
         };
         StateMachine::apply(&state1, &op, &NULL_DAG).unwrap();
 

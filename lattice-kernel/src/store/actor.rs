@@ -511,11 +511,13 @@ impl<S: StateMachine> ReplicationController<S> {
         };
 
         let op = lattice_model::Op {
-            id: hash,
+            info: lattice_model::IntentionInfo {
+                hash,
+                payload: std::borrow::Cow::Borrowed(&intention.ops),
+                timestamp: intention.timestamp,
+                author: intention.author,
+            },
             causal_deps,
-            payload: &intention.ops,
-            author: intention.author,
-            timestamp: intention.timestamp,
             prev_hash: intention.store_prev,
         };
 
@@ -592,8 +594,8 @@ mod tests {
             op: &lattice_model::Op,
             _dag: &dyn lattice_model::DagQueries,
         ) -> Result<(), std::io::Error> {
-            self.tips.write().unwrap().insert(op.author, op.id);
-            self.applied_ops.write().unwrap().insert(op.id);
+            self.tips.write().unwrap().insert(op.info.author, op.id());
+            self.applied_ops.write().unwrap().insert(op.id());
             Ok(())
         }
     }

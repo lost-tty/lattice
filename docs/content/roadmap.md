@@ -61,12 +61,11 @@ Reduce what state machines store per conflict domain. Currently each key persist
 - [x] **Removed `HeadList`/`HeadInfo` from `storage.proto`.** Dead code — `lattice-kvtable` no longer depends on `lattice-proto`. Conversion impls (`Head ↔ HeadInfo`) and re-exports (`lattice-storage::head`, `lattice-kvstore::Head`) removed.
 - [x] **Moved `kv_store.proto` to `lattice-kvstore/proto/`.** KV service/payload protos (`PutRequest`, `KvPayload`, `WatchEventProto`, etc.) compiled locally. `lattice-kvstore` and `lattice-kvstore-api` no longer depend on `lattice-proto`. `Operation` helper impls moved to `lattice-kvstore::proto`.
 
-### 14E: Clean Up `StateMachine` Interface
-- [ ] **Change `apply` signature.** Replace `apply(&self, op: &Op)` with `apply(&self, info: &IntentionInfo, causal_deps: &[Hash])`. Separates intention data from DAG plumbing. `Op` struct remains temporarily for the kernel's internal use (`verify_and_update_tip` needs `prev_hash`).
-- [ ] **Remove `Op` from `StateMachine` trait surface.** After 14D, `KVTable` handles `causal_deps` internally. The state machine receives only `IntentionInfo`. The kernel passes `causal_deps` to `KVTable::apply()` directly. `apply` becomes `apply(&self, info: &IntentionInfo)`.
-- [ ] **Remove `Head` struct from `lattice-model`.** No longer persisted. Intention metadata (HLC, author) is accessed from the DAG when needed (conflict reads, HITL).
-- [ ] **Remove `Merge` trait from `lattice-model`.** `lww()`, `fww()`, `all()` operate on `[Head]` slices which no longer exist. LWW resolution is inlined in `KVTable::apply()` as an HLC comparison. FWW / multi-value can be added later as apply-time strategies if needed.
-- [ ] **Update `architecture.md`.** State Machines section references `HeadList`, LWW-at-read-time, `Head` tracking. Rewrite to reflect `KVTable` engine and apply-time resolution.
+### 14E: Clean Up `StateMachine` Interface ✅
+- [x] **`Op` embeds `IntentionInfo`.** `Op { info: IntentionInfo<'a>, causal_deps, prev_hash }`. `IntentionInfo` uses `Cow<'a, [u8]>` for payload — borrowed in `Op` (from in-flight intention), owned in `DagQueries` results (from DB). Same type in both contexts. `prev_hash` stays in `Op` because `verify_and_update_tip` needs it atomically in the same write transaction.
+- [x] **Remove `Head` struct from `lattice-model`.** No longer persisted. Intention metadata (HLC, author) is accessed from the DAG when needed (conflict reads, HITL).
+- [x] **Remove `Merge` trait from `lattice-model`.** `lww()`, `fww()`, `all()` operate on `[Head]` slices which no longer exist. LWW resolution is inlined in `KVTable::apply()` as an HLC comparison. FWW / multi-value can be added later as apply-time strategies if needed.
+- [x] **Update `architecture.md`.** State Machines section updated to reflect `KVTable` engine, write-time LWW resolution, and slim storage format (materialized value + intention hash pointers).
 
 ### 14F: Conflict Surfacing
 - [ ] **Conflict detection on read.** `get(key)` returns the materialized value. If `heads.len() > 1`, flag the response as conflicted. Cheap — no DAG query needed.

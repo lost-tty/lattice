@@ -793,14 +793,14 @@ impl IntentionStore {
 }
 
 impl lattice_model::DagQueries for IntentionStore {
-    fn get_intention(&self, hash: &Hash) -> anyhow::Result<lattice_model::IntentionInfo> {
+    fn get_intention(&self, hash: &Hash) -> anyhow::Result<lattice_model::IntentionInfo<'static>> {
         let signed = self.get(hash)?.ok_or_else(|| {
             IntentionStoreError::InvalidData(format!("intention not found: {}", hash))
         })?;
         let intention = signed.intention;
         Ok(lattice_model::IntentionInfo {
             hash: intention.hash(),
-            payload: intention.ops,
+            payload: intention.ops.into(),
             timestamp: intention.timestamp,
             author: intention.author,
         })
@@ -881,7 +881,7 @@ impl lattice_model::DagQueries for IntentionStore {
         &self,
         from: &Hash,
         to: &Hash,
-    ) -> anyhow::Result<Vec<lattice_model::IntentionInfo>> {
+    ) -> anyhow::Result<Vec<lattice_model::IntentionInfo<'static>>> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
         if from == to {
@@ -944,14 +944,15 @@ impl lattice_model::DagQueries for IntentionStore {
             .map(|(&h, _)| h)
             .collect();
 
-        let mut result: Vec<lattice_model::IntentionInfo> = Vec::with_capacity(subgraph.len());
+        let mut result: Vec<lattice_model::IntentionInfo<'static>> =
+            Vec::with_capacity(subgraph.len());
 
         while let Some(hash) = queue.pop_front() {
             if let Some((signed, _)) = subgraph.get(&hash) {
                 let intention = &signed.intention;
                 result.push(lattice_model::IntentionInfo {
                     hash: intention.hash(),
-                    payload: intention.ops.clone(),
+                    payload: intention.ops.clone().into(),
                     timestamp: intention.timestamp,
                     author: intention.author,
                 });

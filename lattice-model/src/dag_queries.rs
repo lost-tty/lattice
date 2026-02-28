@@ -6,22 +6,26 @@
 //! and intention payloads.
 
 use crate::{Hash, PubKey, HLC};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// Intention data returned by DAG queries.
+/// Intention data returned by DAG queries and embedded in `Op`.
 ///
 /// Contains what state machines need to inspect an intention:
 /// the hash (for identity/reference), payload (for the value),
 /// timestamp (for ordering/display), and author (for HITL attribution).
 /// DAG plumbing (causal deps, prev_hash) is handled by the kernel
 /// via other `DagQueries` methods.
+///
+/// Uses `Cow<[u8]>` for payload so it can borrow (in `Op`, from an
+/// in-flight intention) or own (from `DagQueries` DB lookups).
 #[derive(Debug, Clone)]
-pub struct IntentionInfo {
+pub struct IntentionInfo<'a> {
     /// Hash of the intention
     pub hash: Hash,
     /// The opaque payload data (state-machine specific)
-    pub payload: Vec<u8>,
+    pub payload: Cow<'a, [u8]>,
     /// Logical timestamp
     pub timestamp: HLC,
     /// Author who signed this intention
@@ -42,7 +46,7 @@ pub trait DagQueries: Send + Sync {
     ///
     /// Returns the same information a state machine receives in `apply`,
     /// but owned. Used to read conflicting values and metadata from head hashes.
-    fn get_intention(&self, hash: &Hash) -> anyhow::Result<IntentionInfo>;
+    fn get_intention(&self, hash: &Hash) -> anyhow::Result<IntentionInfo<'static>>;
 
     /// Lowest common ancestor of two intentions.
     ///
@@ -55,7 +59,7 @@ pub trait DagQueries: Send + Sync {
     /// `from` is exclusive, `to` is inclusive. Returns the path from
     /// `from` to `to` following causal edges, topologically sorted
     /// via reverse BFS + Kahn's algorithm.
-    fn get_path(&self, from: &Hash, to: &Hash) -> anyhow::Result<Vec<IntentionInfo>>;
+    fn get_path(&self, from: &Hash, to: &Hash) -> anyhow::Result<Vec<IntentionInfo<'static>>>;
 
     /// Tests whether `ancestor` is a causal ancestor of `descendant`.
     fn is_ancestor(&self, ancestor: &Hash, descendant: &Hash) -> anyhow::Result<bool>;
@@ -68,13 +72,13 @@ pub trait DagQueries: Send + Sync {
 pub struct NullDag;
 
 impl DagQueries for NullDag {
-    fn get_intention(&self, _: &Hash) -> anyhow::Result<IntentionInfo> {
+    fn get_intention(&self, _: &Hash) -> anyhow::Result<IntentionInfo<'static>> {
         anyhow::bail!("NullDag: no DAG available")
     }
     fn find_lca(&self, _: &Hash, _: &Hash) -> anyhow::Result<Hash> {
         anyhow::bail!("NullDag: no DAG available")
     }
-    fn get_path(&self, _: &Hash, _: &Hash) -> anyhow::Result<Vec<IntentionInfo>> {
+    fn get_path(&self, _: &Hash, _: &Hash) -> anyhow::Result<Vec<IntentionInfo<'static>>> {
         anyhow::bail!("NullDag: no DAG available")
     }
     fn is_ancestor(&self, _: &Hash, _: &Hash) -> anyhow::Result<bool> {
@@ -85,7 +89,7 @@ impl DagQueries for NullDag {
 /// HashMap-backed DAG for tests. Supports `get_intention` only.
 /// Record ops with `record()` before applying them.
 pub struct HashMapDag {
-    intentions: Mutex<HashMap<Hash, IntentionInfo>>,
+    intentions: Mutex<HashMap<Hash, IntentionInfo<'static>>>,
 }
 
 impl HashMapDag {
@@ -98,19 +102,19 @@ impl HashMapDag {
     /// Record an op so it can be looked up later by hash.
     pub fn record(&self, op: &crate::state_machine::Op) {
         self.intentions.lock().unwrap().insert(
-            op.id,
+            op.info.hash,
             IntentionInfo {
-                hash: op.id,
-                payload: op.payload.to_vec(),
-                timestamp: op.timestamp,
-                author: op.author,
+                hash: op.info.hash,
+                payload: Cow::Owned(op.info.payload.to_vec()),
+                timestamp: op.info.timestamp,
+                author: op.info.author,
             },
         );
     }
 }
 
 impl DagQueries for HashMapDag {
-    fn get_intention(&self, hash: &Hash) -> anyhow::Result<IntentionInfo> {
+    fn get_intention(&self, hash: &Hash) -> anyhow::Result<IntentionInfo<'static>> {
         self.intentions
             .lock()
             .unwrap()
@@ -121,7 +125,7 @@ impl DagQueries for HashMapDag {
     fn find_lca(&self, _: &Hash, _: &Hash) -> anyhow::Result<Hash> {
         anyhow::bail!("HashMapDag: not implemented")
     }
-    fn get_path(&self, _: &Hash, _: &Hash) -> anyhow::Result<Vec<IntentionInfo>> {
+    fn get_path(&self, _: &Hash, _: &Hash) -> anyhow::Result<Vec<IntentionInfo<'static>>> {
         anyhow::bail!("HashMapDag: not implemented")
     }
     fn is_ancestor(&self, _: &Hash, _: &Hash) -> anyhow::Result<bool> {

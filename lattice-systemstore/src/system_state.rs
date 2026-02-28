@@ -1,5 +1,5 @@
 use lattice_model::store_info::PeerStrategy;
-use lattice_model::{Hash, Op, PubKey, StateMachine, StoreMeta};
+use lattice_model::{Hash, IntentionInfo, Op, PubKey, StateMachine, StoreMeta};
 use lattice_model::{Openable, StoreTypeProvider};
 use lattice_proto::storage::{
     hierarchy_op, invite_op, peer_op, peer_strategy_op, store_op, system_op, universal_op,
@@ -8,6 +8,7 @@ use lattice_proto::storage::{
 use lattice_storage::{StateDbError, StateLogic};
 use lattice_store_base::{BoxByteStream, StreamError, StreamHandler, StreamProvider, Subscriber};
 use prost::Message;
+use std::borrow::Cow;
 use std::future::Future;
 use std::io::Read;
 use std::path::Path;
@@ -66,7 +67,7 @@ impl<S: StateLogic> SystemLayer<S> {
         let should_apply = self
             .inner
             .backend()
-            .verify_and_update_tip(&write_txn, &op.author, op.id, op.prev_hash)
+            .verify_and_update_tip(&write_txn, &op.info.author, op.id(), op.prev_hash)
             .map_err(StateDbError::from)?;
 
         if !should_apply {
@@ -173,7 +174,7 @@ where
     type Error = SystemLayerError;
 
     fn apply(&self, op: &Op, dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
-        let universal = UniversalOp::decode(op.payload).map_err(|e| {
+        let universal = UniversalOp::decode(op.info.payload.as_ref()).map_err(|e| {
             SystemLayerError::Inner(format!("invalid UniversalOp envelope: {e}").into())
         })?;
 
@@ -183,11 +184,13 @@ where
                 .map_err(SystemLayerError::Db),
             Some(universal_op::Op::AppData(data)) => {
                 let new_op = Op {
-                    id: op.id,
+                    info: IntentionInfo {
+                        hash: op.info.hash,
+                        payload: Cow::Borrowed(&data),
+                        timestamp: op.info.timestamp,
+                        author: op.info.author,
+                    },
                     causal_deps: op.causal_deps,
-                    payload: &data,
-                    author: op.author,
-                    timestamp: op.timestamp,
                     prev_hash: op.prev_hash,
                 };
                 StateMachine::apply(&self.inner, &new_op, dag)

@@ -120,11 +120,13 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
 
             // Create and apply Op
             let op = Op {
-                id: hash,
+                info: lattice_model::IntentionInfo {
+                    hash,
+                    payload: std::borrow::Cow::Borrowed(&payload),
+                    timestamp: HLC::now(),
+                    author,
+                },
                 causal_deps: &causal_deps,
-                payload: &payload,
-                author,
-                timestamp: HLC::now(),
                 prev_hash,
             };
 

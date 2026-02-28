@@ -39,7 +39,7 @@ mod tests {
             op: &Op<'_>,
             _dag: &dyn lattice_model::DagQueries,
         ) -> Result<(), Self::Error> {
-            self.applied.write().unwrap().push(op.id);
+            self.applied.write().unwrap().push(op.id());
             Ok(())
         }
     }

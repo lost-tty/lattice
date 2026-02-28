@@ -14,9 +14,8 @@
 use std::collections::HashSet;
 use std::ops::RangeBounds;
 
-use lattice_model::dag_queries::DagQueries;
+use lattice_model::dag_queries::{DagQueries, IntentionInfo};
 use lattice_model::hlc::HLC;
-use lattice_model::state_machine::Op;
 use lattice_model::types::{Hash, PubKey};
 use prost::Message;
 use redb::ReadableTable;
@@ -108,7 +107,8 @@ impl<'a, 'txn> KVTable<'a, 'txn> {
 
     /// Apply a new head to a key with causal subsumption and LWW resolution.
     ///
-    /// `op` provides the new intention's hash, HLC, and author.
+    /// `info` identifies the intention (hash, HLC, author).
+    /// `causal_deps` are parent hashes this intention supersedes.
     /// `value` is the new value (empty for tombstones).
     /// `tombstone` is true for deletes.
     /// `dag` is used to look up the existing winner's HLC/author for LWW comparison.
@@ -118,14 +118,15 @@ impl<'a, 'txn> KVTable<'a, 'txn> {
     pub fn apply_head(
         &mut self,
         key: &[u8],
-        op: &Op,
+        info: &IntentionInfo,
+        causal_deps: &[Hash],
         value: Vec<u8>,
         tombstone: bool,
         dag: &dyn DagQueries,
     ) -> Result<Option<Option<Vec<u8>>>, KvTableError> {
-        let new_hash = op.id.as_bytes().to_vec();
-        let new_hlc = op.timestamp;
-        let new_author = op.author;
+        let new_hash = info.hash.as_bytes().to_vec();
+        let new_hlc = info.timestamp;
+        let new_author = info.author;
 
         // 1. Read existing
         let mut existing = match self.table.get(key)? {
@@ -139,8 +140,7 @@ impl<'a, 'txn> KVTable<'a, 'txn> {
         }
 
         // 3. Causal subsumption — remove heads that are in parent_hashes
-        let parent_set: HashSet<&[u8]> = op
-            .causal_deps
+        let parent_set: HashSet<&[u8]> = causal_deps
             .iter()
             .map(|h| h.as_bytes().as_slice())
             .collect();
@@ -301,19 +301,17 @@ impl Iterator for LwwRange<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_model::{NullDag, Op};
+    use lattice_model::NullDag;
     use redb::TableDefinition;
 
     const TEST_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("test");
 
-    fn test_op() -> Op<'static> {
-        Op {
-            id: Hash::from([1u8; 32]),
+    fn test_info() -> IntentionInfo<'static> {
+        IntentionInfo {
+            hash: Hash::from([1u8; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
             timestamp: lattice_model::hlc::HLC::new(1, 0),
             author: PubKey::from([0xAA; 32]),
-            payload: &[],
-            causal_deps: &[],
-            prev_hash: Hash::from([0u8; 32]),
         }
     }
 
@@ -328,7 +326,7 @@ mod tests {
             let mut kvt = KVTable::new(&mut table);
 
             let result = kvt
-                .apply_head(b"key", &test_op(), vec![], false, &NullDag)
+                .apply_head(b"key", &test_info(), &[], vec![], false, &NullDag)
                 .unwrap();
 
             // Should be Some(Some(empty vec)) — live entry with empty value
@@ -351,7 +349,7 @@ mod tests {
             let mut kvt = KVTable::new(&mut table);
 
             let result = kvt
-                .apply_head(b"key", &test_op(), vec![], true, &NullDag)
+                .apply_head(b"key", &test_info(), &[], vec![], true, &NullDag)
                 .unwrap();
 
             // Should be Some(None) — tombstone
