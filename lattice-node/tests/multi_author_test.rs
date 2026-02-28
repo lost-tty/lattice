@@ -1,5 +1,5 @@
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::Uuid;
-use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
 use lattice_node::data_dir::DataDir;
 use lattice_node::{direct_opener, Node, NodeBuilder, PeerManager, StoreHandle};
 use prost::Message;
@@ -8,20 +8,14 @@ use std::time::Duration; // For decode
 
 // ==================== Test Helpers ====================
 
-fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
-    type PersistentKvState = lattice_systemstore::SystemLayer<
-        lattice_storage::PersistentState<lattice_kvstore::KvState>,
-    >;
-    type PersistentLogState = lattice_systemstore::SystemLayer<
-        lattice_storage::PersistentState<lattice_logstore::LogState>,
-    >;
+type PersistentNullState =
+    lattice_systemstore::SystemLayer<lattice_mockkernel::PersistentNullState>;
 
+fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
-        .with_opener(STORE_TYPE_KVSTORE, |registry| {
-            direct_opener::<PersistentKvState>(registry)
-        })
-        .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-            direct_opener::<PersistentLogState>(registry)
+        .in_memory()
+        .with_opener(STORE_TYPE_NULLSTORE, |registry| {
+            direct_opener::<PersistentNullState>(registry)
         })
 }
 
@@ -114,14 +108,14 @@ async fn test_multi_author_convergence() {
     // 2. Create Root Store on Node 1 (Shared Store)
     let store_id = ctx1
         .node
-        .create_store(None, Some("convergence-root".into()), STORE_TYPE_KVSTORE)
+        .create_store(None, Some("convergence-root".into()), STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     let handle1 = ctx1.sm().get_handle(&store_id).expect("handle1");
 
     // 3. Manually Initialize Replicas on Node 2 and 3 (Empty State)
-    let handle2 = open_replica(&ctx2, store_id, STORE_TYPE_KVSTORE).await;
-    let handle3 = open_replica(&ctx3, store_id, STORE_TYPE_KVSTORE).await;
+    let handle2 = open_replica(&ctx2, store_id, STORE_TYPE_NULLSTORE).await;
+    let handle3 = open_replica(&ctx3, store_id, STORE_TYPE_NULLSTORE).await;
 
     // 4. Register Peers Manually
     // Node 1 adds Node 2 and 3 as active peers so they are authorized.
@@ -152,7 +146,7 @@ async fn test_multi_author_convergence() {
     {
         let sys = handle1.clone().as_system().unwrap();
         lattice_systemstore::SystemBatch::new(sys.as_ref())
-            .add_child(child_id_1, "child-1".into(), STORE_TYPE_KVSTORE)
+            .add_child(child_id_1, "child-1".into(), STORE_TYPE_NULLSTORE)
             .commit()
             .await
             .unwrap();
@@ -162,7 +156,7 @@ async fn test_multi_author_convergence() {
     {
         let sys = handle2.clone().as_system().unwrap();
         lattice_systemstore::SystemBatch::new(sys.as_ref())
-            .add_child(child_id_2, "child-2".into(), STORE_TYPE_KVSTORE)
+            .add_child(child_id_2, "child-2".into(), STORE_TYPE_NULLSTORE)
             .commit()
             .await
             .unwrap();
@@ -172,7 +166,7 @@ async fn test_multi_author_convergence() {
     {
         let sys = handle3.clone().as_system().unwrap();
         lattice_systemstore::SystemBatch::new(sys.as_ref())
-            .add_child(child_id_3, "child-3".into(), STORE_TYPE_KVSTORE)
+            .add_child(child_id_3, "child-3".into(), STORE_TYPE_NULLSTORE)
             .commit()
             .await
             .unwrap();

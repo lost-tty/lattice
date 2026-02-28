@@ -12,9 +12,10 @@ use lattice_node::{direct_opener, Invite, NodeBuilder};
 use lattice_systemstore::system_state::SystemLayer;
 use std::sync::Arc;
 
-/// Custom builder with logstore opener (not available in common module)
+/// Custom builder with logstore opener (not available in common module), in-memory storage.
 fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
+        .in_memory()
         .with_opener(STORE_TYPE_KVSTORE, |registry| {
             direct_opener::<SystemLayer<PersistentKvState>>(registry)
         })

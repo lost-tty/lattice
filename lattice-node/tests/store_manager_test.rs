@@ -1,5 +1,6 @@
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::NodeIdentity;
-use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
+use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_node::data_dir::DataDir;
 use lattice_node::{direct_opener, Node, NodeBuilder};
 use std::sync::Arc;
@@ -7,22 +8,28 @@ use std::time::Duration;
 
 // ==================== Test Helpers ====================
 
-/// Helper to create a node with openers registered (using handle-less pattern)
-fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
-    // Use lattice-systemstore wrappers for system capabilities
-    type PersistentKvState = lattice_systemstore::SystemLayer<
-        lattice_storage::PersistentState<lattice_kvstore::KvState>,
-    >;
-    type PersistentLogState = lattice_systemstore::SystemLayer<
-        lattice_storage::PersistentState<lattice_logstore::LogState>,
-    >;
+type PersistentNullState =
+    lattice_systemstore::SystemLayer<lattice_mockkernel::PersistentNullState>;
 
+/// Helper to create a node with NullState opener (in-memory storage).
+fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
+    NodeBuilder::new(data_dir)
+        .in_memory()
+        .with_opener(STORE_TYPE_NULLSTORE, |registry| {
+            direct_opener::<PersistentNullState>(registry)
+        })
+}
+
+// Use lattice-systemstore wrappers for system capabilities
+type PersistentKvState = lattice_systemstore::SystemLayer<
+    lattice_storage::PersistentState<lattice_kvstore::KvState>,
+>;
+
+/// File-backed node builder for tests that need persistence across restarts.
+fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
         .with_opener(STORE_TYPE_KVSTORE, |registry| {
             direct_opener::<PersistentKvState>(registry)
-        })
-        .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-            direct_opener::<PersistentLogState>(registry)
         })
 }
 
@@ -78,7 +85,7 @@ async fn test_store_creation_and_archival() {
     // 1. Create a root store
     let root_id = ctx
         .node
-        .create_store(None, Some("my-root".to_string()), STORE_TYPE_KVSTORE)
+        .create_store(None, Some("my-root".to_string()), STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     assert!(
@@ -86,7 +93,7 @@ async fn test_store_creation_and_archival() {
         "Root store should be open"
     );
     if let Some(info) = ctx.sm().get_info(&root_id) {
-        assert_eq!(info.store_type, STORE_TYPE_KVSTORE);
+        assert_eq!(info.store_type, STORE_TYPE_NULLSTORE);
     }
 
     // 2. Create a child store under root
@@ -95,7 +102,7 @@ async fn test_store_creation_and_archival() {
         .create_store(
             Some(root_id),
             Some("my-child".to_string()),
-            STORE_TYPE_KVSTORE,
+            STORE_TYPE_NULLSTORE,
         )
         .await
         .unwrap();
@@ -115,7 +122,7 @@ async fn test_watcher_reacts_to_changes() {
 
     let root_id = ctx
         .node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -123,7 +130,7 @@ async fn test_watcher_reacts_to_changes() {
     // Create child -> Watcher should pick it up
     let child_id = ctx
         .node
-        .create_store(Some(root_id), None, STORE_TYPE_KVSTORE)
+        .create_store(Some(root_id), None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     wait_for_open(ctx.sm(), child_id).await;
@@ -145,7 +152,7 @@ async fn test_store_emits_network_event() {
     let ctx = TestCtx::new();
     let root_id = ctx
         .node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
 
@@ -155,7 +162,7 @@ async fn test_store_emits_network_event() {
 
     let child_id = ctx
         .node
-        .create_store(Some(root_id), None, STORE_TYPE_KVSTORE)
+        .create_store(Some(root_id), None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     wait_for_open(ctx.sm(), child_id).await;
@@ -185,12 +192,12 @@ async fn test_archived_store_hidden_from_network() {
     let ctx = TestCtx::new();
     let root_id = ctx
         .node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     let child_id = ctx
         .node
-        .create_store(Some(root_id), None, STORE_TYPE_KVSTORE)
+        .create_store(Some(root_id), None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     wait_for_open(ctx.sm(), child_id).await;
@@ -218,16 +225,23 @@ async fn test_archived_store_hidden_from_network() {
 async fn test_synced_store_declaration_auto_opened() {
     use lattice_net_types::NetworkStoreRegistry;
 
-    let ctx = TestCtx::new();
-    let root_id = ctx
-        .node
+    // This test needs file-backed storage: it creates store dirs on the filesystem
+    // to simulate a store arriving via sync.
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = DataDir::new(tmp.path().to_path_buf());
+    let node = file_node_builder(DataDir::new(data_dir.base()))
+        .build()
+        .unwrap();
+    let sm = node.store_manager();
+
+    let root_id = node
         .create_store(None, None, STORE_TYPE_KVSTORE)
         .await
         .unwrap();
 
     // Simulate a store declaration arriving via sync (bypass Node::create_store)
     let foreign_store_id = lattice_model::Uuid::new_v4();
-    let root = ctx.sm().get_handle(&root_id).expect("root handle");
+    let root = sm.get_handle(&root_id).expect("root handle");
     let system = root.clone().as_system().expect("SystemStore");
 
     lattice_systemstore::SystemBatch::new(system.as_ref())
@@ -245,22 +259,21 @@ async fn test_synced_store_declaration_auto_opened() {
         .expect("write declaration");
 
     // Create store files manually (simulating sync)
-    let data_dir = DataDir::new(ctx._tmp.path().to_path_buf());
     data_dir.ensure_store_dirs(foreign_store_id).unwrap();
 
     // Watcher should auto-open it
     for _ in 0..30 {
-        if ctx.sm().store_ids().contains(&foreign_store_id) {
+        if sm.store_ids().contains(&foreign_store_id) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(
-        ctx.sm().store_ids().contains(&foreign_store_id),
+        sm.store_ids().contains(&foreign_store_id),
         "Synced store should be auto-opened"
     );
     assert!(
-        ctx.sm().get_network_store(&foreign_store_id).is_some(),
+        sm.get_network_store(&foreign_store_id).is_some(),
         "Should be visible to network"
     );
 }
@@ -272,11 +285,11 @@ async fn test_stores_opened_on_startup() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
 
-    // Phase 1: Create stores, then shutdown
+    // Phase 1: Create stores, then shutdown (file-backed — restart test)
     let root_id;
     let child_id;
     {
-        let node = test_node_builder(DataDir::new(data_dir.base()))
+        let node = file_node_builder(DataDir::new(data_dir.base()))
             .build()
             .unwrap();
         root_id = node
@@ -300,7 +313,7 @@ async fn test_stores_opened_on_startup() {
         let mut last_err = None;
         let mut node_opt = None;
         for _ in 0..5 {
-            match test_node_builder(DataDir::new(data_dir.base())).build() {
+            match file_node_builder(DataDir::new(data_dir.base())).build() {
                 Ok(n) => {
                     node_opt = Some(n);
                     break;
@@ -339,17 +352,17 @@ async fn test_sibling_store_isolation() {
 
     let root_id = ctx
         .node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     let child_a = ctx
         .node
-        .create_store(Some(root_id), Some("child-a".into()), STORE_TYPE_KVSTORE)
+        .create_store(Some(root_id), Some("child-a".into()), STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     let child_b = ctx
         .node
-        .create_store(Some(root_id), Some("child-b".into()), STORE_TYPE_KVSTORE)
+        .create_store(Some(root_id), Some("child-b".into()), STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     wait_for_open(ctx.sm(), child_a).await;
@@ -377,12 +390,12 @@ async fn test_cascade_close_grandchildren() {
 
     let root_id = ctx
         .node
-        .create_store(None, Some("root".into()), STORE_TYPE_KVSTORE)
+        .create_store(None, Some("root".into()), STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     let child_id = ctx
         .node
-        .create_store(Some(root_id), Some("child".into()), STORE_TYPE_KVSTORE)
+        .create_store(Some(root_id), Some("child".into()), STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     wait_for_open(ctx.sm(), child_id).await;
@@ -392,7 +405,7 @@ async fn test_cascade_close_grandchildren() {
         .create_store(
             Some(child_id),
             Some("grandchild".into()),
-            STORE_TYPE_KVSTORE,
+            STORE_TYPE_NULLSTORE,
         )
         .await
         .unwrap();
@@ -400,7 +413,7 @@ async fn test_cascade_close_grandchildren() {
 
     let sibling_id = ctx
         .node
-        .create_store(Some(root_id), Some("sibling".into()), STORE_TYPE_KVSTORE)
+        .create_store(Some(root_id), Some("sibling".into()), STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     wait_for_open(ctx.sm(), sibling_id).await;
@@ -432,27 +445,27 @@ async fn test_cascade_close_deep_hierarchy() {
 
     let root_id = ctx
         .node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
 
     let child_id = ctx
         .node
-        .create_store(Some(root_id), None, STORE_TYPE_KVSTORE)
+        .create_store(Some(root_id), None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     wait_for_open(ctx.sm(), child_id).await;
 
     let grandchild_id = ctx
         .node
-        .create_store(Some(child_id), None, STORE_TYPE_KVSTORE)
+        .create_store(Some(child_id), None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     wait_for_open(ctx.sm(), grandchild_id).await;
 
     let great_grandchild_id = ctx
         .node
-        .create_store(Some(grandchild_id), None, STORE_TYPE_KVSTORE)
+        .create_store(Some(grandchild_id), None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     wait_for_open(ctx.sm(), great_grandchild_id).await;
@@ -486,7 +499,7 @@ async fn test_invite_create_and_consume() {
     let inviter = ctx.node.node_id();
     let root_id = ctx
         .node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
 
@@ -522,7 +535,7 @@ async fn test_consume_unknown_invite() {
     let ctx = TestCtx::new();
     let root_id = ctx
         .node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
 
@@ -553,7 +566,7 @@ async fn test_revoke_peer() {
     let inviter = ctx.node.node_id();
     let root_id = ctx
         .node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
 
@@ -596,7 +609,7 @@ async fn test_rejoin_after_revoke() {
     let inviter = ctx.node.node_id();
     let root_id = ctx
         .node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
 
@@ -645,7 +658,7 @@ async fn test_handle_peer_join_rejects_unauthorized() {
     let ctx = TestCtx::new();
     let root_id = ctx
         .node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
 
@@ -672,7 +685,7 @@ async fn test_system_batch_produces_single_intention() {
 
     let root_id = ctx
         .node
-        .create_store(None, Some("batch-root".to_string()), STORE_TYPE_KVSTORE)
+        .create_store(None, Some("batch-root".to_string()), STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -685,7 +698,7 @@ async fn test_system_batch_produces_single_intention() {
     let child_id = lattice_model::Uuid::new_v4();
     let system = handle.clone().as_system().expect("SystemStore");
     lattice_systemstore::SystemBatch::new(system.as_ref())
-        .add_child(child_id, "batched-child".to_string(), STORE_TYPE_KVSTORE)
+        .add_child(child_id, "batched-child".to_string(), STORE_TYPE_NULLSTORE)
         .set_child_status(child_id, lattice_model::store_info::ChildStatus::Active)
         .commit()
         .await

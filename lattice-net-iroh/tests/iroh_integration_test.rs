@@ -6,12 +6,16 @@
 //! 3. Two nodes can discover each other (via stored NodeAddr)
 //! 4. Store creation, invite, join, and sync work through iroh transport
 
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net_iroh::IrohBackend;
 use lattice_net_types::GossipLayer;
 use lattice_node::{direct_opener, Invite, Node, NodeBuilder, NodeEvent};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
+
+type PersistentNullState =
+    lattice_systemstore::system_state::SystemLayer<lattice_mockkernel::PersistentNullState>;
 
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -26,11 +30,18 @@ fn temp_data_dir(name: &str) -> lattice_node::DataDir {
 }
 
 fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
-    NodeBuilder::new(data_dir).with_opener(STORE_TYPE_KVSTORE, |registry| {
-        direct_opener::<
-            lattice_systemstore::system_state::SystemLayer<lattice_kvstore::PersistentKvState>,
-        >(registry)
-    })
+    // Register both NullState and KvState: complete_join() hardcodes STORE_TYPE_KVSTORE
+    // for the joining node, so we need KvState available for the join flow.
+    NodeBuilder::new(data_dir)
+        .in_memory()
+        .with_opener(STORE_TYPE_NULLSTORE, |registry| {
+            direct_opener::<PersistentNullState>(registry)
+        })
+        .with_opener(STORE_TYPE_KVSTORE, |registry| {
+            direct_opener::<
+                lattice_systemstore::system_state::SystemLayer<lattice_kvstore::PersistentKvState>,
+            >(registry)
+        })
 }
 
 /// Build a node with net_tx wired up.
@@ -185,7 +196,7 @@ async fn test_two_iroh_nodes_store_sync() {
 
     // === Node A creates a store ===
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store on A");
     tracing::info!(%store_id, "Store created on A");

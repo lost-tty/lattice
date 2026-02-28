@@ -5,7 +5,7 @@
 
 use crate::store_manager::{StoreManagerError, StoreOpener};
 use crate::{StoreHandle, StoreRegistry};
-use lattice_model::{Openable, Uuid};
+use lattice_model::{Openable, StorageConfig, Uuid};
 use std::sync::Arc;
 
 // ==== Direct opener (handle-less pattern) ====
@@ -56,8 +56,8 @@ where
     fn open(&self, store_id: Uuid) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
         let (store, _) = self
             .registry
-            .get_or_open(store_id, |path| {
-                S::open(store_id, path).map_err(|e| lattice_kernel::store::StateError::Backend(e))
+            .get_or_open(store_id, |config: &StorageConfig| {
+                S::open(store_id, config).map_err(|e| lattice_kernel::store::StateError::Backend(e))
             })
             .map_err(|e| StoreManagerError::Registry(e.to_string()))?;
 

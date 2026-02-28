@@ -1,7 +1,17 @@
 //! Mock kernel for testing stores without real replication.
 //!
-//! Provides `MockWriter<S>` - a generic StateWriter that applies operations
-//! directly to state without needing the full replication stack.
+//! Provides:
+//! - `MockWriter<S>` — a generic StateWriter that applies operations directly
+//!   to state without the full replication stack.
+//! - `NullState` — a minimal state machine with no application logic, for tests
+//!   that only need the kernel (intentions, sync, gossip) without any real store.
+
+mod null_state;
+
+pub use null_state::{NullState, STORE_TYPE_NULLSTORE};
+
+/// Type alias for NullState wrapped in PersistentState for use with direct_opener().
+pub type PersistentNullState = lattice_storage::PersistentState<NullState>;
 
 use futures_util::StreamExt;
 use lattice_model::dag_queries::NullDag;

@@ -11,7 +11,6 @@ use prost::Message;
 use std::borrow::Cow;
 use std::future::Future;
 use std::io::Read;
-use std::path::Path;
 use std::pin::Pin;
 use thiserror::Error;
 use uuid::Uuid;
@@ -300,8 +299,8 @@ impl<S: StoreTypeProvider> StoreTypeProvider for SystemLayer<S> {
 }
 
 impl<S: Openable + StateLogic> Openable for SystemLayer<S> {
-    fn open(id: Uuid, path: &Path) -> Result<Self, String> {
-        let inner = S::open(id, path)?;
+    fn open(id: Uuid, config: &lattice_model::StorageConfig) -> Result<Self, String> {
+        let inner = S::open(id, config)?;
         Ok(Self::new(inner))
     }
 }

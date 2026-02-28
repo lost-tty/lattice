@@ -8,7 +8,6 @@ use lattice_kernel::proto::weaver::WitnessContent;
 use lattice_model::Uuid;
 use lattice_model::StorageConfig;
 use prost::Message;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 // Mock State Machine
@@ -39,12 +38,9 @@ impl StateMachine for MockState {
     }
 }
 
-async fn create_store(id: Uuid, identity: NodeIdentity) -> (Arc<Store<MockState>>, PathBuf) {
-    let temp_dir = std::env::temp_dir().join(format!("lattice-test-{}", Uuid::new_v4()));
-    let _ = std::fs::remove_dir_all(&temp_dir); // Clean start
-
+async fn create_store(id: Uuid, identity: NodeIdentity) -> Arc<Store<MockState>> {
     let state = Arc::new(MockState);
-    let config = StorageConfig::File(temp_dir.clone());
+    let config = StorageConfig::InMemory;
     let opened = OpenedStore::new(id, &config, state, identity.signing_key()).unwrap();
     let (handle, _info, runner) = opened.into_handle(identity).unwrap();
 
@@ -52,7 +48,7 @@ async fn create_store(id: Uuid, identity: NodeIdentity) -> (Arc<Store<MockState>
         runner.run().await;
     });
 
-    (Arc::new(handle), temp_dir)
+    Arc::new(handle)
 }
 
 #[tokio::test]
@@ -62,7 +58,7 @@ async fn test_bootstrap_clone_flow() {
 
     // Peer A (Source)
     let node_a_id = NodeIdentity::generate();
-    let (store_a, _dir_a) = create_store(store_id, node_a_id.clone()).await;
+    let store_a = create_store(store_id, node_a_id.clone()).await;
 
     // Generate some data in A
     let mut expected_witnesses = Vec::new();
@@ -74,7 +70,7 @@ async fn test_bootstrap_clone_flow() {
 
     // Peer B (Target/Clone)
     let node_b_id = NodeIdentity::generate();
-    let (store_b, _dir_b) = create_store(store_id, node_b_id.clone()).await;
+    let store_b = create_store(store_id, node_b_id.clone()).await;
 
     // A. Verify Store A can scan witness log
     // scan_witness_log returns the stream directly

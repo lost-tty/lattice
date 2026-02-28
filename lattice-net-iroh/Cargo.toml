@@ -26,6 +26,7 @@ lattice-net-types = { workspace = true }
 lattice-model = { workspace = true }
 lattice-node = { workspace = true }
 lattice-kvstore = { workspace = true }
+lattice-mockkernel = { workspace = true }
 lattice-storage = { workspace = true }
 lattice-systemstore = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

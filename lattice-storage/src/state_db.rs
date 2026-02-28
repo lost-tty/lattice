@@ -835,8 +835,7 @@ pub trait StateFactory: StateLogic {
 // Generic implementation of Openable for any PersistentState<T> where T implements StateFactory + StoreTypeProvider.
 // This solves the Orphan Rule violation by implementing it in the crate where PersistentState is defined.
 impl<T: StateFactory + StoreTypeProvider + 'static> lattice_model::Openable for PersistentState<T> {
-    fn open(id: Uuid, path: &Path) -> Result<Self, String> {
-        let config = StorageConfig::File(path.to_path_buf());
-        setup_persistent_state(id, &config, T::create).map_err(|e| e.to_string())
+    fn open(id: Uuid, config: &StorageConfig) -> Result<Self, String> {
+        setup_persistent_state(id, config, T::create).map_err(|e| e.to_string())
     }
 }

@@ -13,7 +13,6 @@ use lattice_kernel::{
 use lattice_model::StateMachine;
 use lattice_model::StorageConfig;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 /// Manages store lifecycle and caching
@@ -24,10 +23,12 @@ pub struct StoreRegistry {
     stores: RwLock<HashMap<Uuid, Box<dyn RegistryEntry>>>,
     /// Tracked actor task handles for clean shutdown
     handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// When true, all stores use in-memory backends (no filesystem).
+    in_memory: bool,
 }
 
 impl StoreRegistry {
-    /// Create a new store registry
+    /// Create a new store registry (file-backed).
     pub fn new(data_dir: DataDir, meta: Arc<MetaStore>, node: Arc<NodeIdentity>) -> Self {
         Self {
             data_dir,
@@ -35,7 +36,47 @@ impl StoreRegistry {
             node,
             stores: RwLock::new(HashMap::new()),
             handles: std::sync::Mutex::new(Vec::new()),
+            in_memory: false,
         }
+    }
+
+    /// Create a new store registry with in-memory storage.
+    /// Stores will use `StorageConfig::InMemory` for both state and intentions.
+    pub fn new_in_memory(data_dir: DataDir, meta: Arc<MetaStore>, node: Arc<NodeIdentity>) -> Self {
+        Self {
+            in_memory: true,
+            ..Self::new(data_dir, meta, node)
+        }
+    }
+
+    /// Returns the `StorageConfig` for a store's state database.
+    fn state_config(&self, store_id: Uuid) -> StorageConfig {
+        if self.in_memory {
+            StorageConfig::InMemory
+        } else {
+            let store_dir = self.data_dir.store_dir(store_id);
+            StorageConfig::File(store_dir.join("state"))
+        }
+    }
+
+    /// Returns the `StorageConfig` for a store's intentions database.
+    fn intentions_config(&self, store_id: Uuid) -> StorageConfig {
+        if self.in_memory {
+            StorageConfig::InMemory
+        } else {
+            let store_dir = self.data_dir.store_dir(store_id);
+            StorageConfig::File(store_dir.join("intentions"))
+        }
+    }
+
+    /// Ensure storage directories exist (no-op for in-memory mode).
+    fn ensure_dirs(&self, store_id: Uuid) -> Result<(), StateError> {
+        if !self.in_memory {
+            let store_dir = self.data_dir.store_dir(store_id);
+            let intentions_dir = store_dir.join("intentions");
+            std::fs::create_dir_all(&intentions_dir)?;
+        }
+        Ok(())
     }
 
     /// Peek store metadata (type, version) from disk without fully opening it.
@@ -53,18 +94,16 @@ impl StoreRegistry {
     pub fn create<S, F>(&self, store_id: Uuid, open_fn: F) -> Result<Uuid, StateError>
     where
         S: StateMachine + Send + Sync + 'static,
-        F: FnOnce(&Path) -> Result<S, StateError>,
+        F: FnOnce(&StorageConfig) -> Result<S, StateError>,
     {
-        // Create storage directories
-        let store_dir = self.data_dir.store_dir(store_id);
-        let state_dir = store_dir.join("state");
-        let intentions_dir = store_dir.join("intentions");
-        std::fs::create_dir_all(&intentions_dir)?;
+        self.ensure_dirs(store_id)?;
+
+        let state_config = self.state_config(store_id);
+        let intentions_config = self.intentions_config(store_id);
 
         // Open Initial State (creates db) using provided function
-        let state = Arc::new(open_fn(&state_dir)?);
-        let config = StorageConfig::File(intentions_dir);
-        let _ = OpenedStore::new(store_id, &config, state, self.node.signing_key())?;
+        let state = Arc::new(open_fn(&state_config)?);
+        let _ = OpenedStore::new(store_id, &intentions_config, state, self.node.signing_key())?;
 
         // Register in meta
         self.meta.add_store(store_id, Uuid::nil()).map_err(|e| {
@@ -84,7 +123,7 @@ impl StoreRegistry {
     ) -> Result<(Store<S>, StoreInfo), StateError>
     where
         S: StateMachine + Send + Sync + 'static + lattice_systemstore::SystemReader,
-        F: FnOnce(&Path) -> Result<S, StateError>,
+        F: FnOnce(&StorageConfig) -> Result<S, StateError>,
     {
         {
             let Ok(stores) = self.stores.read() else {
@@ -108,14 +147,13 @@ impl StoreRegistry {
         }
 
         // Not cached - open and cache the ORIGINAL (keeps actor alive)
-        let store_dir = self.data_dir.store_dir(store_id);
-        let state_dir = store_dir.join("state");
-        let intentions_dir = store_dir.join("intentions");
-        std::fs::create_dir_all(&intentions_dir)?;
+        self.ensure_dirs(store_id)?;
 
-        let state = Arc::new(open_fn(&state_dir)?);
-        let config = StorageConfig::File(intentions_dir);
-        let opened = OpenedStore::new(store_id, &config, state, self.node.signing_key())?;
+        let state_config = self.state_config(store_id);
+        let intentions_config = self.intentions_config(store_id);
+
+        let state = Arc::new(open_fn(&state_config)?);
+        let opened = OpenedStore::new(store_id, &intentions_config, state, self.node.signing_key())?;
         let (store_handle, info, runner) = opened.into_handle((*self.node).clone())?;
 
         // Spawn the actor runner as tokio task

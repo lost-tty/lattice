@@ -1,7 +1,7 @@
 mod common;
 
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::PeerStatus;
-use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network;
 use lattice_net_sim::{ChannelNetwork, ChannelTransport};
 use lattice_node::Invite;
@@ -37,7 +37,7 @@ async fn test_peer_persistence_after_bootstrap() {
 
     // A creates store
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store");
 

@@ -133,7 +133,11 @@ Manage log growth on long-running nodes via stability frontier, snapshots, pruni
 - [ ] Address all items in Technical Debt
 - [ ] Address all items in Discussion
 - [ ] Address all items in Future
+- [ ] Remove all sleep calls if possible
 - [ ] Review code base
+- [ ] **Fix `complete_join` store type hardcode** and drop `lattice-kvstore` dev-dependency from `lattice-net-iroh` and (where possible) `lattice-net`
+- [ ] **Fix flaky `test_channel_bidirectional_sync`** (`lattice-net/tests/sync_channel_test.rs`): A intermittently missing B's data after sync
+- [ ] **Fix flaky `test_interleaved_modifications`** (`lattice-net/tests/sync_stress.rs`): intermittent failure
 
 ---
 
@@ -239,6 +243,7 @@ Run the kernel on the RP2350.
 - [ ] **Sync Trigger & Bootstrap Controller Review**: Review how and when sync is triggered (currently ad-hoc in `active_peer_ids` or `complete_join_handshake`). Consider introducing a dedicated `BootstrapController` to manage initial sync state, retry logic, and transition to steady-state gossip/sync.
 - [ ] Unify `IntentionInfo` and `Op` into a single type in StateMachine::apply().
 - [ ] **Clean up**: Remove map_err wherever possible.
+- [ ] **`complete_join` hardcodes `STORE_TYPE_KVSTORE`**: `Node::complete_join()` calls `store_manager.open(store_id, STORE_TYPE_KVSTORE)` instead of using the actual store type. The store type should be communicated through the join protocol (invite token or `JoinResponse`). Blocks dropping `lattice-kvstore` as a dev-dependency from crates that only need NullState for testing. Affects `lattice-net-iroh` and `lattice-net` tests.
 
 ---
 

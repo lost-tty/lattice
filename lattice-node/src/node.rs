@@ -105,6 +105,8 @@ pub struct NodeBuilder {
         String,
         Box<dyn FnOnce(std::sync::Arc<StoreRegistry>) -> Box<dyn crate::StoreOpener> + Send>,
     )>,
+    /// When true, all stores use in-memory backends (no filesystem for store data).
+    in_memory: bool,
 }
 
 impl NodeBuilder {
@@ -114,6 +116,7 @@ impl NodeBuilder {
             net_tx: None,
             name: None,
             opener_factories: Vec::new(),
+            in_memory: false,
         }
     }
 
@@ -133,6 +136,13 @@ impl NodeBuilder {
     /// Set explicit node name (overrides system hostname)
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// Use in-memory storage for all stores (no filesystem for store data).
+    /// Useful for tests that don't need persistence.
+    pub fn in_memory(mut self) -> Self {
+        self.in_memory = true;
         self
     }
 
@@ -175,11 +185,11 @@ impl NodeBuilder {
 
         let node = std::sync::Arc::new(node);
         let meta = std::sync::Arc::new(meta);
-        let registry = std::sync::Arc::new(StoreRegistry::new(
-            self.data_dir.clone(),
-            meta.clone(),
-            node.clone(),
-        ));
+        let registry = std::sync::Arc::new(if self.in_memory {
+            StoreRegistry::new_in_memory(self.data_dir.clone(), meta.clone(), node.clone())
+        } else {
+            StoreRegistry::new(self.data_dir.clone(), meta.clone(), node.clone())
+        });
         let store_manager = std::sync::Arc::new(crate::StoreManager::new(
             registry.clone(),
             event_tx.clone(),
@@ -691,19 +701,37 @@ mod tests {
     use super::*;
     use crate::direct_opener;
     use lattice_kvstore_api::KvStoreExt;
+    use lattice_mockkernel::STORE_TYPE_NULLSTORE;
     use lattice_model::types::PubKey;
     use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
 
-    /// Helper to create node builder with openers registered for tests that use mesh/store manager
-    fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
-        // Use lattice-systemstore wrappers for system capabilities
-        type PersistentKvState = lattice_systemstore::SystemLayer<
-            lattice_storage::PersistentState<lattice_kvstore::KvState>,
-        >;
-        type PersistentLogState = lattice_systemstore::SystemLayer<
-            lattice_storage::PersistentState<lattice_logstore::LogState>,
-        >;
+    // Use lattice-systemstore wrappers for system capabilities
+    type PersistentKvState = lattice_systemstore::SystemLayer<
+        lattice_storage::PersistentState<lattice_kvstore::KvState>,
+    >;
+    type PersistentLogState = lattice_systemstore::SystemLayer<
+        lattice_storage::PersistentState<lattice_logstore::LogState>,
+    >;
+    type PersistentNullState =
+        lattice_systemstore::SystemLayer<lattice_mockkernel::PersistentNullState>;
 
+    /// Helper to create node builder with openers registered (in-memory storage).
+    fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
+        NodeBuilder::new(data_dir)
+            .in_memory()
+            .with_opener(STORE_TYPE_KVSTORE, |registry| {
+                direct_opener::<PersistentKvState>(registry)
+            })
+            .with_opener(STORE_TYPE_LOGSTORE, |registry| {
+                direct_opener::<PersistentLogState>(registry)
+            })
+            .with_opener(STORE_TYPE_NULLSTORE, |registry| {
+                direct_opener::<PersistentNullState>(registry)
+            })
+    }
+
+    /// File-backed node builder for tests that need persistence across restarts.
+    fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
         NodeBuilder::new(data_dir)
             .with_opener(STORE_TYPE_KVSTORE, |registry| {
                 direct_opener::<PersistentKvState>(registry)
@@ -806,7 +834,7 @@ mod tests {
 
         // create_store creates a mesh
         let store_id = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .expect("create_store failed");
         assert!(node
@@ -829,11 +857,11 @@ mod tests {
             .expect("create node");
 
         let store_id_1 = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .expect("first mesh");
         let store_id_2 = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .expect("second mesh");
 
@@ -860,10 +888,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path().to_path_buf());
 
-        // First session: create mesh
+        // First session: create mesh (file-backed — persistence test)
         let store_id;
         {
-            let node = test_node_builder(data_dir.clone())
+            let node = file_node_builder(data_dir.clone())
                 .build()
                 .expect("create node");
             store_id = node
@@ -874,7 +902,7 @@ mod tests {
         } // End first session
 
         // Second session: mesh should persist in meta.db
-        let node = test_node_builder(data_dir.clone())
+        let node = file_node_builder(data_dir.clone())
             .build()
             .expect("reload node");
 
@@ -901,7 +929,7 @@ mod tests {
         let initial_name = node.name().unwrap();
 
         // create_mesh creates mesh
-        node.create_store(None, None, STORE_TYPE_KVSTORE)
+        node.create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .expect("create_mesh");
 
@@ -930,7 +958,7 @@ mod tests {
 
         // create_mesh first
         let store_id = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .expect("create_mesh");
 
@@ -960,7 +988,7 @@ mod tests {
 
         // create_mesh first
         let store_id = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .expect("create_mesh");
 

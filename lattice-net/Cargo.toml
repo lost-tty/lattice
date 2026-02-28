@@ -36,5 +36,6 @@ lattice-systemstore = { workspace = true }
 lattice-node = { workspace = true }
 rand = { workspace = true }
 lattice-kernel = { workspace = true }
+lattice-mockkernel = { workspace = true }
 lattice-net-sim = { path = "../lattice-net-sim" }
 ed25519-dalek = { workspace = true }

@@ -1,0 +1,12 @@
+syntax = "proto3";
+package lattice.null;
+
+// Minimal service definition for NullState introspection.
+// NullState never dispatches commands; this exists only to satisfy
+// the Introspectable trait bound.
+service NullStore {}
+
+// Opaque payload wrapper — NullState ignores the content.
+message NullPayload {
+    bytes data = 1;
+}

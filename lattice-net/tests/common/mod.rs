@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 //! Shared test utilities for lattice-net integration tests.
 
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::types::PubKey;
 use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network;
@@ -11,6 +12,9 @@ use lattice_node::{direct_opener, Invite, Node, NodeBuilder, NodeEvent, StoreHan
 use std::sync::Arc;
 use tokio::time::Duration;
 
+type PersistentNullState =
+    lattice_systemstore::system_state::SystemLayer<lattice_mockkernel::PersistentNullState>;
+
 /// Create a temp data directory, cleaning up any existing one.
 pub fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     let path = std::env::temp_dir().join(format!("lattice_test_{}", name));
@@ -18,13 +22,18 @@ pub fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     lattice_node::DataDir::new(path)
 }
 
-/// Create a NodeBuilder with KV and Log store openers registered.
+/// Create a NodeBuilder with KV and NullState openers registered (in-memory storage).
 pub fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
-    NodeBuilder::new(data_dir).with_opener(STORE_TYPE_KVSTORE, |registry| {
-        direct_opener::<
-            lattice_systemstore::system_state::SystemLayer<lattice_kvstore::PersistentKvState>,
-        >(registry)
-    })
+    NodeBuilder::new(data_dir)
+        .in_memory()
+        .with_opener(STORE_TYPE_KVSTORE, |registry| {
+            direct_opener::<
+                lattice_systemstore::system_state::SystemLayer<lattice_kvstore::PersistentKvState>,
+            >(registry)
+        })
+        .with_opener(STORE_TYPE_NULLSTORE, |registry| {
+            direct_opener::<PersistentNullState>(registry)
+        })
 }
 
 /// Build a node from a name (creates temp dir + builder).

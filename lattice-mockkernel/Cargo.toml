@@ -8,9 +8,17 @@ license.workspace = true
 [dependencies]
 lattice-model = { workspace = true }
 lattice-storage = { workspace = true }
+lattice-store-base = { workspace = true }
+lattice-systemstore = { workspace = true }
 lattice-proto = { workspace = true }
 blake3 = { workspace = true }
+once_cell = { workspace = true }
 prost = { workspace = true }
+prost-reflect = { workspace = true }
+redb = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 futures-util = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
