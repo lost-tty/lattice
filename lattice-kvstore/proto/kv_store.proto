@@ -1,0 +1,101 @@
+syntax = "proto3";
+package lattice.kv;
+
+// The Key-Value Store Service
+service KvStore {
+    rpc Put (PutRequest) returns (PutResponse);
+    rpc Get (GetRequest) returns (GetResponse);
+    rpc Delete (DeleteRequest) returns (DeleteResponse);
+    rpc List (ListRequest) returns (ListResponse);
+    rpc Batch (BatchRequest) returns (BatchResponse);
+}
+
+// --- Batch Operations ---
+
+message BatchRequest {
+    repeated Operation ops = 1;
+}
+
+message BatchResponse {
+    bytes hash = 1;  // Entry hash of the atomic batch
+}
+
+// --- Service Request/Response ---
+
+message PutRequest {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+message PutResponse {
+    bytes hash = 1;
+}
+
+message GetRequest {
+    bytes key = 1;
+    bool verbose = 2;
+}
+
+message GetResponse {
+    optional bytes value = 1;
+}
+
+message DeleteRequest {
+    bytes key = 1;
+}
+
+message DeleteResponse {
+    bytes hash = 1;
+}
+
+message ListRequest {
+    bytes prefix = 1;
+    bool verbose = 2;
+}
+
+message ListResponse {
+    repeated KeyValuePair items = 1;
+}
+
+message KeyValuePair {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+// --- Payload Types (log entry format) ---
+
+message PutOp {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+message DeleteOp {
+    bytes key = 1;
+}
+
+message Operation {
+    oneof op_type {
+        PutOp put = 1;
+        DeleteOp delete = 2;
+    }
+}
+
+message KvPayload {
+    repeated Operation ops = 1;
+}
+
+// --- Stream Types (watch subscription) ---
+
+// Parameters for the Watch stream
+message WatchParams {
+    string pattern = 1;  // Regex pattern to filter keys
+}
+
+// Wire format for watch events
+message WatchEventProto {
+    bytes key = 1;
+    oneof kind {
+        bytes value = 2;  // Update: the new LWW value
+        bool deleted = 3; // Delete: key was removed (value ignored)
+    }
+}

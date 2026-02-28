@@ -15,7 +15,6 @@ fn main() -> Result<()> {
             &[
                 "proto/storage.proto",
                 "proto/network.proto",
-                "proto/kv_store.proto",
                 "proto/weaver.proto",
             ],
             &["proto/"],

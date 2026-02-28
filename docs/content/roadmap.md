@@ -59,7 +59,7 @@ Reduce what state machines store per conflict domain. Currently each key persist
 - [x] **`KVTable::apply()` resolves LWW at write time.** Compares incoming HLC/author against current winner via DAG lookup. `get()` returns the value directly — no more read-time resolution.
 - [x] **New on-disk format.** `proto::Value { oneof kind { value | tombstone }, heads[] }` in `lattice-kvtable/proto/value.proto`. `heads[0]` is the LWW winner. HLC/author not stored — looked up from the DAG on demand. `oneof` distinguishes live entries (including empty values) from tombstones at the type level.
 - [x] **Removed `HeadList`/`HeadInfo` from `storage.proto`.** Dead code — `lattice-kvtable` no longer depends on `lattice-proto`. Conversion impls (`Head ↔ HeadInfo`) and re-exports (`lattice-storage::head`, `lattice-kvstore::Head`) removed.
-- [ ] **Move `kv_store.proto` out of `lattice-proto`.** The KV service/payload protos (`PutRequest`, `KvPayload`, `WatchEventProto`, etc.) are only used by `lattice-kvstore` and `lattice-kvstore-api`. Move to one of those crates to keep `lattice-proto` focused on core/shared types.
+- [x] **Moved `kv_store.proto` to `lattice-kvstore/proto/`.** KV service/payload protos (`PutRequest`, `KvPayload`, `WatchEventProto`, etc.) compiled locally. `lattice-kvstore` and `lattice-kvstore-api` no longer depend on `lattice-proto`. `Operation` helper impls moved to `lattice-kvstore::proto`.
 
 ### 14E: Clean Up `StateMachine` Interface
 - [ ] **Change `apply` signature.** Replace `apply(&self, op: &Op)` with `apply(&self, info: &IntentionInfo, causal_deps: &[Hash])`. Separates intention data from DAG plumbing. `Op` struct remains temporarily for the kernel's internal use (`verify_and_update_tip` needs `prev_hash`).

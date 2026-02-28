@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 // Re-export proto types
-pub use lattice_proto::kv::*;
+pub use lattice_kvstore::proto::*;
 
 // Re-export watch types from lattice-kvstore (canonical definitions)
 pub use lattice_kvstore::{WatchEvent, WatchEventKind};
