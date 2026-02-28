@@ -3,11 +3,11 @@
 #![allow(dead_code)]
 //! Shared test utilities for lattice-net integration tests.
 
-use lattice_node::{NodeBuilder, NodeEvent, Invite, Node, Uuid, direct_opener, StoreHandle};
+use lattice_model::types::PubKey;
 use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network;
-use lattice_net_sim::{ChannelTransport, ChannelNetwork};
-use lattice_model::types::PubKey;
+use lattice_net_sim::{ChannelNetwork, ChannelTransport};
+use lattice_node::{direct_opener, Invite, Node, NodeBuilder, NodeEvent, StoreHandle, Uuid};
 use std::sync::Arc;
 use tokio::time::Duration;
 
@@ -20,15 +20,20 @@ pub fn temp_data_dir(name: &str) -> lattice_node::DataDir {
 
 /// Create a NodeBuilder with KV and Log store openers registered.
 pub fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
-    NodeBuilder::new(data_dir)
-        .with_opener(STORE_TYPE_KVSTORE, |registry| {
-            direct_opener::<lattice_systemstore::system_state::SystemLayer<lattice_kvstore::PersistentKvState>>(registry)
-        })
+    NodeBuilder::new(data_dir).with_opener(STORE_TYPE_KVSTORE, |registry| {
+        direct_opener::<
+            lattice_systemstore::system_state::SystemLayer<lattice_kvstore::PersistentKvState>,
+        >(registry)
+    })
 }
 
 /// Build a node from a name (creates temp dir + builder).
 pub fn build_node(name: &str) -> Arc<Node> {
-    Arc::new(test_node_builder(temp_data_dir(name)).build().expect("build node"))
+    Arc::new(
+        test_node_builder(temp_data_dir(name))
+            .build()
+            .expect("build node"),
+    )
 }
 
 /// Join a store via Node::join() and wait for the StoreReady event.
@@ -44,14 +49,19 @@ pub async fn join_store_via_event(
     }
     match tokio::time::timeout(Duration::from_secs(10), async {
         while let Ok(event) = events.recv().await {
-            if let NodeEvent::StoreReady { store_id: ready_id, .. } = event {
+            if let NodeEvent::StoreReady {
+                store_id: ready_id, ..
+            } = event
+            {
                 if ready_id == store_id {
                     return node.store_manager().get_handle(&ready_id);
                 }
             }
         }
         None
-    }).await {
+    })
+    .await
+    {
         Ok(res) => res,
         Err(_) => None,
     }
@@ -81,18 +91,45 @@ impl TestPair {
         let event_rx_a = node_a.subscribe_net_events();
         let event_rx_b = node_b.subscribe_net_events();
 
-        let server_a = network::NetworkService::new(node_a.clone(), lattice_net_sim::SimBackend::new(transport_a, node_a.clone(), None), event_rx_a);
-        let server_b = network::NetworkService::new(node_b.clone(), lattice_net_sim::SimBackend::new(transport_b, node_b.clone(), None), event_rx_b);
+        let server_a = network::NetworkService::new(
+            node_a.clone(),
+            lattice_net_sim::SimBackend::new(transport_a, node_a.clone(), None),
+            event_rx_a,
+        );
+        let server_b = network::NetworkService::new(
+            node_b.clone(),
+            lattice_net_sim::SimBackend::new(transport_b, node_b.clone(), None),
+            event_rx_b,
+        );
 
-        let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store");
-        let store_a = node_a.store_manager().get_handle(&store_id).expect("get store a");
+        let store_id = node_a
+            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .await
+            .expect("create store");
+        let store_a = node_a
+            .store_manager()
+            .get_handle(&store_id)
+            .expect("get store a");
 
-        let token = node_a.store_manager().create_invite(store_id, node_a.node_id()).await.expect("invite");
+        let token = node_a
+            .store_manager()
+            .create_invite(store_id, node_a.node_id())
+            .await
+            .expect("invite");
         let invite = Invite::parse(&token).expect("parse invite");
 
         let store_b = join_store_via_event(&node_b, node_a.node_id(), store_id, invite.secret)
-            .await.expect("B join A");
+            .await
+            .expect("B join A");
 
-        Self { node_a, node_b, server_a, server_b, store_a, store_b, net }
+        Self {
+            node_a,
+            node_b,
+            server_a,
+            server_b,
+            store_a,
+            store_b,
+            net,
+        }
     }
 }

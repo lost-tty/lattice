@@ -1,9 +1,9 @@
 //! CLI command handlers and dispatch
 
-use lattice_runtime::LatticeBackend;
-use crate::{node_commands, store_commands, peer_commands};
 use crate::subscriptions::SubscriptionRegistry;
-use clap::{Parser, Subcommand, CommandFactory};
+use crate::{node_commands, peer_commands, store_commands};
+use clap::{CommandFactory, Parser, Subcommand};
+use lattice_runtime::LatticeBackend;
 use rustyline_async::SharedWriter;
 use std::io::Write;
 use std::sync::Arc;
@@ -44,7 +44,12 @@ pub struct CommandContext {
 }
 
 #[derive(Parser)]
-#[command(name = "lattice", no_binary_name = true, disable_help_subcommand = true, infer_subcommands = true)]
+#[command(
+    name = "lattice",
+    no_binary_name = true,
+    disable_help_subcommand = true,
+    infer_subcommands = true
+)]
 pub struct LatticeCli {
     #[command(subcommand)]
     pub command: LatticeCommand,
@@ -88,12 +93,14 @@ fn format_recursive_help(cmd: &clap::Command, prefix: &str, output: &mut String)
 
     for sub in cmd.get_subcommands() {
         let name = sub.get_name();
-        if name == "help" { continue; }
-        
+        if name == "help" {
+            continue;
+        }
+
         let heading = sub.get_next_help_heading().map(|h| h.to_string());
         let has_subcommands = sub.has_subcommands();
         let final_heading = if prefix.is_empty() && has_subcommands && heading.is_none() {
-             sub.get_about().map(|a| a.to_string())
+            sub.get_about().map(|a| a.to_string())
         } else {
             heading
         };
@@ -103,16 +110,23 @@ fn format_recursive_help(cmd: &clap::Command, prefix: &str, output: &mut String)
         } else {
             format!("{} {}", prefix, name)
         };
-        
-        groups.entry(final_heading).or_default().push((sub, full_name));
+
+        groups
+            .entry(final_heading)
+            .or_default()
+            .push((sub, full_name));
     }
 
     let mut first_group = true;
     for (heading, cmds) in groups {
-        if !first_group { output.push('\n'); }
+        if !first_group {
+            output.push('\n');
+        }
         first_group = false;
 
-        if let Some(h) = heading { let _ = writeln!(output, "{}:", h); }
+        if let Some(h) = heading {
+            let _ = writeln!(output, "{}:", h);
+        }
         for (cmd, full) in cmds {
             let about = cmd.get_about().map(|a| a.to_string()).unwrap_or_default();
             if cmd.has_subcommands() {
@@ -133,8 +147,6 @@ pub enum NodeSubcommand {
     /// Join a store/mesh using an invite token
     Join { token: String },
 }
-
-
 
 #[derive(Subcommand, Clone, Debug)]
 #[command(allow_external_subcommands = true)]
@@ -228,16 +240,20 @@ pub enum PeerSubcommand {
     Invite,
 }
 
-async fn format_help(backend: &dyn LatticeBackend, ctx: &CommandContext, topic: Option<&str>) -> String {
+async fn format_help(
+    backend: &dyn LatticeBackend,
+    ctx: &CommandContext,
+    topic: Option<&str>,
+) -> String {
     let mut output = String::from("Available commands:\n");
     let cmd = LatticeCli::command();
     format_recursive_help(&cmd, "", &mut output);
-    
+
     let Some(store_id) = ctx.store_id else {
         output.push('\n');
         return output;
     };
-    
+
     // If topic specified, delegate to store_commands for detailed help
     if let Some(name) = topic {
         if let Some(help) = store_commands::format_topic_help(backend, store_id, name).await {
@@ -245,13 +261,12 @@ async fn format_help(backend: &dyn LatticeBackend, ctx: &CommandContext, topic: 
         }
         return format!("Unknown command or stream: {}\n", name);
     }
-    
+
     // Delegate dynamic help (operations + streams) to store_commands
     output.push_str(&store_commands::format_dynamic_help(backend, store_id).await);
     output.push('\n');
     output
 }
-
 
 pub async fn handle_command(
     backend: &dyn LatticeBackend,
@@ -266,15 +281,18 @@ pub async fn handle_command(
             let _ = write!(w, "{}", output);
             Ok(Continue)
         }
-        
+
         LatticeCommand::Node { subcommand } => match subcommand {
             NodeSubcommand::Status => node_commands::cmd_status(backend, writer).await,
-            NodeSubcommand::SetName { name } => node_commands::cmd_set_name(backend, &name, writer).await,
-            NodeSubcommand::Join { token } => node_commands::cmd_join(backend, &token, writer).await,
+            NodeSubcommand::SetName { name } => {
+                node_commands::cmd_set_name(backend, &name, writer).await
+            }
+            NodeSubcommand::Join { token } => {
+                node_commands::cmd_join(backend, &token, writer).await
+            }
         },
-        
+
         // Mesh command removed in favor of fractal stores
-        
         LatticeCommand::Store { subcommand } => match subcommand {
             StoreSubcommand::Create { name, r#type, root } => {
                 let parent_id = if root { None } else { ctx.store_id };
@@ -295,16 +313,13 @@ pub async fn handle_command(
             StoreSubcommand::Status { verbose: _ } => {
                 store_commands::cmd_store_status(backend, ctx.store_id, writer).await
             }
-            StoreSubcommand::Debug { sub } => {
-                match sub {
-                    Some(DebugSubcommand::Intention { hash }) => {
-                        store_commands::cmd_store_debug_intention(backend, ctx.store_id, &hash, writer).await
-                    }
-                    None => {
-                        store_commands::cmd_store_debug(backend, ctx.store_id, writer).await
-                    }
+            StoreSubcommand::Debug { sub } => match sub {
+                Some(DebugSubcommand::Intention { hash }) => {
+                    store_commands::cmd_store_debug_intention(backend, ctx.store_id, &hash, writer)
+                        .await
                 }
-            }
+                None => store_commands::cmd_store_debug(backend, ctx.store_id, writer).await,
+            },
             StoreSubcommand::History => {
                 store_commands::cmd_history(backend, ctx.store_id, writer).await
             }
@@ -312,11 +327,15 @@ pub async fn handle_command(
                 store_commands::cmd_store_sync(backend, ctx.store_id, writer).await
             }
             StoreSubcommand::InspectType { type_name } => {
-                store_commands::cmd_store_inspect_type(backend, ctx.store_id, type_name.as_deref(), writer).await
+                store_commands::cmd_store_inspect_type(
+                    backend,
+                    ctx.store_id,
+                    type_name.as_deref(),
+                    writer,
+                )
+                .await
             }
-            StoreSubcommand::Subs => {
-                store_commands::cmd_subs(&ctx.registry, writer)
-            }
+            StoreSubcommand::Subs => store_commands::cmd_subs(&ctx.registry, writer),
             StoreSubcommand::Unsub { target } => {
                 store_commands::cmd_unsub(&ctx.registry, &target, writer).await
             }
@@ -324,7 +343,7 @@ pub async fn handle_command(
                 SystemSubcommand::Show => {
                     store_commands::cmd_store_system_show(backend, ctx.store_id, writer).await
                 }
-            }
+            },
             StoreSubcommand::External(args) => {
                 store_commands::cmd_dynamic_exec(backend, ctx, &args, writer).await
             }
@@ -338,10 +357,10 @@ pub async fn handle_command(
                 peer_commands::cmd_peer_revoke(backend, ctx.store_id, &pubkey, writer).await
             }
             PeerSubcommand::Invite => {
-                 peer_commands::cmd_peer_invite(backend, ctx.store_id, writer).await
+                peer_commands::cmd_peer_invite(backend, ctx.store_id, writer).await
             }
         },
-        
+
         LatticeCommand::Quit => {
             // Stop all subscriptions before quitting
             ctx.registry.stop_all().await;
@@ -349,7 +368,7 @@ pub async fn handle_command(
             let _ = writeln!(w, "Goodbye!");
             Ok(Quit)
         }
-        
+
         LatticeCommand::External(args) => {
             store_commands::cmd_dynamic_exec(backend, ctx, &args, writer).await
         }

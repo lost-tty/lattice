@@ -4,7 +4,7 @@ pub mod storage {
     include!(concat!(env!("OUT_DIR"), "/lattice.storage.rs"));
 
     use lattice_model::head::Head;
-    use lattice_model::{PubKey, Hash, HLC};
+    use lattice_model::{Hash, PubKey, HLC};
 
     impl From<Hlc> for HLC {
         fn from(proto: Hlc) -> Self {
@@ -60,14 +60,21 @@ pub mod kv {
     impl Operation {
         /// Create a Put operation
         pub fn put(key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
-            Self { op_type: Some(operation::OpType::Put(PutOp { key: key.into(), value: value.into() })) }
+            Self {
+                op_type: Some(operation::OpType::Put(PutOp {
+                    key: key.into(),
+                    value: value.into(),
+                })),
+            }
         }
-        
+
         /// Create a Delete operation
         pub fn delete(key: impl Into<Vec<u8>>) -> Self {
-            Self { op_type: Some(operation::OpType::Delete(DeleteOp { key: key.into() })) }
+            Self {
+                op_type: Some(operation::OpType::Delete(DeleteOp { key: key.into() })),
+            }
         }
-        
+
         /// Get the key affected by this operation
         pub fn key(&self) -> Option<&[u8]> {
             match &self.op_type {

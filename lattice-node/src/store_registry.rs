@@ -7,13 +7,13 @@
 
 use crate::{DataDir, MetaStore, Uuid};
 use lattice_kernel::{
+    store::{OpenedStore, RegistryEntry, StateError, Store, StoreInfo},
     NodeIdentity,
-    store::{OpenedStore, Store, StoreInfo, StateError, RegistryEntry},
 };
 use lattice_model::StateMachine;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 /// Manages store lifecycle and caching
 pub struct StoreRegistry {
@@ -42,41 +42,47 @@ impl StoreRegistry {
     pub fn peek_store_info(&self, store_id: Uuid) -> Result<(Uuid, String, u64), StateError> {
         let store_dir = self.data_dir.store_dir(store_id);
         let state_dir = store_dir.join("state");
-        
+
         lattice_storage::StateBackend::peek_info(&state_dir)
             .map_err(|e| StateError::Backend(e.to_string()))
     }
-    
+
     /// Create a new store (registers in meta.db, creates storage)
     /// Does NOT open or spawn actor - use get_or_open() for that
-    pub fn create<S, F>(&self, store_id: Uuid, open_fn: F) -> Result<Uuid, StateError> 
+    pub fn create<S, F>(&self, store_id: Uuid, open_fn: F) -> Result<Uuid, StateError>
     where
         S: StateMachine + Send + Sync + 'static,
-        F: FnOnce(&Path) -> Result<S, StateError>
+        F: FnOnce(&Path) -> Result<S, StateError>,
     {
         // Create storage directories
         let store_dir = self.data_dir.store_dir(store_id);
         let state_dir = store_dir.join("state");
         let intentions_dir = store_dir.join("intentions");
         std::fs::create_dir_all(&intentions_dir)?;
-        
+
         // Open Initial State (creates db) using provided function
         let state = Arc::new(open_fn(&state_dir)?);
         let _ = OpenedStore::new(store_id, intentions_dir, state, self.node.signing_key())?;
-        
+
         // Register in meta
-        self.meta.add_store(store_id, Uuid::nil()).map_err(|e| StateError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        )))?;
+        self.meta.add_store(store_id, Uuid::nil()).map_err(|e| {
+            StateError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
         Ok(store_id)
     }
-    
+
     /// Get a store handle, opening and spawning actor if not already cached
-    pub fn get_or_open<S, F>(&self, store_id: Uuid, open_fn: F) -> Result<(Store<S>, StoreInfo), StateError> 
+    pub fn get_or_open<S, F>(
+        &self,
+        store_id: Uuid,
+        open_fn: F,
+    ) -> Result<(Store<S>, StoreInfo), StateError>
     where
         S: StateMachine + Send + Sync + 'static + lattice_systemstore::SystemReader,
-        F: FnOnce(&Path) -> Result<S, StateError>
+        F: FnOnce(&Path) -> Result<S, StateError>,
     {
         {
             let Ok(stores) = self.stores.read() else {
@@ -85,32 +91,38 @@ impl StoreRegistry {
             if let Some(boxed_store) = stores.get(&store_id) {
                 // Downcast
                 if let Some(handle) = boxed_store.as_any().downcast_ref::<Store<S>>() {
-                    let info = StoreInfo { store_id, entries_replayed: 0 };
+                    let info = StoreInfo {
+                        store_id,
+                        entries_replayed: 0,
+                    };
                     return Ok((handle.clone(), info));
                 } else {
-                    return Err(StateError::Backend(format!("Store {} opened with different type", store_id)));
+                    return Err(StateError::Backend(format!(
+                        "Store {} opened with different type",
+                        store_id
+                    )));
                 }
             }
         }
-        
+
         // Not cached - open and cache the ORIGINAL (keeps actor alive)
         let store_dir = self.data_dir.store_dir(store_id);
         let state_dir = store_dir.join("state");
         let intentions_dir = store_dir.join("intentions");
         std::fs::create_dir_all(&intentions_dir)?;
-        
+
         let state = Arc::new(open_fn(&state_dir)?);
         let opened = OpenedStore::new(store_id, intentions_dir, state, self.node.signing_key())?;
         let (store_handle, info, runner) = opened.into_handle((*self.node).clone())?;
-        
+
         // Spawn the actor runner as tokio task
         let task_handle = tokio::spawn(async move { runner.run().await });
-        
+
         // Track the handle
         if let Ok(mut handles) = self.handles.lock() {
             handles.push(task_handle);
         }
-        
+
         // Cache original handle (owns actor thread), return a clone
         let handle_clone = store_handle.clone();
         {
@@ -120,22 +132,25 @@ impl StoreRegistry {
             // Box as Any
             stores.insert(store_id, Box::new(store_handle));
         }
-        
+
         Ok((handle_clone, info))
     }
-    
+
     /// List all registered store IDs
     pub fn list(&self) -> Vec<Uuid> {
-        self.meta.list_stores()
+        self.meta
+            .list_stores()
             .unwrap_or_default()
             .into_iter()
             .map(|(id, _)| id)
             .collect()
     }
-    
+
     /// Check if a store is cached (has an open handle)
     pub fn is_open(&self, store_id: &Uuid) -> bool {
-        let Ok(stores) = self.stores.read() else { return false };
+        let Ok(stores) = self.stores.read() else {
+            return false;
+        };
         stores.contains_key(store_id)
     }
 
@@ -158,7 +173,7 @@ impl StoreRegistry {
                 store.shutdown();
             }
         }
-        
+
         // 2. Drop all StoreHandles to close command channels.
         if let Ok(mut stores) = self.stores.write() {
             stores.clear();

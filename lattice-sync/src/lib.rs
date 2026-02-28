@@ -11,15 +11,14 @@
 //! 4. If they differ and too large → split at byte midpoint, recurse on each half
 //! 5. Diff the leaf hash sets → fetch missing intentions
 
-use lattice_model::types::Hash;
 use async_trait::async_trait;
+use lattice_model::types::Hash;
 pub use lattice_proto::network::{
-    ReconcileMessage, 
-    reconcile_message::Content as ReconcileContent,
-    RangeFingerprint, RangeItemsRequest, RangeItemsReply
+    reconcile_message::Content as ReconcileContent, RangeFingerprint, RangeItemsReply,
+    RangeItemsRequest, ReconcileMessage,
 };
 pub mod sync_provider;
-pub use sync_provider::{SyncProvider, SyncError};
+pub use sync_provider::{SyncError, SyncProvider};
 
 /// Maximum number of items in a range before we list hashes directly
 /// instead of subdividing further.
@@ -91,7 +90,6 @@ pub struct Reconciler<'a, S: RangeStore> {
     store: &'a S,
 }
 
-
 impl<'a, S: RangeStore> Reconciler<'a, S> {
     pub fn new(store: &'a S) -> Self {
         Self { store }
@@ -124,7 +122,6 @@ impl<E: std::error::Error + 'static> std::error::Error for ReconcileError<E> {
 }
 
 impl<'a, S: RangeStore> Reconciler<'a, S> {
-
     /// Produce the initial message to start reconciliation.
     pub async fn initiate(&self) -> Result<ReconcileMessage, S::Error> {
         let fp = self.store.table_fingerprint().await?;
@@ -135,36 +132,57 @@ impl<'a, S: RangeStore> Reconciler<'a, S> {
                 end: RANGE_MAX.as_bytes().to_vec(),
                 fingerprint: fp.as_bytes().to_vec(),
                 count,
-            }))
+            })),
         })
     }
 
     /// Process an inbound message from the peer and produce a response.
-    pub async fn process(&self, msg: &ReconcileMessage) -> Result<ProcessResult, ReconcileError<S::Error>> {
+    pub async fn process(
+        &self,
+        msg: &ReconcileMessage,
+    ) -> Result<ProcessResult, ReconcileError<S::Error>> {
         match &msg.content {
             Some(ReconcileContent::RangeFingerprint(p)) => {
-                let start = Hash::try_from(p.start.as_slice()).map_err(|_| ReconcileError::Proto("Bad start hash".into()))?;
-                let end = Hash::try_from(p.end.as_slice()).map_err(|_| ReconcileError::Proto("Bad end hash".into()))?;
-                let fp = Hash::try_from(p.fingerprint.as_slice()).map_err(|_| ReconcileError::Proto("Bad fingerprint".into()))?;
-                self.handle_range_fingerprint(&start, &end, &fp, p.count).await
+                let start = Hash::try_from(p.start.as_slice())
+                    .map_err(|_| ReconcileError::Proto("Bad start hash".into()))?;
+                let end = Hash::try_from(p.end.as_slice())
+                    .map_err(|_| ReconcileError::Proto("Bad end hash".into()))?;
+                let fp = Hash::try_from(p.fingerprint.as_slice())
+                    .map_err(|_| ReconcileError::Proto("Bad fingerprint".into()))?;
+                self.handle_range_fingerprint(&start, &end, &fp, p.count)
+                    .await
             }
             Some(ReconcileContent::RangeItemsRequest(p)) => {
-                let start = Hash::try_from(p.start.as_slice()).map_err(|_| ReconcileError::Proto("Bad start hash".into()))?;
-                let end = Hash::try_from(p.end.as_slice()).map_err(|_| ReconcileError::Proto("Bad end hash".into()))?;
-                let hashes = p.hashes.iter().map(|h| Hash::try_from(h.as_slice()))
-                    .collect::<Result<Vec<_>, _>>().map_err(|_| ReconcileError::Proto("Bad hash in request".into()))?;
+                let start = Hash::try_from(p.start.as_slice())
+                    .map_err(|_| ReconcileError::Proto("Bad start hash".into()))?;
+                let end = Hash::try_from(p.end.as_slice())
+                    .map_err(|_| ReconcileError::Proto("Bad end hash".into()))?;
+                let hashes = p
+                    .hashes
+                    .iter()
+                    .map(|h| Hash::try_from(h.as_slice()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| ReconcileError::Proto("Bad hash in request".into()))?;
                 self.handle_range_items(&start, &end, &hashes, true).await
             }
             Some(ReconcileContent::RangeItemsReply(p)) => {
-                let start = Hash::try_from(p.start.as_slice()).map_err(|_| ReconcileError::Proto("Bad start hash".into()))?;
-                let end = Hash::try_from(p.end.as_slice()).map_err(|_| ReconcileError::Proto("Bad end hash".into()))?;
-                let hashes = p.hashes.iter().map(|h| Hash::try_from(h.as_slice()))
-                    .collect::<Result<Vec<_>, _>>().map_err(|_| ReconcileError::Proto("Bad hash in reply".into()))?;
+                let start = Hash::try_from(p.start.as_slice())
+                    .map_err(|_| ReconcileError::Proto("Bad start hash".into()))?;
+                let end = Hash::try_from(p.end.as_slice())
+                    .map_err(|_| ReconcileError::Proto("Bad end hash".into()))?;
+                let hashes = p
+                    .hashes
+                    .iter()
+                    .map(|h| Hash::try_from(h.as_slice()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| ReconcileError::Proto("Bad hash in reply".into()))?;
                 self.handle_range_items(&start, &end, &hashes, false).await
             }
-            Some(ReconcileContent::Done(_)) => {
-                Ok(ProcessResult { send: vec![], need: vec![], done: true })
-            }
+            Some(ReconcileContent::Done(_)) => Ok(ProcessResult {
+                send: vec![],
+                need: vec![],
+                done: true,
+            }),
             None => Err(ReconcileError::Proto("Empty message content".into())),
         }
     }
@@ -176,13 +194,23 @@ impl<'a, S: RangeStore> Reconciler<'a, S> {
         peer_fp: &Hash,
         peer_count: u64,
     ) -> Result<ProcessResult, ReconcileError<S::Error>> {
-        let my_fp = self.store.fingerprint_range(start, end).await.map_err(ReconcileError::Store)?;
-        let my_count = self.store.count_range(start, end).await.map_err(ReconcileError::Store)?;
+        let my_fp = self
+            .store
+            .fingerprint_range(start, end)
+            .await
+            .map_err(ReconcileError::Store)?;
+        let my_count = self
+            .store
+            .count_range(start, end)
+            .await
+            .map_err(ReconcileError::Store)?;
 
         // Fingerprints match — this range is in sync
         if my_fp == *peer_fp {
             return Ok(ProcessResult {
-                send: vec![ReconcileMessage { content: Some(ReconcileContent::Done(true)) }],
+                send: vec![ReconcileMessage {
+                    content: Some(ReconcileContent::Done(true)),
+                }],
                 need: vec![],
                 done: true,
             });
@@ -190,14 +218,18 @@ impl<'a, S: RangeStore> Reconciler<'a, S> {
 
         // Small enough to enumerate directly
         if my_count + peer_count <= LEAF_THRESHOLD {
-            let my_hashes = self.store.hashes_in_range(start, end).await.map_err(ReconcileError::Store)?;
+            let my_hashes = self
+                .store
+                .hashes_in_range(start, end)
+                .await
+                .map_err(ReconcileError::Store)?;
             return Ok(ProcessResult {
                 send: vec![ReconcileMessage {
                     content: Some(ReconcileContent::RangeItemsRequest(RangeItemsRequest {
                         start: start.as_bytes().to_vec(),
                         end: end.as_bytes().to_vec(),
                         hashes: my_hashes.iter().map(|h| h.as_bytes().to_vec()).collect(),
-                    }))
+                    })),
                 }],
                 need: vec![],
                 done: false,
@@ -206,10 +238,26 @@ impl<'a, S: RangeStore> Reconciler<'a, S> {
 
         // Too large — split at midpoint and send fingerprints for each half
         let mid = midpoint(start, end);
-        let fp_lo = self.store.fingerprint_range(start, &mid).await.map_err(ReconcileError::Store)?;
-        let count_lo = self.store.count_range(start, &mid).await.map_err(ReconcileError::Store)?;
-        let fp_hi = self.store.fingerprint_range(&mid, end).await.map_err(ReconcileError::Store)?;
-        let count_hi = self.store.count_range(&mid, end).await.map_err(ReconcileError::Store)?;
+        let fp_lo = self
+            .store
+            .fingerprint_range(start, &mid)
+            .await
+            .map_err(ReconcileError::Store)?;
+        let count_lo = self
+            .store
+            .count_range(start, &mid)
+            .await
+            .map_err(ReconcileError::Store)?;
+        let fp_hi = self
+            .store
+            .fingerprint_range(&mid, end)
+            .await
+            .map_err(ReconcileError::Store)?;
+        let count_hi = self
+            .store
+            .count_range(&mid, end)
+            .await
+            .map_err(ReconcileError::Store)?;
 
         Ok(ProcessResult {
             send: vec![
@@ -219,7 +267,7 @@ impl<'a, S: RangeStore> Reconciler<'a, S> {
                         end: mid.as_bytes().to_vec(),
                         fingerprint: fp_lo.as_bytes().to_vec(),
                         count: count_lo,
-                    }))
+                    })),
                 },
                 ReconcileMessage {
                     content: Some(ReconcileContent::RangeFingerprint(RangeFingerprint {
@@ -227,7 +275,7 @@ impl<'a, S: RangeStore> Reconciler<'a, S> {
                         end: end.as_bytes().to_vec(),
                         fingerprint: fp_hi.as_bytes().to_vec(),
                         count: count_hi,
-                    }))
+                    })),
                 },
             ],
             need: vec![],
@@ -242,11 +290,16 @@ impl<'a, S: RangeStore> Reconciler<'a, S> {
         peer_hashes: &[Hash],
         is_request: bool,
     ) -> Result<ProcessResult, ReconcileError<S::Error>> {
-        let my_hashes = self.store.hashes_in_range(start, end).await.map_err(ReconcileError::Store)?;
+        let my_hashes = self
+            .store
+            .hashes_in_range(start, end)
+            .await
+            .map_err(ReconcileError::Store)?;
 
         // Find what we're missing: in peer's set but not ours
         let my_set: std::collections::HashSet<&Hash> = my_hashes.iter().collect();
-        let need: Vec<Hash> = peer_hashes.iter()
+        let need: Vec<Hash> = peer_hashes
+            .iter()
             .filter(|h| !my_set.contains(h))
             .copied()
             .collect();
@@ -258,10 +311,12 @@ impl<'a, S: RangeStore> Reconciler<'a, S> {
                     start: start.as_bytes().to_vec(),
                     end: end.as_bytes().to_vec(),
                     hashes: my_hashes.iter().map(|h| h.as_bytes().to_vec()).collect(),
-                }))
+                })),
             }]
         } else {
-            vec![ReconcileMessage { content: Some(ReconcileContent::Done(true)) }]
+            vec![ReconcileMessage {
+                content: Some(ReconcileContent::Done(true)),
+            }]
         };
 
         Ok(ProcessResult {
@@ -278,7 +333,7 @@ impl<'a, S: RangeStore> Reconciler<'a, S> {
 fn midpoint(a: &Hash, b: &Hash) -> Hash {
     // Process as two 128-bit Big-Endian integers to match Hash lexicographical order
     // (Hash comparison treats bytes[0] as MSB)
-    
+
     // 1. Load inputs as two u128s each (Big Endian)
     // "hi" is the first 16 bytes, "lo" is the last 16 bytes
     let a_hi = u128::from_be_bytes(a.0[0..16].try_into().unwrap());
@@ -292,7 +347,7 @@ fn midpoint(a: &Hash, b: &Hash) -> Hash {
     let mut mid_lo = (a_lo & b_lo) + ((a_lo ^ b_lo) >> 1);
 
     // 3. Handle the carry from high to low
-    // If the LSB of the High Part's XOR term was 1, it shifts right 
+    // If the LSB of the High Part's XOR term was 1, it shifts right
     // to become the MSB of the Low Part (2^128 becomes 2^127).
     if (a_hi ^ b_hi) & 1 == 1 {
         mid_lo |= 1 << 127;
@@ -322,7 +377,9 @@ mod tests {
 
     impl MemStore {
         fn new(hashes: impl IntoIterator<Item = Hash>) -> Self {
-            Self { hashes: hashes.into_iter().collect() }
+            Self {
+                hashes: hashes.into_iter().collect(),
+            }
         }
     }
 
@@ -344,7 +401,11 @@ mod tests {
             Ok(Hash(fp))
         }
 
-        async fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, Self::Error> {
+        async fn hashes_in_range(
+            &self,
+            start: &Hash,
+            end: &Hash,
+        ) -> Result<Vec<Hash>, Self::Error> {
             Ok(self.hashes.range(start..end).copied().collect())
         }
 
@@ -391,9 +452,15 @@ mod tests {
             }
             a_outbox = next_a_out;
 
-            if a_outbox.iter().all(|m| matches!(m.content, Some(ReconcileContent::Done(_)))) && 
-               b_outbox.iter().all(|m| matches!(m.content, Some(ReconcileContent::Done(_)))) &&
-               !a_outbox.is_empty() && !b_outbox.is_empty() {
+            if a_outbox
+                .iter()
+                .all(|m| matches!(m.content, Some(ReconcileContent::Done(_))))
+                && b_outbox
+                    .iter()
+                    .all(|m| matches!(m.content, Some(ReconcileContent::Done(_))))
+                && !a_outbox.is_empty()
+                && !b_outbox.is_empty()
+            {
                 break;
             }
         }
@@ -474,15 +541,15 @@ mod tests {
     #[tokio::test]
     async fn large_set_few_differences() {
         // 200 common items, 5 unique to each side
-        let common: Vec<Hash> = (0u16..200).map(|i| {
-            Hash(*blake3::hash(&i.to_le_bytes()).as_bytes())
-        }).collect();
-        let a_extra: Vec<Hash> = (1000u16..1005).map(|i| {
-            Hash(*blake3::hash(&i.to_le_bytes()).as_bytes())
-        }).collect();
-        let b_extra: Vec<Hash> = (2000u16..2005).map(|i| {
-            Hash(*blake3::hash(&i.to_le_bytes()).as_bytes())
-        }).collect();
+        let common: Vec<Hash> = (0u16..200)
+            .map(|i| Hash(*blake3::hash(&i.to_le_bytes()).as_bytes()))
+            .collect();
+        let a_extra: Vec<Hash> = (1000u16..1005)
+            .map(|i| Hash(*blake3::hash(&i.to_le_bytes()).as_bytes()))
+            .collect();
+        let b_extra: Vec<Hash> = (2000u16..2005)
+            .map(|i| Hash(*blake3::hash(&i.to_le_bytes()).as_bytes()))
+            .collect();
 
         let a = MemStore::new(common.iter().chain(a_extra.iter()).copied());
         let b = MemStore::new(common.iter().chain(b_extra.iter()).copied());

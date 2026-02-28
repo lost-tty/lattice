@@ -2,12 +2,12 @@
 //!
 //! Semantic newtypes for common fixed-size byte arrays, replacing raw `[u8; N]`.
 
-use std::fmt;
-use borsh::{BorshSerialize, BorshDeserialize};
 use borsh::io::{Read, Write};
+use borsh::{BorshDeserialize, BorshSerialize};
+use std::fmt;
 
 /// Macro to define fixed-size byte arrays with strong types.
-/// 
+///
 /// Args:
 /// - $name: The name of the struct (e.g., Hash)
 /// - $len: The size of the array (e.g., 32)
@@ -19,7 +19,7 @@ macro_rules! define_bytes {
     ($name:ident, $len:expr, $doc:expr, [$($derives:ident),*]) => {
         #[doc = $doc]
         #[derive(Clone, Copy, serde::Serialize, serde::Deserialize, $($derives),*)]
-        #[repr(transparent)] 
+        #[repr(transparent)]
         pub struct $name(#[serde(with = "serde_bytes")] pub [u8; $len]);
 
         impl $name {
@@ -134,9 +134,9 @@ macro_rules! define_bytes {
 // --- Type Definitions ---
 
 define_bytes!(
-    Hash, 
-    32, 
-    "32-byte hash (BLAKE3)", 
+    Hash,
+    32,
+    "32-byte hash (BLAKE3)",
     [PartialEq, Eq, Hash, Default, PartialOrd, Ord]
 );
 
@@ -145,18 +145,13 @@ impl Hash {
 }
 
 define_bytes!(
-    PubKey, 
-    32, 
-    "32-byte Ed25519 public key", 
+    PubKey,
+    32,
+    "32-byte Ed25519 public key",
     [PartialEq, Eq, Hash, Default, PartialOrd, Ord]
 );
 
-define_bytes!(
-    Signature, 
-    64, 
-    "64-byte Ed25519 signature", 
-    [PartialEq, Eq]
-);
+define_bytes!(Signature, 64, "64-byte Ed25519 signature", [PartialEq, Eq]);
 
 // --- Tests ---
 
@@ -187,7 +182,7 @@ mod tests {
         assert_eq!(*hash, bytes); // Test Deref
         assert_eq!(hash.as_bytes(), &bytes);
     }
-    
+
     #[test]
     fn test_from_into() {
         let bytes: [u8; 32] = [1; 32];

@@ -41,17 +41,22 @@ pub fn author_color(author: &PubKey) -> AnsiColors {
     // 12 Safe colors (skipping Black, White, and Gray to ensure readability)
     const COLORS: [AnsiColors; 12] = [
         // Standard
-        AnsiColors::Red, AnsiColors::Green, AnsiColors::Yellow,
-        AnsiColors::Blue, AnsiColors::Magenta, AnsiColors::Cyan,
+        AnsiColors::Red,
+        AnsiColors::Green,
+        AnsiColors::Yellow,
+        AnsiColors::Blue,
+        AnsiColors::Magenta,
+        AnsiColors::Cyan,
         // Bright / Bold variants
-        AnsiColors::BrightRed, AnsiColors::BrightGreen, AnsiColors::BrightYellow,
-        AnsiColors::BrightBlue, AnsiColors::BrightMagenta, AnsiColors::BrightCyan,
+        AnsiColors::BrightRed,
+        AnsiColors::BrightGreen,
+        AnsiColors::BrightYellow,
+        AnsiColors::BrightBlue,
+        AnsiColors::BrightMagenta,
+        AnsiColors::BrightCyan,
     ];
     // Mix first 4 bytes to prevent clumping when keys share prefixes
-    let hash = author[0] as usize 
-             ^ author[1] as usize 
-             ^ author[2] as usize 
-             ^ author[3] as usize;
+    let hash = author[0] as usize ^ author[1] as usize ^ author[2] as usize ^ author[3] as usize;
 
     COLORS[hash % COLORS.len()]
 }
@@ -99,7 +104,8 @@ pub fn render_sexpr_colored(expr: &lattice_runtime::SExpr, max_hex_bytes: usize)
         }
         SExpr::Num(n) => format!("{}", n.yellow()),
         SExpr::List(items) => {
-            let inner: Vec<String> = items.iter()
+            let inner: Vec<String> = items
+                .iter()
                 .map(|i| render_sexpr_colored(i, max_hex_bytes))
                 .collect();
             format!("{}{}{}", "(".dimmed(), inner.join(" "), ")".dimmed())
@@ -114,17 +120,36 @@ pub fn render_sexpr_pretty_colored(expr: &lattice_runtime::SExpr, max_hex_bytes:
     fmt_pretty_colored(expr, max_hex_bytes, 0)
 }
 
-fn fmt_pretty_colored(expr: &lattice_runtime::SExpr, max_hex_bytes: usize, indent: usize) -> String {
+fn fmt_pretty_colored(
+    expr: &lattice_runtime::SExpr,
+    max_hex_bytes: usize,
+    indent: usize,
+) -> String {
     use lattice_runtime::SExpr;
     use owo_colors::OwoColorize;
     match expr {
-        SExpr::List(items) if items.len() > 1 && items.iter().any(|i| matches!(i, SExpr::List(_))) => {
+        SExpr::List(items)
+            if items.len() > 1 && items.iter().any(|i| matches!(i, SExpr::List(_))) =>
+        {
             let pad = "  ".repeat(indent + 1);
             let head = render_sexpr_colored(&items[0], max_hex_bytes);
-            let children: Vec<String> = items[1..].iter()
-                .map(|item| format!("{}{}", pad, fmt_pretty_colored(item, max_hex_bytes, indent + 1)))
+            let children: Vec<String> = items[1..]
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{}{}",
+                        pad,
+                        fmt_pretty_colored(item, max_hex_bytes, indent + 1)
+                    )
+                })
                 .collect();
-            format!("{}{}\n{}{}", "(".dimmed(), head, children.join("\n"), ")".dimmed())
+            format!(
+                "{}{}\n{}{}",
+                "(".dimmed(),
+                head,
+                children.join("\n"),
+                ")".dimmed()
+            )
         }
         _ => render_sexpr_colored(expr, max_hex_bytes),
     }

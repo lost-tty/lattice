@@ -6,7 +6,7 @@
 #[cfg(test)]
 mod tests {
     use lattice_kernel::OpenedStore;
-    use lattice_model::{NodeIdentity, StateMachine, StateWriter, Op, PubKey, types::Hash};
+    use lattice_model::{types::Hash, NodeIdentity, Op, PubKey, StateMachine, StateWriter};
     use std::sync::{Arc, RwLock};
     use uuid::Uuid;
 
@@ -28,10 +28,7 @@ mod tests {
         fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> {
             Ok(Box::new(std::io::Cursor::new(Vec::new())))
         }
-        fn restore(
-            &self,
-            _snapshot: Box<dyn std::io::Read + Send>,
-        ) -> Result<(), Self::Error> {
+        fn restore(&self, _snapshot: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> {
             Ok(())
         }
         fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
@@ -54,7 +51,8 @@ mod tests {
         // Phase 1: Create store and write data
         {
             let state = Arc::new(TestStateMachine::new());
-            let opened = OpenedStore::new(store_id, store_dir.clone(), state, node.signing_key()).unwrap();
+            let opened =
+                OpenedStore::new(store_id, store_dir.clone(), state, node.signing_key()).unwrap();
             let (handle, _info, runner) = opened.into_handle(node.clone()).unwrap();
             let _actor = tokio::spawn(async move { runner.run().await });
 
@@ -121,7 +119,8 @@ mod tests {
         // Phase 1: Create and populate store
         {
             let state = Arc::new(TestStateMachine::new());
-            let opened = OpenedStore::new(store_id, store_dir.clone(), state, node.signing_key()).unwrap();
+            let opened =
+                OpenedStore::new(store_id, store_dir.clone(), state, node.signing_key()).unwrap();
             let (handle, _info, runner) = opened.into_handle(node.clone()).unwrap();
             let _actor = tokio::spawn(async move { runner.run().await });
 

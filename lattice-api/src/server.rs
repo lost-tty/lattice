@@ -5,8 +5,7 @@ use crate::dynamic_store_service::DynamicStoreServiceImpl;
 use crate::node_service::NodeServiceImpl;
 use crate::proto::{
     dynamic_store_service_server::DynamicStoreServiceServer,
-    node_service_server::NodeServiceServer,
-    store_service_server::StoreServiceServer,
+    node_service_server::NodeServiceServer, store_service_server::StoreServiceServer,
 };
 use crate::store_service::StoreServiceImpl;
 use std::path::PathBuf;
@@ -22,7 +21,10 @@ pub struct RpcServer {
 
 impl RpcServer {
     pub fn new(backend: Backend, socket_path: PathBuf) -> Self {
-        Self { backend, socket_path }
+        Self {
+            backend,
+            socket_path,
+        }
     }
 
     /// Default socket path using platform-specific data directory
@@ -46,7 +48,7 @@ impl RpcServer {
         }
 
         let uds = UnixListener::bind(&self.socket_path)?;
-        
+
         // Secure the socket (RW for owner only)
         #[cfg(unix)]
         {
@@ -57,7 +59,7 @@ impl RpcServer {
                 let _ = std::fs::set_permissions(&self.socket_path, perms);
             }
         }
-        
+
         let uds_stream = UnixListenerStream::new(uds);
 
         tracing::info!("RPC server listening on {:?}", self.socket_path);

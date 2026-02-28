@@ -15,7 +15,7 @@ use lattice_systemstore::SystemStore;
 use std::sync::Arc;
 
 /// A unified interface for store handles.
-/// 
+///
 /// All store handles implement this trait,
 /// providing type-agnostic access to:
 /// - CommandDispatcher for introspection and command execution (extends Introspectable)
@@ -25,16 +25,16 @@ use std::sync::Arc;
 pub trait StoreHandle: Send + Sync {
     /// Get the store's unique identifier
     fn id(&self) -> Uuid;
-    
+
     /// Get the store type string (e.g., "core:kvstore")
     fn store_type(&self) -> &str;
-    
+
     /// Get a CommandDispatcher for introspection and command execution
     fn as_dispatcher(&self) -> Arc<dyn CommandDispatcher>;
-    
+
     /// Get a SyncProvider for network sync operations
     fn as_sync_provider(&self) -> Arc<dyn SyncProvider>;
-    
+
     /// Get a StoreInspector for log inspection and diagnostics (CLI)
     fn as_inspector(&self) -> Arc<dyn StoreInspector>;
     /// Get a StreamReflectable for stream introspection
@@ -52,33 +52,41 @@ pub trait StoreHandle: Send + Sync {
 // Specialized Implementation for Store<S>
 use lattice_kernel::Store;
 use lattice_model::StateMachine;
-use lattice_store_base::{Introspectable, CommandHandler, StreamProvider};
 use lattice_model::StoreTypeProvider;
+use lattice_store_base::{CommandHandler, Introspectable, StreamProvider};
 
 impl<S> StoreHandle for Store<S>
 where
-    S: StateMachine + Introspectable + CommandHandler + StreamProvider + StoreTypeProvider + lattice_systemstore::SystemReader + Send + Sync + 'static,
+    S: StateMachine
+        + Introspectable
+        + CommandHandler
+        + StreamProvider
+        + StoreTypeProvider
+        + lattice_systemstore::SystemReader
+        + Send
+        + Sync
+        + 'static,
 {
     fn id(&self) -> Uuid {
         SyncProvider::id(self)
     }
-    
+
     fn store_type(&self) -> &str {
         S::store_type()
     }
-    
+
     fn as_dispatcher(&self) -> Arc<dyn CommandDispatcher> {
         Arc::new(self.clone())
     }
-    
+
     fn as_sync_provider(&self) -> Arc<dyn SyncProvider> {
         Arc::new(self.clone())
     }
-    
+
     fn as_inspector(&self) -> Arc<dyn StoreInspector> {
         Arc::new(self.clone())
     }
-    
+
     fn as_stream_reflectable(&self) -> Arc<dyn StreamReflectable> {
         Arc::new(self.clone())
     }
@@ -103,15 +111,18 @@ impl Introspectable for dyn StoreHandle {
     fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
         self.as_dispatcher().service_descriptor()
     }
-    
-    fn decode_payload(&self, payload: &[u8]) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+
+    fn decode_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
         self.as_dispatcher().decode_payload(payload)
     }
-    
+
     fn command_docs(&self) -> std::collections::HashMap<String, String> {
         self.as_dispatcher().command_docs()
     }
-    
+
     fn field_formats(&self) -> std::collections::HashMap<String, lattice_store_base::FieldFormat> {
         self.as_dispatcher().field_formats()
     }
@@ -120,7 +131,10 @@ impl Introspectable for dyn StoreHandle {
         self.as_dispatcher().matches_filter(payload, filter)
     }
 
-    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<lattice_model::SExpr> {
+    fn summarize_payload(
+        &self,
+        payload: &prost_reflect::DynamicMessage,
+    ) -> Vec<lattice_model::SExpr> {
         self.as_dispatcher().summarize_payload(payload)
     }
 }
@@ -130,11 +144,19 @@ impl CommandDispatcher for dyn StoreHandle {
         &'a self,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
         let dispatcher = self.as_dispatcher();
-        Box::pin(async move {
-            dispatcher.dispatch(method_name, request).await
-        })
+        Box::pin(async move { dispatcher.dispatch(method_name, request).await })
     }
 }
 
@@ -142,15 +164,23 @@ impl StreamReflectable for dyn StoreHandle {
     fn stream_descriptors(&self) -> Vec<lattice_store_base::StreamDescriptor> {
         self.as_stream_reflectable().stream_descriptors()
     }
-    
+
     fn subscribe<'a>(
         &'a self,
         stream_name: &'a str,
         params: &'a [u8],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<lattice_store_base::BoxByteStream, lattice_store_base::StreamError>> + Send + 'a>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        lattice_store_base::BoxByteStream,
+                        lattice_store_base::StreamError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
         let stream_ref = self.as_stream_reflectable();
-        Box::pin(async move {
-            stream_ref.subscribe(stream_name, params).await
-        })
+        Box::pin(async move { stream_ref.subscribe(stream_name, params).await })
     }
 }

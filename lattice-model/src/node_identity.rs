@@ -4,24 +4,24 @@
 //! - Private key: stored locally in `identity.key` (never replicated)
 //! - Public key: serves as the node's identity (32 bytes)
 
+use crate::types::PubKey;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use thiserror::Error;
-use crate::types::PubKey;
-use serde::{Serialize, Deserialize};
 
 /// Errors that can occur during node operations
 #[derive(Error, Debug)]
 pub enum NodeError {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
-    
+
     #[error("Invalid key length: expected 32 bytes, got {0}")]
     InvalidKeyLength(usize),
-    
+
     #[error("Invalid signature")]
     InvalidSignature,
 }
@@ -63,18 +63,18 @@ impl NodeIdentity {
     /// Load a node's identity from a key file.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, NodeError> {
         use zeroize::Zeroizing;
-        
+
         // Read file into Zeroizing wrapper to ensure heap memory is wiped
         let bytes = Zeroizing::new(fs::read(path)?);
-        
+
         if bytes.len() != 32 {
             return Err(NodeError::InvalidKeyLength(bytes.len()));
         }
-        
+
         // Copy to stack array, also wrapped in Zeroizing to wipe stack memory
         let mut key_bytes = Zeroizing::new([0u8; 32]);
         key_bytes.copy_from_slice(&bytes);
-        
+
         let signing_key = SigningKey::from_bytes(&key_bytes);
         Ok(Self { signing_key })
     }
@@ -82,12 +82,12 @@ impl NodeIdentity {
     /// Save the node's private key to a file.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), NodeError> {
         let path = path.as_ref();
-        
+
         // Create parent directories if they don't exist
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        
+
         let mut file = fs::File::create(path)?;
         file.write_all(self.signing_key.as_bytes())?;
         Ok(())
@@ -224,7 +224,7 @@ mod tests {
     fn test_sign_and_verify() {
         let node = NodeIdentity::generate();
         let message = b"hello lattice";
-        
+
         let signature = node.sign(message);
         assert!(node.verify(message, &signature).is_ok());
     }
@@ -233,7 +233,7 @@ mod tests {
     fn test_verify_wrong_message() {
         let node = NodeIdentity::generate();
         let signature = node.sign(b"original");
-        
+
         assert!(node.verify(b"tampered", &signature).is_err());
     }
 
@@ -241,49 +241,55 @@ mod tests {
     fn test_verify_with_different_key() {
         let node1 = NodeIdentity::generate();
         let node2 = NodeIdentity::generate();
-        
+
         let signature = node1.sign(b"message");
         assert!(node2.verify(b"message", &signature).is_err());
     }
 
     #[test]
     fn test_save_and_load() {
-        let temp_path = tempfile::tempdir().expect("tempdir").keep().join("lattice_test_identity.key");
-        
+        let temp_path = tempfile::tempdir()
+            .expect("tempdir")
+            .keep()
+            .join("lattice_test_identity.key");
+
         // Generate and save
         let node1 = NodeIdentity::generate();
         let pk1 = node1.public_key();
         node1.save(&temp_path).unwrap();
-        
+
         // Load and verify same key
         let node2 = NodeIdentity::load(&temp_path).unwrap();
         let pk2 = node2.public_key();
-        
+
         assert_eq!(pk1, pk2);
-        
+
         // Cleanup
         fs::remove_file(&temp_path).ok();
     }
 
     #[test]
     fn test_load_or_generate() {
-        let temp_path = tempfile::tempdir().expect("tempdir").keep().join("lattice_test_identity2.key");
-        
+        let temp_path = tempfile::tempdir()
+            .expect("tempdir")
+            .keep()
+            .join("lattice_test_identity2.key");
+
         // Remove if exists
         fs::remove_file(&temp_path).ok();
-        
+
         // First call: generates
         let (node1, is_new1) = NodeIdentity::load_or_generate(&temp_path).unwrap();
         let pk1 = node1.public_key();
         assert!(is_new1, "should be newly generated");
-        
+
         // Second call: loads existing
         let (node2, is_new2) = NodeIdentity::load_or_generate(&temp_path).unwrap();
         let pk2 = node2.public_key();
         assert!(!is_new2, "should load existing");
-        
+
         assert_eq!(pk1, pk2);
-        
+
         // Cleanup
         fs::remove_file(&temp_path).ok();
     }
@@ -293,9 +299,9 @@ mod tests {
         let node = NodeIdentity::generate();
         let pk = node.verifying_key();
         let message = b"test message";
-        
+
         let signature = node.sign(message);
-        
+
         assert!(NodeIdentity::verify_with_key(&pk, message, &signature).is_ok());
     }
 }

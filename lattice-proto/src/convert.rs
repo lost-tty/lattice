@@ -17,7 +17,9 @@ pub fn intention_to_proto(signed: &SignedIntention) -> crate::weaver::SignedInte
 }
 
 /// Proto → Model (fallible: borsh decode + signature length)
-pub fn intention_from_proto(proto: &crate::weaver::SignedIntention) -> Result<SignedIntention, String> {
+pub fn intention_from_proto(
+    proto: &crate::weaver::SignedIntention,
+) -> Result<SignedIntention, String> {
     let intention = Intention::from_borsh(&proto.intention_borsh)
         .map_err(|e| format!("Borsh decode failed: {}", e))?;
     let sig_bytes: [u8; 64] = proto

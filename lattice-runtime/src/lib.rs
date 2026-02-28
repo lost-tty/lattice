@@ -11,8 +11,8 @@
 mod backend;
 mod backend_inprocess;
 mod backend_rpc;
-mod runtime;
 mod ops_summary;
+mod runtime;
 mod system_summary;
 
 // Re-export backend abstraction
@@ -22,14 +22,15 @@ pub use backend_rpc::RpcBackend;
 pub use runtime::{Runtime, RuntimeBuilder, RuntimeError};
 
 // Re-export types consumers need
-pub use lattice_store_base::FieldFormat;
-pub use lattice_model::types::{PubKey, Hash};
+pub use lattice_model::types::{Hash, PubKey};
 pub use lattice_model::SExpr;
+pub use lattice_store_base::FieldFormat;
 
 // Re-export store plugin types for custom store registration
-pub use lattice_node::{StoreOpener, StoreRegistry, direct_opener};
+pub use lattice_node::{direct_opener, StoreOpener, StoreRegistry};
 
 // Internal re-exports (not public API)
-pub(crate) type NetworkService = lattice_net::network::NetworkService<lattice_net_iroh::IrohTransport>;
-pub(crate) use lattice_node::{Node, NodeBuilder, StoreHandle};
+pub(crate) type NetworkService =
+    lattice_net::network::NetworkService<lattice_net_iroh::IrohTransport>;
 pub(crate) use lattice_api::RpcServer;
+pub(crate) use lattice_node::{Node, NodeBuilder, StoreHandle};

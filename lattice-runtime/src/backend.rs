@@ -5,19 +5,26 @@
 
 // Re-export everything from lattice-api's backend module
 pub use lattice_api::backend::{
-    LatticeBackend, Backend, NodeEvent, BackendError, BackendResult,
-    AsyncResult, EventReceiver, StreamDescriptor, BoxByteStream,
+    AsyncResult,
+    Backend,
+    BackendError,
+    BackendResult,
+    BoxByteStream,
+    EventReceiver,
     IntentionDetail,
+    JoinFailedEvent,
+    LatticeBackend,
+    NodeEvent,
     // Event wrapper types
-    StoreReadyEvent, JoinFailedEvent, SyncResultEvent,
+    StoreReadyEvent,
+    StreamDescriptor,
+    SyncResultEvent,
 };
 
 // Re-export proto types for consumers
 pub use lattice_api::proto::{
-    NodeStatus, PeerInfo, StoreDetails, StoreMeta, StoreRef,
-    AuthorState, WitnessLogEntry, SignedIntention, SyncResult,
-    Condition, CausalDeps, Hlc, condition,
-    SExpr as ProtoSExpr,
+    condition, AuthorState, CausalDeps, Condition, Hlc, NodeStatus, PeerInfo, SExpr as ProtoSExpr,
+    SignedIntention, StoreDetails, StoreMeta, StoreRef, SyncResult, WitnessLogEntry,
 };
 
 // Re-export weaver proto types for CLI access (avoids lattice-proto dependency)

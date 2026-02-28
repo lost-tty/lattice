@@ -5,7 +5,7 @@
 //! - `CommandHandler` trait for state-level command routing (takes a writer parameter)
 //! - `StreamProvider` trait for stream handlers
 
-use crate::{Introspectable, FieldFormat};
+use crate::{FieldFormat, Introspectable};
 use std::collections::HashMap;
 
 // =============================================================================
@@ -13,13 +13,13 @@ use std::collections::HashMap;
 // =============================================================================
 
 /// Trait for types that provide access to an inner state.
-/// 
+///
 /// Implementing this trait enables automatic delegation of `Introspectable`
 /// to the inner state type via a blanket impl.
 pub trait StateProvider {
     /// The inner state type
     type State;
-    
+
     /// Get a reference to the inner state
     fn state(&self) -> &Self::State;
 }
@@ -29,7 +29,7 @@ pub trait StateProvider {
 // =============================================================================
 
 /// Blanket impl: Any `StateProvider` where `State: Introspectable` is itself `Introspectable`.
-/// 
+///
 /// This eliminates boilerplate delegation code in store handles.
 impl<T> Introspectable for T
 where
@@ -40,7 +40,10 @@ where
         self.state().service_descriptor()
     }
 
-    fn decode_payload(&self, payload: &[u8]) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+    fn decode_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
         self.state().decode_payload(payload)
     }
 
@@ -56,7 +59,10 @@ where
         self.state().matches_filter(payload, filter)
     }
 
-    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<lattice_model::SExpr> {
+    fn summarize_payload(
+        &self,
+        payload: &prost_reflect::DynamicMessage,
+    ) -> Vec<lattice_model::SExpr> {
         self.state().summarize_payload(payload)
     }
 }
@@ -70,11 +76,11 @@ use std::future::Future;
 use std::pin::Pin;
 
 /// Trait for state types that can handle commands.
-/// 
+///
 /// This trait enables state implementations (KvState, LogState) to handle
 /// commands with an injected writer for mutations. Distinct from `CommandDispatcher`
 /// which is the handle-level trait that owns the writer.
-/// 
+///
 /// # Example
 /// ```ignore
 /// impl CommandHandler for KvState {
@@ -101,7 +107,17 @@ pub trait CommandHandler: Send + Sync {
         writer: &'a dyn StateWriter,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
-    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>;
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    >;
 }
 
 /// Blanket impl: Any type that derefs to a CommandHandler is also a CommandHandler.
@@ -116,7 +132,17 @@ where
         writer: &'a dyn StateWriter,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
-    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
         (**self).handle_command(writer, method_name, request)
     }
 }
@@ -125,14 +151,14 @@ where
 // StreamProvider Trait + Blanket StreamReflectable
 // =============================================================================
 
-use crate::{StreamReflectable, StreamDescriptor, StreamError, BoxByteStream};
+use crate::{BoxByteStream, StreamDescriptor, StreamError, StreamReflectable};
 
 /// Trait for handling stream subscriptions.
 pub trait Subscriber<S: ?Sized>: Send + Sync {
     fn subscribe<'a>(
-        &'a self, 
-        state: &'a S, 
-        params: &'a [u8]
+        &'a self,
+        state: &'a S,
+        params: &'a [u8],
     ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>>;
 }
 
@@ -143,10 +169,10 @@ pub struct StreamHandler<S: ?Sized> {
 }
 
 /// Trait for state types that provide stream handlers.
-/// 
+///
 /// Implementing this trait enables automatic `StreamReflectable` on handles
 /// via the blanket impl.
-/// 
+///
 /// # Example
 /// ```ignore
 /// impl StreamProvider for KvState {
@@ -157,7 +183,7 @@ pub struct StreamHandler<S: ?Sized> {
 ///         }]
 ///     }
 /// }
-/// 
+///
 /// impl KvState {
 ///     fn subscribe_watch(&self, params: &[u8]) -> Result<BoxByteStream, StreamError> { ... }
 /// }
@@ -174,27 +200,35 @@ where
     T::State: StreamProvider,
 {
     fn stream_descriptors(&self) -> Vec<StreamDescriptor> {
-        self.state().stream_handlers().into_iter().map(|h| h.descriptor).collect()
+        self.state()
+            .stream_handlers()
+            .into_iter()
+            .map(|h| h.descriptor)
+            .collect()
     }
-    
-    fn subscribe<'a>(&'a self, stream_name: &'a str, params: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+
+    fn subscribe<'a>(
+        &'a self,
+        stream_name: &'a str,
+        params: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
         let handlers = self.state().stream_handlers();
-        
+
         // We must clone the descriptor name needed or process handlers before async block
         // to avoid lifetime issues with `stream_name`.
-        // Actually, we can just find the handler inside the async block if we own the resources or 
-        // if we process it outside. 
+        // Actually, we can just find the handler inside the async block if we own the resources or
+        // if we process it outside.
         // The issue is `stream_name` is &str.
-        
+
         let found_handler = handlers
             .into_iter()
             .find(|h| h.descriptor.name == stream_name);
-            
+
         Box::pin(async move {
-             let handler = found_handler
-                .ok_or_else(|| StreamError::NotFound(stream_name.to_string()))?;
-            
-             handler.subscriber.subscribe(self.state(), params).await
+            let handler =
+                found_handler.ok_or_else(|| StreamError::NotFound(stream_name.to_string()))?;
+
+            handler.subscriber.subscribe(self.state(), params).await
         })
     }
 }

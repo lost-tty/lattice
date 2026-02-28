@@ -23,15 +23,17 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("latticed v{} starting...", env!("CARGO_PKG_VERSION"));
 
     // Start runtime with Node + NetworkService + RPC server
-    let runtime = Runtime::builder().with_core_stores().with_rpc().build().await.map_err(|e| {
-        tracing::error!("Failed to start: {}", e);
-        anyhow::anyhow!("{}", e)
-    })?;
+    let runtime = Runtime::builder()
+        .with_core_stores()
+        .with_rpc()
+        .build()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to start: {}", e);
+            anyhow::anyhow!("{}", e)
+        })?;
 
-    tracing::info!(
-        "Node: {}",
-        hex::encode(&runtime.backend().node_id()[..4])
-    );
+    tracing::info!("Node: {}", hex::encode(&runtime.backend().node_id()[..4]));
     tracing::info!("Daemon ready. Press Ctrl+C to stop.");
 
     // Wait for shutdown signal

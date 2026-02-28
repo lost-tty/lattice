@@ -1,45 +1,50 @@
 //! Lattice Model
 //!
-//! Pure data types and traits for the Lattice system, decoupled from 
+//! Pure data types and traits for the Lattice system, decoupled from
 //! storage engines, network stacks, and replication logs.
 
-pub mod types;
-pub mod crypto;
-pub mod hlc;
 pub mod clock;
-pub mod state_machine;
+pub mod crypto;
 pub mod dag_queries;
-pub mod replication;
-pub mod node_identity;
-pub mod peer_provider;
-pub mod net_event;
-pub mod node_provider;
-pub mod store_type;
-pub mod openable;
-pub mod store_info;
 pub mod head;
-pub mod weaver;
+pub mod hlc;
+pub mod net_event;
+pub mod node_identity;
+pub mod node_provider;
+pub mod openable;
+pub mod peer_provider;
+pub mod replication;
 pub mod sexpr;
+pub mod state_machine;
+pub mod store_info;
+pub mod store_type;
+pub mod types;
+pub mod weaver;
 
 // Re-exports from dependencies
-pub use uuid::Uuid;
-pub use types::{Hash, PubKey, Signature};
-pub use hlc::HLC;
-pub use clock::{Clock, SystemClock, MockClock};
-pub use state_machine::{StateMachine, StateWriter, StateWriterError, Op};
+pub use clock::{Clock, MockClock, SystemClock};
 pub use dag_queries::{DagQueries, IntentionInfo};
+pub use head::{Head, HeadError};
+pub use hlc::HLC;
+pub use net_event::NetEvent;
+pub use node_identity::{InviteInfo, InviteStatus, NodeError, NodeIdentity, PeerInfo, PeerStatus};
+pub use node_provider::{
+    JoinAcceptanceInfo, NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent,
+};
+pub use openable::{OpenError, Openable};
+pub use peer_provider::{GossipPeer, PeerEvent, PeerEventStream, PeerProvider};
 pub use replication::{
+    IngestResult,
+    // Types
+    ReplicationError,
     // Traits
     StoreEventSource,
-    // Types
-    ReplicationError, IngestResult,
 };
-pub use node_identity::{NodeIdentity, NodeError, PeerStatus, PeerInfo, InviteStatus, InviteInfo};
-pub use peer_provider::{PeerProvider, PeerEvent, PeerEventStream, GossipPeer};
-pub use net_event::NetEvent;
-pub use node_provider::{NodeProvider, NodeProviderAsync, NodeProviderError, UserEvent, JoinAcceptanceInfo};
-pub use store_type::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, CORE_STORE_TYPES, StoreTypeProvider};
-pub use openable::{Openable, OpenError};
-pub use store_info::{StoreMeta, StoreLink, SystemEvent};
-pub use head::{Head, HeadError};
 pub use sexpr::SExpr;
+pub use state_machine::{Op, StateMachine, StateWriter, StateWriterError};
+pub use store_info::{StoreLink, StoreMeta, SystemEvent};
+pub use store_type::{
+    StoreTypeProvider, CORE_STORE_TYPES, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE,
+};
+pub use types::{Hash, PubKey, Signature};
+pub use uuid::Uuid;

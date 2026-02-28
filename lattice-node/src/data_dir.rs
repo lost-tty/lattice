@@ -88,7 +88,10 @@ mod tests {
     fn test_custom_path() {
         let dd = DataDir::new("/custom/path");
         assert_eq!(dd.base(), Path::new("/custom/path"));
-        assert_eq!(dd.identity_key(), PathBuf::from("/custom/path/identity.key"));
+        assert_eq!(
+            dd.identity_key(),
+            PathBuf::from("/custom/path/identity.key")
+        );
         assert_eq!(dd.meta_db(), PathBuf::from("/custom/path/meta.db"));
         assert_eq!(dd.stores_dir(), PathBuf::from("/custom/path/stores"));
     }
@@ -97,10 +100,22 @@ mod tests {
     fn test_store_paths() {
         let dd = DataDir::new("/data");
         let store_id = Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
-        
-        assert_eq!(dd.store_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
-        assert_eq!(dd.store_intentions_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/intentions"));
-        assert_eq!(dd.store_state_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/state"));
-        assert_eq!(dd.store_sync_dir(store_id), PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/sync"));
+
+        assert_eq!(
+            dd.store_dir(store_id),
+            PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+        );
+        assert_eq!(
+            dd.store_intentions_dir(store_id),
+            PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/intentions")
+        );
+        assert_eq!(
+            dd.store_state_dir(store_id),
+            PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/state")
+        );
+        assert_eq!(
+            dd.store_sync_dir(store_id),
+            PathBuf::from("/data/stores/a1b2c3d4-e5f6-7890-abcd-ef1234567890/sync")
+        );
     }
 }

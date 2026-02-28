@@ -3,4 +3,4 @@
 //! Re-exports `PeerProvider` trait from lattice-model.
 
 // Re-export from lattice-model
-pub use lattice_model::{PeerProvider, PeerEvent, PeerEventStream, PeerStatus};
+pub use lattice_model::{PeerEvent, PeerEventStream, PeerProvider, PeerStatus};

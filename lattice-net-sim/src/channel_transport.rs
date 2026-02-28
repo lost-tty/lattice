@@ -66,16 +66,22 @@ impl Transport for ChannelTransport {
         self.pubkey
     }
 
-    fn connect(&self, peer: &PubKey) -> impl std::future::Future<Output = Result<Self::Connection, TransportError>> + Send {
+    fn connect(
+        &self,
+        peer: &PubKey,
+    ) -> impl std::future::Future<Output = Result<Self::Connection, TransportError>> + Send {
         let network = self.network.clone();
         let my_pubkey = self.pubkey;
         let peer_pubkey = *peer;
 
         async move {
             let peers = network.peers.lock().await;
-            let accept_tx = peers.get(&peer_pubkey).ok_or_else(|| {
-                TransportError::Connect(format!("Peer {} not found in network", peer_pubkey))
-            })?.clone();
+            let accept_tx = peers
+                .get(&peer_pubkey)
+                .ok_or_else(|| {
+                    TransportError::Connect(format!("Peer {} not found in network", peer_pubkey))
+                })?
+                .clone();
             drop(peers);
 
             // One channel: initiator sends DuplexStream ends to peer.
@@ -92,7 +98,9 @@ impl Transport for ChannelTransport {
             })?;
 
             // Emit peer connected
-            let _ = self.network_events_tx.send(lattice_net_types::NetworkEvent::PeerConnected(peer_pubkey));
+            let _ = self
+                .network_events_tx
+                .send(lattice_net_types::NetworkEvent::PeerConnected(peer_pubkey));
 
             // Return the initiator connection.
             Ok(ChannelConnection {
@@ -108,12 +116,14 @@ impl Transport for ChannelTransport {
         async move {
             let conn = accept_rx.lock().await.recv().await;
             if let Some(ref c) = conn {
-                let _ = events_tx.send(lattice_net_types::NetworkEvent::PeerConnected(c.remote_pubkey));
+                let _ = events_tx.send(lattice_net_types::NetworkEvent::PeerConnected(
+                    c.remote_pubkey,
+                ));
             }
             conn
         }
     }
-    
+
     fn network_events(&self) -> tokio::sync::broadcast::Receiver<lattice_net_types::NetworkEvent> {
         self.network_events_tx.subscribe()
     }
@@ -144,7 +154,9 @@ impl std::fmt::Debug for ChannelConnection {
 impl Connection for ChannelConnection {
     type Stream = ChannelBiStream;
 
-    fn open_bi(&self) -> impl std::future::Future<Output = Result<Self::Stream, TransportError>> + Send {
+    fn open_bi(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Self::Stream, TransportError>> + Send {
         let role = match &self.role {
             ConnectionRole::Initiator(tx) => ConnectionRole::Initiator(tx.clone()),
             ConnectionRole::Responder(rx) => ConnectionRole::Responder(rx.clone()),
@@ -155,16 +167,17 @@ impl Connection for ChannelConnection {
                 ConnectionRole::Initiator(tx) => {
                     let (mine, theirs) = tokio::io::duplex(DUPLEX_BUF_SIZE);
                     let tx = tx.lock().await;
-                    tx.send(theirs).await.map_err(|_| {
-                        TransportError::Stream("Connection closed".into())
-                    })?;
+                    tx.send(theirs)
+                        .await
+                        .map_err(|_| TransportError::Stream("Connection closed".into()))?;
                     Ok(ChannelBiStream(mine))
                 }
                 ConnectionRole::Responder(rx) => {
                     let mut rx = rx.lock().await;
-                    let stream = rx.recv().await.ok_or_else(|| {
-                        TransportError::Stream("Connection closed".into())
-                    })?;
+                    let stream = rx
+                        .recv()
+                        .await
+                        .ok_or_else(|| TransportError::Stream("Connection closed".into()))?;
                     Ok(ChannelBiStream(stream))
                 }
             }

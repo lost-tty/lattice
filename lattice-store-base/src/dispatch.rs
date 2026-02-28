@@ -1,9 +1,9 @@
 //! Generic Proto Command Dispatch Helper
-//! 
+//!
 //! Reduces boilerplate for mapping DynamicMessage requests to async Rust generic handlers.
 
-use prost_reflect::{DynamicMessage, ServiceDescriptor};
 use prost::Message;
+use prost_reflect::{DynamicMessage, ServiceDescriptor};
 use std::error::Error;
 use std::future::Future;
 
@@ -36,8 +36,11 @@ where
     // We go via bytes: Dynamic -> Bytes -> Concrete
     // This is robust and doesn't require reflection on Concrete
     let mut buf = Vec::new();
-    request.encode(&mut buf).map_err(|e| format!("Failed to encode dynamic request: {}", e))?;
-    let req = Req::decode(buf.as_slice()).map_err(|e| format!("Failed to decode concrete request: {}", e))?;
+    request
+        .encode(&mut buf)
+        .map_err(|e| format!("Failed to encode dynamic request: {}", e))?;
+    let req = Req::decode(buf.as_slice())
+        .map_err(|e| format!("Failed to decode concrete request: {}", e))?;
 
     // 3. Execute Handler
     let resp = handler(req).await?;
@@ -45,10 +48,13 @@ where
     // 4. Encode Response (Concrete -> Dynamic)
     // Concrete -> Bytes -> Dynamic
     let mut resp_buf = Vec::new();
-    resp.encode(&mut resp_buf).map_err(|e| format!("Failed to encode concrete response: {}", e))?;
-    
+    resp.encode(&mut resp_buf)
+        .map_err(|e| format!("Failed to encode concrete response: {}", e))?;
+
     let mut dynamic_resp = DynamicMessage::new(method.output());
-    dynamic_resp.merge(resp_buf.as_slice()).map_err(|e| format!("Failed to parse response into dynamic message: {}", e))?;
-    
+    dynamic_resp
+        .merge(resp_buf.as_slice())
+        .map_err(|e| format!("Failed to parse response into dynamic message: {}", e))?;
+
     Ok(dynamic_resp)
 }

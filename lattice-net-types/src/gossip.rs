@@ -3,9 +3,9 @@
 //! Pure transport-level gossip: subscribe to topics and exchange raw bytes.
 //! Proto encoding/decoding and intention management live in `lattice-net`.
 
+use lattice_model::types::PubKey;
 use tokio::sync::broadcast;
 use uuid::Uuid;
-use lattice_model::types::PubKey;
 
 /// Error type for gossip operations.
 #[derive(Debug, thiserror::Error)]
@@ -44,7 +44,7 @@ pub trait GossipLayer: Send + Sync + 'static {
 
     /// Shut down the entire gossip layer.
     async fn shutdown(&self);
-    
+
     /// Get a stream of network connectivity events
     fn network_events(&self) -> tokio::sync::broadcast::Receiver<crate::NetworkEvent>;
 }

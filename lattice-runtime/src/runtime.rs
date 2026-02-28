@@ -23,28 +23,30 @@ impl Runtime {
     pub fn builder() -> RuntimeBuilder {
         RuntimeBuilder::new()
     }
-    
+
     /// Get the underlying Node.
     pub fn node(&self) -> &Arc<Node> {
         &self.node
     }
-    
+
     /// Get the backend for SDK operations.
     pub fn backend(&self) -> &Arc<dyn LatticeBackend> {
         &self.backend
     }
-    
+
     /// Shutdown the runtime gracefully.
     pub async fn shutdown(&self) -> Result<(), RuntimeError> {
         // Abort RPC server if running
         if let Some(handle) = &self.rpc_handle {
             handle.abort();
         }
-        
+
         // Shutdown mesh service
-        self.mesh_service.shutdown().await
+        self.mesh_service
+            .shutdown()
+            .await
             .map_err(|e| RuntimeError::Network(e.to_string()))?;
-        
+
         Ok(())
     }
 }
@@ -59,19 +61,19 @@ pub struct RuntimeBuilder {
 
 impl RuntimeBuilder {
     pub fn new() -> Self {
-        Self { 
+        Self {
             data_dir: None,
             with_rpc: false,
             name: None,
             opener_factories: Vec::new(),
         }
     }
-    
+
     pub fn data_dir(mut self, path: PathBuf) -> Self {
         self.data_dir = Some(path);
         self
     }
-    
+
     /// Enable RPC server (for daemon mode).
     pub fn with_rpc(mut self) -> Self {
         self.with_rpc = true;
@@ -101,7 +103,8 @@ impl RuntimeBuilder {
     where
         F: FnOnce(Arc<StoreRegistry>) -> Box<dyn StoreOpener> + Send + 'static,
     {
-        self.opener_factories.push((store_type.into(), Box::new(factory)));
+        self.opener_factories
+            .push((store_type.into(), Box::new(factory)));
         self
     }
 
@@ -111,70 +114,70 @@ impl RuntimeBuilder {
     /// customise which store types are available, use `with_opener()` instead.
     #[cfg(feature = "core-stores")]
     pub fn with_core_stores(self) -> Self {
-        use lattice_node::direct_opener;
-        use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
-        use lattice_systemstore::SystemLayer;
-        use lattice_storage::PersistentState;
         use lattice_kvstore::KvState;
         use lattice_logstore::LogState;
+        use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
+        use lattice_node::direct_opener;
+        use lattice_storage::PersistentState;
+        use lattice_systemstore::SystemLayer;
 
         self.with_opener(STORE_TYPE_KVSTORE, |registry| {
-                direct_opener::<SystemLayer<PersistentState<KvState>>>(registry)
-            })
-            .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-                direct_opener::<SystemLayer<PersistentState<LogState>>>(registry)
-            })
+            direct_opener::<SystemLayer<PersistentState<KvState>>>(registry)
+        })
+        .with_opener(STORE_TYPE_LOGSTORE, |registry| {
+            direct_opener::<SystemLayer<PersistentState<LogState>>>(registry)
+        })
     }
 
     /// Build and start the runtime.
     pub async fn build(self) -> Result<Runtime, RuntimeError> {
         // Create net channel
         let (net_tx, net_rx) = tokio::sync::broadcast::channel(64);
-        
+
         // Determine data directory
         let data_path = match self.data_dir {
             Some(p) => p,
-            None => {
-                dirs::data_dir()
-                    .unwrap_or_else(|| PathBuf::from("./data"))
-                    .join("lattice")
-            }
+            None => dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("./data"))
+                .join("lattice"),
         };
-        
+
         let data_dir = lattice_node::data_dir::DataDir::new(data_path);
 
         // Build node with registered openers
-        let mut builder = NodeBuilder::new(data_dir)
-            .with_net_tx(net_tx);
+        let mut builder = NodeBuilder::new(data_dir).with_net_tx(net_tx);
         for (store_type, factory) in self.opener_factories {
             builder = builder.with_opener(store_type, factory);
         }
         if let Some(name) = self.name {
             builder = builder.with_name(name);
         }
-        
-        let node = Arc::new(builder.build().map_err(|e| RuntimeError::Node(e.to_string()))?);
-        
+
+        let node = Arc::new(
+            builder
+                .build()
+                .map_err(|e| RuntimeError::Node(e.to_string()))?,
+        );
+
         // --- Create networking stack ---
-        
+
         let backend = lattice_net_iroh::IrohBackend::new(node.identity(), node.clone())
             .await
             .map_err(|e| RuntimeError::Network(e.to_string()))?;
-        
-        let mesh_service = lattice_net::network::NetworkService::new(
-            node.clone(),
-            backend,
-            net_rx,
-        );
-        
+
+        let mesh_service = lattice_net::network::NetworkService::new(node.clone(), backend, net_rx);
+
         // Create backend
-        let backend = Arc::new(InProcessBackend::new(node.clone(), Some(mesh_service.clone())));
-        
+        let backend = Arc::new(InProcessBackend::new(
+            node.clone(),
+            Some(mesh_service.clone()),
+        ));
+
         // Start node (opens existing meshes)
         if let Err(e) = node.start().await {
             tracing::warn!("Node start: {}", e);
         }
-        
+
         // Start RPC server if requested
         let rpc_handle = if self.with_rpc {
             let rpc_server = RpcServer::new(backend.clone(), RpcServer::default_socket_path());
@@ -186,7 +189,7 @@ impl RuntimeBuilder {
         } else {
             None
         };
-        
+
         Ok(Runtime {
             node,
             mesh_service,

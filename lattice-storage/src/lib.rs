@@ -4,7 +4,6 @@ pub use lattice_model::head;
 
 // Re-export common items
 pub use state_db::{
-    StateBackend, StateDbError, TableMap, 
-    TABLE_DATA, TABLE_META, TABLE_SYSTEM, 
-    PersistentState, StateLogic, setup_persistent_state, StateFactory
-}; 
+    setup_persistent_state, PersistentState, StateBackend, StateDbError, StateFactory, StateLogic,
+    TableMap, TABLE_DATA, TABLE_META, TABLE_SYSTEM,
+};

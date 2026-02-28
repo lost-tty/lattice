@@ -3,9 +3,8 @@
 //! HLCs combine wall clock time with a logical counter to provide
 //! causally consistent ordering even with clock drift.
 
-use std::cmp::Ordering;
 use crate::clock::{Clock, SystemClock};
-
+use std::cmp::Ordering;
 
 /// Default maximum drift allowed before clamping (1 hour in ms)
 pub const DEFAULT_MAX_DRIFT_MS: u64 = 60 * 60 * 1000;
@@ -47,7 +46,7 @@ impl HLC {
     /// Update this clock with an explicit clock source (for testing)
     pub fn update_with_clock(&self, received: &HLC, clock: &impl Clock) -> HLC {
         let local_wall_time = clock.now_ms();
-        
+
         if local_wall_time > self.wall_time && local_wall_time > received.wall_time {
             // Local wall clock is ahead of everything, use it
             HLC::new(local_wall_time, 0)
@@ -76,7 +75,12 @@ impl HLC {
     }
 
     /// Clamp with clock source (convenience method)
-    pub fn clamp_future_with_clock(&self, parent: &HLC, clock: &impl Clock, max_drift_ms: u64) -> HLC {
+    pub fn clamp_future_with_clock(
+        &self,
+        parent: &HLC,
+        clock: &impl Clock,
+        max_drift_ms: u64,
+    ) -> HLC {
         self.clamp_future(parent, clock.now_ms(), max_drift_ms)
     }
 
@@ -141,7 +145,6 @@ impl From<HLC> for (u64, u32) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,9 +166,9 @@ mod tests {
         let local = HLC::new(100, 5);
         let received = HLC::new(200, 3);
         let clock = MockClock::new(50); // Wall clock behind both
-        
+
         let updated = local.update_with_clock(&received, &clock);
-        
+
         assert!(updated > received);
         assert_eq!(updated.wall_time, 200);
         assert_eq!(updated.counter, 4);
@@ -176,9 +179,9 @@ mod tests {
         let local = HLC::new(200, 5);
         let received = HLC::new(100, 3);
         let clock = MockClock::new(50); // Wall clock behind both
-        
+
         let updated = local.update_with_clock(&received, &clock);
-        
+
         assert!(updated > local);
         assert_eq!(updated.wall_time, 200);
         assert_eq!(updated.counter, 6);
@@ -189,9 +192,9 @@ mod tests {
         let local = HLC::new(100, 5);
         let received = HLC::new(150, 3);
         let clock = MockClock::new(500); // Wall clock ahead of both
-        
+
         let updated = local.update_with_clock(&received, &clock);
-        
+
         assert_eq!(updated.wall_time, 500);
         assert_eq!(updated.counter, 0);
     }
@@ -201,9 +204,9 @@ mod tests {
         let future = HLC::new(2050_000_000_000, 0);
         let parent = HLC::new(100, 5);
         let clock = MockClock::new(1000);
-        
+
         let clamped = future.clamp_future_with_clock(&parent, &clock, DEFAULT_MAX_DRIFT_MS);
-        
+
         assert_eq!(clamped.wall_time, 100);
         assert_eq!(clamped.counter, 6);
     }
@@ -213,9 +216,9 @@ mod tests {
         let normal = HLC::new(1000, 3);
         let parent = HLC::new(100, 5);
         let clock = MockClock::new(900);
-        
+
         let clamped = normal.clamp_future_with_clock(&parent, &clock, DEFAULT_MAX_DRIFT_MS);
-        
+
         assert_eq!(clamped, normal);
     }
 
@@ -225,9 +228,9 @@ mod tests {
         let old_clock = HLC::new(0, 0);
         let received = HLC::new(1_700_000_000_000, 5);
         let clock = MockClock::new(0); // Clock also at 1970
-        
+
         let updated = old_clock.update_with_clock(&received, &clock);
-        
+
         assert_eq!(updated.wall_time, 1_700_000_000_000);
         assert_eq!(updated.counter, 6);
     }
@@ -235,13 +238,13 @@ mod tests {
     #[test]
     fn test_tick_with_mock_clock() {
         let hlc = HLC::new(100, 5);
-        
+
         // Clock behind: counter increments
         let clock = MockClock::new(50);
         let ticked = hlc.tick_with_clock(&clock);
         assert_eq!(ticked.wall_time, 100);
         assert_eq!(ticked.counter, 6);
-        
+
         // Clock ahead: use new wall time
         let clock = MockClock::new(200);
         let ticked = hlc.tick_with_clock(&clock);
@@ -253,7 +256,7 @@ mod tests {
     fn test_now_with_mock_clock() {
         let clock = MockClock::new(12345);
         let hlc = HLC::now_with_clock(&clock);
-        
+
         assert_eq!(hlc.wall_time, 12345);
         assert_eq!(hlc.counter, 0);
     }
@@ -264,9 +267,9 @@ mod tests {
         let local = HLC::new(100, 5);
         let received = HLC::new(100, 8);
         let clock = MockClock::new(50); // Wall clock behind both
-        
+
         let updated = local.update_with_clock(&received, &clock);
-        
+
         // Should take max(5, 8) + 1 = 9
         assert_eq!(updated.wall_time, 100);
         assert_eq!(updated.counter, 9);
@@ -278,9 +281,9 @@ mod tests {
         let local = HLC::new(100, 10);
         let received = HLC::new(100, 3);
         let clock = MockClock::new(50);
-        
+
         let updated = local.update_with_clock(&received, &clock);
-        
+
         // Should take max(10, 3) + 1 = 11
         assert_eq!(updated.wall_time, 100);
         assert_eq!(updated.counter, 11);
@@ -289,16 +292,16 @@ mod tests {
     #[test]
     fn test_is_future() {
         let hlc = HLC::new(1000, 0);
-        
+
         // Within drift: not future
         assert!(!hlc.is_future(500, 600));
-        
+
         // Exactly at drift boundary: not future (>= vs >)
         assert!(!hlc.is_future(500, 500));
-        
+
         // Beyond drift: is future
         assert!(hlc.is_future(500, 400));
-        
+
         // Way in the future
         let future = HLC::new(2050_000_000_000, 0);
         assert!(future.is_future(1_700_000_000_000, DEFAULT_MAX_DRIFT_MS));
@@ -325,10 +328,10 @@ mod tests {
     fn test_update_with_system_clock_smoke() {
         let local = HLC::new(100, 5);
         let received = HLC::new(200, 3);
-        
+
         // This should use the real system clock internally
         let updated = local.update(&received);
-        
+
         // Updated should be greater than both
         assert!(updated > local);
         assert!(updated > received);
@@ -338,9 +341,8 @@ mod tests {
     fn test_tick_with_system_clock_smoke() {
         let hlc = HLC::new(100, 5);
         let ticked = hlc.tick();
-        
+
         // Should be greater than original
         assert!(ticked > hlc);
     }
 }
-

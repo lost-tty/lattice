@@ -41,7 +41,9 @@ pub trait Connection: Send + Sync + 'static {
     type Stream: BiStream;
 
     /// Open a new bidirectional stream on this connection.
-    fn open_bi(&self) -> impl std::future::Future<Output = Result<Self::Stream, TransportError>> + Send;
+    fn open_bi(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Self::Stream, TransportError>> + Send;
 
     /// Get the remote peer's public key.
     fn remote_public_key(&self) -> PubKey;
@@ -59,11 +61,14 @@ pub trait Transport: Send + Sync + fmt::Debug + 'static {
     fn public_key(&self) -> PubKey;
 
     /// Connect to a remote peer by public key.
-    fn connect(&self, peer: &PubKey) -> impl std::future::Future<Output = Result<Self::Connection, TransportError>> + Send;
+    fn connect(
+        &self,
+        peer: &PubKey,
+    ) -> impl std::future::Future<Output = Result<Self::Connection, TransportError>> + Send;
 
     /// Accept an incoming connection (blocks until one arrives, or returns None on shutdown).
     fn accept(&self) -> impl std::future::Future<Output = Option<Self::Connection>> + Send;
-    
+
     /// Get a stream of network connectivity events (e.g. PeerConnected/Disconnected)
     fn network_events(&self) -> tokio::sync::broadcast::Receiver<crate::NetworkEvent>;
 }

@@ -3,13 +3,13 @@
 //! Accepts iroh connections, extracts the send/recv streams, and delegates
 //! to the generic `dispatch_stream` function in `lattice-net::network::handlers`.
 
+use crate::ToLattice;
 use lattice_net::network::PeerStoreRegistry;
 use lattice_net::LatticeNetError;
 use lattice_net_types::NodeProviderExt;
-use crate::ToLattice;
 
 use iroh::endpoint::Connection;
-use iroh::protocol::{ProtocolHandler, AcceptError};
+use iroh::protocol::{AcceptError, ProtocolHandler};
 use std::sync::Arc;
 
 /// Protocol handler for the main LATTICE_ALPN protocol.
@@ -26,7 +26,7 @@ impl SyncProtocol {
             peer_stores: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         }
     }
-    
+
     /// Get the shared peer_stores set (needed by NetworkService)
     pub fn peer_stores(&self) -> PeerStoreRegistry {
         self.peer_stores.clone()
@@ -40,7 +40,10 @@ impl std::fmt::Debug for SyncProtocol {
 }
 
 impl ProtocolHandler for SyncProtocol {
-    fn accept(&self, conn: Connection) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
+    fn accept(
+        &self,
+        conn: Connection,
+    ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
         let provider = self.provider.clone();
         let peer_stores = self.peer_stores.clone();
         Box::pin(async move {
@@ -60,8 +63,12 @@ pub async fn handle_connection(
     conn: Connection,
 ) -> Result<(), LatticeNetError> {
     let remote_id = conn.remote_id();
-    tracing::debug!("[Incoming] {} (ALPN: {})", remote_id.fmt_short(), String::from_utf8_lossy(conn.alpn()));
-    
+    tracing::debug!(
+        "[Incoming] {} (ALPN: {})",
+        remote_id.fmt_short(),
+        String::from_utf8_lossy(conn.alpn())
+    );
+
     let remote_pubkey = remote_id.to_lattice();
 
     loop {
@@ -73,8 +80,14 @@ pub async fn handle_connection(
                 tokio::spawn(async move {
                     // Delegate to generic dispatch in lattice-net
                     match lattice_net::network::handlers::dispatch_stream(
-                        provider, peer_stores, remote_pubkey, send, recv
-                    ).await {
+                        provider,
+                        peer_stores,
+                        remote_pubkey,
+                        send,
+                        recv,
+                    )
+                    .await
+                    {
                         Ok(mut send_stream) => {
                             // iroh-specific: gracefully finish the QUIC send stream
                             if let Err(e) = send_stream.finish() {

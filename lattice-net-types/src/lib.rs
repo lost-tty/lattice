@@ -10,17 +10,17 @@
 //! - `Transport`: Transport layer abstraction
 //! - `GossipLayer`: Gossip pub/sub abstraction
 
+pub mod gossip;
 mod network_store;
 mod node_provider_ext;
 pub mod transport;
-pub mod gossip;
 
+pub use gossip::{GossipError, GossipLayer};
 pub use network_store::{NetworkStore, NetworkStoreRegistry};
 pub use node_provider_ext::NodeProviderExt;
-pub use transport::{Transport, Connection, BiStream, TransportError};
-pub use gossip::{GossipLayer, GossipError};
+pub use transport::{BiStream, Connection, Transport, TransportError};
 
-/// Generic network connectivity events 
+/// Generic network connectivity events
 /// Emitted by Transport and GossipLayer to abstract session tracking
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkEvent {

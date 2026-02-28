@@ -7,13 +7,14 @@
 
 mod state;
 
-pub use state::{LogState, LogEvent};
+pub use state::{LogEvent, LogState};
 
 /// Type alias for Log store state wrapped in PersistentState for use with direct_opener()
 pub type PersistentLogState = lattice_storage::PersistentState<LogState>;
 
 // Include the generated FileDescriptorSet
-pub const LOG_DESCRIPTOR_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/log_descriptor.bin"));
+pub const LOG_DESCRIPTOR_BYTES: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/log_descriptor.bin"));
 
 // Lazy service descriptor for introspection
 use once_cell::sync::Lazy;
@@ -25,7 +26,9 @@ static DESCRIPTOR_POOL: Lazy<DescriptorPool> = Lazy::new(|| {
 
 /// Get the LogStore service descriptor for CLI introspection
 pub static LOG_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
-    DESCRIPTOR_POOL.get_service_by_name("lattice.log.LogStore").expect("Service definition missing")
+    DESCRIPTOR_POOL
+        .get_service_by_name("lattice.log.LogStore")
+        .expect("Service definition missing")
 });
 
 // Generated proto types

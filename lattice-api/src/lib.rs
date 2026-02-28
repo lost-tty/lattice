@@ -39,7 +39,8 @@ impl From<lattice_model::weaver::Condition> for proto::Condition {
         match c {
             lattice_model::weaver::Condition::V1(deps) => proto::Condition {
                 kind: Some(proto::condition::Kind::V1(proto::CausalDeps {
-                    hashes: deps.into_iter()
+                    hashes: deps
+                        .into_iter()
                         .filter(|h| *h != lattice_model::types::Hash::ZERO)
                         .map(|h| h.to_vec())
                         .collect(),
@@ -91,9 +92,9 @@ impl From<proto::SExpr> for lattice_model::SExpr {
             Some(s_expr::Value::Str(s)) => M::Str(s),
             Some(s_expr::Value::Raw(b)) => M::Raw(b),
             Some(s_expr::Value::Num(n)) => M::Num(n),
-            Some(s_expr::Value::List(list)) => M::List(
-                list.items.into_iter().map(Into::into).collect(),
-            ),
+            Some(s_expr::Value::List(list)) => {
+                M::List(list.items.into_iter().map(Into::into).collect())
+            }
             None => M::Symbol("?".into()),
         }
     }
@@ -109,9 +110,11 @@ impl From<proto::Condition> for lattice_model::weaver::Condition {
     fn from(p: proto::Condition) -> Self {
         match p.kind {
             Some(proto::condition::Kind::V1(deps)) => {
-                let hashes = deps.hashes.into_iter().filter_map(|h| {
-                    lattice_model::types::Hash::try_from(h.as_slice()).ok()
-                }).collect();
+                let hashes = deps
+                    .hashes
+                    .into_iter()
+                    .filter_map(|h| lattice_model::types::Hash::try_from(h.as_slice()).ok())
+                    .collect();
                 lattice_model::weaver::Condition::V1(hashes)
             }
             None => lattice_model::weaver::Condition::V1(vec![]),
@@ -121,16 +124,16 @@ impl From<proto::Condition> for lattice_model::weaver::Condition {
 
 impl From<proto::SignedIntention> for lattice_model::weaver::SignedIntention {
     fn from(p: proto::SignedIntention) -> Self {
-        let author = lattice_model::types::PubKey(
-            p.author.try_into().unwrap_or([0u8; 32])
-        );
-        let timestamp = p.timestamp
+        let author = lattice_model::types::PubKey(p.author.try_into().unwrap_or([0u8; 32]));
+        let timestamp = p
+            .timestamp
             .map(Into::into)
             .unwrap_or(lattice_model::hlc::HLC::new(0, 0));
         let store_id = uuid::Uuid::from_slice(&p.store_id).unwrap_or_default();
         let store_prev = lattice_model::types::Hash::try_from(p.store_prev.as_slice())
             .unwrap_or(lattice_model::types::Hash::ZERO);
-        let condition = p.condition
+        let condition = p
+            .condition
             .map(Into::into)
             .unwrap_or(lattice_model::weaver::Condition::V1(vec![]));
         let sig_bytes: [u8; 64] = p.signature.try_into().unwrap_or([0u8; 64]);
@@ -152,9 +155,8 @@ impl From<proto::SignedIntention> for lattice_model::weaver::SignedIntention {
 impl From<proto::FloatingIntention> for lattice_model::weaver::FloatingIntention {
     fn from(p: proto::FloatingIntention) -> Self {
         lattice_model::weaver::FloatingIntention {
-            signed: p.intention
-                .map(Into::into)
-                .unwrap_or_else(|| lattice_model::weaver::SignedIntention {
+            signed: p.intention.map(Into::into).unwrap_or_else(|| {
+                lattice_model::weaver::SignedIntention {
                     intention: lattice_model::weaver::Intention {
                         author: lattice_model::types::PubKey([0u8; 32]),
                         timestamp: lattice_model::hlc::HLC::new(0, 0),
@@ -164,7 +166,8 @@ impl From<proto::FloatingIntention> for lattice_model::weaver::FloatingIntention
                         ops: vec![],
                     },
                     signature: lattice_model::types::Signature([0u8; 64]),
-                }),
+                }
+            }),
             received_at: p.received_at,
         }
     }
@@ -209,11 +212,11 @@ pub mod backend;
 mod node_service;
 
 #[cfg(feature = "server")]
-mod store_service;
-#[cfg(feature = "server")]
 mod dynamic_store_service;
 #[cfg(feature = "server")]
 mod server;
+#[cfg(feature = "server")]
+mod store_service;
 
 #[cfg(feature = "client")]
 mod client;
@@ -226,8 +229,7 @@ pub use client::RpcClient;
 
 // Re-export backend types for consumers
 pub use backend::{
-    LatticeBackend, Backend, NodeEvent, BackendError, BackendResult, 
-    AsyncResult, EventReceiver,
+    AsyncResult, Backend, BackendError, BackendResult, EventReceiver, LatticeBackend, NodeEvent,
 };
 
 #[cfg(test)]

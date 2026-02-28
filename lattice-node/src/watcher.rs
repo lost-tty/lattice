@@ -1,14 +1,9 @@
-use std::sync::{Arc, RwLock};
-use std::collections::HashSet;
-use crate::{
-    store_manager::StoreManager,
-    peer_manager::PeerManager,
-    StoreHandle,
-    Uuid,
-};
-use lattice_model::{SystemEvent, store_info::ChildStatus};
+use crate::{peer_manager::PeerManager, store_manager::StoreManager, StoreHandle, Uuid};
 use futures_util::StreamExt;
-use tracing::{info, warn, debug};
+use lattice_model::{store_info::ChildStatus, SystemEvent};
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
+use tracing::{debug, info, warn};
 
 /// Watcher that recursively monitors a root store and opens declared child stores.
 pub struct RecursiveWatcher {
@@ -47,7 +42,7 @@ impl RecursiveWatcher {
         let peer_manager = self.peer_manager.clone();
         let opened_stores = self.opened_stores.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
-        
+
         tokio::spawn(async move {
             // Get SystemStore capability
             let system = match root_store.clone().as_system() {
@@ -57,7 +52,7 @@ impl RecursiveWatcher {
                     return;
                 }
             };
-            
+
             // 1. Subscribe to system events (Log-based + Local Ephemeral)
             let mut stream = match system.subscribe_events() {
                 Ok(s) => s,
@@ -66,14 +61,22 @@ impl RecursiveWatcher {
                     return;
                 }
             };
-            
+
             // 2. Initial reconcile (manual list)
-            if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores).await {
+            if let Err(e) = Self::reconcile_stores(
+                &store_manager,
+                &root_store,
+                root_store_id,
+                &peer_manager,
+                &opened_stores,
+            )
+            .await
+            {
                 warn!(error = %e, "Initial reconcile failed");
             }
 
             debug!("Store watcher started for root {}", root_store_id);
-            
+
             // 5. Process unified stream
             loop {
                 tokio::select! {
@@ -86,13 +89,13 @@ impl RecursiveWatcher {
                             Some(Ok(evt)) => {
                                 // Reconcile on child/hierarchy changes or BootstrapComplete
                                 let should_reconcile = match evt {
-                                    SystemEvent::ChildLinkUpdated(_) | 
-                                    SystemEvent::ChildStatusUpdated(_, _) | 
+                                    SystemEvent::ChildLinkUpdated(_) |
+                                    SystemEvent::ChildStatusUpdated(_, _) |
                                     SystemEvent::ChildLinkRemoved(_) |
                                     SystemEvent::BootstrapComplete => true,
-                                    _ => false, 
+                                    _ => false,
                                 };
-                                
+
                                 if should_reconcile {
                                     if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores).await {
                                         warn!(error = %e, "Reconcile failed");
@@ -109,7 +112,7 @@ impl RecursiveWatcher {
             }
         });
     }
-    
+
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
     }
@@ -121,30 +124,28 @@ impl RecursiveWatcher {
         }
     }
 
-    
     async fn reconcile_stores(
-        store_manager: &Arc<StoreManager>, 
-        root: &Arc<dyn StoreHandle>, 
+        store_manager: &Arc<StoreManager>,
+        root: &Arc<dyn StoreHandle>,
         _root_store_id: Uuid,
         peer_manager: &Arc<PeerManager>,
         opened_stores: &Arc<RwLock<HashSet<Uuid>>>,
     ) -> Result<(), String> {
         let declarations = Self::list_declarations(root).await?;
-        
+
         // Get IDs of stores we have opened (from our tracking set)
-        let our_stores: HashSet<Uuid> = opened_stores.read()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        
+        let our_stores: HashSet<Uuid> = opened_stores.read().map(|g| g.clone()).unwrap_or_default();
+
         // Get current store IDs in StoreManager (excluding others?)
         // Actually we just check if it's open in SM
         let current_ids: HashSet<Uuid> = store_manager.store_ids().into_iter().collect();
-        
-        let declared_ids: HashSet<Uuid> = declarations.iter()
+
+        let declared_ids: HashSet<Uuid> = declarations
+            .iter()
             .filter(|d| !d.archived)
             .map(|d| d.id)
             .collect();
-        
+
         for decl in &declarations {
             if decl.archived {
                 if our_stores.contains(&decl.id) && current_ids.contains(&decl.id) {
@@ -168,7 +169,12 @@ impl RecursiveWatcher {
                         Ok(opened) => {
                             // Register with same peer_manager as root store
                             // Note: We deliberately use root's peer manager for children (Inherited)
-                            if let Err(e) = store_manager.register(decl.id, opened, &store_type, peer_manager.clone()) {
+                            if let Err(e) = store_manager.register(
+                                decl.id,
+                                opened,
+                                &store_type,
+                                peer_manager.clone(),
+                            ) {
                                 warn!(store_id = %decl.id, error = ?e, "Failed to register store");
                             } else {
                                 if let Ok(mut guard) = opened_stores.write() {
@@ -185,15 +191,15 @@ impl RecursiveWatcher {
                     // Already open. Adopt it into our tracking set if not already tracked.
                     // This allows manual creation (Node::create_store) to be managed by watcher.
                     if !our_stores.contains(&decl.id) {
-                         if let Ok(mut guard) = opened_stores.write() {
-                             guard.insert(decl.id);
-                         }
-                         debug!(store_id = %decl.id, "Adopted existing store into watcher");
+                        if let Ok(mut guard) = opened_stores.write() {
+                            guard.insert(decl.id);
+                        }
+                        debug!(store_id = %decl.id, "Adopted existing store into watcher");
                     }
                 }
             }
         }
-        
+
         // Close stores that WE opened but are no longer declared
         for store_id in &our_stores {
             if !declared_ids.contains(store_id) && current_ids.contains(store_id) {
@@ -204,17 +210,20 @@ impl RecursiveWatcher {
                 info!(store_id = %store_id, "Closed undeclared store");
             }
         }
-        
+
         Ok(())
     }
 
-    async fn list_declarations(root: &Arc<dyn StoreHandle>) -> Result<Vec<StoreDeclaration>, String> {
-        let system = root.clone().as_system()
-             .ok_or_else(|| "Root store must support SystemStore".to_string())?;
-        
-        let children = system.get_children()
-            .map_err(|e| e.to_string())?;
-            
+    async fn list_declarations(
+        root: &Arc<dyn StoreHandle>,
+    ) -> Result<Vec<StoreDeclaration>, String> {
+        let system = root
+            .clone()
+            .as_system()
+            .ok_or_else(|| "Root store must support SystemStore".to_string())?;
+
+        let children = system.get_children().map_err(|e| e.to_string())?;
+
         let mut declarations = Vec::new();
         for child in children {
             declarations.push(StoreDeclaration {

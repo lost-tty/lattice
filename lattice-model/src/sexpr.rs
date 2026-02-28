@@ -68,7 +68,8 @@ impl SExpr {
                 format!("{}…", hex::encode(&b[..max_hex_bytes]))
             }
             SExpr::List(items) => {
-                let inner: Vec<String> = items.iter().map(|i| i.to_compact(max_hex_bytes)).collect();
+                let inner: Vec<String> =
+                    items.iter().map(|i| i.to_compact(max_hex_bytes)).collect();
                 format!("({})", inner.join(" "))
             }
             _ => self.to_text(),
@@ -86,7 +87,8 @@ impl SExpr {
                 // Top-level: head on first line, each child indented
                 let pad = "  ".repeat(indent + 1);
                 let head = items[0].to_text();
-                let children: Vec<String> = items[1..].iter()
+                let children: Vec<String> = items[1..]
+                    .iter()
                     .map(|item| format!("{}{}", pad, item.fmt_pretty(indent + 1)))
                     .collect();
                 format!("({}\n{})", head, children.join("\n"))

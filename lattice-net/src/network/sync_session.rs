@@ -9,20 +9,16 @@
 //! 3. Fetch missing intentions by content hash
 //! 4. Ingest via IntentionStore
 
-use crate::{MessageSink, MessageStream};
 use crate::error::LatticeNetError;
+use crate::{MessageSink, MessageStream};
 use lattice_model::types::{Hash, PubKey};
 use lattice_net_types::NetworkStore;
+use lattice_proto::convert::{intention_from_proto, intention_to_proto};
 use lattice_proto::network::{
-    FetchIntentions, IntentionResponse,
-    PeerMessage, peer_message,
-    reconcile_message::Content as ReconcileContent,
-    ReconcilePayload,
+    peer_message, reconcile_message::Content as ReconcileContent, FetchIntentions,
+    IntentionResponse, PeerMessage, ReconcilePayload,
 };
-use lattice_proto::convert::{
-    intention_to_proto, intention_from_proto,
-};
-use lattice_sync::{Reconciler, ReconcileMessage};
+use lattice_sync::{ReconcileMessage, Reconciler};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Result of a sync session
@@ -48,14 +44,21 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
         stream: &'a mut MessageStream<R>,
         _peer_id: PubKey,
     ) -> Self {
-        Self { store, sink, stream }
+        Self {
+            store,
+            sink,
+            stream,
+        }
     }
-    
+
     /// Run the sync protocol (symmetric)
-    /// 
+    ///
     /// If `initial_message` is provided, we are the responder and this is the first message.
     /// If `initial_message` is None, we are the initiator and should send the first message.
-    pub async fn run(&mut self, initial_message: Option<ReconcilePayload>) -> Result<SyncResult, LatticeNetError> {
+    pub async fn run(
+        &mut self,
+        initial_message: Option<ReconcilePayload>,
+    ) -> Result<SyncResult, LatticeNetError> {
         let mut intentions_received: u64 = 0;
         let mut intentions_sent: u64 = 0;
 
@@ -70,7 +73,10 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
 
         // If initiator, start the process
         if initial_message.is_none() {
-            let init_msg = reconciler.initiate().await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            let init_msg = reconciler
+                .initiate()
+                .await
+                .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
             self.send_reconcile(&init_msg).await?;
             reconcile_load += 1;
         } else {
@@ -102,7 +108,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                         } else {
                             return Err(LatticeNetError::Sync("Stream closed unexpectedly".into()));
                         }
-                    },
+                    }
                     Ok(Err(e)) => return Err(LatticeNetError::Sync(e.to_string())),
                     Err(_) => return Err(LatticeNetError::Sync("Timeout during sync".into())),
                 }
@@ -117,23 +123,27 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                     // We should decrement load on RECV, increment on SEND.
                     // Except for initial message (responder), where we didn't send anything.
                     // So we treat initial message as "pending work".
-                    
+
                     if reconcile_load > 0 {
                         reconcile_load -= 1;
                     }
-                    
-                    let r_msg = payload.message.ok_or_else(|| LatticeNetError::Sync("Missing reconcile message".into()))?;
-                        
-                    let result = reconciler.process(&r_msg).await
+
+                    let r_msg = payload
+                        .message
+                        .ok_or_else(|| LatticeNetError::Sync("Missing reconcile message".into()))?;
+
+                    let result = reconciler
+                        .process(&r_msg)
+                        .await
                         .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-                        
+
                     for out_msg in result.send {
                         self.send_reconcile(&out_msg).await?;
                         if !matches!(out_msg.content, Some(ReconcileContent::Done(_))) {
                             reconcile_load += 1;
                         }
                     }
-                    
+
                     if !result.need.is_empty() {
                         self.send_fetch_intentions(&result.need).await?;
                         active_fetches += 1;
@@ -150,7 +160,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                             }
                         }
                     }
-                    
+
                     if resp.done {
                         if active_fetches > 0 {
                             active_fetches -= 1;
@@ -160,10 +170,13 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                 _ => {}
             }
         }
-        
-        Ok(SyncResult { entries_received: intentions_received, entries_sent: intentions_sent })
+
+        Ok(SyncResult {
+            entries_received: intentions_received,
+            entries_sent: intentions_sent,
+        })
     }
-    
+
     async fn send_reconcile(&mut self, msg: &ReconcileMessage) -> Result<(), LatticeNetError> {
         let wrapper = PeerMessage {
             message: Some(peer_message::Message::Reconcile(ReconcilePayload {
@@ -171,11 +184,14 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                 message: Some(msg.clone()),
             })),
         };
-        self.sink.send(&wrapper).await.map_err(|e| LatticeNetError::Sync(e.to_string()))
+        self.sink
+            .send(&wrapper)
+            .await
+            .map_err(|e| LatticeNetError::Sync(e.to_string()))
     }
-    
+
     // StatusRequest/Response methods removed
-    
+
     async fn send_fetch_intentions(&mut self, hashes: &[Hash]) -> Result<(), LatticeNetError> {
         let msg = PeerMessage {
             message: Some(peer_message::Message::FetchIntentions(FetchIntentions {
@@ -183,29 +199,42 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                 hashes: hashes.iter().map(|h| h.as_bytes().to_vec()).collect(),
             })),
         };
-        self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))
+        self.sink
+            .send(&msg)
+            .await
+            .map_err(|e| LatticeNetError::Sync(e.to_string()))
     }
-    
-    async fn handle_fetch_intentions(&mut self, req: &FetchIntentions) -> Result<u64, LatticeNetError> {
-        // Chunk processing to avoid OOM
-        const BATCH_SIZE: usize = 50; 
 
-        let all_hashes: Vec<Hash> = req.hashes.iter()
+    async fn handle_fetch_intentions(
+        &mut self,
+        req: &FetchIntentions,
+    ) -> Result<u64, LatticeNetError> {
+        // Chunk processing to avoid OOM
+        const BATCH_SIZE: usize = 50;
+
+        let all_hashes: Vec<Hash> = req
+            .hashes
+            .iter()
             .filter_map(|h| Hash::try_from(h.as_slice()).ok())
             .collect();
-    
+
         let total_requested = all_hashes.len();
         let mut total_sent = 0;
 
         if total_requested == 0 {
-             let msg = PeerMessage {
-                message: Some(peer_message::Message::IntentionResponse(IntentionResponse {
-                    store_id: req.store_id.clone(),
-                    done: true,
-                    intentions: vec![],
-                })),
+            let msg = PeerMessage {
+                message: Some(peer_message::Message::IntentionResponse(
+                    IntentionResponse {
+                        store_id: req.store_id.clone(),
+                        done: true,
+                        intentions: vec![],
+                    },
+                )),
             };
-            self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            self.sink
+                .send(&msg)
+                .await
+                .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
             return Ok(0);
         }
 
@@ -214,22 +243,30 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
 
         for (i, chunk) in chunks.iter().enumerate() {
             // Fetch only this batch from store
-            let intentions = self.store.fetch_intentions(chunk.to_vec()).await
+            let intentions = self
+                .store
+                .fetch_intentions(chunk.to_vec())
+                .await
                 .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
-            
+
             total_sent += intentions.len() as u64;
 
             let proto_intentions: Vec<_> = intentions.iter().map(intention_to_proto).collect();
             let is_last = i == num_chunks - 1;
-            
+
             let msg = PeerMessage {
-                message: Some(peer_message::Message::IntentionResponse(IntentionResponse {
-                    store_id: req.store_id.clone(),
-                    done: is_last,
-                    intentions: proto_intentions,
-                })),
+                message: Some(peer_message::Message::IntentionResponse(
+                    IntentionResponse {
+                        store_id: req.store_id.clone(),
+                        done: is_last,
+                        intentions: proto_intentions,
+                    },
+                )),
             };
-            self.sink.send(&msg).await.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            self.sink
+                .send(&msg)
+                .await
+                .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
         }
 
         Ok(total_sent)

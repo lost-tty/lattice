@@ -5,11 +5,11 @@
 
 use crate::ChannelTransport;
 use lattice_net::network::{NetworkBackend, PeerStoreRegistry, ShutdownHandle};
-use lattice_net_types::{NodeProviderExt, GossipLayer};
-use lattice_net_types::transport::{Transport, Connection as TransportConnection, BiStream};
+use lattice_net_types::transport::{BiStream, Connection as TransportConnection, Transport};
+use lattice_net_types::{GossipLayer, NodeProviderExt};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashSet;
 
 /// ShutdownHandle for the simulated accept loop.
 struct AcceptLoopHandle(tokio::task::JoinHandle<()>);
@@ -49,7 +49,9 @@ impl SimBackend {
             let peer_stores = peer_stores.clone();
             tokio::spawn(async move {
                 loop {
-                    let Some(conn) = transport_clone.accept().await else { break };
+                    let Some(conn) = transport_clone.accept().await else {
+                        break;
+                    };
                     let provider = provider.clone();
                     let peer_stores = peer_stores.clone();
                     let remote = conn.remote_public_key();
@@ -60,8 +62,14 @@ impl SimBackend {
                         };
                         let (send, recv) = bi.into_split();
                         match lattice_net::network::handlers::dispatch_stream(
-                            provider, peer_stores, remote, send, recv,
-                        ).await {
+                            provider,
+                            peer_stores,
+                            remote,
+                            send,
+                            recv,
+                        )
+                        .await
+                        {
                             Ok(_writer) => { /* ChannelTransport: no finalization needed */ }
                             Err(e) => tracing::debug!(error = %e, "Sim accept handler error"),
                         }

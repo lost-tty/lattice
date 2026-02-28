@@ -11,7 +11,7 @@ pub fn summarize_intention_ops(
     dispatcher: &dyn lattice_store_base::Introspectable,
     hash: &lattice_model::Hash,
 ) -> Vec<SExpr> {
-    use lattice_proto::storage::{UniversalOp, universal_op};
+    use lattice_proto::storage::{universal_op, UniversalOp};
     use prost::Message;
 
     let Ok(universal) = UniversalOp::decode(ops) else {
@@ -39,10 +39,15 @@ fn decode_app_ops(
     dispatcher: &dyn lattice_store_base::Introspectable,
     hash: &lattice_model::Hash,
 ) -> Vec<SExpr> {
-    dispatcher.decode_payload(data)
+    dispatcher
+        .decode_payload(data)
         .map(|msg| {
             let s = dispatcher.summarize_payload(&msg);
-            if s.is_empty() { vec![SExpr::raw(hash.0[..4].to_vec())] } else { s }
+            if s.is_empty() {
+                vec![SExpr::raw(hash.0[..4].to_vec())]
+            } else {
+                s
+            }
         })
         .unwrap_or_else(|_| vec![SExpr::raw(hash.0[..4].to_vec())])
 }

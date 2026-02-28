@@ -3,11 +3,11 @@
 //! The next-generation transaction format for Lattice stores.
 //! See `docs/design/weaver_protocol.md` for the full specification.
 
-pub mod intention;
 pub mod ingest;
+pub mod intention;
 
-pub use intention::{Condition, FloatingIntention, Intention, SignedIntention};
 pub use ingest::{IngestResult, MissingDep};
+pub use intention::{Condition, FloatingIntention, Intention, SignedIntention};
 
 use crate::types::Hash;
 

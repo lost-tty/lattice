@@ -8,17 +8,15 @@
 //!
 //! The runtime (or any composition root) wires these into `lattice-net::NetworkService`.
 
-pub mod transport;
 pub mod gossip;
 pub mod protocol;
+pub mod transport;
 
-pub use transport::{IrohTransport, IrohBiStream, IrohConnection, PublicKey, LATTICE_ALPN};
 pub use gossip::GossipManager;
+pub use transport::{IrohBiStream, IrohConnection, IrohTransport, PublicKey, LATTICE_ALPN};
 
 use lattice_model::types::PubKey;
 use std::sync::Arc;
-
-
 
 // ==================== Conversion traits ====================
 
@@ -34,7 +32,9 @@ pub trait ToLattice {
 
 impl ToIroh for PubKey {
     fn to_iroh(&self) -> Result<PublicKey, lattice_net::LatticeNetError> {
-        PublicKey::from_bytes(&**self).map_err(|e| lattice_net::LatticeNetError::Validation(format!("Invalid Iroh key: {}", e)))
+        PublicKey::from_bytes(&**self).map_err(|e| {
+            lattice_net::LatticeNetError::Validation(format!("Invalid Iroh key: {}", e))
+        })
     }
 }
 
@@ -47,7 +47,7 @@ impl ToLattice for PublicKey {
 // ==================== IrohBackend ====================
 
 use lattice_net::network::{NetworkBackend, ShutdownHandle};
-use lattice_net_types::{NodeProviderExt, GossipLayer};
+use lattice_net_types::{GossipLayer, NodeProviderExt};
 
 /// ShutdownHandle implementation for iroh Router
 struct RouterShutdownHandle(iroh::protocol::Router);
@@ -74,17 +74,17 @@ impl IrohBackend {
         let transport = IrohTransport::new(identity)
             .await
             .map_err(|e| lattice_net_types::GossipError::Setup(e.to_string()))?;
-        
+
         let gossip = Arc::new(GossipManager::new(&transport).await?);
-        
+
         let sync_protocol = protocol::SyncProtocol::new(provider);
         let peer_stores = sync_protocol.peer_stores();
-        
+
         let router = iroh::protocol::Router::builder(transport.endpoint().clone())
             .accept(LATTICE_ALPN, sync_protocol)
             .accept(iroh_gossip::ALPN, gossip.gossip().clone())
             .spawn();
-        
+
         Ok(NetworkBackend {
             transport,
             gossip: Some(gossip as Arc<dyn GossipLayer>),

@@ -100,7 +100,9 @@ pub trait SyncProvider: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Hash>, SyncError>> + Send + '_>>;
 
     /// Global table fingerprint (XOR sum of all intentions)
-    fn table_fingerprint(&self) -> Pin<Box<dyn Future<Output = Result<Hash, SyncError>> + Send + '_>>;
+    fn table_fingerprint(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Hash, SyncError>> + Send + '_>>;
 
     /// Walk back the chain from target until since (or genesis)
     fn walk_back_until(
@@ -114,5 +116,11 @@ pub trait SyncProvider: Send + Sync {
         &self,
         start_hash: Option<Hash>,
         limit: usize,
-    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, SyncError>> + Send + '_>>;
+    ) -> Pin<
+        Box<
+            dyn futures_core::Stream<Item = Result<lattice_model::weaver::WitnessEntry, SyncError>>
+                + Send
+                + '_,
+        >,
+    >;
 }

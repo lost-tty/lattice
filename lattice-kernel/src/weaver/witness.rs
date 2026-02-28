@@ -4,7 +4,7 @@
 //! from `lattice-proto`. Signature covers `blake3(content_bytes)`.
 
 use lattice_model::crypto;
-use lattice_model::types::{Signature};
+use lattice_model::types::Signature;
 use lattice_proto::weaver::{WitnessContent, WitnessRecord};
 use prost::Message;
 

@@ -5,15 +5,15 @@
 //! - `StateProvider` - trait for handles to provide access to inner state
 //! - Blanket impls that delegate reflection traits through `StateProvider`
 
-mod introspection;
-mod handle;
 pub mod dispatch;
+mod handle;
+mod introspection;
 pub mod invoke;
 
 pub use introspection::{
-    BoxByteStream, CommandDispatcher, FieldFormat, Introspectable, StreamDescriptor,
-    StreamError, StreamReflectable,
+    BoxByteStream, CommandDispatcher, FieldFormat, Introspectable, StreamDescriptor, StreamError,
+    StreamReflectable,
 };
 
-pub use handle::{StateProvider, CommandHandler, StreamHandler, StreamProvider, Subscriber};
+pub use handle::{CommandHandler, StateProvider, StreamHandler, StreamProvider, Subscriber};
 pub use invoke::invoke_command;

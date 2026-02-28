@@ -3,18 +3,18 @@
 //! Provides `MockWriter<S>` - a generic StateWriter that applies operations
 //! directly to state without needing the full replication stack.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use lattice_model::{StateWriter, StateWriterError, StateMachine};
-use lattice_model::types::{Hash, PubKey};
-use lattice_model::hlc::HLC;
-use lattice_model::Op;
-use lattice_model::weaver::{Intention, Condition};
-use lattice_storage::PersistentState;
-use lattice_storage::state_db::StateLogic;
-use prost::Message;
-use tokio::sync::broadcast;
 use futures_util::StreamExt;
+use lattice_model::hlc::HLC;
+use lattice_model::types::{Hash, PubKey};
+use lattice_model::weaver::{Condition, Intention};
+use lattice_model::Op;
+use lattice_model::{StateMachine, StateWriter, StateWriterError};
+use lattice_storage::state_db::StateLogic;
+use lattice_storage::PersistentState;
+use prost::Message;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// A mock StateWriter that applies operations directly to state.
 ///
@@ -70,8 +70,10 @@ impl<S: StateLogic> Clone for MockWriter<S> {
 impl<S: StateLogic> lattice_model::replication::StoreEventSource for MockWriter<S> {
     fn subscribe_entries(&self) -> Box<dyn futures_util::Stream<Item = Vec<u8>> + Send + Unpin> {
         let rx = self.entry_tx.subscribe();
-        Box::new(tokio_stream::wrappers::BroadcastStream::new(rx)
-            .map(|r| r.expect("MockWriter stream lagged")))
+        Box::new(
+            tokio_stream::wrappers::BroadcastStream::new(rx)
+                .map(|r| r.expect("MockWriter stream lagged")),
+        )
     }
 }
 
@@ -80,7 +82,9 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
         &self,
         payload: Vec<u8>,
         causal_deps: Vec<Hash>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Hash, StateWriterError>> + Send + '_>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Hash, StateWriterError>> + Send + '_>,
+    > {
         let state = self.state.clone();
         let hash_num = self.next_hash.fetch_add(1, Ordering::SeqCst);
         let tx = self.entry_tx.clone();
@@ -103,7 +107,8 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
             let author = PubKey::from([1u8; 32]);
 
             // Find current chaintip for this author
-            let prev_hash = state.applied_chaintips()
+            let prev_hash = state
+                .applied_chaintips()
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?
                 .into_iter()
                 .find(|(a, _)| a == &author)
@@ -142,4 +147,3 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
         })
     }
 }
-

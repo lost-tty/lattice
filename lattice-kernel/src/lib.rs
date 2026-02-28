@@ -15,10 +15,10 @@ pub mod weaver;
 pub use lattice_model::{NodeError, NodeIdentity, PeerStatus};
 
 // Store exports (replication engine)
-pub use store::{OpenedStore, Store, StoreInfo, StateError};
+pub use store::{OpenedStore, StateError, Store, StoreInfo};
 pub use store::{ReplicationController, ReplicationControllerCmd, ReplicationControllerError};
 pub use store_inspector::StoreInspector;
 
 // Sync trait facade - canonical definition in lattice-sync,
 // re-exported here since Store<S> implements it.
-pub use lattice_sync::sync_provider::{SyncProvider, SyncError};
+pub use lattice_sync::sync_provider::{SyncError, SyncProvider};

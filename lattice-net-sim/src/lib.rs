@@ -6,10 +6,10 @@
 //!
 //! Enables multi-node sync and gossip testing without real networking.
 
-mod channel_transport;
 mod broadcast_gossip;
+mod channel_transport;
 mod sim_backend;
 
-pub use channel_transport::{ChannelTransport, ChannelNetwork, ChannelConnection, ChannelBiStream};
 pub use broadcast_gossip::{BroadcastGossip, GossipNetwork};
+pub use channel_transport::{ChannelBiStream, ChannelConnection, ChannelNetwork, ChannelTransport};
 pub use sim_backend::SimBackend;

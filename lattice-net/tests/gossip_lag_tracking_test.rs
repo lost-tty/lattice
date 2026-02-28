@@ -5,11 +5,11 @@
 
 mod common;
 
-use lattice_node::{NodeEvent, Invite};
+use lattice_kvstore_api::KvStoreExt;
 use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network::{self, GossipLagStats};
-use lattice_net_sim::{ChannelTransport, ChannelNetwork, BroadcastGossip, GossipNetwork};
-use lattice_kvstore_api::KvStoreExt;
+use lattice_net_sim::{BroadcastGossip, ChannelNetwork, ChannelTransport, GossipNetwork};
+use lattice_node::{Invite, NodeEvent};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -29,11 +29,14 @@ fn test_gossip_lag_stats_initial_state() {
 fn test_gossip_lag_stats_after_drop() {
     let mut stats = GossipLagStats::new();
     stats.record_drop(5);
-    
+
     assert_eq!(stats.total_drops, 5);
     assert!(stats.last_drop_at.is_some());
     assert!(!stats.broadcast_since_last_drop);
-    assert!(stats.needs_sync(), "Should need sync after drop with no subsequent broadcast");
+    assert!(
+        stats.needs_sync(),
+        "Should need sync after drop with no subsequent broadcast"
+    );
 }
 
 #[test]
@@ -41,9 +44,12 @@ fn test_gossip_lag_stats_drop_then_broadcast() {
     let mut stats = GossipLagStats::new();
     stats.record_drop(3);
     assert!(stats.needs_sync());
-    
+
     stats.record_broadcast();
-    assert!(!stats.needs_sync(), "Should not need sync after successful broadcast");
+    assert!(
+        !stats.needs_sync(),
+        "Should not need sync after successful broadcast"
+    );
     assert!(stats.broadcast_since_last_drop);
     assert_eq!(stats.total_drops, 3, "Total drops should be preserved");
 }
@@ -53,13 +59,13 @@ fn test_gossip_lag_stats_cumulative_drops() {
     let mut stats = GossipLagStats::new();
     stats.record_drop(2);
     stats.record_drop(3);
-    
+
     assert_eq!(stats.total_drops, 5);
     assert!(stats.needs_sync());
-    
+
     stats.record_broadcast();
     assert!(!stats.needs_sync());
-    
+
     // Another drop after broadcast
     stats.record_drop(1);
     assert_eq!(stats.total_drops, 6);
@@ -100,32 +106,56 @@ async fn test_gossip_stats_tracked_on_successful_broadcast() {
     );
 
     // A creates store
-    let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store");
-    let store_a = node_a.store_manager().get_handle(&store_id).expect("get store a");
+    let store_id = node_a
+        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .await
+        .expect("create store");
+    let store_a = node_a
+        .store_manager()
+        .get_handle(&store_id)
+        .expect("get store a");
 
     // B joins via invite
-    let token = node_a.store_manager().create_invite(store_id, node_a.node_id()).await.unwrap();
+    let token = node_a
+        .store_manager()
+        .create_invite(store_id, node_a.node_id())
+        .await
+        .unwrap();
     let invite = Invite::parse(&token).unwrap();
 
     let mut events = node_b.subscribe_events();
-    node_b.join(node_a.node_id(), store_id, invite.secret).expect("join");
+    node_b
+        .join(node_a.node_id(), store_id, invite.secret)
+        .expect("join");
 
     // Wait for StoreReady on B
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Ok(event) = events.recv().await {
-            if let NodeEvent::StoreReady { store_id: ready_id, .. } = event {
-                if ready_id == store_id { break; }
+            if let NodeEvent::StoreReady {
+                store_id: ready_id, ..
+            } = event
+            {
+                if ready_id == store_id {
+                    break;
+                }
             }
         }
-    }).await.expect("timeout waiting for StoreReady");
+    })
+    .await
+    .expect("timeout waiting for StoreReady");
 
     // Let peer watcher detect B and gossip subscription establish
     sleep(Duration::from_millis(200)).await;
 
     // Write items via A — they should be gossiped successfully
     for i in 0..5 {
-        store_a.put(format!("/key_{}", i).into_bytes(), format!("val_{}", i).into_bytes())
-            .await.expect("put");
+        store_a
+            .put(
+                format!("/key_{}", i).into_bytes(),
+                format!("val_{}", i).into_bytes(),
+            )
+            .await
+            .expect("put");
     }
 
     // Poll until stats entry appears (strict: must exist within timeout)
@@ -140,10 +170,18 @@ async fn test_gossip_stats_tracked_on_successful_broadcast() {
             drop(stats);
             sleep(Duration::from_millis(50)).await;
         }
-    }).await.expect("Stats entry must exist after successful gossip broadcasts");
+    })
+    .await
+    .expect("Stats entry must exist after successful gossip broadcasts");
 
-    assert_eq!(total_drops, 0, "No drops expected under normal gossip conditions");
-    assert!(!needs_sync, "Should not need sync when all broadcasts succeeded");
+    assert_eq!(
+        total_drops, 0,
+        "No drops expected under normal gossip conditions"
+    );
+    assert!(
+        !needs_sync,
+        "Should not need sync when all broadcasts succeeded"
+    );
 }
 
 /// Test that gossip stats are tracked under burst write load.
@@ -169,16 +207,24 @@ async fn test_gossip_stats_consistent_under_burst_writes() {
     );
 
     // A creates store
-    let store_id = node_a.create_store(None, None, STORE_TYPE_KVSTORE).await.expect("create store");
-    let store_a = node_a.store_manager().get_handle(&store_id).expect("get store a");
+    let store_id = node_a
+        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .await
+        .expect("create store");
+    let store_a = node_a
+        .store_manager()
+        .get_handle(&store_id)
+        .expect("get store a");
 
     // Wait for gossip subscription to establish
     sleep(Duration::from_millis(200)).await;
 
     // Blast writes (channel capacity is 64)
     for i in 0..200u8 {
-        store_a.put(format!("/burst_{:04}", i).into_bytes(), vec![i; 64])
-            .await.expect("put");
+        store_a
+            .put(format!("/burst_{:04}", i).into_bytes(), vec![i; 64])
+            .await
+            .expect("put");
     }
 
     // Poll until stats entry appears (strict: must exist within timeout)
@@ -193,13 +239,21 @@ async fn test_gossip_stats_consistent_under_burst_writes() {
                 drop(stats);
                 sleep(Duration::from_millis(50)).await;
             }
-        }).await.expect("Stats entry must exist after burst writes through gossip");
+        })
+        .await
+        .expect("Stats entry must exist after burst writes through gossip");
 
     // Invariant: needs_sync must be consistent with the recorded state
     if total_drops > 0 && !broadcast_since_last_drop {
-        assert!(needs_sync, "needs_sync must be true when drops occurred without recovery");
+        assert!(
+            needs_sync,
+            "needs_sync must be true when drops occurred without recovery"
+        );
     } else if broadcast_since_last_drop {
-        assert!(!needs_sync, "needs_sync must be false after a successful broadcast");
+        assert!(
+            !needs_sync,
+            "needs_sync must be false after a successful broadcast"
+        );
     }
 
     eprintln!(

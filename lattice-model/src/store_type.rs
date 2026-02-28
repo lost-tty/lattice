@@ -13,7 +13,7 @@ pub const STORE_TYPE_LOGSTORE: &str = "core:logstore";
 pub const CORE_STORE_TYPES: &[&str] = &[STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE];
 
 /// Trait for state types to declare their store type string.
-/// 
+///
 /// Implement this on state types (KvState, LogState) to enable
 /// automatic type identification during store opening.
 pub trait StoreTypeProvider {

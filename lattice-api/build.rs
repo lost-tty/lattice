@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Add uniffi::Record to message types exposed in FFI
         let ffi_records = [
             "NodeStatus",
-            "RootStoreRecord", 
+            "RootStoreRecord",
             "StoreRef",
             "StoreDetails",
             "StoreMeta",
@@ -29,12 +29,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "SExprList",
             "GetIntentionRequest",
         ];
-        
+
         let mut config = config;
         for msg in ffi_records {
             config = config.type_attribute(msg, "#[derive(uniffi::Record)]");
         }
-        
+
         // Add uniffi::Enum to enum types
         let ffi_enums = [
             "ErrorCode",
@@ -42,11 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".lattice.daemon.v1.Condition.kind",
             ".lattice.daemon.v1.SExpr.value",
         ];
-        
+
         for e in ffi_enums {
             config = config.type_attribute(e, "#[derive(uniffi::Enum)]");
         }
-        
+
         config
     };
 

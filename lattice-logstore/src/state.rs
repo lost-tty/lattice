@@ -5,12 +5,12 @@
 
 use lattice_model::{Op, PubKey, SExpr, Uuid};
 
-use std::path::Path;
 use redb::{ReadableTable, ReadableTableMetadata};
+use std::path::Path;
 
-use tokio::sync::broadcast;
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use tokio::sync::broadcast;
 
 /// Event emitted when a new log entry is appended
 #[derive(Debug, Clone)]
@@ -29,7 +29,10 @@ pub struct LogEntry {
     pub content: Vec<u8>,
 }
 
-use lattice_storage::{StateBackend, StateDbError, TABLE_DATA, PersistentState, StateLogic, StateFactory, setup_persistent_state};
+use lattice_storage::{
+    setup_persistent_state, PersistentState, StateBackend, StateDbError, StateFactory, StateLogic,
+    TABLE_DATA,
+};
 
 /// LogState - append-only log with redb persistence
 pub struct LogState {
@@ -101,8 +104,15 @@ impl LogState {
     }
 
     /// Helper to decode a DB result into a LogEntry
-    fn decode_db_result(result: Result<(redb::AccessGuard<'_, &[u8]>, redb::AccessGuard<'_, &[u8]>), redb::StorageError>) -> Option<LogEntry> {
-        result.ok().and_then(|(k, v)| Self::decode_entry(k.value(), v.value()).ok())
+    fn decode_db_result(
+        result: Result<
+            (redb::AccessGuard<'_, &[u8]>, redb::AccessGuard<'_, &[u8]>),
+            redb::StorageError,
+        >,
+    ) -> Option<LogEntry> {
+        result
+            .ok()
+            .and_then(|(k, v)| Self::decode_entry(k.value(), v.value()).ok())
     }
 
     /// Read entries (all or last N, always chronological)
@@ -115,12 +125,13 @@ impl LogState {
             Ok(t) => t,
             Err(_) => return Vec::new(),
         };
-        
+
         match table.iter() {
             Ok(iter) => {
                 if let Some(n) = tail {
                     // Optimized tail: read newest first, take N
-                    let mut entries: Vec<_> = iter.rev()
+                    let mut entries: Vec<_> = iter
+                        .rev()
                         .filter_map(Self::decode_db_result)
                         .take(n)
                         .collect();
@@ -128,11 +139,11 @@ impl LogState {
                     entries.reverse();
                     entries
                 } else {
-                    // Read all (chronological) 
+                    // Read all (chronological)
                     iter.filter_map(Self::decode_db_result).collect()
                 }
             }
-            Err(_) => Vec::new()
+            Err(_) => Vec::new(),
         }
     }
 
@@ -148,7 +159,7 @@ impl LogState {
         };
         table.len().unwrap_or(0) as usize
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -180,13 +191,15 @@ impl StateLogic for LogState {
             content: op.payload.to_vec(),
         };
         let value = Self::encode_entry(&entry);
-        
+
         // Check for duplicate key (timestamp collision for same author is fatal)
         if table.get(key.as_slice())?.is_some() {
-            return Err(StateDbError::InvalidChain("Duplicate timestamp for author".into()));
+            return Err(StateDbError::InvalidChain(
+                "Duplicate timestamp for author".into(),
+            ));
         }
         table.insert(key.as_slice(), value.as_slice())?;
-        
+
         Ok(op.payload.to_vec())
     }
 
@@ -224,7 +237,10 @@ impl lattice_store_base::Introspectable for LogState {
         crate::LOG_SERVICE_DESCRIPTOR.clone()
     }
 
-    fn decode_payload(&self, payload: &[u8]) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+    fn decode_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
         // LogStore entries are simple - just content bytes
         // Create a message with the raw content
         let append_desc = crate::LOG_SERVICE_DESCRIPTOR
@@ -233,14 +249,23 @@ impl lattice_store_base::Introspectable for LogState {
             .ok_or("Append method not found")?
             .input();
         let mut msg = prost_reflect::DynamicMessage::new(append_desc);
-        msg.set_field_by_name("content", prost_reflect::Value::Bytes(payload.to_vec().into()));
+        msg.set_field_by_name(
+            "content",
+            prost_reflect::Value::Bytes(payload.to_vec().into()),
+        );
         Ok(msg)
     }
 
     fn command_docs(&self) -> std::collections::HashMap<String, String> {
         let mut docs = std::collections::HashMap::new();
-        docs.insert("Append".to_string(), "Append a message to the log".to_string());
-        docs.insert("Read".to_string(), "Read log entries (tail option for last N)".to_string());
+        docs.insert(
+            "Append".to_string(),
+            "Append a message to the log".to_string(),
+        );
+        docs.insert(
+            "Read".to_string(),
+            "Read log entries (tail option for last N)".to_string(),
+        );
         docs
     }
 
@@ -259,7 +284,10 @@ impl lattice_store_base::Introspectable for LogState {
         false
     }
 
-    fn summarize_payload(&self, payload: &prost_reflect::DynamicMessage) -> Vec<lattice_model::SExpr> {
+    fn summarize_payload(
+        &self,
+        payload: &prost_reflect::DynamicMessage,
+    ) -> Vec<lattice_model::SExpr> {
         if let Some(content) = payload.get_field_by_name("content") {
             if let Some(bytes) = content.as_bytes() {
                 let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(50)]);
@@ -271,15 +299,17 @@ impl lattice_store_base::Introspectable for LogState {
 }
 
 // Implement StreamProvider for LogState - enables blanket StreamReflectable on handles
-use lattice_store_base::{StreamProvider, StreamHandler, StreamDescriptor, StreamError, BoxByteStream, Subscriber};
+use lattice_store_base::{
+    BoxByteStream, StreamDescriptor, StreamError, StreamHandler, StreamProvider, Subscriber,
+};
 
 struct LogSubscriber;
 
 impl Subscriber<LogState> for LogSubscriber {
     fn subscribe<'a>(
-        &'a self, 
-        state: &'a LogState, 
-        params: &'a [u8]
+        &'a self,
+        state: &'a LogState,
+        params: &'a [u8],
     ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
         state.subscribe_follow(params)
     }
@@ -287,29 +317,30 @@ impl Subscriber<LogState> for LogSubscriber {
 
 impl StreamProvider for LogState {
     fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
-        vec![
-            StreamHandler {
-                descriptor: StreamDescriptor {
-                    name: "Follow".to_string(),
-                    description: "Subscribe to new log entries as they are appended".to_string(),
-                    param_schema: Some("lattice.log.FollowParams".to_string()),
-                    event_schema: Some("lattice.log.LogEvent".to_string()),
-                },
-                subscriber: Box::new(LogSubscriber),
-            }
-        ]
+        vec![StreamHandler {
+            descriptor: StreamDescriptor {
+                name: "Follow".to_string(),
+                description: "Subscribe to new log entries as they are appended".to_string(),
+                param_schema: Some("lattice.log.FollowParams".to_string()),
+                event_schema: Some("lattice.log.LogEvent".to_string()),
+            },
+            subscriber: Box::new(LogSubscriber),
+        }]
     }
 }
 
 impl LogState {
     /// Subscribe to new log entries as they are appended.
-    pub fn subscribe_follow<'a>(&'a self, _params: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+    pub fn subscribe_follow<'a>(
+        &'a self,
+        _params: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
         use prost::Message;
-        
+
         Box::pin(async move {
             // Subscribe to state's broadcast channel
             let mut state_rx = self.subscribe();
-            
+
             // Create stream that converts events to proto and serializes
             let stream = async_stream::stream! {
                 loop {
@@ -319,7 +350,7 @@ impl LogState {
                             let proto_event = crate::proto::LogEvent {
                                 content: event.content,
                             };
-                            
+
                             // Serialize to bytes
                             let mut buf = Vec::new();
                             proto_event.encode(&mut buf).ok();
@@ -330,7 +361,7 @@ impl LogState {
                     }
                 }
             };
-            
+
             Ok(Box::pin(stream) as BoxByteStream)
         })
     }
@@ -341,9 +372,9 @@ impl LogState {
 // Enables LogState to handle commands directly without a wrapper handle.
 // Write operations use the injected StateWriter.
 
-use lattice_store_base::{CommandHandler, dispatch::dispatch_method};
-use lattice_model::StateWriter;
 use crate::proto::{AppendRequest, AppendResponse, ReadRequest, ReadResponse};
+use lattice_model::StateWriter;
+use lattice_store_base::{dispatch::dispatch_method, CommandHandler};
 
 impl CommandHandler for LogState {
     fn handle_command<'a>(
@@ -351,12 +382,29 @@ impl CommandHandler for LogState {
         writer: &'a dyn StateWriter,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
-    ) -> Pin<Box<dyn Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
         let desc = crate::LOG_SERVICE_DESCRIPTOR.clone();
         Box::pin(async move {
             match method_name {
-                "Append" => dispatch_method(method_name, request, desc, |req| self.handle_append(writer, req)).await,
-                "Read" => dispatch_method(method_name, request, desc, |req| self.handle_read(req)).await,
+                "Append" => {
+                    dispatch_method(method_name, request, desc, |req| {
+                        self.handle_append(writer, req)
+                    })
+                    .await
+                }
+                "Read" => {
+                    dispatch_method(method_name, request, desc, |req| self.handle_read(req)).await
+                }
                 _ => Err(format!("Unknown method: {}", method_name).into()),
             }
         })
@@ -364,17 +412,28 @@ impl CommandHandler for LogState {
 }
 
 impl LogState {
-    async fn handle_append(&self, writer: &dyn StateWriter, req: AppendRequest) -> Result<AppendResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_append(
+        &self,
+        writer: &dyn StateWriter,
+        req: AppendRequest,
+    ) -> Result<AppendResponse, Box<dyn std::error::Error + Send + Sync>> {
         // Log entries don't have causal dependencies on each other
         let hash = writer.submit(req.content, vec![]).await?;
-        Ok(AppendResponse { hash: hash.0.to_vec() })
+        Ok(AppendResponse {
+            hash: hash.0.to_vec(),
+        })
     }
 
-    async fn handle_read(&self, req: ReadRequest) -> Result<ReadResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_read(
+        &self,
+        req: ReadRequest,
+    ) -> Result<ReadResponse, Box<dyn std::error::Error + Send + Sync>> {
         let tail = req.tail.map(|v| v as usize);
         let entries = self.read(tail);
         let entry_values = entries.iter().map(|e| e.content.clone()).collect();
-        Ok(ReadResponse { entries: entry_values })
+        Ok(ReadResponse {
+            entries: entry_values,
+        })
     }
 }
 
@@ -382,9 +441,9 @@ impl LogState {
 mod tests {
     use super::*;
     use lattice_model::hlc::HLC;
-    use tempfile::tempdir;
     use lattice_model::Uuid;
-    use lattice_model::{Hash, PubKey, Op, StateMachine};
+    use lattice_model::{Hash, Op, PubKey, StateMachine};
+    use tempfile::tempdir;
 
     #[test]
     fn test_persistence_roundtrip() {
@@ -393,74 +452,86 @@ mod tests {
         let author = PubKey::from([1u8; 32]);
         let id = Uuid::new_v4();
         let state = LogState::open(id, dir.path()).unwrap();
-        
+
         let op = Op {
             id: Hash::from([42u8; 32]),
             prev_hash: Hash::ZERO,
             causal_deps: &[],
             author,
-            timestamp: HLC { wall_time: 1000, counter: 1 },
+            timestamp: HLC {
+                wall_time: 1000,
+                counter: 1,
+            },
             payload: b"hello world",
         };
-        
+
         StateMachine::apply(&state, &op).unwrap();
         assert_eq!(state.read(None).len(), 1);
-        
+
         drop(state);
-        
+
         // Re-open with SAME ID
         let state2 = LogState::open(id, dir.path()).unwrap();
         assert_eq!(state2.read(None).len(), 1);
         assert_eq!(state2.read(None)[0].content, b"hello world");
     }
-    
+
     #[test]
     fn test_ordering() {
         let dir = tempdir().unwrap();
         let state = LogState::open(Uuid::new_v4(), dir.path()).unwrap();
-        
+
         let author1 = PubKey::from([1u8; 32]);
         let author2 = PubKey::from([2u8; 32]);
         let causal_deps: Vec<Hash> = vec![];
-        
+
         // Insert out of order: third, first, second
         let op3 = Op {
             id: Hash::from([3u8; 32]),
             prev_hash: Hash::ZERO,
             causal_deps: &causal_deps,
             author: author2,
-            timestamp: HLC { wall_time: 3000, counter: 0 },
+            timestamp: HLC {
+                wall_time: 3000,
+                counter: 0,
+            },
             payload: b"third",
         };
         StateMachine::apply(&state, &op3).unwrap();
-        
+
         let op1 = Op {
             id: Hash::from([1u8; 32]),
             prev_hash: Hash::ZERO,
             causal_deps: &causal_deps,
             author: author1,
-            timestamp: HLC { wall_time: 1000, counter: 0 },
+            timestamp: HLC {
+                wall_time: 1000,
+                counter: 0,
+            },
             payload: b"first",
         };
         StateMachine::apply(&state, &op1).unwrap();
-        
+
         let op2 = Op {
             id: Hash::from([2u8; 32]),
             prev_hash: Hash::from([1u8; 32]), // Chain to op1
             causal_deps: &causal_deps,
             author: author1,
-            timestamp: HLC { wall_time: 2000, counter: 0 },
+            timestamp: HLC {
+                wall_time: 2000,
+                counter: 0,
+            },
             payload: b"second",
         };
         StateMachine::apply(&state, &op2).unwrap();
-        
+
         // read(None) should return in HLC order
         let entries = state.read(None);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].content, b"first");
         assert_eq!(entries[1].content, b"second");
         assert_eq!(entries[2].content, b"third");
-        
+
         // Test tail reading (read last 2)
         let tail = state.read(Some(2));
         assert_eq!(tail.len(), 2);
@@ -472,10 +543,10 @@ mod tests {
     #[test]
     fn test_snapshot_restore() {
         let store_id = Uuid::new_v4();
-        
+
         let dir1 = tempdir().unwrap();
         let state1 = LogState::open(store_id, dir1.path()).unwrap();
-        
+
         let author = PubKey::from([1u8; 32]);
         let start_hlc = HLC::now();
         let op = Op {
@@ -487,15 +558,15 @@ mod tests {
             payload: b"log_entry_1",
         };
         StateMachine::apply(&state1, &op).unwrap();
-        
+
         // Take snapshot
         let snapshot = state1.snapshot().unwrap();
-        
+
         // Restore to fresh state with SAME store ID (restore validates ID)
         let dir2 = tempdir().unwrap();
         let state2 = LogState::open(store_id, dir2.path()).unwrap();
         state2.restore(snapshot).unwrap();
-        
+
         // Verify
         assert_eq!(state2.len(), 1);
         let entries = state2.read(None);

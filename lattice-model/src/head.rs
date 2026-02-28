@@ -1,7 +1,7 @@
 //! Head - internal strong-typed representation of a KV/System history head
 
+use crate::hlc::HLC;
 use crate::types::{Hash, PubKey};
-use crate::hlc::HLC; 
 use thiserror::Error;
 
 /// Errors concerning Head operations and conversions
@@ -9,10 +9,10 @@ use thiserror::Error;
 pub enum HeadError {
     #[error("Invalid author bytes: {0}")]
     InvalidAuthor(String),
-    
+
     #[error("Invalid hash bytes: {0}")]
     InvalidHash(String),
-    
+
     #[error("Invalid HLC in HeadInfo")]
     InvalidHlc,
 }
@@ -50,5 +50,3 @@ impl Head {
         }
     }
 }
-
-

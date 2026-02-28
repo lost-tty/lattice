@@ -25,10 +25,12 @@ impl<W: AsyncWrite + Send + Unpin> MessageSink<W> {
     /// Send a PeerMessage (length-prefixed)
     pub async fn send(&mut self, msg: &PeerMessage) -> Result<(), LatticeNetError> {
         let bytes = msg.encode_to_vec();
-        self.inner.send(bytes.into()).await
+        self.inner
+            .send(bytes.into())
+            .await
             .map_err(|e| LatticeNetError::Io(e.into()))
     }
-    
+
     /// Consume the sink and return the underlying writer.
     /// Useful for transport-specific stream finalization (e.g. iroh's `finish()`).
     pub fn into_inner(self) -> W {
@@ -51,11 +53,9 @@ impl<R: AsyncRead + Send + Unpin> MessageStream<R> {
     /// Receive next PeerMessage (or None if stream closed)
     pub async fn recv(&mut self) -> Result<Option<PeerMessage>, LatticeNetError> {
         match self.inner.next().await {
-            Some(Ok(bytes)) => {
-                PeerMessage::decode(&bytes[..])
-                    .map(Some)
-                    .map_err(LatticeNetError::from)
-            }
+            Some(Ok(bytes)) => PeerMessage::decode(&bytes[..])
+                .map(Some)
+                .map_err(LatticeNetError::from),
             Some(Err(e)) => Err(LatticeNetError::Io(e.into())),
             None => Ok(None),
         }

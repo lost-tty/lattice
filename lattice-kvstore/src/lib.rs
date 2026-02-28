@@ -29,14 +29,15 @@ pub enum WatchEventKind {
 
 // Internal modules
 pub mod state;
-pub use state::KvState;
 pub use lattice_storage::head::{Head, HeadError};
 pub use proto::KvPayload;
+pub use state::KvState;
 
 /// Type alias for KV store state wrapped in PersistentState for use with direct_opener()  
 pub type PersistentKvState = lattice_storage::PersistentState<KvState>;
 
-pub const KV_DESCRIPTOR_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kv_descriptor.bin"));
+pub const KV_DESCRIPTOR_BYTES: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/kv_descriptor.bin"));
 
 // Lazy service descriptor for introspection
 use once_cell::sync::Lazy;
@@ -48,5 +49,7 @@ static DESCRIPTOR_POOL: Lazy<DescriptorPool> = Lazy::new(|| {
 
 /// Get the KvStore service descriptor for CLI introspection
 pub static KV_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
-    DESCRIPTOR_POOL.get_service_by_name("lattice.kv.KvStore").expect("Service definition missing")
+    DESCRIPTOR_POOL
+        .get_service_by_name("lattice.kv.KvStore")
+        .expect("Service definition missing")
 });

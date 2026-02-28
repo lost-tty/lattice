@@ -4,13 +4,13 @@
 //! Mirrors the `ChannelNetwork` pattern: a shared `GossipNetwork` broker
 //! connects multiple `BroadcastGossip` instances.
 
-use lattice_net_types::{GossipLayer, GossipError};
 use lattice_model::types::PubKey;
+use lattice_net_types::{GossipError, GossipLayer};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use uuid::Uuid;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Shared broadcast network — routes raw bytes between BroadcastGossip instances.
 ///
@@ -31,7 +31,8 @@ impl GossipNetwork {
     /// Get or create the broadcast channel for a store.
     pub async fn get_or_create(&self, store_id: Uuid) -> broadcast::Sender<(PubKey, Vec<u8>)> {
         let mut channels = self.channels.write().await;
-        channels.entry(store_id)
+        channels
+            .entry(store_id)
             .or_insert_with(|| broadcast::channel(256).0)
             .clone()
     }
@@ -90,14 +91,23 @@ impl GossipLayer for BroadcastGossip {
         let my_pubkey = self.my_pubkey;
 
         let token = tokio_util::sync::CancellationToken::new();
-        self.store_tokens.lock().await.insert(store_id, token.clone());
+        self.store_tokens
+            .lock()
+            .await
+            .insert(store_id, token.clone());
 
         // Store the sender for broadcast()
-        self.store_senders.lock().await.insert(store_id, sender.clone());
+        self.store_senders
+            .lock()
+            .await
+            .insert(store_id, sender.clone());
 
         // Create the inbound channel for this store
         let (inbound_tx, inbound_rx) = broadcast::channel(256);
-        self.inbound_channels.lock().await.insert(store_id, inbound_tx.clone());
+        self.inbound_channels
+            .lock()
+            .await
+            .insert(store_id, inbound_tx.clone());
 
         // Receive task: route incoming bytes, skip our own messages
         let token_recv = token.clone();
@@ -113,13 +123,13 @@ impl GossipLayer for BroadcastGossip {
                                 if sender_pubkey == my_pubkey {
                                     continue;
                                 }
-                                
+
                                 // Test injection: drop exactly one message if flag is set
                                 if drop_flag.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
                                     tracing::info!("TEST: Intentionally dropping incoming gossip message from {}", sender_pubkey);
                                     continue;
                                 }
-                                
+
                                 // Deliver raw bytes to subscriber
                                 let _ = inbound_tx.send((sender_pubkey, data));
                             }

@@ -10,13 +10,13 @@ pub use lattice_net_types::GossipError;
 pub enum ServerError {
     #[error("init: {0}")]
     Init(String),
-    
+
     #[error("endpoint: {0}")]
     Endpoint(String),
-    
+
     #[error("gossip: {0}")]
     Gossip(#[from] GossipError),
-    
+
     #[error("node: {0}")]
     Node(#[from] lattice_model::NodeError),
 }

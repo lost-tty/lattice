@@ -28,7 +28,10 @@ pub trait Introspectable: Send + Sync {
     /// Decode an opaque log payload into a human-readable DynamicMessage.
     ///
     /// This allows the generic CLI to visualize history without knowing the schema.
-    fn decode_payload(&self, payload: &[u8]) -> Result<DynamicMessage, Box<dyn Error + Send + Sync>>;
+    fn decode_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<DynamicMessage, Box<dyn Error + Send + Sync>>;
 
     /// Returns a map of command names to human-readable descriptions.
     ///
@@ -71,7 +74,9 @@ pub trait CommandDispatcher: Introspectable {
         &'a self,
         method_name: &'a str,
         request: DynamicMessage,
-    ) -> Pin<Box<dyn Future<Output = Result<DynamicMessage, Box<dyn Error + Send + Sync>>> + Send + 'a>>;
+    ) -> Pin<
+        Box<dyn Future<Output = Result<DynamicMessage, Box<dyn Error + Send + Sync>>> + Send + 'a>,
+    >;
 }
 
 // ============================================================================
@@ -126,16 +131,18 @@ pub type BoxByteStream = Pin<Box<dyn futures_core::Stream<Item = Vec<u8>> + Send
 pub trait StreamReflectable: Send + Sync {
     /// Returns descriptors for all available streams.
     fn stream_descriptors(&self) -> Vec<StreamDescriptor>;
-    
+
     /// Subscribe to a named stream with the given parameters.
     ///
     /// Returns a Future that yields a stream of serialized proto events.
     /// The Future allows ensuring that subscription setup (regex compilation, channel creation)
     /// succeeds before returning the stream.
-    fn subscribe<'a>(&'a self, stream_name: &'a str, _params: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
-        Box::pin(async move {
-            Err(StreamError::NotFound(stream_name.to_string()))
-        })
+    fn subscribe<'a>(
+        &'a self,
+        stream_name: &'a str,
+        _params: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+        Box::pin(async move { Err(StreamError::NotFound(stream_name.to_string())) })
     }
 }
 
@@ -149,7 +156,10 @@ impl<T: Introspectable + ?Sized> Introspectable for std::sync::Arc<T> {
         (**self).service_descriptor()
     }
 
-    fn decode_payload(&self, payload: &[u8]) -> Result<DynamicMessage, Box<dyn Error + Send + Sync>> {
+    fn decode_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<DynamicMessage, Box<dyn Error + Send + Sync>> {
         (**self).decode_payload(payload)
     }
 
@@ -175,7 +185,9 @@ impl<T: CommandDispatcher + ?Sized> CommandDispatcher for std::sync::Arc<T> {
         &'a self,
         method_name: &'a str,
         request: DynamicMessage,
-    ) -> Pin<Box<dyn Future<Output = Result<DynamicMessage, Box<dyn Error + Send + Sync>>> + Send + 'a>> {
+    ) -> Pin<
+        Box<dyn Future<Output = Result<DynamicMessage, Box<dyn Error + Send + Sync>>> + Send + 'a>,
+    > {
         (**self).dispatch(method_name, request)
     }
 }
@@ -184,7 +196,7 @@ impl<T: StreamReflectable + ?Sized> StreamReflectable for std::sync::Arc<T> {
     fn stream_descriptors(&self) -> Vec<StreamDescriptor> {
         (**self).stream_descriptors()
     }
-    
+
     fn subscribe<'a>(
         &'a self,
         stream_name: &'a str,

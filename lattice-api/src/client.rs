@@ -4,8 +4,8 @@
 //! communicate with the daemon over UDS.
 
 use crate::proto::{
-    dynamic_store_service_client::DynamicStoreServiceClient, node_service_client::NodeServiceClient,
-    store_service_client::StoreServiceClient,
+    dynamic_store_service_client::DynamicStoreServiceClient,
+    node_service_client::NodeServiceClient, store_service_client::StoreServiceClient,
 };
 use hyper_util::rt::TokioIo;
 use std::path::Path;
@@ -23,9 +23,11 @@ pub struct RpcClient {
 
 impl RpcClient {
     /// Connect to the daemon at the given socket path
-    pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn connect(
+        socket_path: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let socket_path = socket_path.as_ref().to_path_buf();
-        
+
         // Dummy URI required by tonic's Endpoint API - actual connection uses Unix socket below
         let channel = Endpoint::from_static("http://[::]:0")
             .connect_with_connector(service_fn(move |_: Uri| {

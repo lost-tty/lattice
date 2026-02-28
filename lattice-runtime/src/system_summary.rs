@@ -7,8 +7,8 @@
 
 use lattice_model::SExpr;
 use lattice_proto::storage::{
-    SystemOp, system_op, hierarchy_op, peer_op, peer_strategy_op, store_op, invite_op,
-    PeerStatus, ChildStatus, InviteStatus,
+    hierarchy_op, invite_op, peer_op, peer_strategy_op, store_op, system_op, ChildStatus,
+    InviteStatus, PeerStatus, SystemOp,
 };
 
 /// Build structured SExpr summaries for a SystemOp.
@@ -19,9 +19,7 @@ pub fn summarize(op: &SystemOp) -> Vec<SExpr> {
         Some(system_op::Kind::Strategy(s)) => summarize_strategy(s),
         Some(system_op::Kind::Store(s)) => summarize_store(s),
         Some(system_op::Kind::Invite(i)) => summarize_invite(i),
-        Some(system_op::Kind::Batch(batch)) => {
-            batch.ops.iter().flat_map(summarize).collect()
-        }
+        Some(system_op::Kind::Batch(batch)) => batch.ops.iter().flat_map(summarize).collect(),
         None => vec![SExpr::list(vec![SExpr::sym("system-op")])],
     }
 }
@@ -30,7 +28,7 @@ fn fmt_uuid(bytes: &[u8]) -> SExpr {
     SExpr::str(
         uuid::Uuid::from_slice(bytes)
             .map(|u| u.to_string())
-            .unwrap_or_else(|_| hex::encode(bytes))
+            .unwrap_or_else(|_| hex::encode(bytes)),
     )
 }
 
@@ -65,7 +63,10 @@ fn summarize_hierarchy(op: &lattice_proto::storage::HierarchyOp) -> Vec<SExpr> {
             vec![SExpr::list(items)]
         }
         Some(hierarchy_op::Op::RemoveChild(rem)) => {
-            vec![SExpr::list(vec![SExpr::sym("child-remove"), fmt_uuid(&rem.target_id)])]
+            vec![SExpr::list(vec![
+                SExpr::sym("child-remove"),
+                fmt_uuid(&rem.target_id),
+            ])]
         }
         Some(hierarchy_op::Op::SetStatus(status)) => {
             let label = match ChildStatus::try_from(status.status) {
@@ -94,16 +95,32 @@ fn summarize_peer(op: &lattice_proto::storage::PeerOp) -> Vec<SExpr> {
                 Ok(PeerStatus::Revoked) => ":revoked",
                 _ => ":unknown",
             };
-            vec![SExpr::list(vec![SExpr::sym("peer-status"), pk, SExpr::sym(label)])]
+            vec![SExpr::list(vec![
+                SExpr::sym("peer-status"),
+                pk,
+                SExpr::sym(label),
+            ])]
         }
         Some(peer_op::Op::SetName(n)) => {
-            vec![SExpr::list(vec![SExpr::sym("peer-name"), pk, SExpr::str(&n.name)])]
+            vec![SExpr::list(vec![
+                SExpr::sym("peer-name"),
+                pk,
+                SExpr::str(&n.name),
+            ])]
         }
         Some(peer_op::Op::SetAddedAt(a)) => {
-            vec![SExpr::list(vec![SExpr::sym("peer-added-at"), pk, SExpr::num(a.timestamp)])]
+            vec![SExpr::list(vec![
+                SExpr::sym("peer-added-at"),
+                pk,
+                SExpr::num(a.timestamp),
+            ])]
         }
         Some(peer_op::Op::SetAddedBy(b)) => {
-            vec![SExpr::list(vec![SExpr::sym("peer-added-by"), pk, fmt_pubkey(&b.adder_pubkey)])]
+            vec![SExpr::list(vec![
+                SExpr::sym("peer-added-by"),
+                pk,
+                fmt_pubkey(&b.adder_pubkey),
+            ])]
         }
         None => vec![SExpr::list(vec![SExpr::sym("peer-op"), pk])],
     }
@@ -138,7 +155,10 @@ fn summarize_strategy(op: &lattice_proto::storage::PeerStrategyOp) -> Vec<SExpr>
 fn summarize_store(op: &lattice_proto::storage::StoreOp) -> Vec<SExpr> {
     match &op.op {
         Some(store_op::Op::SetName(n)) => {
-            vec![SExpr::list(vec![SExpr::sym("store-name"), SExpr::str(&n.name)])]
+            vec![SExpr::list(vec![
+                SExpr::sym("store-name"),
+                SExpr::str(&n.name),
+            ])]
         }
         None => vec![SExpr::list(vec![SExpr::sym("store-op")])],
     }
@@ -154,13 +174,25 @@ fn summarize_invite(op: &lattice_proto::storage::InviteOp) -> Vec<SExpr> {
                 Ok(InviteStatus::Claimed) => ":claimed",
                 _ => ":unknown",
             };
-            vec![SExpr::list(vec![SExpr::sym("invite-status"), tok, SExpr::sym(label)])]
+            vec![SExpr::list(vec![
+                SExpr::sym("invite-status"),
+                tok,
+                SExpr::sym(label),
+            ])]
         }
         Some(invite_op::Op::SetInvitedBy(b)) => {
-            vec![SExpr::list(vec![SExpr::sym("invite-invited-by"), tok, fmt_pubkey(&b.inviter_pubkey)])]
+            vec![SExpr::list(vec![
+                SExpr::sym("invite-invited-by"),
+                tok,
+                fmt_pubkey(&b.inviter_pubkey),
+            ])]
         }
         Some(invite_op::Op::SetClaimedBy(c)) => {
-            vec![SExpr::list(vec![SExpr::sym("invite-claimed-by"), tok, fmt_pubkey(&c.claimer_pubkey)])]
+            vec![SExpr::list(vec![
+                SExpr::sym("invite-claimed-by"),
+                tok,
+                fmt_pubkey(&c.claimer_pubkey),
+            ])]
         }
         None => vec![SExpr::list(vec![SExpr::sym("invite-op"), tok])],
     }

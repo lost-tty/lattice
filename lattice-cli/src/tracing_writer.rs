@@ -42,8 +42,8 @@ pub struct SharedWriterMakeWriter {
 impl SharedWriterMakeWriter {
     /// Create a new SharedWriterMakeWriter
     pub fn new(shared_writer: SharedWriter) -> Self {
-        Self { 
-            writer: Arc::new(Mutex::new(shared_writer))
+        Self {
+            writer: Arc::new(Mutex::new(shared_writer)),
         }
     }
 }
