@@ -29,7 +29,6 @@ pub enum WatchEventKind {
 
 // Internal modules
 pub mod state;
-pub use lattice_storage::head::{Head, HeadError};
 pub use proto::KvPayload;
 pub use state::KvState;
 

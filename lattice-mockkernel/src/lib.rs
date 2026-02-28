@@ -4,10 +4,10 @@
 //! directly to state without needing the full replication stack.
 
 use futures_util::StreamExt;
+use lattice_model::dag_queries::NullDag;
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{Condition, Intention};
-use lattice_model::dag_queries::NullDag;
 use lattice_model::Op;
 use lattice_model::{StateMachine, StateWriter, StateWriterError};
 use lattice_storage::state_db::StateLogic;

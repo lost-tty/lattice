@@ -6,8 +6,8 @@ license.workspace = true
 description = "Unified head-tracking engine for KV-shaped conflict domains"
 
 [dependencies]
+anyhow = { workspace = true }
 lattice-model = { workspace = true }
-lattice-proto = { workspace = true }
 redb = { workspace = true }
 prost = { workspace = true }
 thiserror = { workspace = true }

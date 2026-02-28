@@ -34,7 +34,11 @@ mod tests {
         fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
             Ok(Vec::new())
         }
-        fn apply(&self, op: &Op<'_>, _dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
+        fn apply(
+            &self,
+            op: &Op<'_>,
+            _dag: &dyn lattice_model::DagQueries,
+        ) -> Result<(), Self::Error> {
             self.applied.write().unwrap().push(op.id);
             Ok(())
         }

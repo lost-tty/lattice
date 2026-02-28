@@ -587,7 +587,11 @@ mod tests {
             Ok(self.tips.read().unwrap().clone().into_iter().collect())
         }
 
-        fn apply(&self, op: &lattice_model::Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), std::io::Error> {
+        fn apply(
+            &self,
+            op: &lattice_model::Op,
+            _dag: &dyn lattice_model::DagQueries,
+        ) -> Result<(), std::io::Error> {
             self.tips.write().unwrap().insert(op.author, op.id);
             self.applied_ops.write().unwrap().insert(op.id);
             Ok(())

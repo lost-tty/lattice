@@ -3,8 +3,7 @@
 pub mod storage {
     include!(concat!(env!("OUT_DIR"), "/lattice.storage.rs"));
 
-    use lattice_model::head::Head;
-    use lattice_model::{Hash, PubKey, HLC};
+    use lattice_model::HLC;
 
     impl From<Hlc> for HLC {
         fn from(proto: Hlc) -> Self {
@@ -17,34 +16,6 @@ pub mod storage {
             Hlc {
                 wall_time: hlc.wall_time,
                 counter: hlc.counter,
-            }
-        }
-    }
-
-    impl TryFrom<HeadInfo> for Head {
-        type Error = String;
-
-        fn try_from(proto: HeadInfo) -> Result<Self, Self::Error> {
-            Ok(Head {
-                value: proto.value,
-                hlc: proto.hlc.ok_or("Missing HLC")?.into(),
-                author: PubKey::try_from(proto.author.as_slice())
-                    .map_err(|_| "Invalid author length".to_string())?,
-                hash: Hash::try_from(proto.hash.as_slice())
-                    .map_err(|_| "Invalid hash length".to_string())?,
-                tombstone: proto.tombstone,
-            })
-        }
-    }
-
-    impl From<Head> for HeadInfo {
-        fn from(head: Head) -> Self {
-            Self {
-                value: head.value,
-                hlc: Some(head.hlc.into()),
-                author: head.author.to_vec(),
-                hash: head.hash.to_vec(),
-                tombstone: head.tombstone,
             }
         }
     }

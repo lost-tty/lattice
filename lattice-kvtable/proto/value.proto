@@ -4,11 +4,13 @@ package lattice.kvtable;
 
 // On-disk format for KVTable (14D).
 //
-// heads[0] is the LWW winner (the intention that produced `value`).
-// Remaining heads are concurrent losers, kept for conflict detection.
+// `kind` distinguishes live entries from tombstones.
+// `heads[0]` is the LWW winner; remaining heads are concurrent losers.
 // Non-winning metadata is looked up from the DAG on demand.
 message Value {
-    bytes value = 1;           // Winner's value (empty for tombstones)
-    bool tombstone = 2;        // True if winner is a delete
+    oneof kind {
+        bytes value = 1;     // Live entry (winner's value, may be empty)
+        bool tombstone = 2;  // Delete marker (always true when set)
+    }
     repeated bytes heads = 3;  // heads[0] = winner; rest = losers
 }

@@ -49,7 +49,12 @@ impl<S> SystemLayer<S> {
 
 impl<S: StateLogic> SystemLayer<S> {
     /// Orchestrate the transaction for a SystemOp
-    fn apply_system_transaction(&self, op: &Op, sys_op: SystemOp) -> Result<(), StateDbError> {
+    fn apply_system_transaction(
+        &self,
+        op: &Op,
+        sys_op: SystemOp,
+        dag: &dyn lattice_model::DagQueries,
+    ) -> Result<(), StateDbError> {
         let mut write_txn = self
             .inner
             .backend()
@@ -69,7 +74,7 @@ impl<S: StateLogic> SystemLayer<S> {
         }
 
         // 2. Apply System Op
-        self.apply_system_op(&mut write_txn, sys_op, op)
+        self.apply_system_op(&mut write_txn, sys_op, op, dag)
             .map_err(StateDbError::from)?;
 
         write_txn.commit().map_err(StateDbError::Commit)?;
@@ -83,17 +88,18 @@ impl<S: StateLogic> SystemLayer<S> {
         txn: &mut redb::WriteTransaction,
         sys_op: SystemOp,
         op: &Op,
+        dag: &dyn lattice_model::DagQueries,
     ) -> Result<(), StateDbError> {
         // Handle Batch first (before opening table) to avoid borrow conflict
         if let Some(system_op::Kind::Batch(batch)) = sys_op.kind {
             for inner_op in batch.ops {
-                self.apply_system_op(txn, inner_op, op)?;
+                self.apply_system_op(txn, inner_op, op, dag)?;
             }
             return Ok(());
         }
 
         let raw_table = txn.open_table(lattice_storage::TABLE_SYSTEM)?;
-        let mut table = crate::tables::SystemTable::new(raw_table);
+        let mut table = crate::tables::SystemTable::new(raw_table, dag);
 
         match sys_op.kind {
             Some(system_op::Kind::Hierarchy(h_op)) => match h_op.op {
@@ -173,7 +179,7 @@ where
 
         match universal.op {
             Some(universal_op::Op::System(sys_op)) => self
-                .apply_system_transaction(op, sys_op)
+                .apply_system_transaction(op, sys_op, dag)
                 .map_err(SystemLayerError::Db),
             Some(universal_op::Op::AppData(data)) => {
                 let new_op = Op {

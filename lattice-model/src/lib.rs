@@ -23,7 +23,7 @@ pub mod weaver;
 
 // Re-exports from dependencies
 pub use clock::{Clock, MockClock, SystemClock};
-pub use dag_queries::{DagQueries, IntentionInfo, NullDag};
+pub use dag_queries::{DagQueries, HashMapDag, IntentionInfo, NullDag};
 pub use head::{Head, HeadError};
 pub use hlc::HLC;
 pub use net_event::NetEvent;

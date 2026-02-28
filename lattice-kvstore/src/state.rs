@@ -3,9 +3,8 @@
 //! This is a pure StateMachine implementation that knows nothing about entries,
 //! intentions, or replication. It only knows how to apply operations.
 //!
-//! Uses redb for efficient embedded storage.
-//! Tables:
-//! - kv: Vec<u8> → HeadList (multi-head DAG tips per key)
+//! Uses redb for efficient embedded storage. Per-key state is encoded as
+//! `proto::Value { oneof kind { value | tombstone }, heads[] }` via `KVTable`.
 
 // Internal table names
 use lattice_storage::{
@@ -18,7 +17,6 @@ use std::pin::Pin;
 use crate::proto::{operation, KvPayload};
 use crate::{WatchEvent, WatchEventKind};
 use lattice_model::{Hash, Op, Uuid};
-use lattice_storage::head::Head;
 use lattice_store_base::{FieldFormat, Introspectable};
 use prost::Message;
 use prost_reflect::{DescriptorPool, ReflectMessage};
@@ -42,12 +40,6 @@ impl std::fmt::Debug for KvState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KvState").finish_non_exhaustive()
     }
-}
-
-/// Result of a successful apply_head: the LWW-resolved value for watcher notifications.
-/// `None` means the key is now a tombstone (deleted).
-struct ApplyResult {
-    value: Option<Vec<u8>>,
 }
 
 // ==================== Openable Implementation ====================
@@ -77,26 +69,6 @@ impl KvState {
     /// Subscribe to state changes.
     pub fn subscribe(&self) -> broadcast::Receiver<WatchEvent> {
         self.watcher_tx.subscribe()
-    }
-
-    /// Apply a new head to a key, removing ancestor heads (idempotent).
-    /// Delegates to `lattice_kvtable::KVTable`.
-    /// Returns the LWW-resolved value on mutation, `None` on idempotent skip.
-    fn apply_head(
-        &self,
-        table: &mut redb::Table<&[u8], &[u8]>,
-        key: &[u8],
-        new_head: Head,
-        parent_hashes: &[Hash],
-    ) -> Result<Option<ApplyResult>, StateDbError> {
-        let mut kvt = lattice_kvtable::KVTable::new(table);
-        match kvt.apply_head(key, new_head, parent_hashes) {
-            Ok(Some(new_heads)) => Ok(Some(ApplyResult {
-                value: lattice_kvtable::lww(&new_heads),
-            })),
-            Ok(None) => Ok(None),
-            Err(e) => Err(StateDbError::Conversion(e.to_string())),
-        }
     }
 
     /// Get the materialized LWW value for a key.
@@ -184,34 +156,28 @@ impl StateLogic for KvState {
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
-        _dag: &dyn lattice_model::DagQueries,
+        dag: &dyn lattice_model::DagQueries,
     ) -> Result<Self::Updates, StateDbError> {
         // Decode payload
         let kv_payload = KvPayload::decode(op.payload.as_ref())
             .map_err(|e| StateDbError::Conversion(e.to_string()))?;
 
+        let mut kvt = lattice_kvtable::KVTable::new(table);
         let mut updates: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
 
         // Apply KV operations (in reverse order for "last op wins" within batch)
         for kv_op in kv_payload.ops.iter().rev() {
             if let Some(op_type) = &kv_op.op_type {
-                match op_type {
-                    operation::OpType::Put(put) => {
-                        let new_head = Head::from_op(op, put.value.clone());
-                        if let Some(result) =
-                            self.apply_head(table, &put.key, new_head, &op.causal_deps)?
-                        {
-                            updates.push((put.key.clone(), result.value));
-                        }
+                let (key, value, tombstone) = match op_type {
+                    operation::OpType::Put(put) => (&put.key, put.value.clone(), false),
+                    operation::OpType::Delete(del) => (&del.key, Vec::new(), true),
+                };
+                match kvt.apply_head(key, op, value, tombstone, dag) {
+                    Ok(Some(winner)) => {
+                        updates.push((key.clone(), winner));
                     }
-                    operation::OpType::Delete(del) => {
-                        let tombstone = Head::tombstone(op);
-                        if let Some(result) =
-                            self.apply_head(table, &del.key, tombstone, &op.causal_deps)?
-                        {
-                            updates.push((del.key.clone(), result.value));
-                        }
-                    }
+                    Ok(None) => {} // idempotent skip
+                    Err(e) => return Err(StateDbError::Conversion(e.to_string())),
                 }
             }
         }
@@ -713,7 +679,7 @@ impl KvState {
 mod tests {
     use super::*;
     use crate::proto::Operation;
-    use lattice_model::dag_queries::NullDag;
+    use lattice_model::dag_queries::{HashMapDag, NullDag};
     use lattice_model::hlc::HLC;
     use lattice_model::PubKey;
     use lattice_model::StateMachine;
@@ -764,6 +730,7 @@ mod tests {
     fn test_state_machine_concurrent_puts() {
         let dir = tempdir().unwrap();
         let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let dag = HashMapDag::new();
 
         let key = b"shared/key";
 
@@ -771,13 +738,15 @@ mod tests {
         let author_a = PubKey::from([10u8; 32]);
         let hash_a = Hash::from([11u8; 32]);
         let op_a = make_put_op(key, b"value_a", hash_a, author_a, &[], Hash::ZERO);
-        StateMachine::apply(&store, &op_a, &NULL_DAG).unwrap();
+        dag.record(&op_a);
+        StateMachine::apply(&store, &op_a, &dag).unwrap();
 
         // Second put from author B (concurrent - no deps)
         let author_b = PubKey::from([20u8; 32]);
         let hash_b = Hash::from([21u8; 32]);
         let op_b = make_put_op(key, b"value_b", hash_b, author_b, &[], Hash::ZERO);
-        StateMachine::apply(&store, &op_b, &NULL_DAG).unwrap();
+        dag.record(&op_b);
+        StateMachine::apply(&store, &op_b, &dag).unwrap();
 
         // Should have 2 concurrent heads
         assert_eq!(
@@ -791,7 +760,8 @@ mod tests {
         let hash_c = Hash::from([31u8; 32]);
         let deps = vec![hash_a, hash_b];
         let op_c = make_put_op(key, b"merged", hash_c, author_c, &deps, Hash::ZERO);
-        StateMachine::apply(&store, &op_c, &NULL_DAG).unwrap();
+        dag.record(&op_c);
+        StateMachine::apply(&store, &op_c, &dag).unwrap();
 
         // Should now have only 1 head (the merge)
         assert_eq!(store.head_hashes(key).unwrap(), vec![hash_c]);
@@ -994,7 +964,8 @@ mod tests {
         let ops = vec![Operation::put(b"".as_slice(), b"value")];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
 
-        StateMachine::apply(&store, &op, &NULL_DAG).expect("Empty key should be applied at apply_op level");
+        StateMachine::apply(&store, &op, &NULL_DAG)
+            .expect("Empty key should be applied at apply_op level");
 
         // Verify it was stored
         assert_eq!(store.get(b"").unwrap(), Some(b"value".to_vec()));

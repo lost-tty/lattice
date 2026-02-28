@@ -192,16 +192,3 @@ enum InviteStatus {
     INVITE_STATUS_CLAIMED = 3;
 }
 
-// --- HeadList CRDT (Shared) ---
-
-message HeadInfo {
-    bytes value = 1;
-    lattice.storage.HLC hlc = 2;
-    bytes author = 3;
-    bytes hash = 4;
-    bool tombstone = 5;
-}
-
-message HeadList {
-    repeated HeadInfo heads = 1;
-}

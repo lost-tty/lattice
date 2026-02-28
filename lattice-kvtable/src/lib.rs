@@ -2,8 +2,11 @@
 //!
 //! Both `KvState` (app data) and `SystemTable` (system metadata) maintain
 //! per-key head lists with identical semantics: idempotency check, causal
-//! subsumption via parent hashes, deterministic sort, protobuf-encoded
-//! `HeadList` storage. This crate extracts that shared logic into `KVTable`.
+//! subsumption via parent hashes, LWW resolution at write time.
+//!
+//! **On-disk format (14D):** `Value { oneof kind { value | tombstone }, heads[] }`
+//! where `heads[0]` is the LWW winner. HLC/author metadata is looked up from
+//! the DAG on demand — not stored per-head.
 //!
 //! The engine is agnostic to which redb table it operates on — callers
 //! pass in their own `TABLE_DATA` or `TABLE_SYSTEM` table reference.
@@ -11,11 +14,16 @@
 use std::collections::HashSet;
 use std::ops::RangeBounds;
 
-use lattice_model::head::Head;
-use lattice_model::types::Hash;
-use lattice_proto::storage::{HeadInfo as ProtoHeadInfo, HeadList};
+use lattice_model::dag_queries::DagQueries;
+use lattice_model::hlc::HLC;
+use lattice_model::state_machine::Op;
+use lattice_model::types::{Hash, PubKey};
 use prost::Message;
 use redb::ReadableTable;
+
+mod proto {
+    include!(concat!(env!("OUT_DIR"), "/lattice.kvtable.rs"));
+}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -29,56 +37,54 @@ pub enum KvTableError {
 
     #[error("Conversion error: {0}")]
     Conversion(String),
+
+    #[error("DAG lookup error: {0}")]
+    Dag(#[source] anyhow::Error),
 }
 
 // ---------------------------------------------------------------------------
-// Decoding helper (shared by read and write paths)
+// On-disk encoding/decoding (proto::Value used directly, no domain wrapper)
 // ---------------------------------------------------------------------------
 
-/// Decode a protobuf-encoded `HeadList` value into `Vec<Head>`.
-pub fn decode_heads(raw: &[u8]) -> Result<Vec<Head>, KvTableError> {
-    let head_list = HeadList::decode(raw).map_err(|e| KvTableError::Conversion(e.to_string()))?;
-    head_list
-        .heads
-        .into_iter()
-        .map(|h| Head::try_from(h).map_err(KvTableError::Conversion))
-        .collect()
+/// Decode bytes into a `proto::Value`.
+fn decode_value(raw: &[u8]) -> Result<proto::Value, KvTableError> {
+    proto::Value::decode(raw).map_err(|e| KvTableError::Conversion(e.to_string()))
 }
 
-/// Encode `Vec<Head>` into protobuf `HeadList` bytes.
-pub fn encode_heads(heads: &[Head]) -> Vec<u8> {
-    let proto_heads: Vec<ProtoHeadInfo> = heads.iter().map(|h| h.clone().into()).collect();
-    HeadList { heads: proto_heads }.encode_to_vec()
+// ---------------------------------------------------------------------------
+// LWW comparison
+// ---------------------------------------------------------------------------
+
+/// Compare (hlc_a, author_a) vs (hlc_b, author_b) for LWW.
+/// Returns true if A wins (A >= B).
+fn lww_wins(hlc_a: &HLC, author_a: &PubKey, hlc_b: &HLC, author_b: &PubKey) -> bool {
+    (hlc_a, author_a) >= (hlc_b, author_b)
 }
 
-/// Decode raw bytes and resolve to the LWW winner in one step.
-/// Convenience for range-scan call sites that have raw `HeadList` bytes.
-///
-/// Returns `None` for tombstones or empty head lists.
-pub fn decode_lww(raw: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
-    let heads = decode_heads(raw)?;
-    Ok(lww(&heads))
-}
+// ---------------------------------------------------------------------------
+// Read helpers
+// ---------------------------------------------------------------------------
 
-/// LWW resolution: pick the head with highest HLC (tie-break by author).
-/// Returns `None` if the winner is a tombstone or if heads is empty.
-pub fn lww(heads: &[Head]) -> Option<Vec<u8>> {
-    let winner = heads
-        .iter()
-        .max_by(|a, b| a.hlc.cmp(&b.hlc).then_with(|| a.author.cmp(&b.author)))?;
-    if winner.tombstone {
-        None
-    } else {
-        Some(winner.value.clone())
+/// Decode raw bytes and resolve to the LWW winner value.
+/// Returns `None` for tombstones or missing kind.
+fn decode_lww(raw: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
+    let v = decode_value(raw)?;
+    match v.kind {
+        Some(proto::value::Kind::Value(data)) => Ok(Some(data)),
+        _ => Ok(None),
     }
 }
 
-/// Deterministic sort order for heads: descending HLC, then descending author.
-///
-/// This ensures the HeadList binary encoding is identical regardless of
-/// insertion order, which is required for convergent state across nodes.
-fn sort_heads(heads: &mut [Head]) {
-    heads.sort_by(|a, b| b.hlc.cmp(&a.hlc).then_with(|| b.author.cmp(&a.author)));
+/// Decode raw bytes and extract head hashes as `Vec<Hash>`.
+fn decode_heads(raw: &[u8]) -> Result<Vec<Hash>, KvTableError> {
+    let v = decode_value(raw)?;
+    v.heads
+        .iter()
+        .map(|h| {
+            Hash::try_from(h.as_slice())
+                .map_err(|_| KvTableError::Conversion("bad hash in heads".into()))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -100,70 +106,109 @@ impl<'a, 'txn> KVTable<'a, 'txn> {
         Self { table }
     }
 
-    /// Apply a new head to a key with causal subsumption.
+    /// Apply a new head to a key with causal subsumption and LWW resolution.
     ///
-    /// Steps:
-    /// 1. Read existing heads for `key`
-    /// 2. Idempotency check — skip if `new_head.hash` already present
-    /// 3. Remove heads subsumed by `parent_hashes` (causal deps)
-    /// 4. Push `new_head`, sort deterministically
-    /// 5. Encode and store
+    /// `op` provides the new intention's hash, HLC, and author.
+    /// `value` is the new value (empty for tombstones).
+    /// `tombstone` is true for deletes.
+    /// `dag` is used to look up the existing winner's HLC/author for LWW comparison.
     ///
-    /// Returns `None` on idempotent skip, `Some(new_heads)` on mutation.
+    /// Returns `None` on idempotent skip, `Some(Some(bytes))` for a live
+    /// winner, `Some(None)` for a tombstone winner.
     pub fn apply_head(
         &mut self,
         key: &[u8],
-        new_head: Head,
-        parent_hashes: &[Hash],
-    ) -> Result<Option<Vec<Head>>, KvTableError> {
+        op: &Op,
+        value: Vec<u8>,
+        tombstone: bool,
+        dag: &dyn DagQueries,
+    ) -> Result<Option<Option<Vec<u8>>>, KvTableError> {
+        let new_hash = op.id.as_bytes().to_vec();
+        let new_hlc = op.timestamp;
+        let new_author = op.author;
+
         // 1. Read existing
-        let mut heads = match self.table.get(key)? {
-            Some(v) => decode_heads(v.value())?,
-            None => Vec::new(),
+        let mut existing = match self.table.get(key)? {
+            Some(v) => decode_value(v.value())?,
+            None => proto::Value::default(),
         };
 
         // 2. Idempotency
-        if heads.iter().any(|h| h.hash == new_head.hash) {
+        if existing.heads.iter().any(|h| h.as_slice() == new_hash) {
             return Ok(None);
         }
 
-        // 3. Causal subsumption
-        let parent_set: HashSet<Hash> = parent_hashes.iter().cloned().collect();
-        heads.retain(|h| !parent_set.contains(&h.hash));
+        // 3. Causal subsumption — remove heads that are in parent_hashes
+        let parent_set: HashSet<&[u8]> = op
+            .causal_deps
+            .iter()
+            .map(|h| h.as_bytes().as_slice())
+            .collect();
+        existing
+            .heads
+            .retain(|h| !parent_set.contains(h.as_slice()));
 
-        // 4. Push and sort
-        heads.push(new_head);
-        sort_heads(&mut heads);
+        // 4. Build the new kind
+        let new_kind = if tombstone {
+            proto::value::Kind::Tombstone(true)
+        } else {
+            proto::value::Kind::Value(value)
+        };
 
-        // 5. Encode and store
-        let encoded = encode_heads(&heads);
+        // 5. LWW resolution: determine if new head wins over current winner
+        if existing.heads.is_empty() {
+            // No existing heads — new head is the winner
+            existing.heads.push(new_hash);
+            existing.kind = Some(new_kind);
+        } else {
+            // Compare new head against current winner (heads[0])
+            let current_winner_hash = Hash::try_from(existing.heads[0].as_slice())
+                .map_err(|_| KvTableError::Conversion("bad hash in heads[0]".into()))?;
+            let current_info = dag
+                .get_intention(&current_winner_hash)
+                .map_err(KvTableError::Dag)?;
+
+            if lww_wins(
+                &new_hlc,
+                &new_author,
+                &current_info.timestamp,
+                &current_info.author,
+            ) {
+                // New head wins — insert at front, update value
+                existing.heads.insert(0, new_hash);
+                existing.kind = Some(new_kind);
+            } else {
+                // Current winner stays — append new head as loser
+                existing.heads.push(new_hash);
+            }
+        }
+
+        // 6. Encode and store
+        let encoded = existing.encode_to_vec();
         self.table.insert(key, encoded.as_slice())?;
 
-        Ok(Some(heads))
+        let winner = match existing.kind {
+            Some(proto::value::Kind::Value(data)) => Some(data),
+            _ => None,
+        };
+        Ok(Some(winner))
     }
 
     /// Get the materialized LWW value for a key.
     /// Returns `None` for missing keys or tombstone-only.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
-        let heads = self.get_heads(key)?;
-        Ok(lww(&heads))
-    }
-
-    /// Read and decode heads for a key (from the write transaction).
-    fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, KvTableError> {
         match self.table.get(key)? {
-            Some(v) => {
-                let mut heads = decode_heads(v.value())?;
-                sort_heads(&mut heads);
-                Ok(heads)
-            }
-            None => Ok(Vec::new()),
+            Some(v) => Ok(decode_lww(v.value())?),
+            None => Ok(None),
         }
     }
 
     /// Return just the head hashes for a key.
     pub fn heads(&self, key: &[u8]) -> Result<Vec<Hash>, KvTableError> {
-        Ok(self.get_heads(key)?.into_iter().map(|h| h.hash).collect())
+        match self.table.get(key)? {
+            Some(v) => decode_heads(v.value()),
+            None => Ok(Vec::new()),
+        }
     }
 }
 
@@ -188,37 +233,30 @@ impl<T: ReadableTable<&'static [u8], &'static [u8]>> ReadOnlyKVTable<T> {
     /// Get the materialized LWW value for a key.
     /// Returns `None` for missing keys or tombstone-only.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
-        let heads = self.get_heads(key)?;
-        Ok(lww(&heads))
-    }
-
-    /// Read and decode heads for a key.
-    fn get_heads(&self, key: &[u8]) -> Result<Vec<Head>, KvTableError> {
         match self.table.get(key)? {
-            Some(v) => {
-                let mut heads = decode_heads(v.value())?;
-                sort_heads(&mut heads);
-                Ok(heads)
-            }
-            None => Ok(Vec::new()),
+            Some(v) => Ok(decode_lww(v.value())?),
+            None => Ok(None),
         }
     }
 
     /// Return just the head hashes for a key.
     pub fn heads(&self, key: &[u8]) -> Result<Vec<Hash>, KvTableError> {
-        Ok(self.get_heads(key)?.into_iter().map(|h| h.hash).collect())
+        match self.table.get(key)? {
+            Some(v) => decode_heads(v.value()),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Iterate a key range, yielding `(key_bytes, Option<value>)` per entry.
     ///
     /// Each value is LWW-resolved: `Some(bytes)` for live entries, `None` for
-    /// tombstones. Callers never see raw `HeadList` encoding.
-    pub fn range<'a, KR>(
+    /// tombstones. Callers never see raw encoding.
+    pub fn range<'b, KR>(
         &self,
-        range: impl RangeBounds<KR> + 'a,
+        range: impl RangeBounds<KR> + 'b,
     ) -> Result<LwwRange<'_>, KvTableError>
     where
-        KR: std::borrow::Borrow<<&'static [u8] as redb::Value>::SelfType<'a>> + 'a,
+        KR: std::borrow::Borrow<<&'static [u8] as redb::Value>::SelfType<'b>> + 'b,
     {
         let inner = self.table.range(range)?;
         Ok(LwwRange { inner })
@@ -257,5 +295,71 @@ impl Iterator for LwwRange<'_> {
                     Ok((key, value))
                 }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_model::{NullDag, Op};
+    use redb::TableDefinition;
+
+    const TEST_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("test");
+
+    fn test_op() -> Op<'static> {
+        Op {
+            id: Hash::from([1u8; 32]),
+            timestamp: lattice_model::hlc::HLC::new(1, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: &[],
+            causal_deps: &[],
+            prev_hash: Hash::from([0u8; 32]),
+        }
+    }
+
+    #[test]
+    fn empty_value_roundtrips() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            let result = kvt
+                .apply_head(b"key", &test_op(), vec![], false, &NullDag)
+                .unwrap();
+
+            // Should be Some(Some(empty vec)) — live entry with empty value
+            assert_eq!(result, Some(Some(vec![])));
+
+            // Read back via get — should return Some(empty)
+            assert_eq!(kvt.get(b"key").unwrap(), Some(vec![]));
+        }
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn tombstone_roundtrips() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            let result = kvt
+                .apply_head(b"key", &test_op(), vec![], true, &NullDag)
+                .unwrap();
+
+            // Should be Some(None) — tombstone
+            assert_eq!(result, Some(None));
+
+            // Read back via get — should return None
+            assert_eq!(kvt.get(b"key").unwrap(), None);
+        }
+        txn.commit().unwrap();
     }
 }

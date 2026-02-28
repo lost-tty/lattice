@@ -1,6 +1,6 @@
 use lattice_kvstore::{KvPayload, KvState};
 use lattice_kvstore_api::Operation;
-use lattice_model::dag_queries::NullDag;
+use lattice_model::dag_queries::{HashMapDag, NullDag};
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::Uuid;
@@ -95,6 +95,7 @@ fn test_convergence_concurrent_operations() {
     let dir2 = tempdir().unwrap();
     let state2 = KvState::open(Uuid::new_v4(), dir2.path()).unwrap();
 
+    let dag = HashMapDag::new();
     let start_hlc = HLC::now();
 
     let author1 = PubKey::from([1u8; 32]);
@@ -106,13 +107,16 @@ fn test_convergence_concurrent_operations() {
     // Concurrent op (same causal context - empty)
     let op2 = create_test_op(b"key1", b"val2", author2, hash2, start_hlc, Hash::ZERO);
 
+    dag.record(&op1);
+    dag.record(&op2);
+
     // Node A: 1 then 2
-    state1.apply(&op1, &NULL_DAG).unwrap();
-    state1.apply(&op2, &NULL_DAG).unwrap();
+    state1.apply(&op1, &dag).unwrap();
+    state1.apply(&op2, &dag).unwrap();
 
     // Node B: 2 then 1
-    state2.apply(&op2, &NULL_DAG).unwrap();
-    state2.apply(&op1, &NULL_DAG).unwrap();
+    state2.apply(&op2, &dag).unwrap();
+    state2.apply(&op1, &dag).unwrap();
 
     // Convergence Check: both nodes should have same LWW value and same head hashes
     assert_eq!(state1.get(b"key1").unwrap(), state2.get(b"key1").unwrap());
@@ -223,6 +227,7 @@ fn test_delete_correctness() {
 fn test_chain_rules_compliance() {
     let dir = tempdir().unwrap();
     let state = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+    let dag = HashMapDag::new();
     let author = PubKey::from([0x99; 32]);
     let hlc = HLC::now();
 
@@ -230,7 +235,7 @@ fn test_chain_rules_compliance() {
 
     // 1. Invalid Genesis (Prev != ZERO)
     let bad_genesis = create_test_op(b"k", b"v", author, hash1, hlc, Hash::from([0x01; 32]));
-    let err = state.apply(&bad_genesis, &NULL_DAG).unwrap_err();
+    let err = state.apply(&bad_genesis, &dag).unwrap_err();
     assert!(
         format!("{}", err).contains("Invalid genesis"),
         "Error: {}",
@@ -239,16 +244,17 @@ fn test_chain_rules_compliance() {
 
     // 2. Valid Genesis
     let valid_genesis = create_test_op(b"k", b"v", author, hash1, hlc, Hash::ZERO);
-    state.apply(&valid_genesis, &NULL_DAG).unwrap();
+    dag.record(&valid_genesis);
+    state.apply(&valid_genesis, &dag).unwrap();
 
     // 3. Idempotency (Apply same op again)
     // Should return Ok
-    state.apply(&valid_genesis, &NULL_DAG).unwrap();
+    state.apply(&valid_genesis, &dag).unwrap();
 
     // 4. Broken Link (Prev != Current Tip)
     let hash2 = Hash::from([0x22; 32]);
     let bad_link = create_test_op(b"k", b"v2", author, hash2, hlc, Hash::ZERO); // Prev should be hash1
-    let err = state.apply(&bad_link, &NULL_DAG).unwrap_err();
+    let err = state.apply(&bad_link, &dag).unwrap_err();
     assert!(
         format!("{}", err).contains("Broken chain"),
         "Error: {}",
@@ -257,7 +263,8 @@ fn test_chain_rules_compliance() {
 
     // 5. Valid Link
     let valid_link = create_test_op(b"k", b"v2", author, hash2, hlc, hash1);
-    state.apply(&valid_link, &NULL_DAG).unwrap();
+    dag.record(&valid_link);
+    state.apply(&valid_link, &dag).unwrap();
 }
 
 #[test]

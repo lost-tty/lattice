@@ -6,6 +6,8 @@
 //! and intention payloads.
 
 use crate::{Hash, PubKey, HLC};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Intention data returned by DAG queries.
 ///
@@ -61,6 +63,8 @@ pub trait DagQueries: Send + Sync {
 
 /// No-op DAG for tests and contexts where DAG access is not needed.
 /// Every method returns an error if actually called.
+///
+/// Works for single-head writes where no existing winner needs to be looked up.
 pub struct NullDag;
 
 impl DagQueries for NullDag {
@@ -75,5 +79,52 @@ impl DagQueries for NullDag {
     }
     fn is_ancestor(&self, _: &Hash, _: &Hash) -> anyhow::Result<bool> {
         anyhow::bail!("NullDag: no DAG available")
+    }
+}
+
+/// HashMap-backed DAG for tests. Supports `get_intention` only.
+/// Record ops with `record()` before applying them.
+pub struct HashMapDag {
+    intentions: Mutex<HashMap<Hash, IntentionInfo>>,
+}
+
+impl HashMapDag {
+    pub fn new() -> Self {
+        Self {
+            intentions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Record an op so it can be looked up later by hash.
+    pub fn record(&self, op: &crate::state_machine::Op) {
+        self.intentions.lock().unwrap().insert(
+            op.id,
+            IntentionInfo {
+                hash: op.id,
+                payload: op.payload.to_vec(),
+                timestamp: op.timestamp,
+                author: op.author,
+            },
+        );
+    }
+}
+
+impl DagQueries for HashMapDag {
+    fn get_intention(&self, hash: &Hash) -> anyhow::Result<IntentionInfo> {
+        self.intentions
+            .lock()
+            .unwrap()
+            .get(hash)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("HashMapDag: intention {} not found", hash))
+    }
+    fn find_lca(&self, _: &Hash, _: &Hash) -> anyhow::Result<Hash> {
+        anyhow::bail!("HashMapDag: not implemented")
+    }
+    fn get_path(&self, _: &Hash, _: &Hash) -> anyhow::Result<Vec<IntentionInfo>> {
+        anyhow::bail!("HashMapDag: not implemented")
+    }
+    fn is_ancestor(&self, _: &Hash, _: &Hash) -> anyhow::Result<bool> {
+        anyhow::bail!("HashMapDag: not implemented")
     }
 }

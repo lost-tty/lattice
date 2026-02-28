@@ -1,4 +1,4 @@
-use lattice_model::head::Head;
+use lattice_model::dag_queries::DagQueries;
 use lattice_model::{Hash, InviteInfo, InviteStatus as ModelInviteStatus, Op, PubKey};
 use lattice_proto::storage::{
     InviteStatus as ProtoInviteStatus, PeerStrategy, SetInviteClaimedBy, SetInviteInvitedBy,
@@ -9,13 +9,14 @@ use prost::Message;
 use redb::Table;
 
 /// Wrapper around the raw system table to enforce typed access and CRDT rules.
-pub struct SystemTable<'a> {
+pub struct SystemTable<'a, 'dag> {
     table: Table<'a, &'static [u8], &'static [u8]>,
+    dag: &'dag dyn DagQueries,
 }
 
-impl<'a> SystemTable<'a> {
-    pub fn new(table: Table<'a, &'static [u8], &'static [u8]>) -> Self {
-        Self { table }
+impl<'a, 'dag> SystemTable<'a, 'dag> {
+    pub fn new(table: Table<'a, &'static [u8], &'static [u8]>, dag: &'dag dyn DagQueries) -> Self {
+        Self { table, dag }
     }
 
     // ==================== Peer Operations ====================
@@ -28,8 +29,7 @@ impl<'a> SystemTable<'a> {
         op: &Op,
     ) -> Result<(), StateDbError> {
         let key = format!("peer/{}/{}", hex::encode(pubkey), field).into_bytes();
-        let head = Head::from_op(op, value);
-        self.apply_head(&key, head, op.causal_deps)
+        self.apply_head(&key, op, value, false)
     }
 
     pub fn set_peer_status(
@@ -84,13 +84,11 @@ impl<'a> SystemTable<'a> {
 
         // 1. Write Name
         let name_key = format!("child/{}/name", id).into_bytes();
-        let name_head = Head::from_op(op, alias.into_bytes());
-        self.apply_head(&name_key, name_head, op.causal_deps)?;
+        self.apply_head(&name_key, op, alias.into_bytes(), false)?;
 
         // 2. Write Type
         let type_key = format!("child/{}/type", id).into_bytes();
-        let type_head = Head::from_op(op, store_type.into_bytes());
-        self.apply_head(&type_key, type_head, op.causal_deps)?;
+        self.apply_head(&type_key, op, store_type.into_bytes(), false)?;
 
         Ok(())
     }
@@ -106,8 +104,7 @@ impl<'a> SystemTable<'a> {
             got: Default::default(),
         })?;
         let key = format!("child/{}/status", id).into_bytes();
-        let head = Head::from_op(op, status.to_le_bytes().to_vec());
-        self.apply_head(&key, head, op.causal_deps)
+        self.apply_head(&key, op, status.to_le_bytes().to_vec(), false)
     }
 
     pub fn remove_child(&mut self, id_bytes: &[u8], op: &Op) -> Result<(), StateDbError> {
@@ -118,18 +115,15 @@ impl<'a> SystemTable<'a> {
 
         // Remove name
         let name_key = format!("child/{}/name", id).into_bytes();
-        let head = Head::tombstone(op);
-        self.apply_head(&name_key, head, op.causal_deps)?;
+        self.apply_head(&name_key, op, Vec::new(), true)?;
 
         // Remove status
         let status_key = format!("child/{}/status", id).into_bytes();
-        let status_head = Head::tombstone(op);
-        self.apply_head(&status_key, status_head, op.causal_deps)?;
+        self.apply_head(&status_key, op, Vec::new(), true)?;
 
         // Remove type
         let type_key = format!("child/{}/type", id).into_bytes();
-        let type_head = Head::tombstone(op);
-        self.apply_head(&type_key, type_head, op.causal_deps)?;
+        self.apply_head(&type_key, op, Vec::new(), true)?;
 
         Ok(())
     }
@@ -138,8 +132,7 @@ impl<'a> SystemTable<'a> {
 
     pub fn set_strategy(&mut self, strategy: PeerStrategy, op: &Op) -> Result<(), StateDbError> {
         let key = b"strategy";
-        let head = Head::from_op(op, strategy.encode_to_vec());
-        self.apply_head(key, head, op.causal_deps)
+        self.apply_head(key, op, strategy.encode_to_vec(), false)
     }
 
     // ==================== Invite Operations ====================
@@ -152,8 +145,7 @@ impl<'a> SystemTable<'a> {
         op: &Op,
     ) -> Result<(), StateDbError> {
         let key = format!("invite/{}/{}", hex::encode(token_hash), field).into_bytes();
-        let head = Head::from_op(op, value);
-        self.apply_head(&key, head, op.causal_deps)
+        self.apply_head(&key, op, value, false)
     }
 
     pub fn set_invite_status(
@@ -187,22 +179,22 @@ impl<'a> SystemTable<'a> {
 
     pub fn set_name(&mut self, name: String, op: &Op) -> Result<(), StateDbError> {
         let key = b"name";
-        let head = Head::from_op(op, SetStoreName { name }.encode_to_vec());
-        self.apply_head(key, head, op.causal_deps)
+        self.apply_head(key, op, SetStoreName { name }.encode_to_vec(), false)
     }
 
     // ==================== Core CRDT Logic ====================
 
-    /// Apply a Head to the table using CRDT merge logic.
+    /// Apply a head to the table using CRDT merge logic with LWW resolution.
     /// Delegates to `lattice_kvtable::KVTable`.
-    pub fn apply_head(
+    fn apply_head(
         &mut self,
         key: &[u8],
-        new_head: Head,
-        parent_hashes: &[Hash],
+        op: &Op,
+        value: Vec<u8>,
+        tombstone: bool,
     ) -> Result<(), StateDbError> {
         let mut kvt = lattice_kvtable::KVTable::new(&mut self.table);
-        kvt.apply_head(key, new_head, parent_hashes)
+        kvt.apply_head(key, op, value, tombstone, self.dag)
             .map(|_| ())
             .map_err(|e| StateDbError::Conversion(e.to_string()))
     }

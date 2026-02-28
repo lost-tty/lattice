@@ -4,7 +4,7 @@ use futures::StreamExt;
 use lattice_kvstore::KvPayload;
 use lattice_kvstore_api::Operation;
 use lattice_kvstore_api::{KvStoreExt, WatchEventKind};
-use lattice_model::dag_queries::NullDag;
+use lattice_model::dag_queries::{HashMapDag, NullDag};
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::{Op, StateMachine};
@@ -128,6 +128,7 @@ async fn test_subscribe_stream_tombstone_should_not_resurrect() {
 fn test_concurrent_genesis_merge() {
     let store = TestStore::new();
     let state = &store.state;
+    let dag = HashMapDag::new();
 
     let key = b"genesis_key";
     let author1 = PubKey::from([0xA0; 32]);
@@ -154,8 +155,10 @@ fn test_concurrent_genesis_merge() {
         &[],
     );
 
-    state.apply(&op1, &NULL_DAG).unwrap();
-    state.apply(&op2, &NULL_DAG).unwrap();
+    dag.record(&op1);
+    dag.record(&op2);
+    state.apply(&op1, &dag).unwrap();
+    state.apply(&op2, &dag).unwrap();
 
     // Two concurrent heads — LWW picks one, but both should be tracked
     assert_eq!(
@@ -173,6 +176,7 @@ fn test_concurrent_genesis_merge() {
 fn test_concurrent_writes_produce_multi_heads() {
     let store = TestStore::new();
     let state = &store.state;
+    let dag = HashMapDag::new();
 
     let key = b"conflict_key";
     let author1 = PubKey::from([1u8; 32]);
@@ -199,8 +203,10 @@ fn test_concurrent_writes_produce_multi_heads() {
         &[],
     );
 
-    state.apply(&op1, &NULL_DAG).unwrap();
-    state.apply(&op2, &NULL_DAG).unwrap();
+    dag.record(&op1);
+    dag.record(&op2);
+    state.apply(&op1, &dag).unwrap();
+    state.apply(&op2, &dag).unwrap();
 
     assert_eq!(
         state.head_hashes(key).unwrap().len(),
@@ -247,6 +253,7 @@ fn test_causal_dependency_chain() {
 fn test_concurrent_put_and_delete_conflict() {
     let store = TestStore::new();
     let state = &store.state;
+    let dag = HashMapDag::new();
     let key = b"pd_conflict";
     let author1 = PubKey::from([1u8; 32]);
     let author2 = PubKey::from([2u8; 32]);
@@ -255,7 +262,8 @@ fn test_concurrent_put_and_delete_conflict() {
     // 1. Common ancestor
     let hash1 = Hash::from([0x11; 32]);
     let op1 = create_test_op(key, b"v1", author1, hash1, hlc, Hash::ZERO, &[]);
-    state.apply(&op1, &NULL_DAG).unwrap();
+    dag.record(&op1);
+    state.apply(&op1, &dag).unwrap();
 
     // 2. Concurrent Branch A: Put v2 (Author 1)
     let hlc_a = next_hlc(hlc);
@@ -266,8 +274,10 @@ fn test_concurrent_put_and_delete_conflict() {
     let hash2b = Hash::from([0x2B; 32]);
     let op2b = create_delete_op(key, author2, hash2b, hlc_b, Hash::ZERO, &[hash1]);
 
-    state.apply(&op2a, &NULL_DAG).unwrap();
-    state.apply(&op2b, &NULL_DAG).unwrap();
+    dag.record(&op2a);
+    dag.record(&op2b);
+    state.apply(&op2a, &dag).unwrap();
+    state.apply(&op2b, &dag).unwrap();
 
     assert_eq!(
         state.head_hashes(key).unwrap().len(),

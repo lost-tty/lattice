@@ -54,20 +54,18 @@ Reduce what state machines store per conflict domain. Currently each key persist
 - [x] **`ReadOnlyKVTable::range()` and `iter()`.** `LwwRange` iterator adapter wraps redb `Range`, decodes `HeadList` and LWW-resolves each value internally. Yields `(Vec<u8>, Option<Vec<u8>>)` — owned key bytes and resolved value (`None` for tombstones). Callers never see raw proto encoding.
 - [x] **`KvState::mutate()` returns resolved values.** `apply_head()` returns `ApplyResult { value: Option<Vec<u8>> }` (LWW-resolved) instead of `HeadChange { new_heads: Vec<Head> }`. Write-path callers no longer call `lww()` on results.
 
-### 14D: Slim Down Storage Format
-- [ ] StateMachine needs access to DagQueries
-- [ ] Access to Intention-Ops must be filtered for System vs Data ops
-- [ ] **`KVTable::apply()` resolves LWW at write time.** Compare incoming HLC against current winner, update materialized value. `get()` returns the value directly — no more read-time resolution.
-- [ ] **New on-disk format.** Replace `HeadList { heads: [Head { value, hlc, author, hash, tombstone }, ...] }` with `{ value: Option<Vec<u8>>, hlc: HLC, author: PubKey, heads: Vec<Hash> }`. Value is the LWW winner. `None` for tombstones. Non-winning head metadata read from DAG on demand.
-- [ ] **Storage format migration.** On open, detect old `HeadList` proto format, extract LWW winner as materialized value, extract head hashes, rewrite in new format.
-- [ ] **Remove `HeadList`/`HeadInfo` proto messages from `storage.proto`.** After the new format lands, these protos are dead code — no crate outside `kvtable` references them (14C already eliminated all external `decode_heads`/`lww` calls). The replacement on-disk encoding is `kvtable`'s internal concern (minimal proto, borsh, or raw layout). This may drop `kvtable`'s dependency on `lattice-proto` entirely.
+### 14D: Slim Down Storage Format ✅
+- [x] **`StateMachine::apply` receives `&dyn DagQueries`.** Threaded from kernel actor (`IntentionStore` implements `DagQueries`) through `StateMachine::apply` → `StateLogic::mutate` → `KVTable::apply_head`, and `SystemLayer::apply` → `SystemTable`.
+- [x] **`KVTable::apply()` resolves LWW at write time.** Compares incoming HLC/author against current winner via DAG lookup. `get()` returns the value directly — no more read-time resolution.
+- [x] **New on-disk format.** `proto::Value { oneof kind { value | tombstone }, heads[] }` in `lattice-kvtable/proto/value.proto`. `heads[0]` is the LWW winner. HLC/author not stored — looked up from the DAG on demand. `oneof` distinguishes live entries (including empty values) from tombstones at the type level.
+- [x] **Removed `HeadList`/`HeadInfo` from `storage.proto`.** Dead code — `lattice-kvtable` no longer depends on `lattice-proto`. Conversion impls (`Head ↔ HeadInfo`) and re-exports (`lattice-storage::head`, `lattice-kvstore::Head`) removed.
+- [ ] **Move `kv_store.proto` out of `lattice-proto`.** The KV service/payload protos (`PutRequest`, `KvPayload`, `WatchEventProto`, etc.) are only used by `lattice-kvstore` and `lattice-kvstore-api`. Move to one of those crates to keep `lattice-proto` focused on core/shared types.
 
 ### 14E: Clean Up `StateMachine` Interface
 - [ ] **Change `apply` signature.** Replace `apply(&self, op: &Op)` with `apply(&self, info: &IntentionInfo, causal_deps: &[Hash])`. Separates intention data from DAG plumbing. `Op` struct remains temporarily for the kernel's internal use (`verify_and_update_tip` needs `prev_hash`).
 - [ ] **Remove `Op` from `StateMachine` trait surface.** After 14D, `KVTable` handles `causal_deps` internally. The state machine receives only `IntentionInfo`. The kernel passes `causal_deps` to `KVTable::apply()` directly. `apply` becomes `apply(&self, info: &IntentionInfo)`.
 - [ ] **Remove `Head` struct from `lattice-model`.** No longer persisted. Intention metadata (HLC, author) is accessed from the DAG when needed (conflict reads, HITL).
 - [ ] **Remove `Merge` trait from `lattice-model`.** `lww()`, `fww()`, `all()` operate on `[Head]` slices which no longer exist. LWW resolution is inlined in `KVTable::apply()` as an HLC comparison. FWW / multi-value can be added later as apply-time strategies if needed.
-- [ ] **Update tests.** `crdt_correctness.rs`, `sync_compliance.rs`, `state.rs` unit tests assert on `Vec<Head>` from `get()`. Rewrite to assert on resolved values and conflict hash counts.
 - [ ] **Update `architecture.md`.** State Machines section references `HeadList`, LWW-at-read-time, `Head` tracking. Rewrite to reflect `KVTable` engine and apply-time resolution.
 
 ### 14F: Conflict Surfacing
