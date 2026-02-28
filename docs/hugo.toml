@@ -117,10 +117,15 @@ theme = "lattice-theme"
     parent = "design"
     weight = 60
   [[menus.main]]
+    name = "Epoch Key Encryption"
+    pageRef = "/design/epoch-key-encryption"
+    parent = "design"
+    weight = 70
+  [[menus.main]]
     name = "Research & Protocol Evolution"
     pageRef = "/design/research"
     parent = "design"
-    weight = 70
+    weight = 80
 
   [[menus.main]]
     identifier = "examples"
