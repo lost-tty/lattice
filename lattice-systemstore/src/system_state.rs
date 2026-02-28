@@ -632,4 +632,91 @@ mod tests {
         assert_eq!(info.hash, hash);
         assert_eq!(info.author, lattice_model::PubKey::from([2u8; 32]));
     }
+
+    /// Helper: record an intention with a specific hash, author, payload, and causal deps.
+    fn record_with(
+        dag: &HashMapDag,
+        hash_byte: u8,
+        author_byte: u8,
+        payload: &[u8],
+        causal_deps: &[Hash],
+    ) -> Hash {
+        let hash = Hash::from([hash_byte; 32]);
+        let op = Op {
+            info: IntentionInfo {
+                hash,
+                payload: Cow::Borrowed(payload),
+                timestamp: HLC::default(),
+                author: lattice_model::PubKey::from([author_byte; 32]),
+            },
+            causal_deps,
+            prev_hash: Hash::from([0u8; 32]),
+        };
+        dag.record(&op);
+        hash
+    }
+
+    /// Simulates a counter CRDT resolving concurrent increments via DAG payload lookup.
+    ///
+    /// DAG structure (diamond):
+    ///
+    ///       A (set counter = 10)
+    ///      / \
+    ///     B   C        (concurrent: both have causal_deps = [A])
+    ///     +5  +3
+    ///
+    /// A naive LWW would pick one winner (15 or 13). A counter CRDT reads
+    /// all three payloads from the DAG:
+    ///   - A's payload → base value (10)
+    ///   - B's payload → delta (+5)
+    ///   - C's payload → delta (+3)
+    /// and computes 10 + 5 + 3 = 18.
+    ///
+    /// A system op (D) is also recorded in the DAG. Looking it up through
+    /// the AppData scope returns an empty payload, so the CRDT safely
+    /// skips it without panicking.
+    #[test]
+    fn scoped_dag_counter_crdt_concurrent_merge() {
+        let dag = HashMapDag::new();
+
+        // A: genesis intention that sets counter = 10
+        let hash_a = record_with(&dag, 0xAA, 1, &wrap_app_data(&10u32.to_le_bytes()), &[]);
+
+        // B and C: concurrent increments, both causally depend on A
+        let hash_b = record_with(
+            &dag, 0xBB, 1, &wrap_app_data(&5u32.to_le_bytes()), &[hash_a],
+        );
+        let hash_c = record_with(
+            &dag, 0xCC, 2, &wrap_app_data(&3u32.to_le_bytes()), &[hash_a],
+        );
+
+        // D: a system op that happens to be in the DAG (e.g. a peer join)
+        let hash_d = record_with(&dag, 0xDD, 1, &wrap_system_op(), &[hash_a]);
+
+        let scoped = ScopedDag {
+            inner: &dag,
+            scope: DagScope::AppData,
+        };
+
+        // Read the base value from the DAG (not hardcoded)
+        let base_info = scoped.get_intention(&hash_a).unwrap();
+        let base_value = u32::from_le_bytes(base_info.payload.as_ref().try_into().unwrap());
+        assert_eq!(base_value, 10);
+
+        // Simulate what a counter CRDT would do during apply:
+        // look up each concurrent head's payload to read the delta.
+        let concurrent_heads = [hash_b, hash_c];
+        let merged = concurrent_heads.iter().fold(base_value, |acc, head_hash| {
+            let info = scoped.get_intention(head_hash).unwrap();
+            let delta = u32::from_le_bytes(info.payload.as_ref().try_into().unwrap());
+            acc + delta
+        });
+
+        assert_eq!(merged, 18); // 10 + 5 + 3, not LWW's 15 or 13
+
+        // The system op should return an empty payload through AppData scope,
+        // not corrupt the merge or panic.
+        let sys_info = scoped.get_intention(&hash_d).unwrap();
+        assert!(sys_info.payload.is_empty());
+    }
 }
