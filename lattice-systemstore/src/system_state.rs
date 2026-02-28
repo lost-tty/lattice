@@ -164,6 +164,71 @@ impl<S: StateLogic> SystemLayer<S> {
     }
 }
 
+// ==================== ScopedDag wrapper ====================
+
+/// Which side of the `UniversalOp` envelope to extract.
+#[derive(Copy, Clone)]
+enum DagScope {
+    /// Extract `AppData` payload — for the inner state machine.
+    AppData,
+    /// Extract `SystemOp` payload — for the system table.
+    System,
+}
+
+/// Wraps `DagQueries` to unwrap `UniversalOp` envelopes from payloads.
+///
+/// The DAG stores raw `UniversalOp`-encoded bytes. `SystemLayer` splits
+/// intentions into system vs app-data paths, stripping the envelope from
+/// `Op.info.payload`. This wrapper does the same for DAG lookups, so
+/// `op.info.payload` and `dag.get_intention().payload` are always in the
+/// same coordinate system for the consumer.
+struct ScopedDag<'a> {
+    inner: &'a dyn lattice_model::DagQueries,
+    scope: DagScope,
+}
+
+impl ScopedDag<'_> {
+    fn unwrap_payload(
+        info: IntentionInfo<'static>,
+        scope: DagScope,
+    ) -> anyhow::Result<IntentionInfo<'static>> {
+        let universal = UniversalOp::decode(info.payload.as_ref())
+            .map_err(|e| anyhow::anyhow!("invalid UniversalOp in DAG: {e}"))?;
+        let payload = match (scope, universal.op) {
+            (DagScope::AppData, Some(universal_op::Op::AppData(data))) => data,
+            (DagScope::System, Some(universal_op::Op::System(sys))) => sys.encode_to_vec(),
+            // Wrong variant for this scope — return empty payload.
+            _ => Vec::new(),
+        };
+        Ok(IntentionInfo {
+            payload: Cow::Owned(payload),
+            ..info
+        })
+    }
+}
+
+impl lattice_model::DagQueries for ScopedDag<'_> {
+    fn get_intention(&self, hash: &Hash) -> anyhow::Result<IntentionInfo<'static>> {
+        Self::unwrap_payload(self.inner.get_intention(hash)?, self.scope)
+    }
+
+    fn find_lca(&self, a: &Hash, b: &Hash) -> anyhow::Result<Hash> {
+        self.inner.find_lca(a, b)
+    }
+
+    fn get_path(&self, from: &Hash, to: &Hash) -> anyhow::Result<Vec<IntentionInfo<'static>>> {
+        self.inner
+            .get_path(from, to)?
+            .into_iter()
+            .map(|info| Self::unwrap_payload(info, self.scope))
+            .collect()
+    }
+
+    fn is_ancestor(&self, ancestor: &Hash, descendant: &Hash) -> anyhow::Result<bool> {
+        self.inner.is_ancestor(ancestor, descendant)
+    }
+}
+
 // ==================== StateMachine Implementation ====================
 
 impl<S> StateMachine for SystemLayer<S>
@@ -179,9 +244,11 @@ where
         })?;
 
         match universal.op {
-            Some(universal_op::Op::System(sys_op)) => self
-                .apply_system_transaction(op, sys_op, dag)
-                .map_err(SystemLayerError::Db),
+            Some(universal_op::Op::System(sys_op)) => {
+                let sys_dag = ScopedDag { inner: dag, scope: DagScope::System };
+                self.apply_system_transaction(op, sys_op, &sys_dag)
+                    .map_err(SystemLayerError::Db)
+            }
             Some(universal_op::Op::AppData(data)) => {
                 let new_op = Op {
                     info: IntentionInfo {
@@ -193,7 +260,8 @@ where
                     causal_deps: op.causal_deps,
                     prev_hash: op.prev_hash,
                 };
-                StateMachine::apply(&self.inner, &new_op, dag)
+                let app_dag = ScopedDag { inner: dag, scope: DagScope::AppData };
+                StateMachine::apply(&self.inner, &new_op, &app_dag)
                     .map_err(|e| SystemLayerError::Inner(Box::new(e)))
             }
             None => Ok(()),
@@ -466,5 +534,102 @@ impl<S: StateLogic + Send + Sync> SystemReader for SystemLayer<S> {
             Err(e) => return Err(e.to_string()),
         };
         crate::tables::ReadOnlySystemTable::new(table).head_hashes(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_model::dag_queries::HashMapDag;
+    use lattice_model::{DagQueries, HLC};
+    use lattice_proto::storage::SystemOp as ProtoSystemOp;
+
+    /// Build a UniversalOp::AppData envelope around `inner` bytes.
+    fn wrap_app_data(inner: &[u8]) -> Vec<u8> {
+        UniversalOp {
+            op: Some(universal_op::Op::AppData(inner.to_vec())),
+        }
+        .encode_to_vec()
+    }
+
+    /// Build a UniversalOp::System envelope around a no-op SystemOp.
+    fn wrap_system_op() -> Vec<u8> {
+        UniversalOp {
+            op: Some(universal_op::Op::System(ProtoSystemOp { kind: None })),
+        }
+        .encode_to_vec()
+    }
+
+    /// Record an intention in a HashMapDag with the given payload bytes.
+    fn record_intention(dag: &HashMapDag, payload: &[u8]) -> Hash {
+        let op = Op {
+            info: IntentionInfo {
+                hash: Hash::from([1u8; 32]),
+                payload: Cow::Borrowed(payload),
+                timestamp: HLC::default(),
+                author: lattice_model::PubKey::from([2u8; 32]),
+            },
+            causal_deps: &[],
+            prev_hash: Hash::from([0u8; 32]),
+        };
+        dag.record(&op);
+        op.info.hash
+    }
+
+    #[test]
+    fn scoped_dag_app_data_unwraps_payload() {
+        let inner_bytes = b"hello world";
+        let dag = HashMapDag::new();
+        let hash = record_intention(&dag, &wrap_app_data(inner_bytes));
+
+        let scoped = ScopedDag {
+            inner: &dag,
+            scope: DagScope::AppData,
+        };
+        let info = scoped.get_intention(&hash).unwrap();
+        assert_eq!(info.payload.as_ref(), inner_bytes);
+    }
+
+    #[test]
+    fn scoped_dag_system_unwraps_payload() {
+        let dag = HashMapDag::new();
+        let hash = record_intention(&dag, &wrap_system_op());
+
+        let scoped = ScopedDag {
+            inner: &dag,
+            scope: DagScope::System,
+        };
+        let info = scoped.get_intention(&hash).unwrap();
+        // Should decode back to the SystemOp we encoded
+        let decoded = ProtoSystemOp::decode(info.payload.as_ref()).unwrap();
+        assert_eq!(decoded.kind, None);
+    }
+
+    #[test]
+    fn scoped_dag_wrong_scope_returns_empty_payload() {
+        let dag = HashMapDag::new();
+        let hash = record_intention(&dag, &wrap_system_op());
+
+        // Looking up a System intention through an AppData scope
+        let scoped = ScopedDag {
+            inner: &dag,
+            scope: DagScope::AppData,
+        };
+        let info = scoped.get_intention(&hash).unwrap();
+        assert!(info.payload.is_empty());
+    }
+
+    #[test]
+    fn scoped_dag_preserves_metadata() {
+        let dag = HashMapDag::new();
+        let hash = record_intention(&dag, &wrap_app_data(b"data"));
+
+        let scoped = ScopedDag {
+            inner: &dag,
+            scope: DagScope::AppData,
+        };
+        let info = scoped.get_intention(&hash).unwrap();
+        assert_eq!(info.hash, hash);
+        assert_eq!(info.author, lattice_model::PubKey::from([2u8; 32]));
     }
 }

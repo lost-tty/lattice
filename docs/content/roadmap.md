@@ -66,6 +66,7 @@ Reduce what state machines store per conflict domain. Currently each key persist
 - [x] **Remove `Head` struct from `lattice-model`.** No longer persisted. Intention metadata (HLC, author) is accessed from the DAG when needed (conflict reads, HITL).
 - [x] **Remove `Merge` trait from `lattice-model`.** `lww()`, `fww()`, `all()` operate on `[Head]` slices which no longer exist. LWW resolution is inlined in `KVTable::apply()` as an HLC comparison. FWW / multi-value can be added later as apply-time strategies if needed.
 - [x] **Update `architecture.md`.** State Machines section updated to reflect `KVTable` engine, write-time LWW resolution, and slim storage format (materialized value + intention hash pointers).
+- [x] **`ScopedDag` wrapper.** `SystemLayer` wraps `&dyn DagQueries` before passing to each side: `AppData` scope unwraps inner app bytes, `System` scope unwraps `SystemOp` bytes. Ensures `op.info.payload` and `dag.get_intention().payload` are in the same coordinate system for both app state machines and the system table.
 
 ### 14F: Conflict Surfacing
 - [ ] **Conflict detection on read.** `get(key)` returns the materialized value. If `heads.len() > 1`, flag the response as conflicted. Cheap — no DAG query needed.
@@ -245,7 +246,6 @@ Run the kernel on the RP2350.
 
 - [ ] Does StateMachines need snapshot/restore once we have IntentionStore pruning/snapshots?
 - [ ] Revoking a Peer is untested. How do we ensure removed peers will not receive future Intentions?
-- [ ] How do we prevent apply()/mutate() from seeing SystemOps in DagQueries?
 
 ---
 

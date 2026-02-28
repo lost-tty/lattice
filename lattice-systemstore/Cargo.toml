@@ -11,6 +11,7 @@ lattice-storage = { workspace = true }
 lattice-store-base = { workspace = true }
 lattice-proto = { workspace = true }
 lattice-kvtable = { workspace = true }
+anyhow = { workspace = true }
 prost = { workspace = true }
 bytes = { workspace = true }
 uuid = { workspace = true }
