@@ -14,9 +14,9 @@ use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
 fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("lattice=debug,iroh=warn")
-        .try_init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off"));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
 fn temp_data_dir(name: &str) -> lattice_node::DataDir {

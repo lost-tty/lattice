@@ -26,6 +26,8 @@ use tokio::sync::broadcast;
 pub struct MockWriter<S: StateLogic> {
     state: Arc<PersistentState<S>>,
     next_hash: Arc<AtomicU64>,
+    /// Monotonic wall_time: max(system_ms, prev+1) to guarantee unique timestamps.
+    next_wall_time: Arc<AtomicU64>,
     entry_tx: broadcast::Sender<Vec<u8>>,
     store_id: lattice_model::Uuid,
 }
@@ -37,6 +39,7 @@ impl<S: StateLogic> MockWriter<S> {
         Self {
             state,
             next_hash: Arc::new(AtomicU64::new(1)),
+            next_wall_time: Arc::new(AtomicU64::new(0)),
             entry_tx,
             store_id: lattice_model::Uuid::new_v4(),
         }
@@ -64,6 +67,7 @@ impl<S: StateLogic> Clone for MockWriter<S> {
         Self {
             state: self.state.clone(),
             next_hash: self.next_hash.clone(),
+            next_wall_time: self.next_wall_time.clone(),
             entry_tx: self.entry_tx.clone(),
             store_id: self.store_id,
         }
@@ -90,19 +94,21 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
     > {
         let state = self.state.clone();
         let hash_num = self.next_hash.fetch_add(1, Ordering::SeqCst);
+        let next_wt = self.next_wall_time.clone();
         let tx = self.entry_tx.clone();
         let store_id = self.store_id;
 
         Box::pin(async move {
-            // Generate unique hash
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
+            // Monotonic wall_time: max(now, prev+1)
+            let now_ms = HLC::now().wall_time;
+            let wall_time = next_wt.fetch_max(now_ms, Ordering::SeqCst).max(now_ms);
+            next_wt.fetch_max(wall_time + 1, Ordering::SeqCst);
+            let timestamp = HLC::new(wall_time, 0);
 
+            // Generate unique hash
             let mut hasher = blake3::Hasher::new();
             hasher.update(&hash_num.to_le_bytes());
-            hasher.update(&timestamp.to_le_bytes());
+            hasher.update(&wall_time.to_le_bytes());
             hasher.update(&payload);
             let hash = Hash::from(*hasher.finalize().as_bytes());
 
@@ -123,7 +129,7 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
                 info: lattice_model::IntentionInfo {
                     hash,
                     payload: std::borrow::Cow::Borrowed(&payload),
-                    timestamp: HLC::now(),
+                    timestamp,
                     author,
                 },
                 causal_deps: &causal_deps,
@@ -136,7 +142,7 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
             // Emit as SignedIntention format (matching real kernel)
             let intention = Intention {
                 author,
-                timestamp: HLC::now(),
+                timestamp,
                 store_id,
                 store_prev: prev_hash,
                 condition: Condition::v1(causal_deps),

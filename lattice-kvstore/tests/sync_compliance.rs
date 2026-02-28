@@ -5,10 +5,9 @@ use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::Uuid;
 use lattice_model::{Op, StateMachine};
+use lattice_storage::StorageConfig;
 use prost::Message;
 use std::io::Read;
-use tempfile::tempdir;
-
 static NULL_DAG: NullDag = NullDag;
 
 fn create_test_op(
@@ -44,9 +43,8 @@ fn snapshot_bytes(state: &impl StateMachine) -> Vec<u8> {
 
 #[test]
 fn test_snapshot_restore() {
-    let dir1 = tempdir().unwrap();
     let store_id = Uuid::new_v4();
-    let state1 = KvState::open(store_id, dir1.path()).unwrap();
+    let state1 = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
 
     let author = PubKey::from([1u8; 32]);
     let hash = Hash::from([0xCC; 32]);
@@ -65,8 +63,7 @@ fn test_snapshot_restore() {
     let snapshot1_bytes = snapshot_bytes(&state1);
 
     // Create fresh state
-    let dir2 = tempdir().unwrap();
-    let state2 = KvState::open(store_id, dir2.path()).unwrap();
+    let state2 = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
 
     // Restore
     state2
@@ -91,11 +88,8 @@ fn test_snapshot_restore() {
 
 #[test]
 fn test_convergence_concurrent_operations() {
-    let dir1 = tempdir().unwrap();
-    let state1 = KvState::open(Uuid::new_v4(), dir1.path()).unwrap();
-
-    let dir2 = tempdir().unwrap();
-    let state2 = KvState::open(Uuid::new_v4(), dir2.path()).unwrap();
+    let state1 = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+    let state2 = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
     let dag = HashMapDag::new();
     let start_hlc = HLC::now();
@@ -134,9 +128,8 @@ fn test_convergence_concurrent_operations() {
 
 #[test]
 fn test_restore_overwrites_existing_data() {
-    let dir = tempdir().unwrap();
     let store_id = Uuid::new_v4();
-    let state = KvState::open(store_id, dir.path()).unwrap();
+    let state = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
 
     let author = PubKey::from([1u8; 32]);
     let start_hlc = HLC::now();
@@ -149,9 +142,8 @@ fn test_restore_overwrites_existing_data() {
     assert!(state.get(b"key_old").unwrap().is_some());
 
     // 2. Prepare a Snapshot that ONLY has "key_new"
-    let dir_snap = tempdir().unwrap();
     // MUST use same store_id for restore to work
-    let state_snap = KvState::open(store_id, dir_snap.path()).unwrap();
+    let state_snap = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
     let hash2 = Hash::from([0xBB; 32]);
     let op2 = create_test_op(b"key_new", b"val_new", author, hash2, start_hlc, Hash::ZERO);
     state_snap.apply(&op2, &NULL_DAG).unwrap();
@@ -184,8 +176,7 @@ fn test_restore_overwrites_existing_data() {
 
 #[test]
 fn test_delete_correctness() {
-    let dir = tempdir().unwrap();
-    let state = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+    let state = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
     let author = PubKey::from([1u8; 32]);
     let start_hlc = HLC::now();
@@ -229,8 +220,7 @@ fn test_delete_correctness() {
 
 #[test]
 fn test_chain_rules_compliance() {
-    let dir = tempdir().unwrap();
-    let state = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+    let state = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
     let dag = HashMapDag::new();
     let author = PubKey::from([0x99; 32]);
     let hlc = HLC::now();
@@ -273,9 +263,8 @@ fn test_chain_rules_compliance() {
 
 #[test]
 fn test_snapshot_checksum_failure() {
-    let dir1 = tempdir().unwrap();
     let store_id = Uuid::new_v4();
-    let state1 = KvState::open(store_id, dir1.path()).unwrap();
+    let state1 = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
 
     // Add some data
     let author = PubKey::from([1u8; 32]);
@@ -290,8 +279,7 @@ fn test_snapshot_checksum_failure() {
     let mut corrupt_checksum = snap_bytes.clone();
     corrupt_checksum[len - 1] ^= 0xFF;
 
-    let dir2 = tempdir().unwrap();
-    let state2 = KvState::open(store_id, dir2.path()).unwrap();
+    let state2 = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
 
     let err = state2
         .restore(Box::new(std::io::Cursor::new(corrupt_checksum)))
@@ -313,14 +301,12 @@ fn test_snapshot_checksum_failure() {
 
 #[test]
 fn test_snapshot_uuid_mismatch() {
-    let dir1 = tempdir().unwrap();
-    let state1 = KvState::open(Uuid::new_v4(), dir1.path()).unwrap();
+    let state1 = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
     let snapshot = state1.snapshot().unwrap();
 
-    let dir2 = tempdir().unwrap();
     // Open with DIFFERENT UUID
-    let state2 = KvState::open(Uuid::new_v4(), dir2.path()).unwrap();
+    let state2 = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
     let err = state2.restore(snapshot).unwrap_err();
     assert!(

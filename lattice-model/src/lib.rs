@@ -15,6 +15,7 @@ pub mod peer_provider;
 pub mod replication;
 pub mod sexpr;
 pub mod state_machine;
+pub mod storage_config;
 pub mod store_info;
 pub mod store_type;
 pub mod types;
@@ -40,6 +41,7 @@ pub use replication::{
 };
 pub use sexpr::SExpr;
 pub use state_machine::{Op, StateMachine, StateWriter, StateWriterError};
+pub use storage_config::StorageConfig;
 pub use store_info::{StoreLink, StoreMeta, SystemEvent};
 pub use store_type::{
     StoreTypeProvider, CORE_STORE_TYPES, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE,

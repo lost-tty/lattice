@@ -1,5 +1,5 @@
 use blake3::Hasher;
-use lattice_model::{DagQueries, Hash, Op, PubKey, StateMachine, StoreMeta};
+use lattice_model::{DagQueries, Hash, Op, PubKey, StateMachine, StorageConfig, StoreMeta};
 use redb::{Database, ReadableTable, TableDefinition, TableHandle};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -129,22 +129,36 @@ impl StateBackend {
         }
     }
 
-    /// Open or create a store at the given path.
+    /// Open or create a store with the given configuration.
     pub fn open(
         id: Uuid,
-        state_dir: impl AsRef<Path>,
+        config: &StorageConfig,
         expected_type: Option<&str>,
         expected_version: u64,
     ) -> Result<Self, StateDbError> {
-        let dir = state_dir.as_ref();
-        if !dir.exists() {
-            std::fs::create_dir_all(dir)?;
-        }
+        let db = match config {
+            StorageConfig::File(dir) => {
+                if !dir.exists() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                let state_db_path = dir.join("state.db");
+                Database::builder().create(&state_db_path)?
+            }
+            StorageConfig::InMemory => {
+                Database::builder()
+                    .create_with_backend(redb::backends::InMemoryBackend::new())?
+            }
+        };
+        Self::init(db, id, expected_type, expected_version)
+    }
 
-        let state_db_path = dir.join("state.db");
-        let db = Database::builder().create(&state_db_path)?;
-
-        // Verify Store ID & Type
+    /// Shared init: verify/write store metadata in TABLE_META.
+    fn init(
+        db: Database,
+        id: Uuid,
+        expected_type: Option<&str>,
+        expected_version: u64,
+    ) -> Result<Self, StateDbError> {
         let write_txn = db.begin_write()?;
         {
             let mut table_meta = write_txn.open_table(TABLE_META)?;
@@ -796,14 +810,18 @@ impl<T: StateLogic + StoreTypeProvider> StoreTypeProvider for PersistentState<T>
 
 /// Helper to standardize the "Open" ceremony for PersistentState.
 ///
-/// Handles opening the StateBackend, creating the inner logic, and wrapping it in PersistentState.
+/// For `StorageConfig::File`, validates store type and schema version.
+/// For `StorageConfig::InMemory`, skips type/version validation.
 pub fn setup_persistent_state<L: StateLogic + StoreTypeProvider>(
     id: Uuid,
-    path: &Path,
+    config: &StorageConfig,
     constructor: impl FnOnce(StateBackend) -> L,
 ) -> Result<PersistentState<L>, StateDbError> {
-    let store_type = L::store_type();
-    let backend = StateBackend::open(id, path, Some(store_type), 1)?;
+    let (expected_type, expected_version) = match config {
+        StorageConfig::File(_) => (Some(L::store_type()), 1),
+        StorageConfig::InMemory => (None, 0),
+    };
+    let backend = StateBackend::open(id, config, expected_type, expected_version)?;
     Ok(PersistentState::new(constructor(backend)))
 }
 
@@ -818,6 +836,7 @@ pub trait StateFactory: StateLogic {
 // This solves the Orphan Rule violation by implementing it in the crate where PersistentState is defined.
 impl<T: StateFactory + StoreTypeProvider + 'static> lattice_model::Openable for PersistentState<T> {
     fn open(id: Uuid, path: &Path) -> Result<Self, String> {
-        setup_persistent_state(id, path, T::create).map_err(|e| e.to_string())
+        let config = StorageConfig::File(path.to_path_buf());
+        setup_persistent_state(id, &config, T::create).map_err(|e| e.to_string())
     }
 }

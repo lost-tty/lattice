@@ -6,7 +6,6 @@
 use lattice_model::{Op, PubKey, SExpr, Uuid};
 
 use redb::{ReadableTable, ReadableTableMetadata};
-use std::path::Path;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -31,7 +30,7 @@ pub struct LogEntry {
 
 use lattice_storage::{
     setup_persistent_state, PersistentState, StateBackend, StateDbError, StateFactory, StateLogic,
-    TABLE_DATA,
+    StorageConfig, TABLE_DATA,
 };
 
 /// LogState - append-only log with redb persistence
@@ -50,9 +49,9 @@ impl std::fmt::Debug for LogState {
 // ==================== Openable Implementation ====================
 
 impl LogState {
-    /// Open or create a log state in the given directory.
-    pub fn open(id: Uuid, path: &Path) -> Result<PersistentState<Self>, StateDbError> {
-        setup_persistent_state(id, path, |backend| {
+    /// Open or create a log state with the given storage configuration.
+    pub fn open(id: Uuid, config: &StorageConfig) -> Result<PersistentState<Self>, StateDbError> {
+        setup_persistent_state(id, config, |backend| {
             let (event_tx, _) = broadcast::channel(256);
             Self { backend, event_tx }
         })
@@ -445,17 +444,16 @@ mod tests {
     use lattice_model::hlc::HLC;
     use lattice_model::Uuid;
     use lattice_model::{Hash, Op, PubKey, StateMachine};
-    use tempfile::tempdir;
-
     static NULL_DAG: NullDag = NullDag;
 
     #[test]
     fn test_persistence_roundtrip() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         // Create initial state
         let author = PubKey::from([1u8; 32]);
         let id = Uuid::new_v4();
-        let state = LogState::open(id, dir.path()).unwrap();
+        let config = StorageConfig::File(dir.path().to_path_buf());
+        let state = LogState::open(id, &config).unwrap();
 
         let op = Op {
             info: lattice_model::IntentionInfo {
@@ -477,15 +475,14 @@ mod tests {
         drop(state);
 
         // Re-open with SAME ID
-        let state2 = LogState::open(id, dir.path()).unwrap();
+        let state2 = LogState::open(id, &config).unwrap();
         assert_eq!(state2.read(None).len(), 1);
         assert_eq!(state2.read(None)[0].content, b"hello world");
     }
 
     #[test]
     fn test_ordering() {
-        let dir = tempdir().unwrap();
-        let state = LogState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let state = LogState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
         let author1 = PubKey::from([1u8; 32]);
         let author2 = PubKey::from([2u8; 32]);
@@ -556,8 +553,7 @@ mod tests {
     fn test_snapshot_restore() {
         let store_id = Uuid::new_v4();
 
-        let dir1 = tempdir().unwrap();
-        let state1 = LogState::open(store_id, dir1.path()).unwrap();
+        let state1 = LogState::open(store_id, &StorageConfig::InMemory).unwrap();
 
         let author = PubKey::from([1u8; 32]);
         let start_hlc = HLC::now();
@@ -577,8 +573,7 @@ mod tests {
         let snapshot = state1.snapshot().unwrap();
 
         // Restore to fresh state with SAME store ID (restore validates ID)
-        let dir2 = tempdir().unwrap();
-        let state2 = LogState::open(store_id, dir2.path()).unwrap();
+        let state2 = LogState::open(store_id, &StorageConfig::InMemory).unwrap();
         state2.restore(snapshot).unwrap();
 
         // Verify

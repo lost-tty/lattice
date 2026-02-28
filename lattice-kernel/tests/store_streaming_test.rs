@@ -7,7 +7,6 @@ use lattice_model::{
 };
 use prost::Message;
 use std::sync::Arc;
-use tempfile::tempdir;
 use tokio_stream::StreamExt;
 use uuid::Uuid; // For decoding WitnessContent
 
@@ -40,16 +39,13 @@ impl StateMachine for MockStateMachine {
 
 #[tokio::test]
 async fn test_scan_witness_log_streaming() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempdir()?;
-    let store_dir = dir.path().to_path_buf();
-
     // Create store
     let store_id = Uuid::new_v4();
     let state = Arc::new(MockStateMachine::default());
     let node = NodeIdentity::generate();
 
-    // Open store
-    let opened = OpenedStore::new(store_id, store_dir, state, node.signing_key())?;
+    // Open store in memory
+    let opened = OpenedStore::new(store_id, &lattice_model::StorageConfig::InMemory, state, node.signing_key())?;
     let (handle, _info, runner) = opened.into_handle(node.clone())?;
 
     // Spawn runner to process requests

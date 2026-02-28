@@ -1,7 +1,6 @@
-use lattice_storage::{StateBackend, StateDbError, TABLE_DATA};
+use lattice_storage::{StateBackend, StateDbError, StorageConfig, TABLE_DATA};
 use redb::ReadableTableMetadata;
 use std::io::Cursor;
-use tempfile::tempdir;
 use uuid::Uuid;
 
 fn populate_db(backend: &StateBackend) {
@@ -21,17 +20,15 @@ fn populate_db(backend: &StateBackend) {
 
 #[test]
 fn test_snapshot_restore_success() {
-    let dir1 = tempdir().unwrap();
     let id1 = Uuid::new_v4();
-    let backend1 = StateBackend::open(id1, dir1.path(), None, 0).unwrap();
+    let backend1 = StateBackend::open(id1, &StorageConfig::InMemory, None, 0).unwrap();
     populate_db(&backend1);
 
     let mut buffer = Vec::new();
     backend1.snapshot(&mut buffer).unwrap();
 
-    let dir2 = tempdir().unwrap();
     // Same ID required for restore unless we want ID mismatch
-    let backend2 = StateBackend::open(id1, dir2.path(), None, 0).unwrap();
+    let backend2 = StateBackend::open(id1, &StorageConfig::InMemory, None, 0).unwrap();
 
     backend2.restore(&mut Cursor::new(buffer)).unwrap();
 
@@ -43,17 +40,15 @@ fn test_snapshot_restore_success() {
 
 #[test]
 fn test_snapshot_uuid_mismatch() {
-    let dir1 = tempdir().unwrap();
     let id1 = Uuid::new_v4();
-    let backend1 = StateBackend::open(id1, dir1.path(), None, 0).unwrap();
+    let backend1 = StateBackend::open(id1, &StorageConfig::InMemory, None, 0).unwrap();
     populate_db(&backend1);
 
     let mut buffer = Vec::new();
     backend1.snapshot(&mut buffer).unwrap();
 
-    let dir2 = tempdir().unwrap();
     let id2 = Uuid::new_v4(); // Different ID
-    let backend2 = StateBackend::open(id2, dir2.path(), None, 0).unwrap();
+    let backend2 = StateBackend::open(id2, &StorageConfig::InMemory, None, 0).unwrap();
 
     let err = backend2.restore(&mut Cursor::new(buffer)).unwrap_err();
 
@@ -62,9 +57,8 @@ fn test_snapshot_uuid_mismatch() {
 
 #[test]
 fn test_snapshot_checksum_failure_last_byte() {
-    let dir1 = tempdir().unwrap();
     let id1 = Uuid::new_v4();
-    let backend1 = StateBackend::open(id1, dir1.path(), None, 0).unwrap();
+    let backend1 = StateBackend::open(id1, &StorageConfig::InMemory, None, 0).unwrap();
     populate_db(&backend1);
 
     let mut buffer = Vec::new();
@@ -74,8 +68,7 @@ fn test_snapshot_checksum_failure_last_byte() {
     let len = buffer.len();
     buffer[len - 1] ^= 0xFF;
 
-    let dir2 = tempdir().unwrap();
-    let backend2 = StateBackend::open(id1, dir2.path(), None, 0).unwrap();
+    let backend2 = StateBackend::open(id1, &StorageConfig::InMemory, None, 0).unwrap();
 
     let err = backend2.restore(&mut Cursor::new(buffer)).unwrap_err();
 
@@ -88,9 +81,8 @@ fn test_snapshot_checksum_failure_last_byte() {
 
 #[test]
 fn test_restore_transaction_atomicity() {
-    let dir1 = tempdir().unwrap();
     let id1 = Uuid::new_v4();
-    let backend1 = StateBackend::open(id1, dir1.path(), None, 0).unwrap();
+    let backend1 = StateBackend::open(id1, &StorageConfig::InMemory, None, 0).unwrap();
     populate_db(&backend1);
 
     let mut buffer = Vec::new();
@@ -100,8 +92,7 @@ fn test_restore_transaction_atomicity() {
     let len = buffer.len();
     buffer[len - 1] ^= 0xFF;
 
-    let dir2 = tempdir().unwrap();
-    let backend2 = StateBackend::open(id1, dir2.path(), None, 0).unwrap();
+    let backend2 = StateBackend::open(id1, &StorageConfig::InMemory, None, 0).unwrap();
 
     // 1. Initial state for db2 should be empty, let's pre-fill it
     populate_db(&backend2);

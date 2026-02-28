@@ -170,7 +170,7 @@ where
 mod tests {
     use super::*;
     use lattice_model::{Op, StateMachine, Uuid};
-    use lattice_storage::{StateBackend, StateDbError, StateLogic};
+    use lattice_storage::{StateBackend, StateDbError, StateLogic, StorageConfig};
 
     struct MockLogic {
         backend: StateBackend,
@@ -216,9 +216,7 @@ mod tests {
         // This test simply validates that compilation succeeds for the trait bound
         fn takes_system_reader<T: super::SystemReader>(_t: &T) {} // Explicit super::SystemReader
 
-        let dir = tempfile::tempdir().unwrap();
-        let id = Uuid::new_v4();
-        let backend = StateBackend::open(id, dir.path(), None, 1).unwrap();
+        let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
         let logic = MockLogic { backend };
 
         // Wrap logic in SystemLayer

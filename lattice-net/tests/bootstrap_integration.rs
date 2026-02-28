@@ -6,6 +6,7 @@ use lattice_model::{NodeIdentity, StateMachine, StoreMeta};
 use futures_util::StreamExt;
 use lattice_kernel::proto::weaver::WitnessContent;
 use lattice_model::Uuid;
+use lattice_model::StorageConfig;
 use prost::Message;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,7 +44,8 @@ async fn create_store(id: Uuid, identity: NodeIdentity) -> (Arc<Store<MockState>
     let _ = std::fs::remove_dir_all(&temp_dir); // Clean start
 
     let state = Arc::new(MockState);
-    let opened = OpenedStore::new(id, temp_dir.clone(), state, identity.signing_key()).unwrap();
+    let config = StorageConfig::File(temp_dir.clone());
+    let opened = OpenedStore::new(id, &config, state, identity.signing_key()).unwrap();
     let (handle, _info, runner) = opened.into_handle(identity).unwrap();
 
     tokio::spawn(async move {

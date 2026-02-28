@@ -9,7 +9,7 @@
 // Internal table names
 use lattice_storage::{
     setup_persistent_state, PersistentState, StateBackend, StateDbError, StateFactory, StateLogic,
-    TABLE_DATA,
+    StorageConfig, TABLE_DATA,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -22,7 +22,6 @@ use prost::Message;
 use prost_reflect::{DescriptorPool, ReflectMessage};
 use redb::Database;
 use regex::bytes::Regex;
-use std::path::Path;
 use tokio::sync::broadcast;
 
 /// Persistent state for KV with DAG conflict resolution.
@@ -46,12 +45,12 @@ impl std::fmt::Debug for KvState {
 
 // KvState is the logic. PersistentState<KvState> is the StateMachine.
 impl KvState {
-    /// Open or create a KvState in the given directory.
+    /// Open or create a KvState with the given storage configuration.
     pub fn open(
         id: Uuid,
-        state_dir: impl AsRef<Path>,
+        config: &StorageConfig,
     ) -> Result<PersistentState<Self>, StateDbError> {
-        setup_persistent_state(id, state_dir.as_ref(), |backend| {
+        setup_persistent_state(id, config, |backend| {
             let (watcher_tx, _) = broadcast::channel(1024);
             Self {
                 backend,
@@ -683,15 +682,12 @@ mod tests {
     use lattice_model::hlc::HLC;
     use lattice_model::PubKey;
     use lattice_model::StateMachine;
-    use tempfile::tempdir;
-
     static NULL_DAG: NullDag = NullDag;
 
     /// Test that StateMachine::apply works correctly for put operations
     #[test]
     fn test_state_machine_apply_put() {
-        let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
         // Create an Op with a Put payload
         let key = b"test/key";
@@ -730,8 +726,7 @@ mod tests {
     /// Test that multiple puts to same key creates proper head list
     #[test]
     fn test_state_machine_concurrent_puts() {
-        let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
         let dag = HashMapDag::new();
 
         let key = b"shared/key";
@@ -773,8 +768,7 @@ mod tests {
     /// Test delete operation via StateMachine trait
     #[test]
     fn test_state_machine_apply_delete() {
-        let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
         let key = b"to/delete";
 
@@ -881,8 +875,7 @@ mod tests {
     /// Test that apply_op with duplicate keys in payload uses last-wins (reverse iteration)
     #[test]
     fn test_apply_op_duplicate_keys_last_wins() {
-        let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -905,8 +898,7 @@ mod tests {
     /// Test that apply_op with put then delete on same key results in deletion
     #[test]
     fn test_apply_op_put_then_delete_same_key() {
-        let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -928,8 +920,7 @@ mod tests {
     /// Test that apply_op with delete then put on same key results in value
     #[test]
     fn test_apply_op_delete_then_put_same_key() {
-        let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -952,8 +943,7 @@ mod tests {
     /// This ensures deterministic replay - once signed, always apply.
     #[test]
     fn test_apply_op_empty_key_allowed() {
-        let dir = tempdir().unwrap();
-        let store = KvState::open(Uuid::new_v4(), dir.path()).unwrap();
+        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
 
         let author = PubKey::from([1u8; 32]);
         let hash = Hash::from([2u8; 32]);

@@ -604,7 +604,6 @@ mod tests {
 
     fn open_test_store(
         store_id: Uuid,
-        store_dir: std::path::PathBuf,
         node: NodeIdentity,
     ) -> Result<
         (
@@ -617,7 +616,7 @@ mod tests {
         let state = Arc::new(MockStateMachine::new());
         let opened = crate::store::OpenedStore::new(
             store_id,
-            store_dir.clone(),
+            &lattice_model::StorageConfig::InMemory,
             state.clone(),
             node.signing_key(),
         )?;
@@ -628,10 +627,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_and_author_tips() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node.clone()).unwrap();
+            open_test_store(TEST_STORE, node.clone()).unwrap();
 
         // Submit a payload
         let hash = handle.submit(b"hello".to_vec(), vec![]).await.unwrap();
@@ -649,11 +648,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_ingest_intention() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, node_a.clone()).unwrap();
 
         // Create an intention from node_b
         let intention = Intention {
@@ -682,10 +681,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_intentions() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node.clone()).unwrap();
+            open_test_store(TEST_STORE, node.clone()).unwrap();
 
         let hash1 = handle.submit(b"op1".to_vec(), vec![]).await.unwrap();
         let hash2 = handle.submit(b"op2".to_vec(), vec![]).await.unwrap();
@@ -703,11 +702,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_ingest_is_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, node_a.clone()).unwrap();
 
         let intention = Intention {
             author: node_b.public_key(),
@@ -728,11 +727,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_out_of_order_chain_arrival() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, node_a.clone()).unwrap();
 
         // Build a chain: i1 -> i2 -> i3
         let i1 = Intention {
@@ -800,12 +799,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_cross_author_causal_dep() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let node_c = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, node_a.clone()).unwrap();
 
         // B's intention depends on C's intention (causal dep)
         let i_c = Intention {
@@ -847,13 +846,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_diamond_dependency() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_local = NodeIdentity::generate();
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let node_c = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_local.clone()).unwrap();
+            open_test_store(TEST_STORE, node_local.clone()).unwrap();
 
         // A and B are independent roots
         let i_a = Intention {
@@ -912,11 +911,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_external_dep_floats() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, node_a.clone()).unwrap();
 
         // A non-existent hash
         let phantom_hash = Hash::from([0xDEu8; 32]);
@@ -967,11 +966,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_ingest_no_duplicate_witness() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, node_a.clone()).unwrap();
 
         let i_b = Intention {
             author: node_b.public_key(),
@@ -1001,10 +1000,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_submit_creates_witness() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node.clone()).unwrap();
+            open_test_store(TEST_STORE, node.clone()).unwrap();
 
         let hash = handle.submit(b"hello".to_vec(), vec![]).await.unwrap();
 
@@ -1027,10 +1026,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_history_order_matches_apply_order() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node.clone()).unwrap();
+            open_test_store(TEST_STORE, node.clone()).unwrap();
 
         let h1 = handle.submit(b"op1".to_vec(), vec![]).await.unwrap();
         let h2 = handle.submit(b"op2".to_vec(), vec![]).await.unwrap();
@@ -1061,11 +1060,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_ingested_intention_creates_witness() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, node_a.clone()).unwrap();
 
         let intention = Intention {
             author: node_b.public_key(),
@@ -1092,11 +1091,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_out_of_order_cascade_witness_order() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, node_a.clone()).unwrap();
 
         // Build chain: i1 -> i2 -> i3
         let i1 = Intention {
@@ -1169,11 +1168,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_signature_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, node_a.clone()).unwrap();
 
         let intention = Intention {
             author: node_b.public_key(),
@@ -1209,11 +1208,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_id_mismatch_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node_a = NodeIdentity::generate();
         let node_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, node_a.clone()).unwrap();
 
         // Create intention targeting a DIFFERENT store
         let wrong_store = Uuid::new_v4();
@@ -1248,10 +1247,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_hlc_monotonicity() {
-        let tmp = tempfile::tempdir().unwrap();
+
         let node = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, tmp.path().to_path_buf(), node.clone()).unwrap();
+            open_test_store(TEST_STORE, node.clone()).unwrap();
 
         let mut hashes = Vec::new();
         // Submit 50 intentions rapidly

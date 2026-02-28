@@ -3,11 +3,11 @@ use std::sync::Arc;
 use lattice_kvstore::{KvState, PersistentKvState};
 use lattice_mockkernel::MockWriter;
 use lattice_model::Uuid;
+use lattice_storage::StorageConfig;
 use lattice_store_base::{CommandDispatcher, CommandHandler, StateProvider};
 use prost_reflect::DynamicMessage;
 use std::future::Future;
 use std::pin::Pin;
-use tempfile::TempDir;
 
 /// A test store that combines PersistentState with a MockWriter.
 /// This mimics key aspects of Store<S> but uses a local MockWriter
@@ -15,22 +15,17 @@ use tempfile::TempDir;
 pub struct TestStore {
     pub state: Arc<PersistentKvState>,
     pub writer: MockWriter<KvState>,
-    pub _dir: TempDir, // Keep alive
 }
 
 impl TestStore {
     pub fn new() -> Self {
-        let dir = TempDir::new().unwrap();
         let store_id = Uuid::new_v4();
-        let state = KvState::open(store_id, dir.path()).expect("failed to open state");
+        let state =
+            KvState::open(store_id, &StorageConfig::InMemory).expect("failed to open state");
         let state = Arc::new(state);
         let writer = MockWriter::new(state.clone());
 
-        Self {
-            state,
-            writer,
-            _dir: dir,
-        }
+        Self { state, writer }
     }
 }
 

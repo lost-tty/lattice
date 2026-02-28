@@ -10,12 +10,12 @@
 //! Chain tips are derived from `store_prev` linkage during index rebuild.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use super::witness::sign_witness;
 use lattice_model::types::{Hash, PubKey};
 pub use lattice_model::weaver::WitnessEntry;
 use lattice_model::weaver::{FloatingIntention, Intention, SignedIntention};
+use lattice_model::StorageConfig;
 use lattice_proto::weaver::{FloatingMeta, WitnessContent, WitnessRecord};
 use prost::Message;
 use redb::{
@@ -95,23 +95,37 @@ pub struct IntentionStore {
 }
 
 impl IntentionStore {
-    /// Open or create a `log.db` at the given directory.
+    /// Open or create an IntentionStore with the given storage configuration.
     ///
     /// Reads persisted metadata (author tips, witness_seq, last_witness_hash)
     /// from dedicated tables for O(1) startup. Falls back to a full witness
     /// log replay if the meta table is empty (first open after migration).
     pub fn open(
-        store_dir: impl AsRef<Path>,
+        store_id: Uuid,
+        config: &StorageConfig,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> Result<Self, IntentionStoreError> {
+        let db = match config {
+            StorageConfig::File(dir) => {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    IntentionStoreError::InvalidData(format!("cannot create dir: {e}"))
+                })?;
+                let db_path = dir.join("log.db");
+                Database::builder().create(&db_path)?
+            }
+            StorageConfig::InMemory => {
+                Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?
+            }
+        };
+        Self::init(db, store_id, signing_key)
+    }
+
+    /// Shared init: create tables, load persisted state, derive fingerprint.
+    fn init(
+        db: Database,
         store_id: Uuid,
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Result<Self, IntentionStoreError> {
-        let dir = store_dir.as_ref();
-        std::fs::create_dir_all(dir)
-            .map_err(|e| IntentionStoreError::InvalidData(format!("cannot create dir: {e}")))?;
-
-        let db_path = dir.join("log.db");
-        let db = Database::builder().create(&db_path)?;
-
         // Ensure all tables exist
         {
             let write_txn = db.begin_write()?;
@@ -1012,6 +1026,7 @@ mod tests {
     use super::*;
     use lattice_model::hlc::HLC;
     use lattice_model::weaver::Condition;
+    use std::path::Path;
 
     fn make_key() -> (ed25519_dalek::SigningKey, PubKey) {
         let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
@@ -1032,8 +1047,7 @@ mod tests {
 
     #[test]
     fn insert_and_get() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key, pk) = make_key();
 
         let intention = make_intention(pk, Hash::ZERO, vec![1, 2, 3]);
@@ -1047,8 +1061,7 @@ mod tests {
 
     #[test]
     fn duplicate_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key, pk) = make_key();
 
         let signed = SignedIntention::sign(make_intention(pk, Hash::ZERO, vec![1]), &key);
@@ -1060,8 +1073,7 @@ mod tests {
 
     #[test]
     fn out_of_order_insertion() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key, pk) = make_key();
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
@@ -1089,8 +1101,7 @@ mod tests {
 
     #[test]
     fn author_tip_tracking() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key, pk) = make_key();
 
         assert_eq!(store.author_tip(&pk), Hash::ZERO);
@@ -1122,13 +1133,26 @@ mod tests {
     }
 
     fn open_store(dir: &Path) -> IntentionStore {
-        IntentionStore::open(dir, test_store_id(), &test_signing_key()).unwrap()
+        IntentionStore::open(
+            test_store_id(),
+            &StorageConfig::File(dir.to_path_buf()),
+            &test_signing_key(),
+        )
+        .unwrap()
+    }
+
+    fn open_store_in_memory() -> IntentionStore {
+        IntentionStore::open(
+            test_store_id(),
+            &StorageConfig::InMemory,
+            &test_signing_key(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn witness_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key, pk) = make_key();
 
         let i = make_intention(pk, Hash::ZERO, vec![1, 2]);
@@ -1151,8 +1175,7 @@ mod tests {
 
     #[test]
     fn witness_log_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (_key, pk) = make_key();
 
         let i = make_intention(pk, Hash::ZERO, vec![1]);
@@ -1341,8 +1364,7 @@ mod tests {
 
     #[test]
     fn floating_blocked_by_missing_store_prev() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key, pk) = make_key();
 
         // Intention whose store_prev doesn't exist in the store
@@ -1370,8 +1392,7 @@ mod tests {
 
     #[test]
     fn floating_blocked_by_missing_causal_dep() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key, pk) = make_key();
 
         // Intention with a causal dep on a nonexistent hash
@@ -1395,8 +1416,7 @@ mod tests {
 
     #[test]
     fn floating_idempotent_insert() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key, pk) = make_key();
 
         let i = make_intention(pk, Hash::ZERO, vec![1]);
@@ -1416,8 +1436,7 @@ mod tests {
 
     #[test]
     fn floating_partial_chain_stays_blocked() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key, pk) = make_key();
 
         // Build chain A → B → C but only insert B and C
@@ -1493,8 +1512,7 @@ mod tests {
         // Verifies: per-author tips, floating transitions, witness log
         // ordering, and hash chain integrity.
 
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
 
         let alice_key = ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]);
         let alice = PubKey(alice_key.verifying_key().to_bytes());
@@ -1663,7 +1681,11 @@ mod tests {
         }
 
         // Reopen — should fail with chain broken error
-        let result = IntentionStore::open(dir.path(), test_store_id(), &test_signing_key());
+        let result = IntentionStore::open(
+            test_store_id(),
+            &StorageConfig::File(dir.path().to_path_buf()),
+            &test_signing_key(),
+        );
         match result {
             Ok(_) => panic!("Store should reject corrupted witness chain"),
             Err(e) => {
@@ -1680,9 +1702,8 @@ mod tests {
     fn extreme_wall_time_values() {
         // The store is "dumb" and should accept any wall_time without
         // panicking or overflowing, including boundary values.
-        let dir = tempfile::tempdir().unwrap();
         let (key, pk) = make_key();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
         store
@@ -1710,9 +1731,8 @@ mod tests {
 
     #[test]
     fn double_witness_rejected() {
-        let dir = tempfile::tempdir().unwrap();
         let (key, pk) = make_key();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
         store
@@ -1733,8 +1753,7 @@ mod tests {
 
     #[test]
     fn range_queries_empty_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
+        let store = open_store_in_memory();
 
         let lo = Hash([0x00; 32]);
         let hi = Hash([0xFF; 32]);
@@ -1746,9 +1765,8 @@ mod tests {
 
     #[test]
     fn range_queries_full_range() {
-        let dir = tempfile::tempdir().unwrap();
         let (key, pk) = make_key();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
 
         // Insert three intentions
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
@@ -1797,9 +1815,8 @@ mod tests {
 
     #[test]
     fn range_queries_partial_range() {
-        let dir = tempfile::tempdir().unwrap();
         let (key, pk) = make_key();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
 
         // Insert several intentions
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
@@ -1875,9 +1892,8 @@ mod tests {
 
     #[test]
     fn range_queries_zero_width() {
-        let dir = tempfile::tempdir().unwrap();
         let (key, pk) = make_key();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
         store
@@ -1894,8 +1910,7 @@ mod tests {
 
     #[test]
     fn range_queries_inverted() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
+        let store = open_store_in_memory();
 
         let lo = Hash([0x00; 32]);
         let hi = Hash([0xFF; 32]);
@@ -1910,16 +1925,14 @@ mod tests {
 
     #[test]
     fn table_fingerprint_empty_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
+        let store = open_store_in_memory();
         assert_eq!(store.table_fingerprint(), Hash::ZERO);
     }
 
     #[test]
     fn table_fingerprint_incremental() {
-        let dir = tempfile::tempdir().unwrap();
         let (key, pk) = make_key();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
 
         // Insert first intention
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
@@ -1946,9 +1959,8 @@ mod tests {
 
     #[test]
     fn table_fingerprint_duplicate_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
         let (key, pk) = make_key();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
         let signed = SignedIntention::sign(i1.clone(), &key);
@@ -1962,9 +1974,8 @@ mod tests {
 
     #[test]
     fn table_fingerprint_consistent_with_range() {
-        let dir = tempfile::tempdir().unwrap();
         let (key, pk) = make_key();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
         store
@@ -2010,12 +2021,10 @@ mod tests {
 
     #[test]
     fn table_fingerprint_divergent_stores() {
-        let dir_a = tempfile::tempdir().unwrap();
-        let dir_b = tempfile::tempdir().unwrap();
         let (key, pk) = make_key();
 
-        let mut store_a = open_store(dir_a.path());
-        let mut store_b = open_store(dir_b.path());
+        let mut store_a = open_store_in_memory();
+        let mut store_b = open_store_in_memory();
 
         // Same first intention
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
@@ -2076,8 +2085,7 @@ mod tests {
     ///     D        (author1, prev=B, deps=[C])
     /// ```
     fn build_diamond_dag() -> (IntentionStore, Hash, Hash, Hash, Hash) {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key1, pk1) = make_key();
         let (key2, pk2) = make_key_2();
 
@@ -2097,14 +2105,12 @@ mod tests {
         let signed_d = SignedIntention::sign(int_d.clone(), &key1);
         let hash_d = store.insert(&signed_d).unwrap();
 
-        std::mem::forget(dir);
         (store, hash_a, hash_b, hash_c, hash_d)
     }
 
     /// Build a linear chain A → B → C → D and return the store + hashes.
     fn build_linear_chain() -> (IntentionStore, Hash, Hash, Hash, Hash) {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key, pk) = make_key();
 
         let int_a = make_intention(pk, Hash::ZERO, vec![0xA]);
@@ -2123,7 +2129,6 @@ mod tests {
         let signed_d = SignedIntention::sign(int_d.clone(), &key);
         let hash_d = store.insert(&signed_d).unwrap();
 
-        std::mem::forget(dir);
         (store, hash_a, hash_b, hash_c, hash_d)
     }
 
@@ -2141,8 +2146,7 @@ mod tests {
     ///       G           (author1, prev=E, deps=[F])  — second merge
     /// ```
     fn build_double_diamond() -> (IntentionStore, [Hash; 7]) {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key1, pk1) = make_key();
         let (key2, pk2) = make_key_2();
 
@@ -2181,7 +2185,6 @@ mod tests {
             .insert(&SignedIntention::sign(int_g.clone(), &key1))
             .unwrap();
 
-        std::mem::forget(dir);
         (store, [ha, hb, hc, hd, he, hf, hg])
     }
 
@@ -2194,8 +2197,7 @@ mod tests {
     ///   (short branch, author1)
     /// ```
     fn build_asymmetric_dag() -> (IntentionStore, Hash, Hash, Hash, Hash, Hash, Hash) {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = open_store(dir.path());
+        let mut store = open_store_in_memory();
         let (key1, pk1) = make_key();
         let (key2, pk2) = make_key_2();
 
@@ -2231,7 +2233,6 @@ mod tests {
             .insert(&SignedIntention::sign(int_f.clone(), &key2))
             .unwrap();
 
-        std::mem::forget(dir);
         (store, ha, hb, hc, hd, he, hf)
     }
 

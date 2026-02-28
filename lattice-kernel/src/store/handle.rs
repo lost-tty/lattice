@@ -14,7 +14,6 @@ use lattice_model::NodeIdentity;
 use lattice_model::StoreMeta;
 use lattice_model::{Op, StateMachine, SystemEvent};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -151,13 +150,11 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
     /// Opens the IntentionStore and replays any unapplied intentions.
     pub fn new(
         store_id: Uuid,
-        store_dir: PathBuf,
+        config: &lattice_model::StorageConfig,
         state: Arc<S>,
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Result<Self, super::StateError> {
-        std::fs::create_dir_all(&store_dir)?;
-
-        let intention_store = IntentionStore::open(&store_dir, store_id, signing_key)?;
+        let intention_store = IntentionStore::open(store_id, config, signing_key)?;
         let entries_replayed = replay_intentions(&intention_store, &state)?;
 
         Ok(Self {
