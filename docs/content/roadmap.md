@@ -75,47 +75,60 @@ Reduce what state machines store per conflict domain. Currently each key persist
 
 ---
 
-## Milestone 15: Log Lifecycle & Pruning
+## Milestone 15: Review
+- [ ] Address all items in Technical Debt
+- [ ] Address all items in Discussion
+- [ ] Address all items in Future
+- [ ] Remove all sleep calls if possible
+- [ ] Review code base
+- [ ] **Fix `complete_join` store type hardcode** and drop `lattice-kvstore` dev-dependency from `lattice-net-iroh` and (where possible) `lattice-net`
+- [ ] **Refactor `SyncSession::run` termination** (`lattice-net/src/network/sync_session.rs`): Bidirectional sync is broken — initiator terminates before handling responder's `FetchIntentions` when `reconcile_load == 0 && active_fetches == 0`. Root cause: `Done` (from `Reconciler`) is sent before `FetchIntentions` on the wire, and the peer uses `reconcile_load == 0` as exit condition. Needs a proper termination protocol — either reorder messages so `Done` follows `FetchIntentions`, add a session-level "finished" signal, or use half-close. Affects `test_channel_bidirectional_sync` and `test_bidirectional_sync`.
+- [ ] **Fix `SyncSession` silent ingest error swallowing**: `IntentionResponse` handler (line ~155) silently ignores `ingest_intention` failures via `.is_ok()`. Broken chain errors (`store_prev` pointing to unapplied intention) produce `FATAL: State divergence` log but the error is dropped. Needs: (a) propagate or log the error, (b) investigate out-of-order intention delivery causing chain breaks.
+- [ ] **Fix flaky `test_interleaved_modifications`** (`lattice-net/tests/sync_stress.rs`): intermittent failure
+
+---
+
+## Milestone 16: Log Lifecycle & Pruning
 
 Manage log growth on long-running nodes via stability frontier, snapshots, pruning, and finality checkpoints.
 
 > **See:** [Stability Frontier](stability-frontier.md) for the full design.
 
-### 15A: Stability Frontier & Tip Attestations
+### 16A: Stability Frontier & Tip Attestations
 - [ ] `SystemOp::TipAttestation { tips: Vec<(PubKey, Hash)> }` — publish changed author tips as SystemOps
 - [ ] Attestation keys in `TABLE_SYSTEM`: `attestation/{attester}/{author} → Hash` (LWW by HLC)
 - [ ] Derive per-author frontier: `frontier[A] = min(tip[A] across all Active peers)`
 - [ ] Attestation triggers: post-sync, batch threshold, periodic heartbeat (~15 min), graceful shutdown
 - [ ] **Lag metric:** Per-peer divergence from local tips, surfaced via `NodeEvent::PeerLagWarning` and `store status`
 
-### 15B: Snapshotting
+### 16B: Snapshotting
 - [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Options: tempfile-based replay (works today, heavy on I/O) or in-memory `StateBackend` variant (cleaner, requires refactoring `StateLogic`/`PersistentState`).
 - [ ] Store snapshots in `snapshot.db` (per-store, includes `TABLE_SYSTEM` attestation state)
 - [ ] Bootstrap new peers from snapshot + tail sync instead of full log replay
 - [ ] **Future optimization:** Inverse operations stored in `WitnessRecord` could allow rolling back from current state to frontier in O(head − frontier), avoiding replay. Deferred until profiling shows replay is a bottleneck.
 
-### 15C: Pruning
+### 16C: Pruning
 - [ ] `truncate_prefix` for all intentions per author up to `frontier[A]`
 - [ ] Discard individual attestation intentions below the frontier (snapshot carries state forward)
 - [ ] Preserve intentions newer than frontier
 
-### 15D: Checkpointing / Finality
+### 16D: Checkpointing / Finality
 - [ ] Periodically finalize state hash (protect against "Deep History Attacks")
 - [ ] Signed checkpoint intentions in sigchain
 - [ ] Nodes reject intentions that contradict finalized checkpoints
 
-### 15E: Recursive Store Bootstrapping (Pruning-Aware)
+### 16E: Recursive Store Bootstrapping (Pruning-Aware)
 - [ ] `RecursiveWatcher` identifies child stores from live state, not just intention logs.
 - [ ] Bootstrapping a child store requires a **Two-Phase Protocol** because Negentropy cannot sync from an implicit zero-genesis if the store has been pruned.
 - [ ] **Phase 1 (Snapshot):** Request the opaque snapshot (`state.db`) from the peer for the discovered child store.
 - [ ] **Phase 2 (Tail Sync):** Run Negentropy to sync floating intentions that occurred *after* the snapshot's causal frontier.
 - [ ] **Replace Polling with Notify:** `register_store_by_id` and boot sync use `sleep()` polling loops. Replace with `tokio::sync::Notify` or channel-based signaling.
 
-### 15F: Hash Index Optimization ✅
+### 16F: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
 - [x] Support 100M+ intentions without excessive RAM
 
-### 15G: Advanced Sync Optimization (Future)
+### 16G: Advanced Sync Optimization (Future)
 - [ ] **Modular-Add Fingerprints:** Replace XOR-based fingerprints with modular addition (mod 2^256). XOR is linear and cancels duplicates (`a ⊕ a = 0`); mod-add is strictly more robust at identical cost. Affected sites:
   - `IntentionStore::xor_fingerprint()` / `derive_table_fingerprint()` / `fingerprint_range()` in `lattice-kernel`
   - `SyncProvider` trait docs in `lattice-kernel/src/sync_provider.rs`
@@ -126,18 +139,6 @@ Manage log growth on long-running nodes via stability frontier, snapshots, pruni
 - [ ] **High-Radix Splitting:**
   - Increase branching factor (e.g., 16-32 children) to reduce sync rounds (log32 vs log2)
   - Parallelize range queries
-
----
-
-## Milestone 16: Review
-- [ ] Address all items in Technical Debt
-- [ ] Address all items in Discussion
-- [ ] Address all items in Future
-- [ ] Remove all sleep calls if possible
-- [ ] Review code base
-- [ ] **Fix `complete_join` store type hardcode** and drop `lattice-kvstore` dev-dependency from `lattice-net-iroh` and (where possible) `lattice-net`
-- [ ] **Fix flaky `test_channel_bidirectional_sync`** (`lattice-net/tests/sync_channel_test.rs`): A intermittently missing B's data after sync
-- [ ] **Fix flaky `test_interleaved_modifications`** (`lattice-net/tests/sync_stress.rs`): intermittent failure
 
 ---
 

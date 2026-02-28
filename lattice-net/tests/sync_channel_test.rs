@@ -64,7 +64,7 @@ async fn test_channel_bidirectional_sync() {
         .await
         .expect("put b");
 
-    // Sync is pull-only: each side must initiate to get the other's data
+    // Sync is symmetric: Negentropy reconciliation exchanges items in both directions.
     let a_pubkey = node_a.node_id();
     server_b
         .sync_with_peer_by_id(store_a.id(), a_pubkey, &[])
