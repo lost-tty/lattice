@@ -33,30 +33,47 @@ pub struct IntentionInfo {
 /// `IntentionStore` (synchronous). State machines run inside the actor which
 /// already holds the `IntentionStore`, so no async wrapper is needed.
 ///
+/// Object-safe: can be used as `&dyn DagQueries` or `Arc<dyn DagQueries>`.
 /// Designed to be mockable for testing state machines in isolation.
-pub trait DagQueries {
-    /// The error type returned by query operations.
-    type Error: std::error::Error + Send + Sync + 'static;
-
+pub trait DagQueries: Send + Sync {
     /// Dereference an intention hash into its full data.
     ///
     /// Returns the same information a state machine receives in `apply`,
     /// but owned. Used to read conflicting values and metadata from head hashes.
-    fn get_intention(&self, hash: &Hash) -> Result<IntentionInfo, Self::Error>;
+    fn get_intention(&self, hash: &Hash) -> anyhow::Result<IntentionInfo>;
 
     /// Lowest common ancestor of two intentions.
     ///
     /// Unique because the DAG has a single genesis. Uses alternating
     /// bidirectional BFS over `Condition::V1` causal edges.
-    fn find_lca(&self, a: &Hash, b: &Hash) -> Result<Hash, Self::Error>;
+    fn find_lca(&self, a: &Hash, b: &Hash) -> anyhow::Result<Hash>;
 
     /// Yields intentions between two DAG points in topological order.
     ///
     /// `from` is exclusive, `to` is inclusive. Returns the path from
     /// `from` to `to` following causal edges, topologically sorted
     /// via reverse BFS + Kahn's algorithm.
-    fn get_path(&self, from: &Hash, to: &Hash) -> Result<Vec<IntentionInfo>, Self::Error>;
+    fn get_path(&self, from: &Hash, to: &Hash) -> anyhow::Result<Vec<IntentionInfo>>;
 
     /// Tests whether `ancestor` is a causal ancestor of `descendant`.
-    fn is_ancestor(&self, ancestor: &Hash, descendant: &Hash) -> Result<bool, Self::Error>;
+    fn is_ancestor(&self, ancestor: &Hash, descendant: &Hash) -> anyhow::Result<bool>;
+}
+
+/// No-op DAG for tests and contexts where DAG access is not needed.
+/// Every method returns an error if actually called.
+pub struct NullDag;
+
+impl DagQueries for NullDag {
+    fn get_intention(&self, _: &Hash) -> anyhow::Result<IntentionInfo> {
+        anyhow::bail!("NullDag: no DAG available")
+    }
+    fn find_lca(&self, _: &Hash, _: &Hash) -> anyhow::Result<Hash> {
+        anyhow::bail!("NullDag: no DAG available")
+    }
+    fn get_path(&self, _: &Hash, _: &Hash) -> anyhow::Result<Vec<IntentionInfo>> {
+        anyhow::bail!("NullDag: no DAG available")
+    }
+    fn is_ancestor(&self, _: &Hash, _: &Hash) -> anyhow::Result<bool> {
+        anyhow::bail!("NullDag: no DAG available")
+    }
 }

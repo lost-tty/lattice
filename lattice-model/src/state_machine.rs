@@ -1,4 +1,4 @@
-use crate::{Hash, PubKey, HLC};
+use crate::{DagQueries, Hash, PubKey, HLC};
 use std::error::Error;
 
 /// An operation to be applied to a state machine.
@@ -29,7 +29,7 @@ pub trait StateMachine: Send + Sync {
     type Error: Error + Send + Sync + 'static;
 
     /// Apply a validated operation to the state.
-    fn apply(&self, op: &Op) -> Result<(), Self::Error>;
+    fn apply(&self, op: &Op, dag: &dyn DagQueries) -> Result<(), Self::Error>;
 
     /// Create a point-in-time snapshot of the state.
     fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error>;

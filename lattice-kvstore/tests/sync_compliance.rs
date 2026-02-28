@@ -1,5 +1,6 @@
 use lattice_kvstore::{KvPayload, KvState};
 use lattice_kvstore_api::Operation;
+use lattice_model::dag_queries::NullDag;
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::Uuid;
@@ -7,6 +8,8 @@ use lattice_model::{Op, StateMachine};
 use prost::Message;
 use std::io::Read;
 use tempfile::tempdir;
+
+static NULL_DAG: NullDag = NullDag;
 
 fn create_test_op(
     key: &[u8],
@@ -54,7 +57,7 @@ fn test_snapshot_restore() {
         Hash::ZERO,
     );
 
-    state1.apply(&op).unwrap();
+    state1.apply(&op, &NULL_DAG).unwrap();
 
     // Take Snapshot
     let snapshot1_bytes = snapshot_bytes(&state1);
@@ -104,12 +107,12 @@ fn test_convergence_concurrent_operations() {
     let op2 = create_test_op(b"key1", b"val2", author2, hash2, start_hlc, Hash::ZERO);
 
     // Node A: 1 then 2
-    state1.apply(&op1).unwrap();
-    state1.apply(&op2).unwrap();
+    state1.apply(&op1, &NULL_DAG).unwrap();
+    state1.apply(&op2, &NULL_DAG).unwrap();
 
     // Node B: 2 then 1
-    state2.apply(&op2).unwrap();
-    state2.apply(&op1).unwrap();
+    state2.apply(&op2, &NULL_DAG).unwrap();
+    state2.apply(&op1, &NULL_DAG).unwrap();
 
     // Convergence Check: both nodes should have same LWW value and same head hashes
     assert_eq!(state1.get(b"key1").unwrap(), state2.get(b"key1").unwrap());
@@ -135,7 +138,7 @@ fn test_restore_overwrites_existing_data() {
     // 1. Create State with "key_old"
     let hash1 = Hash::from([0xAA; 32]);
     let op1 = create_test_op(b"key_old", b"val_old", author, hash1, start_hlc, Hash::ZERO);
-    state.apply(&op1).unwrap();
+    state.apply(&op1, &NULL_DAG).unwrap();
 
     assert!(state.get(b"key_old").unwrap().is_some());
 
@@ -145,7 +148,7 @@ fn test_restore_overwrites_existing_data() {
     let state_snap = KvState::open(store_id, dir_snap.path()).unwrap();
     let hash2 = Hash::from([0xBB; 32]);
     let op2 = create_test_op(b"key_new", b"val_new", author, hash2, start_hlc, Hash::ZERO);
-    state_snap.apply(&op2).unwrap();
+    state_snap.apply(&op2, &NULL_DAG).unwrap();
 
     let snapshot_bytes_orig = snapshot_bytes(&state_snap);
 
@@ -184,7 +187,7 @@ fn test_delete_correctness() {
     // 1. Insert
     let hash1 = Hash::from([0xA1; 32]);
     let op1 = create_test_op(b"del_key", b"val", author, hash1, start_hlc, Hash::ZERO);
-    state.apply(&op1).unwrap();
+    state.apply(&op1, &NULL_DAG).unwrap();
 
     assert_eq!(state.get(b"del_key").unwrap(), Some(b"val".to_vec()));
     assert_eq!(state.head_hashes(b"del_key").unwrap().len(), 1);
@@ -205,7 +208,7 @@ fn test_delete_correctness() {
         timestamp: later_hlc,
         prev_hash: hash1,
     };
-    state.apply(&op2).unwrap();
+    state.apply(&op2, &NULL_DAG).unwrap();
 
     // Tombstone: get returns None, but head still exists
     assert_eq!(state.get(b"del_key").unwrap(), None);
@@ -227,7 +230,7 @@ fn test_chain_rules_compliance() {
 
     // 1. Invalid Genesis (Prev != ZERO)
     let bad_genesis = create_test_op(b"k", b"v", author, hash1, hlc, Hash::from([0x01; 32]));
-    let err = state.apply(&bad_genesis).unwrap_err();
+    let err = state.apply(&bad_genesis, &NULL_DAG).unwrap_err();
     assert!(
         format!("{}", err).contains("Invalid genesis"),
         "Error: {}",
@@ -236,16 +239,16 @@ fn test_chain_rules_compliance() {
 
     // 2. Valid Genesis
     let valid_genesis = create_test_op(b"k", b"v", author, hash1, hlc, Hash::ZERO);
-    state.apply(&valid_genesis).unwrap();
+    state.apply(&valid_genesis, &NULL_DAG).unwrap();
 
     // 3. Idempotency (Apply same op again)
     // Should return Ok
-    state.apply(&valid_genesis).unwrap();
+    state.apply(&valid_genesis, &NULL_DAG).unwrap();
 
     // 4. Broken Link (Prev != Current Tip)
     let hash2 = Hash::from([0x22; 32]);
     let bad_link = create_test_op(b"k", b"v2", author, hash2, hlc, Hash::ZERO); // Prev should be hash1
-    let err = state.apply(&bad_link).unwrap_err();
+    let err = state.apply(&bad_link, &NULL_DAG).unwrap_err();
     assert!(
         format!("{}", err).contains("Broken chain"),
         "Error: {}",
@@ -254,7 +257,7 @@ fn test_chain_rules_compliance() {
 
     // 5. Valid Link
     let valid_link = create_test_op(b"k", b"v2", author, hash2, hlc, hash1);
-    state.apply(&valid_link).unwrap();
+    state.apply(&valid_link, &NULL_DAG).unwrap();
 }
 
 #[test]
@@ -267,7 +270,7 @@ fn test_snapshot_checksum_failure() {
     let author = PubKey::from([1u8; 32]);
     let hash = Hash::from([0xAA; 32]);
     let op = create_test_op(b"key", b"val", author, hash, HLC::now(), Hash::ZERO);
-    state1.apply(&op).unwrap();
+    state1.apply(&op, &NULL_DAG).unwrap();
 
     let snap_bytes = snapshot_bytes(&state1);
 

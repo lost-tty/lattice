@@ -15,7 +15,7 @@ use std::sync::Arc;
 struct MockState;
 impl StateMachine for MockState {
     type Error = lattice_kernel::StateError;
-    fn apply(&self, _op: &lattice_model::Op) -> Result<(), Self::Error> {
+    fn apply(&self, _op: &lattice_model::Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
         Ok(())
     }
     fn store_meta(&self) -> StoreMeta {

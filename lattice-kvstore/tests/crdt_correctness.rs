@@ -4,11 +4,14 @@ use futures::StreamExt;
 use lattice_kvstore::KvPayload;
 use lattice_kvstore_api::Operation;
 use lattice_kvstore_api::{KvStoreExt, WatchEventKind};
+use lattice_model::dag_queries::NullDag;
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::{Op, StateMachine};
 use prost::Message;
 use std::time::Duration;
+
+static NULL_DAG: NullDag = NullDag;
 
 fn create_test_op(
     key: &[u8],
@@ -151,8 +154,8 @@ fn test_concurrent_genesis_merge() {
         &[],
     );
 
-    state.apply(&op1).unwrap();
-    state.apply(&op2).unwrap();
+    state.apply(&op1, &NULL_DAG).unwrap();
+    state.apply(&op2, &NULL_DAG).unwrap();
 
     // Two concurrent heads — LWW picks one, but both should be tracked
     assert_eq!(
@@ -196,8 +199,8 @@ fn test_concurrent_writes_produce_multi_heads() {
         &[],
     );
 
-    state.apply(&op1).unwrap();
-    state.apply(&op2).unwrap();
+    state.apply(&op1, &NULL_DAG).unwrap();
+    state.apply(&op2, &NULL_DAG).unwrap();
 
     assert_eq!(
         state.head_hashes(key).unwrap().len(),
@@ -221,7 +224,7 @@ fn test_causal_dependency_chain() {
     // 1. Genesis
     let hash1 = Hash::from([0x11; 32]);
     let op1 = create_test_op(key, b"v1", author, hash1, hlc1, Hash::ZERO, &[]);
-    state.apply(&op1).unwrap();
+    state.apply(&op1, &NULL_DAG).unwrap();
 
     assert_eq!(state.head_hashes(key).unwrap(), vec![hash1]);
     assert_eq!(state.get(key).unwrap(), Some(b"v1".to_vec()));
@@ -230,7 +233,7 @@ fn test_causal_dependency_chain() {
     let hlc2 = next_hlc(hlc1);
     let hash2 = Hash::from([0x22; 32]);
     let op2 = create_test_op(key, b"v2", author, hash2, hlc2, hash1, &[hash1]); // Prev=hash1, Deps=[hash1]
-    state.apply(&op2).unwrap();
+    state.apply(&op2, &NULL_DAG).unwrap();
 
     assert_eq!(
         state.head_hashes(key).unwrap(),
@@ -252,7 +255,7 @@ fn test_concurrent_put_and_delete_conflict() {
     // 1. Common ancestor
     let hash1 = Hash::from([0x11; 32]);
     let op1 = create_test_op(key, b"v1", author1, hash1, hlc, Hash::ZERO, &[]);
-    state.apply(&op1).unwrap();
+    state.apply(&op1, &NULL_DAG).unwrap();
 
     // 2. Concurrent Branch A: Put v2 (Author 1)
     let hlc_a = next_hlc(hlc);
@@ -263,8 +266,8 @@ fn test_concurrent_put_and_delete_conflict() {
     let hash2b = Hash::from([0x2B; 32]);
     let op2b = create_delete_op(key, author2, hash2b, hlc_b, Hash::ZERO, &[hash1]);
 
-    state.apply(&op2a).unwrap();
-    state.apply(&op2b).unwrap();
+    state.apply(&op2a, &NULL_DAG).unwrap();
+    state.apply(&op2b, &NULL_DAG).unwrap();
 
     assert_eq!(
         state.head_hashes(key).unwrap().len(),
@@ -290,20 +293,20 @@ fn test_resurrection_causality() {
     // 1. Put v1
     let hash1 = Hash::from([0x11; 32]);
     let op1 = create_test_op(key, b"v1", author, hash1, hlc1, Hash::ZERO, &[]);
-    state.apply(&op1).unwrap();
+    state.apply(&op1, &NULL_DAG).unwrap();
 
     // 2. Delete (Child of op1)
     let hlc2 = next_hlc(hlc1);
     let hash2 = Hash::from([0x22; 32]);
     let op2 = create_delete_op(key, author, hash2, hlc2, hash1, &[hash1]);
-    state.apply(&op2).unwrap();
+    state.apply(&op2, &NULL_DAG).unwrap();
 
     // 3. Resurrect (Put v2 pointing to Delete) - Valid child of delete
     let hlc3 = next_hlc(hlc2);
     let hash3 = Hash::from([0x33; 32]);
     let op3 = create_test_op(key, b"v2", author, hash3, hlc3, hash2, &[hash2]);
 
-    state.apply(&op3).unwrap();
+    state.apply(&op3, &NULL_DAG).unwrap();
 
     assert_eq!(
         state.head_hashes(key).unwrap().len(),

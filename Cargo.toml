@@ -104,6 +104,7 @@ futures = "0.3"
 futures-util = "0.3"
 
 # Utilities
+anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 bytes = "1"

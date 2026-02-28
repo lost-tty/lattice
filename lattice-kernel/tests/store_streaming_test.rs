@@ -25,7 +25,7 @@ impl StateMachine for MockStateMachine {
         Ok(())
     }
 
-    fn apply(&self, _op: &Op) -> Result<(), Self::Error> {
+    fn apply(&self, _op: &Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
         Ok(())
     }
 

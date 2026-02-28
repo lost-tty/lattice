@@ -177,6 +177,7 @@ impl StateLogic for LogState {
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
+        _dag: &dyn lattice_model::DagQueries,
     ) -> Result<Self::Updates, StateDbError> {
         // Validate payload
         if op.payload.is_empty() {
@@ -440,10 +441,13 @@ impl LogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_model::dag_queries::NullDag;
     use lattice_model::hlc::HLC;
     use lattice_model::Uuid;
     use lattice_model::{Hash, Op, PubKey, StateMachine};
     use tempfile::tempdir;
+
+    static NULL_DAG: NullDag = NullDag;
 
     #[test]
     fn test_persistence_roundtrip() {
@@ -465,7 +469,7 @@ mod tests {
             payload: b"hello world",
         };
 
-        StateMachine::apply(&state, &op).unwrap();
+        StateMachine::apply(&state, &op, &NULL_DAG).unwrap();
         assert_eq!(state.read(None).len(), 1);
 
         drop(state);
@@ -497,7 +501,7 @@ mod tests {
             },
             payload: b"third",
         };
-        StateMachine::apply(&state, &op3).unwrap();
+        StateMachine::apply(&state, &op3, &NULL_DAG).unwrap();
 
         let op1 = Op {
             id: Hash::from([1u8; 32]),
@@ -510,7 +514,7 @@ mod tests {
             },
             payload: b"first",
         };
-        StateMachine::apply(&state, &op1).unwrap();
+        StateMachine::apply(&state, &op1, &NULL_DAG).unwrap();
 
         let op2 = Op {
             id: Hash::from([2u8; 32]),
@@ -523,7 +527,7 @@ mod tests {
             },
             payload: b"second",
         };
-        StateMachine::apply(&state, &op2).unwrap();
+        StateMachine::apply(&state, &op2, &NULL_DAG).unwrap();
 
         // read(None) should return in HLC order
         let entries = state.read(None);
@@ -557,7 +561,7 @@ mod tests {
             timestamp: start_hlc,
             payload: b"log_entry_1",
         };
-        StateMachine::apply(&state1, &op).unwrap();
+        StateMachine::apply(&state1, &op, &NULL_DAG).unwrap();
 
         // Take snapshot
         let snapshot = state1.snapshot().unwrap();

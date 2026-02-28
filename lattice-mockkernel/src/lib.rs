@@ -7,10 +7,13 @@ use futures_util::StreamExt;
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{Condition, Intention};
+use lattice_model::dag_queries::NullDag;
 use lattice_model::Op;
 use lattice_model::{StateMachine, StateWriter, StateWriterError};
 use lattice_storage::state_db::StateLogic;
 use lattice_storage::PersistentState;
+
+static NULL_DAG: NullDag = NullDag;
 use prost::Message;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -125,7 +128,7 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
                 prev_hash,
             };
 
-            StateMachine::apply(&*state, &op)
+            StateMachine::apply(&*state, &op, &NULL_DAG)
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
 
             // Emit as SignedIntention format (matching real kernel)

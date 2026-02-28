@@ -49,12 +49,14 @@ Reduce what state machines store per conflict domain. Currently each key persist
 
 ### 14C: KVTable API
 - [x] **`KVTable::get()` returns materialized value.** `get() -> Option<Vec<u8>>` instead of `Vec<Head>`. `None` for missing keys or tombstone-only. Callers no longer call `.lww()`.
-- [ ] **Migrate KvState callers.** `handle_get` uses `get()` directly. `handle_put`/`handle_delete`/`handle_batch` use `heads()` for causal deps. Remove `.lww()` calls. `scan()` returns `(key, Option<value>)` instead of `(key, Vec<Head>)`.
+- [x] **Migrate KvState callers.** `handle_get` uses `get()` directly. `handle_put`/`handle_delete`/`handle_batch` use `heads()` for causal deps. Remove `.lww()` calls. `scan()` returns `(key, Option<value>)` instead of `(key, Vec<Head>)`.
 - [x] **Migrate SystemTable callers.** `ReadOnlySystemTable` owns a `ReadOnlyKVTable` (not a raw redb table). Point lookups delegate to `get()`/`heads()`. `get_deps()` removed — callers use `head_hashes()` directly. Range sites (`get_peers`, `get_children`, `list_all`) use `ReadOnlyKVTable::range()`/`iter()` via `LwwRange` iterator. No crate outside `lattice-kvtable` calls `decode_heads` or `decode_lww`.
 - [x] **`ReadOnlyKVTable::range()` and `iter()`.** `LwwRange` iterator adapter wraps redb `Range`, decodes `HeadList` and LWW-resolves each value internally. Yields `(Vec<u8>, Option<Vec<u8>>)` — owned key bytes and resolved value (`None` for tombstones). Callers never see raw proto encoding.
 - [x] **`KvState::mutate()` returns resolved values.** `apply_head()` returns `ApplyResult { value: Option<Vec<u8>> }` (LWW-resolved) instead of `HeadChange { new_heads: Vec<Head> }`. Write-path callers no longer call `lww()` on results.
 
 ### 14D: Slim Down Storage Format
+- [ ] StateMachine needs access to DagQueries
+- [ ] Access to Intention-Ops must be filtered for System vs Data ops
 - [ ] **`KVTable::apply()` resolves LWW at write time.** Compare incoming HLC against current winner, update materialized value. `get()` returns the value directly — no more read-time resolution.
 - [ ] **New on-disk format.** Replace `HeadList { heads: [Head { value, hlc, author, hash, tombstone }, ...] }` with `{ value: Option<Vec<u8>>, hlc: HLC, author: PubKey, heads: Vec<Hash> }`. Value is the LWW winner. `None` for tombstones. Non-winning head metadata read from DAG on demand.
 - [ ] **Storage format migration.** On open, detect old `HeadList` proto format, extract LWW winner as materialized value, extract head hashes, rewrite in new format.
@@ -129,64 +131,72 @@ Manage log growth on long-running nodes via stability frontier, snapshots, pruni
 
 ---
 
-## Milestone 16: Content-Addressable Store (CAS)
+## Milestone 16: Review
+- [ ] Address all items in Technical Debt
+- [ ] Address all items in Discussion
+- [ ] Address all items in Future
+- [ ] Review code base
+
+---
+
+## Milestone 17: Content-Addressable Store (CAS)
 
 Node-local content-addressable blob storage. Replication policy managed separately. Requires M11 and M12.
 
-### 16A: Low-Level Storage (`lattice-cas`)
+### 17A: Low-Level Storage (`lattice-cas`)
 - [ ] `CasBackend` trait interface (`fs`, `block`, `s3`)
 - [ ] Isolation: Mandatory `store_id` for all ops
 - [ ] `redb` metadata index: ARC (Adaptive Replacement Cache), RefCounting
 - [ ] `FsBackend`: Sharded local disk blob storage
 
-### 16B: Replication & Safety (`CasManager`)
+### 17B: Replication & Safety (`CasManager`)
 - [ ] `ReplicationPolicy` trait: `crush_map()` and `replication_factor()` from System Table
 - [ ] `StateMachine::referenced_blobs()`: Pinning via State declarations
 - [ ] Pull-based reconciler: `ensure(cid)`, `calculate_duties()`, `gc()` with Soft Handoff
 
-### 16C: Wasm & FUSE Integration
+### 17C: Wasm & FUSE Integration
 - [ ] **Wasm**: Host Handles (avoid linear memory copy)
 - [ ] **FUSE**: `get_range` (random access) and `put_batch` (buffered write)
 - [ ] **Encryption**: Store-side encryption (client responsibility)
 
-### 16D: CLI & Observability
+### 17D: CLI & Observability
 - [ ] `cas put`, `cas get`, `cas pin`, `cas status`
 
 ---
 
-## Milestone 17: Lattice File Sync MVP
+## Milestone 18: Lattice File Sync MVP
 
 File sync over Lattice. Requires M11 (Sync) and M15 (CAS).
 
-### 17A: Filesystem Logic
+### 18A: Filesystem Logic
 - [ ] Define `DirEntry` schema: `{ name, mode, cid, modified_at }` in KV Store
 - [ ] Map file operations (`write`, `mkdir`, `rename`) to KV Ops
 
-### 17B: FUSE Interface
+### 18B: FUSE Interface
 - [ ] Write `lattice-fs` using the `fuser` crate
 - [ ] Mount the Store as a folder on Linux/macOS
 - [ ] **Demo:** `cp photo.jpg ~/lattice/` → Syncs to second node
 
 ---
 
-## Milestone 18: Wasm Runtime
+## Milestone 19: Wasm Runtime
 
 Replace hardcoded state machines with dynamic Wasm modules.
 
-### 18A: Wasm Integration
+### 19A: Wasm Integration
 - [ ] Integrate `wasmtime` into the Kernel
 - [ ] Define minimal Host ABI: `kv_get`, `kv_set`, `log_append`, `get_head`
 - [ ] Replace hardcoded `KvStore::apply()` with `WasmRuntime::call_apply()`
 - [ ] Map Host Functions to `StorageBackend` calls (M9 prerequisite)
 
-### 18B: Data Structures & Verification
+### 19B: Data Structures & Verification
 - [ ] Finalize `Intention`, `SignedIntention`, `Hash`, `PubKey` structs for Wasm boundary
 - [ ] Wasm-side Intention DAG verification (optional, for paranoid clients)
 - **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
 
 ---
 
-## Milestone 19: N-Node Simulator
+## Milestone 20: N-Node Simulator
 
 Scriptable simulation framework for testing Lattice networking at scale. Built on the `lattice-net-sim` crate (M12B).
 
@@ -198,19 +208,19 @@ Scriptable simulation framework for testing Lattice networking at scale. Built o
 
 ---
 
-## Milestone 20: Embedded Proof ("Lattice Nano")
+## Milestone 21: Embedded Proof ("Lattice Nano")
 
 Run the kernel on the RP2350.
 
 > Because CLI is already separated from Daemon (M7) and storage is abstracted (M9), only the Daemon needs porting.
 > **Note:** Requires substantial refactoring of `lattice-kernel` to support `no_std`.
 
-### 20A: `no_std` Refactoring
+### 21A: `no_std` Refactoring
 - [ ] Split `lattice-kernel` into `core` (logic) and `std` (IO)
 - [ ] Replace `wasmtime` (JIT) with `wasmi` (Interpreter) for embedded target
 - [ ] Port storage layer to `sequential-storage` (Flash) via `StorageBackend`
 
-### 20B: Hardware Demo
+### 21B: Hardware Demo
 - [ ] Build physical USB stick prototype
 - [ ] Implement BLE/Serial transport
 - [ ] Sync a file from Laptop → Stick → Phone without Internet
@@ -229,6 +239,16 @@ Run the kernel on the RP2350.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
 - [ ] **DAG Reachability Index**: `DagQueries` methods (`find_lca`, `is_ancestor`, `get_path`) use naive BFS. For large DAGs, add generation numbers (prune impossible ancestors by depth) or bloom filters (compact ancestor summaries) for O(log N) reachability. Not needed until BFS becomes a bottleneck.
 - [ ] **Sync Trigger & Bootstrap Controller Review**: Review how and when sync is triggered (currently ad-hoc in `active_peer_ids` or `complete_join_handshake`). Consider introducing a dedicated `BootstrapController` to manage initial sync state, retry logic, and transition to steady-state gossip/sync.
+- [ ] Unify `IntentionInfo` and `Op` into a single type in StateMachine::apply().
+- [ ] **Clean up**: Remove map_err wherever possible.
+
+---
+
+## Discussion
+
+- [ ] Does StateMachines need snapshot/restore once we have IntentionStore pruning/snapshots?
+- [ ] Revoking a Peer is untested. How do we ensure removed peers will not receive future Intentions?
+- [ ] How do we prevent apply()/mutate() from seeing SystemOps in DagQueries?
 
 ---
 

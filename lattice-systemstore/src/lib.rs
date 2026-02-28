@@ -178,7 +178,7 @@ mod tests {
 
     impl StateMachine for MockLogic {
         type Error = StateDbError;
-        fn apply(&self, _op: &Op) -> Result<(), Self::Error> {
+        fn apply(&self, _op: &Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
             Ok(())
         }
         fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> {
@@ -204,6 +204,7 @@ mod tests {
             &self,
             _table: &mut redb::Table<&[u8], &[u8]>,
             _op: &Op,
+            _dag: &dyn lattice_model::DagQueries,
         ) -> Result<(), StateDbError> {
             Ok(())
         }

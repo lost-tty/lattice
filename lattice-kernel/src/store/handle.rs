@@ -806,7 +806,7 @@ fn replay_intentions<S: StateMachine>(
                 prev_hash: intention.store_prev,
             };
             state
-                .apply(&op)
+                .apply(&op, store)
                 .map_err(|e| super::StateError::Backend(e.to_string()))?;
             entries_replayed += 1;
         }

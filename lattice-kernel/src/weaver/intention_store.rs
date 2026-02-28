@@ -793,9 +793,7 @@ impl IntentionStore {
 }
 
 impl lattice_model::DagQueries for IntentionStore {
-    type Error = IntentionStoreError;
-
-    fn get_intention(&self, hash: &Hash) -> Result<lattice_model::IntentionInfo, Self::Error> {
+    fn get_intention(&self, hash: &Hash) -> anyhow::Result<lattice_model::IntentionInfo> {
         let signed = self.get(hash)?.ok_or_else(|| {
             IntentionStoreError::InvalidData(format!("intention not found: {}", hash))
         })?;
@@ -808,7 +806,7 @@ impl lattice_model::DagQueries for IntentionStore {
         })
     }
 
-    fn find_lca(&self, a: &Hash, b: &Hash) -> Result<Hash, Self::Error> {
+    fn find_lca(&self, a: &Hash, b: &Hash) -> anyhow::Result<Hash> {
         use std::collections::{HashSet, VecDeque};
 
         if a == b {
@@ -876,17 +874,14 @@ impl lattice_model::DagQueries for IntentionStore {
             }
         }
 
-        Err(IntentionStoreError::InvalidData(format!(
-            "find_lca: no common ancestor found for {} and {}",
-            a, b
-        )))
+        anyhow::bail!("find_lca: no common ancestor found for {} and {}", a, b)
     }
 
     fn get_path(
         &self,
         from: &Hash,
         to: &Hash,
-    ) -> Result<Vec<lattice_model::IntentionInfo>, Self::Error> {
+    ) -> anyhow::Result<Vec<lattice_model::IntentionInfo>> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
         if from == to {
@@ -909,9 +904,7 @@ impl lattice_model::DagQueries for IntentionStore {
 
         while let Some(node) = frontier.pop_front() {
             if subgraph.len() >= MAX_NODES {
-                return Err(IntentionStoreError::InvalidData(
-                    "get_path: subgraph too large".into(),
-                ));
+                anyhow::bail!("get_path: subgraph too large");
             }
             if node == Hash::ZERO || node == *from {
                 continue;
@@ -978,7 +971,7 @@ impl lattice_model::DagQueries for IntentionStore {
         Ok(result)
     }
 
-    fn is_ancestor(&self, ancestor: &Hash, descendant: &Hash) -> Result<bool, Self::Error> {
+    fn is_ancestor(&self, ancestor: &Hash, descendant: &Hash) -> anyhow::Result<bool> {
         use std::collections::{HashSet, VecDeque};
 
         if ancestor == descendant {

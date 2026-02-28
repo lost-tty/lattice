@@ -10,6 +10,7 @@ lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
 lattice-proto = { workspace = true }
 lattice-sync = { workspace = true }
+anyhow = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 prost = { workspace = true }

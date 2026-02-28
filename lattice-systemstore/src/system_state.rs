@@ -166,7 +166,7 @@ where
 {
     type Error = SystemLayerError;
 
-    fn apply(&self, op: &Op) -> Result<(), Self::Error> {
+    fn apply(&self, op: &Op, dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
         let universal = UniversalOp::decode(op.payload).map_err(|e| {
             SystemLayerError::Inner(format!("invalid UniversalOp envelope: {e}").into())
         })?;
@@ -184,7 +184,7 @@ where
                     timestamp: op.timestamp,
                     prev_hash: op.prev_hash,
                 };
-                StateMachine::apply(&self.inner, &new_op)
+                StateMachine::apply(&self.inner, &new_op, dag)
                     .map_err(|e| SystemLayerError::Inner(Box::new(e)))
             }
             None => Ok(()),

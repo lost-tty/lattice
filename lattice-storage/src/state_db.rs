@@ -1,5 +1,5 @@
 use blake3::Hasher;
-use lattice_model::{Hash, Op, PubKey, StateMachine, StoreMeta};
+use lattice_model::{DagQueries, Hash, Op, PubKey, StateMachine, StoreMeta};
 use redb::{Database, ReadableTable, TableDefinition, TableHandle};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -570,6 +570,7 @@ pub trait StateLogic: Send + Sync {
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
+        dag: &dyn DagQueries,
     ) -> Result<Self::Updates, StateDbError>;
 
     /// Notify watchers of changes.
@@ -578,7 +579,7 @@ pub trait StateLogic: Send + Sync {
     /// Apply an operation to the state.
     ///
     /// Default implementation: begin txn → verify chain → mutate → commit → notify
-    fn apply(&self, op: &Op) -> Result<(), StateDbError> {
+    fn apply(&self, op: &Op, dag: &dyn DagQueries) -> Result<(), StateDbError> {
         let write_txn = self.backend().db().begin_write()?;
 
         // 0. Validate Chain Integrity (and idempotence)
@@ -592,7 +593,7 @@ pub trait StateLogic: Send + Sync {
 
         // 1. Delegate to logic
         let mut table = write_txn.open_table(TABLE_DATA)?;
-        let updates = self.mutate(&mut table, op)?;
+        let updates = self.mutate(&mut table, op, dag)?;
         drop(table); // Release borrow
 
         write_txn.commit()?;
@@ -647,8 +648,9 @@ impl<T: StateLogic> StateLogic for PersistentState<T> {
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
+        dag: &dyn DagQueries,
     ) -> Result<Self::Updates, StateDbError> {
-        self.inner.mutate(table, op)
+        self.inner.mutate(table, op, dag)
     }
 
     fn notify(&self, updates: Self::Updates) {
@@ -659,8 +661,8 @@ impl<T: StateLogic> StateLogic for PersistentState<T> {
 impl<T: StateLogic> StateMachine for PersistentState<T> {
     type Error = StateDbError;
 
-    fn apply(&self, op: &Op) -> Result<(), Self::Error> {
-        self.inner.apply(op)
+    fn apply(&self, op: &Op, dag: &dyn DagQueries) -> Result<(), Self::Error> {
+        self.inner.apply(op, dag)
     }
 
     fn snapshot(&self) -> Result<Box<dyn Read + Send>, Self::Error> {

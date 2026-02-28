@@ -519,7 +519,7 @@ impl<S: StateMachine> ReplicationController<S> {
             prev_hash: intention.store_prev,
         };
 
-        self.state.apply(&op).map_err(|e| {
+        self.state.apply(&op, store).map_err(|e| {
             let msg = format!(
                 "FATAL: State divergence! Intention {} (author {}) apply failed: {}",
                 hash,
@@ -587,7 +587,7 @@ mod tests {
             Ok(self.tips.read().unwrap().clone().into_iter().collect())
         }
 
-        fn apply(&self, op: &lattice_model::Op) -> Result<(), std::io::Error> {
+        fn apply(&self, op: &lattice_model::Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), std::io::Error> {
             self.tips.write().unwrap().insert(op.author, op.id);
             self.applied_ops.write().unwrap().insert(op.id);
             Ok(())

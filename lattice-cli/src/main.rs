@@ -90,15 +90,14 @@ async fn dispatch_command(
 ) -> DispatchResult {
     use commands::{handle_command, LatticeCommand};
 
-    let needs_blocking =
-        matches!(&cli.command, |LatticeCommand::Store {
-                                    subcommand:
-                                        commands::StoreSubcommand::Use { .. }
-                                        | commands::StoreSubcommand::Subs
-                                        | commands::StoreSubcommand::Unsub { .. },
-                                }| {
-            LatticeCommand::Quit
-        });
+    let needs_blocking = matches!(
+        &cli.command,
+        LatticeCommand::Store {
+            subcommand: commands::StoreSubcommand::Use { .. }
+                | commands::StoreSubcommand::Subs
+                | commands::StoreSubcommand::Unsub { .. },
+        } | LatticeCommand::Quit
+    );
 
     let ctx = {
         let store_id = *current_store.read().unwrap();

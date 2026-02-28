@@ -184,6 +184,7 @@ impl StateLogic for KvState {
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
+        _dag: &dyn lattice_model::DagQueries,
     ) -> Result<Self::Updates, StateDbError> {
         // Decode payload
         let kv_payload = KvPayload::decode(op.payload.as_ref())
@@ -712,10 +713,13 @@ impl KvState {
 mod tests {
     use super::*;
     use crate::proto::Operation;
+    use lattice_model::dag_queries::NullDag;
     use lattice_model::hlc::HLC;
     use lattice_model::PubKey;
     use lattice_model::StateMachine;
     use tempfile::tempdir;
+
+    static NULL_DAG: NullDag = NullDag;
 
     /// Test that StateMachine::apply works correctly for put operations
     #[test]
@@ -748,7 +752,7 @@ mod tests {
         };
 
         // Apply via StateMachine trait
-        StateMachine::apply(&store, &op).unwrap();
+        StateMachine::apply(&store, &op, &NULL_DAG).unwrap();
 
         // Verify the value is stored
         assert_eq!(store.get(key).unwrap(), Some(value.to_vec()));
@@ -767,13 +771,13 @@ mod tests {
         let author_a = PubKey::from([10u8; 32]);
         let hash_a = Hash::from([11u8; 32]);
         let op_a = make_put_op(key, b"value_a", hash_a, author_a, &[], Hash::ZERO);
-        StateMachine::apply(&store, &op_a).unwrap();
+        StateMachine::apply(&store, &op_a, &NULL_DAG).unwrap();
 
         // Second put from author B (concurrent - no deps)
         let author_b = PubKey::from([20u8; 32]);
         let hash_b = Hash::from([21u8; 32]);
         let op_b = make_put_op(key, b"value_b", hash_b, author_b, &[], Hash::ZERO);
-        StateMachine::apply(&store, &op_b).unwrap();
+        StateMachine::apply(&store, &op_b, &NULL_DAG).unwrap();
 
         // Should have 2 concurrent heads
         assert_eq!(
@@ -787,7 +791,7 @@ mod tests {
         let hash_c = Hash::from([31u8; 32]);
         let deps = vec![hash_a, hash_b];
         let op_c = make_put_op(key, b"merged", hash_c, author_c, &deps, Hash::ZERO);
-        StateMachine::apply(&store, &op_c).unwrap();
+        StateMachine::apply(&store, &op_c, &NULL_DAG).unwrap();
 
         // Should now have only 1 head (the merge)
         assert_eq!(store.head_hashes(key).unwrap(), vec![hash_c]);
@@ -806,7 +810,7 @@ mod tests {
         let author = PubKey::from([5u8; 32]);
         let put_hash = Hash::from([6u8; 32]);
         let put_op = make_put_op(key, b"exists", put_hash, author, &[], Hash::ZERO);
-        StateMachine::apply(&store, &put_op).unwrap();
+        StateMachine::apply(&store, &put_op, &NULL_DAG).unwrap();
 
         // Verify it exists
         assert_eq!(store.get(key).unwrap(), Some(b"exists".to_vec()));
@@ -814,7 +818,7 @@ mod tests {
         // Now delete it
         let del_hash = Hash::from([7u8; 32]);
         let del_op = make_delete_op(key, del_hash, author, &[put_hash], put_hash);
-        StateMachine::apply(&store, &del_op).unwrap();
+        StateMachine::apply(&store, &del_op, &NULL_DAG).unwrap();
 
         // Should be deleted (tombstone → get returns None)
         assert_eq!(store.get(key).unwrap(), None);
@@ -923,7 +927,7 @@ mod tests {
             Operation::put(key.as_slice(), b"second"),
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
-        StateMachine::apply(&store, &op).unwrap();
+        StateMachine::apply(&store, &op, &NULL_DAG).unwrap();
 
         // Second put should win, single head
         assert_eq!(store.get(key).unwrap(), Some(b"second".to_vec()));
@@ -946,7 +950,7 @@ mod tests {
             Operation::delete(key.as_slice()),
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
-        StateMachine::apply(&store, &op).unwrap();
+        StateMachine::apply(&store, &op, &NULL_DAG).unwrap();
 
         // Delete should win (last op), single head
         assert_eq!(store.get(key).unwrap(), None);
@@ -969,7 +973,7 @@ mod tests {
             Operation::put(key.as_slice(), b"resurrected"),
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
-        StateMachine::apply(&store, &op).unwrap();
+        StateMachine::apply(&store, &op, &NULL_DAG).unwrap();
 
         // Put should win (last op), single head
         assert_eq!(store.get(key).unwrap(), Some(b"resurrected".to_vec()));
@@ -990,7 +994,7 @@ mod tests {
         let ops = vec![Operation::put(b"".as_slice(), b"value")];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
 
-        StateMachine::apply(&store, &op).expect("Empty key should be applied at apply_op level");
+        StateMachine::apply(&store, &op, &NULL_DAG).expect("Empty key should be applied at apply_op level");
 
         // Verify it was stored
         assert_eq!(store.get(b"").unwrap(), Some(b"value".to_vec()));

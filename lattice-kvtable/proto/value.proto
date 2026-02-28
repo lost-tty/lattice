@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package lattice.kvtable;
+
+// On-disk format for KVTable (14D).
+//
+// heads[0] is the LWW winner (the intention that produced `value`).
+// Remaining heads are concurrent losers, kept for conflict detection.
+// Non-winning metadata is looked up from the DAG on demand.
+message Value {
+    bytes value = 1;           // Winner's value (empty for tombstones)
+    bool tombstone = 2;        // True if winner is a delete
+    repeated bytes heads = 3;  // heads[0] = winner; rest = losers
+}
