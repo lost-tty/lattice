@@ -116,6 +116,7 @@ pub fn render_sexpr_colored(expr: &lattice_runtime::SExpr, max_hex_bytes: usize)
 /// Render an SExpr with ANSI colors, hex truncation, and indentation.
 ///
 /// Top-level list children get their own indented line (like `to_pretty()`).
+/// Lists of homogeneous records are rendered as aligned tables.
 pub fn render_sexpr_pretty_colored(expr: &lattice_runtime::SExpr, max_hex_bytes: usize) -> String {
     fmt_pretty_colored(expr, max_hex_bytes, 0)
 }
@@ -131,6 +132,33 @@ fn fmt_pretty_colored(
         SExpr::List(items)
             if items.len() > 1 && items.iter().any(|i| matches!(i, SExpr::List(_))) =>
         {
+            // Try table rendering for lists of homogeneous records
+            if let Some(table) = try_render_table(items, max_hex_bytes, indent) {
+                return table;
+            }
+
+            // Unwrap nested single-field wrappers down to a table.
+            // e.g. (ListResponse (items ((KVP ...) (KVP ...))))
+            //       └ 2 items     └ 2 items  └ headless list → table
+            {
+                let mut cursor = items.as_slice();
+                loop {
+                    if cursor.len() != 2 {
+                        break;
+                    }
+                    match &cursor[1] {
+                        SExpr::List(inner) => {
+                            if let Some(table) = try_render_table(inner, max_hex_bytes, indent) {
+                                return table;
+                            }
+                            // Keep drilling into the single child
+                            cursor = inner;
+                        }
+                        _ => break,
+                    }
+                }
+            }
+
             let pad = "  ".repeat(indent + 1);
             let head = render_sexpr_colored(&items[0], max_hex_bytes);
             let children: Vec<String> = items[1..]
@@ -152,5 +180,421 @@ fn fmt_pretty_colored(
             )
         }
         _ => render_sexpr_colored(expr, max_hex_bytes),
+    }
+}
+
+/// Detect and render a list of homogeneous records as an aligned table.
+///
+/// Triggers when `items` is `(head (T (f1 v) (f2 v) ...) ...)`:
+/// - 2+ elements (head symbol + at least 1 row)
+/// - All children after head are Lists
+/// - All those Lists share the same first Symbol (the record type)
+/// - All those Lists have the same length
+/// - Each field in a row is a 2-element List `(name value)`
+///
+/// Returns `None` if the pattern doesn't match, letting the caller fall through.
+fn try_render_table(
+    items: &[lattice_runtime::SExpr],
+    max_hex_bytes: usize,
+    indent: usize,
+) -> Option<String> {
+    use lattice_runtime::SExpr;
+    use owo_colors::OwoColorize;
+    use unicode_width::UnicodeWidthStr;
+
+    if items.is_empty() {
+        return None;
+    }
+
+    // Determine rows: if items[0] is a Symbol, it's a head and rows are items[1..].
+    // If items[0] is a List (headless list from Value::List), rows are all of items.
+    let rows: &[SExpr] = match &items[0] {
+        SExpr::Symbol(_) => {
+            if items.len() < 2 {
+                return None;
+            }
+            &items[1..]
+        }
+        SExpr::List(_) => items,
+        _ => return None,
+    };
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    // All rows must be Lists
+    let row_lists: Vec<&Vec<SExpr>> = rows
+        .iter()
+        .map(|r| match r {
+            SExpr::List(inner) => Some(inner),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    // All rows must have same length and >= 2 elements (type name + at least one field)
+    let row_len = row_lists[0].len();
+    if row_len < 2 || row_lists.iter().any(|r| r.len() != row_len) {
+        return None;
+    }
+
+    // All rows must share the same head Symbol (the record type name)
+    let type_name = match &row_lists[0][0] {
+        SExpr::Symbol(s) => s.as_str(),
+        _ => return None,
+    };
+    for row in &row_lists {
+        match &row[0] {
+            SExpr::Symbol(s) if s == type_name => {}
+            _ => return None,
+        }
+    }
+
+    // Each field in every row must be a 2-element List (name, value)
+    // Extract headers from the first row
+    let mut headers: Vec<String> = Vec::with_capacity(row_len - 1);
+    for field in &row_lists[0][1..] {
+        match field {
+            SExpr::List(pair) if pair.len() == 2 => match &pair[0] {
+                SExpr::Symbol(name) => headers.push(name.to_uppercase()),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+
+    // Verify all rows have the same field names and extract cell values
+    let num_cols = headers.len();
+    let mut cells: Vec<Vec<String>> = Vec::with_capacity(rows.len());
+    for row in &row_lists {
+        let mut row_cells: Vec<String> = Vec::with_capacity(num_cols);
+        for (i, field) in row[1..].iter().enumerate() {
+            match field {
+                SExpr::List(pair) if pair.len() == 2 => {
+                    match &pair[0] {
+                        SExpr::Symbol(name) if name.to_uppercase() == headers[i] => {}
+                        _ => return None, // field name mismatch
+                    }
+                    row_cells.push(render_sexpr_colored(&pair[1], max_hex_bytes));
+                }
+                _ => return None,
+            }
+        }
+        cells.push(row_cells);
+    }
+
+    // Compute column widths (max of header and all cell values, using visible width)
+    let col_widths: Vec<usize> = (0..num_cols)
+        .map(|i| {
+            let header_w = headers[i].width();
+            let max_cell_w = cells
+                .iter()
+                .map(|row| strip_ansi(&row[i]).width())
+                .max()
+                .unwrap_or(0);
+            header_w.max(max_cell_w)
+        })
+        .collect();
+
+    // Render
+    let pad = "  ".repeat(indent);
+    let mut out = String::new();
+
+    // Header line
+    out.push_str(&pad);
+    for (i, h) in headers.iter().enumerate() {
+        let w = col_widths[i];
+        let styled = format!("{}", h.dimmed());
+        let visible_len = h.width();
+        out.push_str(&styled);
+        if i + 1 < num_cols {
+            // pad to column width + gap
+            for _ in 0..(w - visible_len + 2) {
+                out.push(' ');
+            }
+        }
+    }
+    out.push('\n');
+
+    // Data rows
+    for row in &cells {
+        out.push_str(&pad);
+        for (i, cell) in row.iter().enumerate() {
+            let w = col_widths[i];
+            let visible_len = strip_ansi(cell).width();
+            out.push_str(cell);
+            if i + 1 < num_cols {
+                for _ in 0..(w - visible_len + 2) {
+                    out.push(' ');
+                }
+            }
+        }
+        out.push('\n');
+    }
+
+    // Footer
+    out.push_str(&pad);
+    out.push_str(&format!("{}", format!("({} items)", rows.len()).dimmed()));
+
+    Some(out)
+}
+
+/// Strip ANSI escape sequences for visible-width measurement.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_escape = false;
+    for c in s.chars() {
+        if in_escape {
+            if c.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+        } else if c == '\x1b' {
+            in_escape = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_runtime::SExpr;
+
+    #[test]
+    fn table_renders_for_homogeneous_records() {
+        // (items (KV (key "a") (value "hello")) (KV (key "bb") (value "x")))
+        let expr = SExpr::list(vec![
+            SExpr::sym("items"),
+            SExpr::list(vec![
+                SExpr::sym("KV"),
+                SExpr::list(vec![SExpr::sym("key"), SExpr::str("a")]),
+                SExpr::list(vec![SExpr::sym("value"), SExpr::str("hello")]),
+            ]),
+            SExpr::list(vec![
+                SExpr::sym("KV"),
+                SExpr::list(vec![SExpr::sym("key"), SExpr::str("bb")]),
+                SExpr::list(vec![SExpr::sym("value"), SExpr::str("x")]),
+            ]),
+        ]);
+
+        let rendered = render_sexpr_pretty_colored(&expr, 8);
+        let plain = strip_ansi(&rendered);
+
+        // Should have header, 2 data rows, and footer
+        let lines: Vec<&str> = plain.lines().collect();
+        assert_eq!(lines.len(), 4, "expected 4 lines, got: {:?}", lines);
+        assert!(lines[0].contains("KEY"), "header should contain KEY");
+        assert!(lines[0].contains("VALUE"), "header should contain VALUE");
+        assert!(lines[1].contains("\"a\""), "row 1 should contain key a");
+        assert!(
+            lines[1].contains("\"hello\""),
+            "row 1 should contain value hello"
+        );
+        assert!(lines[2].contains("\"bb\""), "row 2 should contain key bb");
+        assert!(lines[2].contains("\"x\""), "row 2 should contain value x");
+        assert!(lines[3].contains("(2 items)"), "footer should show count");
+    }
+
+    #[test]
+    fn table_columns_are_aligned() {
+        let expr = SExpr::list(vec![
+            SExpr::sym("list"),
+            SExpr::list(vec![
+                SExpr::sym("Row"),
+                SExpr::list(vec![SExpr::sym("name"), SExpr::str("a")]),
+                SExpr::list(vec![SExpr::sym("count"), SExpr::Num(1)]),
+            ]),
+            SExpr::list(vec![
+                SExpr::sym("Row"),
+                SExpr::list(vec![SExpr::sym("name"), SExpr::str("longer")]),
+                SExpr::list(vec![SExpr::sym("count"), SExpr::Num(999)]),
+            ]),
+        ]);
+
+        let rendered = render_sexpr_pretty_colored(&expr, 8);
+        let plain = strip_ansi(&rendered);
+        let lines: Vec<&str> = plain.lines().collect();
+
+        // The COUNT header and values should start at the same column
+        let header_count_pos = lines[0].find("COUNT").expect("COUNT header");
+        let row1_count_pos = lines[1].find('1').expect("row 1 count");
+        let row2_count_pos = lines[2].find("999").expect("row 2 count");
+        assert_eq!(
+            header_count_pos, row1_count_pos,
+            "COUNT column should be aligned"
+        );
+        assert_eq!(
+            header_count_pos, row2_count_pos,
+            "COUNT column should be aligned"
+        );
+    }
+
+    #[test]
+    fn table_skipped_for_heterogeneous_lists() {
+        // Different head symbols — should NOT trigger table
+        let expr = SExpr::list(vec![
+            SExpr::sym("data"),
+            SExpr::list(vec![
+                SExpr::sym("TypeA"),
+                SExpr::list(vec![SExpr::sym("x"), SExpr::Num(1)]),
+            ]),
+            SExpr::list(vec![
+                SExpr::sym("TypeB"),
+                SExpr::list(vec![SExpr::sym("x"), SExpr::Num(2)]),
+            ]),
+        ]);
+
+        let rendered = render_sexpr_pretty_colored(&expr, 8);
+        let plain = strip_ansi(&rendered);
+        // Should fall through to normal pretty rendering (has parens)
+        assert!(plain.contains("("), "should use normal s-expr rendering");
+        assert!(!plain.contains("items)"), "should not have table footer");
+    }
+
+    #[test]
+    fn table_renders_for_single_row() {
+        let expr = SExpr::list(vec![
+            SExpr::sym("items"),
+            SExpr::list(vec![
+                SExpr::sym("KV"),
+                SExpr::list(vec![SExpr::sym("key"), SExpr::str("a")]),
+                SExpr::list(vec![SExpr::sym("value"), SExpr::str("hello")]),
+            ]),
+        ]);
+
+        let rendered = render_sexpr_pretty_colored(&expr, 8);
+        let plain = strip_ansi(&rendered);
+        let lines: Vec<&str> = plain.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "expected 3 lines: header, row, footer: {:?}",
+            lines
+        );
+        assert!(lines[0].contains("KEY"), "header should contain KEY");
+        assert!(lines[0].contains("VALUE"), "header should contain VALUE");
+        assert!(lines[1].contains("\"a\""), "row should contain key");
+        assert!(lines[2].contains("(1 items)"), "footer should show count");
+    }
+
+    #[test]
+    fn table_skipped_for_mismatched_field_names() {
+        // Same type name but different field names
+        let expr = SExpr::list(vec![
+            SExpr::sym("data"),
+            SExpr::list(vec![
+                SExpr::sym("T"),
+                SExpr::list(vec![SExpr::sym("a"), SExpr::Num(1)]),
+            ]),
+            SExpr::list(vec![
+                SExpr::sym("T"),
+                SExpr::list(vec![SExpr::sym("b"), SExpr::Num(2)]),
+            ]),
+        ]);
+
+        let rendered = render_sexpr_pretty_colored(&expr, 8);
+        let plain = strip_ansi(&rendered);
+        assert!(
+            plain.contains("("),
+            "mismatched fields should use normal rendering"
+        );
+    }
+
+    #[test]
+    fn table_unwraps_nested_single_field_wrappers() {
+        // Real structure from dynamic_message_to_sexpr:
+        // (ListResponse (items ((KV (key "a") (value "1")) (KV (key "b") (value "2")))))
+        //  wrapper        field   bare list from Value::List
+        let expr = SExpr::list(vec![
+            SExpr::sym("ListResponse"),
+            SExpr::list(vec![
+                SExpr::sym("items"),
+                SExpr::list(vec![
+                    SExpr::list(vec![
+                        SExpr::sym("KV"),
+                        SExpr::list(vec![SExpr::sym("key"), SExpr::str("a")]),
+                        SExpr::list(vec![SExpr::sym("value"), SExpr::str("1")]),
+                    ]),
+                    SExpr::list(vec![
+                        SExpr::sym("KV"),
+                        SExpr::list(vec![SExpr::sym("key"), SExpr::str("b")]),
+                        SExpr::list(vec![SExpr::sym("value"), SExpr::str("2")]),
+                    ]),
+                ]),
+            ]),
+        ]);
+
+        let rendered = render_sexpr_pretty_colored(&expr, 8);
+        let plain = strip_ansi(&rendered);
+        let lines: Vec<&str> = plain.lines().collect();
+        assert_eq!(lines.len(), 4, "expected 4 lines, got: {:?}", lines);
+        assert!(lines[0].contains("KEY"), "header should contain KEY");
+        assert!(lines[0].contains("VALUE"), "header should contain VALUE");
+        assert!(
+            !plain.contains("ListResponse"),
+            "wrapper should be unwrapped"
+        );
+    }
+
+    #[test]
+    fn debug_real_list_response_structure() {
+        // Exact structure from dynamic_message_to_sexpr for a ListResponse
+        // with repeated KeyValuePair items field:
+        //
+        // (ListResponse
+        //   (items                    ← field wrapper [sym, val]
+        //     (                       ← bare list (no head sym) from Value::List
+        //       (KeyValuePair (key "a") (value "c") (conflicted true))
+        //       (KeyValuePair (key "b") (value "21") (conflicted false)))))
+        let expr = SExpr::list(vec![
+            SExpr::sym("ListResponse"),
+            SExpr::list(vec![
+                SExpr::sym("items"),
+                SExpr::list(vec![
+                    SExpr::list(vec![
+                        SExpr::sym("KeyValuePair"),
+                        SExpr::list(vec![SExpr::sym("key"), SExpr::str("a")]),
+                        SExpr::list(vec![SExpr::sym("value"), SExpr::str("c")]),
+                        SExpr::list(vec![SExpr::sym("conflicted"), SExpr::sym("true")]),
+                    ]),
+                    SExpr::list(vec![
+                        SExpr::sym("KeyValuePair"),
+                        SExpr::list(vec![SExpr::sym("key"), SExpr::str("b")]),
+                        SExpr::list(vec![SExpr::sym("value"), SExpr::str("21")]),
+                        SExpr::list(vec![SExpr::sym("conflicted"), SExpr::sym("false")]),
+                    ]),
+                ]),
+            ]),
+        ]);
+
+        let rendered = render_sexpr_pretty_colored(&expr, 8);
+        let plain = strip_ansi(&rendered);
+        eprintln!("RENDERED:\n{}", plain);
+
+        // The table should appear at top level, unwrapped
+        let lines: Vec<&str> = plain.lines().collect();
+        assert_eq!(
+            lines.len(),
+            4,
+            "expected header + 2 rows + footer: {:?}",
+            lines
+        );
+        assert!(
+            lines[0].contains("KEY"),
+            "first line should be table header: {:?}",
+            lines
+        );
+        assert!(!plain.contains("ListResponse"), "wrapper should be gone");
+        assert!(plain.contains("\"a\""), "should contain first row key");
+        assert!(plain.contains("\"b\""), "should contain second row key");
+    }
+
+    #[test]
+    fn strip_ansi_removes_escape_codes() {
+        assert_eq!(strip_ansi("\x1b[34mhello\x1b[0m"), "hello");
+        assert_eq!(strip_ansi("no escapes"), "no escapes");
+        assert_eq!(strip_ansi("\x1b[1;31mred\x1b[0m plain"), "red plain");
     }
 }

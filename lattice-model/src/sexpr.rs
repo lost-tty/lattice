@@ -2,6 +2,9 @@
 //!
 //! Used by `Introspectable::summarize_payload` to return structured
 //! operation descriptions that consumers can render however they want.
+//!
+//! Also provides conversion from `prost_reflect::DynamicMessage` to `SExpr`
+//! for rendering arbitrary protobuf responses.
 
 /// A structured s-expression value.
 #[derive(Debug, Clone, PartialEq)]
@@ -102,5 +105,75 @@ impl std::fmt::Display for SExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Default display uses compact rendering (8 bytes = 16 hex chars)
         write!(f, "{}", self.to_compact(8))
+    }
+}
+
+// ==================== Protobuf → SExpr conversion ====================
+
+use prost_reflect::{DynamicMessage, ReflectMessage, Value};
+
+/// Convert a protobuf `DynamicMessage` into an `SExpr` tree.
+///
+/// Message types become `(type-name (field val) ...)`, scalar fields map
+/// to the natural SExpr variant, and repeated fields become nested lists.
+pub fn dynamic_message_to_sexpr(msg: &DynamicMessage) -> SExpr {
+    let desc = msg.descriptor();
+    let fields: Vec<_> = desc.fields().collect();
+
+    if fields.is_empty() {
+        return SExpr::sym("ok");
+    }
+
+    let mut items: Vec<SExpr> = vec![SExpr::sym(desc.name())];
+    for field in &fields {
+        if let Some(value) = msg.get_field_by_name(field.name()) {
+            let val_sexpr = dynamic_value_to_sexpr(value.as_ref());
+            items.push(SExpr::list(vec![SExpr::sym(field.name()), val_sexpr]));
+        }
+    }
+    SExpr::list(items)
+}
+
+/// Convert a single protobuf `Value` into an `SExpr`.
+pub fn dynamic_value_to_sexpr(v: &Value) -> SExpr {
+    match v {
+        Value::String(s) => SExpr::str(s.as_str()),
+        Value::Bytes(b) => {
+            // Try UTF-8; fall back to raw hex
+            if let Ok(s) = std::str::from_utf8(b) {
+                if s.chars().all(|c| !c.is_control() || c == '\n') {
+                    return SExpr::str(s);
+                }
+            }
+            SExpr::raw(b.to_vec())
+        }
+        Value::Bool(b) => SExpr::sym(if *b { "true" } else { "false" }),
+        Value::I32(n) => SExpr::Num(*n as u64),
+        Value::I64(n) => SExpr::Num(*n as u64),
+        Value::U32(n) => SExpr::Num(*n as u64),
+        Value::U64(n) => SExpr::Num(*n),
+        Value::F32(n) => SExpr::str(n.to_string()),
+        Value::F64(n) => SExpr::str(n.to_string()),
+        Value::EnumNumber(n) => SExpr::Num(*n as u64),
+        Value::List(list) => {
+            let items: Vec<SExpr> = list.iter().map(dynamic_value_to_sexpr).collect();
+            SExpr::list(items)
+        }
+        Value::Message(m) => dynamic_message_to_sexpr(m),
+        Value::Map(map) => {
+            let mut items: Vec<SExpr> = vec![SExpr::sym("map")];
+            for (k, v) in map {
+                let key_sexpr = match k {
+                    prost_reflect::MapKey::Bool(b) => SExpr::sym(if *b { "true" } else { "false" }),
+                    prost_reflect::MapKey::I32(n) => SExpr::Num(*n as u64),
+                    prost_reflect::MapKey::I64(n) => SExpr::Num(*n as u64),
+                    prost_reflect::MapKey::U32(n) => SExpr::Num(*n as u64),
+                    prost_reflect::MapKey::U64(n) => SExpr::Num(*n),
+                    prost_reflect::MapKey::String(s) => SExpr::str(s.as_str()),
+                };
+                items.push(SExpr::list(vec![key_sexpr, dynamic_value_to_sexpr(v)]));
+            }
+            SExpr::list(items)
+        }
     }
 }

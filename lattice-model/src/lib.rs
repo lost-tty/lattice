@@ -41,7 +41,7 @@ pub use replication::{
     // Traits
     StoreEventSource,
 };
-pub use sexpr::SExpr;
+pub use sexpr::{dynamic_message_to_sexpr, dynamic_value_to_sexpr, SExpr};
 pub use state_machine::{Op, StateMachine, StateWriter, StateWriterError};
 pub use storage_config::StorageConfig;
 pub use store_info::{StoreLink, StoreMeta, SystemEvent};

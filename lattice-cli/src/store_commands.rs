@@ -6,15 +6,13 @@ use crate::graph_renderer;
 use crate::subscriptions::SubscriptionRegistry;
 use futures_util::StreamExt;
 use lattice_runtime::LatticeBackend;
-use lattice_runtime::{Hash, PubKey, SExpr};
+use lattice_runtime::{dynamic_message_to_sexpr, Hash, PubKey, SExpr};
 use prost_reflect::prost::Message as ProstMessage;
-use prost_reflect::{DescriptorPool, DynamicMessage, ReflectMessage, Value};
+use prost_reflect::{DescriptorPool, DynamicMessage, Value};
 use std::collections::HashMap;
-use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 // ==================== Multi-Store Commands ====================
@@ -1522,8 +1520,10 @@ async fn cmd_dynamic_command(
             let output_desc = method.output();
             match DynamicMessage::decode(output_desc, result_bytes.as_slice()) {
                 Ok(response) => {
-                    let output = format_dynamic_message(&response);
-                    let _ = write!(w, "{}", output);
+                    let sexpr = dynamic_message_to_sexpr(&response);
+                    let output =
+                        crate::display_helpers::render_sexpr_pretty_colored(&sexpr, 8);
+                    let _ = writeln!(w, "{}", output);
                 }
                 Err(e) => {
                     let _ = writeln!(w, "Error decoding response: {}", e);
@@ -1766,198 +1766,6 @@ fn parse_value_for_field(field: &prost_reflect::FieldDescriptor, s: &str) -> pro
     }
 }
 
-// Generic message formatting - no store-specific knowledge
-fn format_dynamic_message(msg: &prost_reflect::DynamicMessage) -> String {
-    let desc = msg.descriptor();
-    let fields: Vec<_> = desc.fields().collect();
-    let mut out = String::new();
-
-    if fields.is_empty() {
-        out.push_str("OK\n");
-        return out;
-    }
-
-    // Single field responses - show value directly
-    if fields.len() == 1 {
-        let field = &fields[0];
-        if let Some(value) = msg.get_field_by_name(field.name()) {
-            format_value_generic(value.as_ref(), &mut out, 0);
-        } else {
-            out.push_str("(empty)\n");
-        }
-        return out;
-    }
-
-    // Multi-field responses - show field names
-    for field in fields {
-        if let Some(value) = msg.get_field_by_name(field.name()) {
-            let _ = write!(out, "{}: ", field.name());
-            format_value_generic(value.as_ref(), &mut out, 0);
-        }
-    }
-
-    out
-}
-
-fn format_value_generic(v: &Value, out: &mut String, indent: usize) {
-    match v {
-        Value::String(s) => {
-            let _ = writeln!(out, "{}", s);
-        }
-        Value::Bytes(b) => {
-            // Try UTF-8 first, fall back to hex
-            if let Ok(s) = std::str::from_utf8(b) {
-                if s.chars().all(|c| !c.is_control() || c == '\n') {
-                    let _ = writeln!(out, "{}", s);
-                    return;
-                }
-            }
-            let hex_str = hex::encode(&b[..32.min(b.len())]);
-            let suffix = if b.len() > 32 { "..." } else { "" };
-            let _ = writeln!(out, "{}{}", hex_str, suffix);
-        }
-        Value::Bool(b) => {
-            let _ = writeln!(out, "{}", b);
-        }
-        Value::I32(n) => {
-            let _ = writeln!(out, "{}", n);
-        }
-        Value::I64(n) => {
-            let _ = writeln!(out, "{}", n);
-        }
-        Value::U32(n) => {
-            let _ = writeln!(out, "{}", n);
-        }
-        Value::U64(n) => {
-            let _ = writeln!(out, "{}", n);
-        }
-        Value::F32(n) => {
-            let _ = writeln!(out, "{}", n);
-        }
-        Value::F64(n) => {
-            let _ = writeln!(out, "{}", n);
-        }
-        Value::EnumNumber(n) => {
-            let _ = writeln!(out, "enum({})", n);
-        }
-        Value::List(list) => {
-            if list.is_empty() {
-                let _ = writeln!(out, "(empty)");
-            } else {
-                format_list_as_table(list, out, indent);
-            }
-        }
-        Value::Message(m) => {
-            for field in m.descriptor().fields() {
-                if let Some(fv) = m.get_field_by_name(field.name()) {
-                    let _ = write!(out, "{}  {}: ", "  ".repeat(indent), field.name());
-                    format_value_generic(fv.as_ref(), out, indent + 1);
-                }
-            }
-        }
-        Value::Map(_) => {
-            let _ = writeln!(out, "(map)");
-        }
-    }
-}
-
-fn format_list_as_table(list: &[Value], out: &mut String, indent: usize) {
-    // Build columns: (header, values)
-    let rows: Vec<Vec<String>> = list
-        .iter()
-        .map(|item| match item {
-            Value::Message(m) => m
-                .descriptor()
-                .fields()
-                .map(|f| {
-                    m.get_field_by_name(f.name())
-                        .map(|v| format_value_inline(v.as_ref()))
-                        .unwrap_or_default()
-                })
-                .collect(),
-            v => vec![format_value_inline(v)],
-        })
-        .collect();
-
-    let headers: Vec<String> = match list.first() {
-        Some(Value::Message(m)) => m
-            .descriptor()
-            .fields()
-            .map(|f| f.name().to_uppercase())
-            .collect(),
-        _ => vec!["VALUE".to_string()],
-    };
-
-    let col_widths: Vec<usize> = (0..headers.len())
-        .map(|i| {
-            headers.get(i).map(|h| h.width()).unwrap_or(0).max(
-                rows.iter()
-                    .filter_map(|r| r.get(i))
-                    .map(|s| s.width())
-                    .max()
-                    .unwrap_or(0),
-            )
-        })
-        .collect();
-
-    // Header
-    let _ = write!(out, "{}", "  ".repeat(indent));
-    for (i, h) in headers.iter().enumerate() {
-        let _ = write!(out, "{:width$}  ", h, width = col_widths[i]);
-    }
-    let _ = writeln!(out);
-
-    // Rows
-    for row in &rows {
-        let _ = write!(out, "{}", "  ".repeat(indent));
-        for (i, val) in row.iter().enumerate() {
-            let _ = write!(
-                out,
-                "{:width$}  ",
-                val,
-                width = col_widths.get(i).copied().unwrap_or(0)
-            );
-        }
-        let _ = writeln!(out);
-    }
-    let _ = writeln!(out, "({} items)", list.len());
-}
-
-fn format_value_inline(v: &Value) -> String {
-    match v {
-        Value::String(s) => escape_control_chars(s),
-        Value::Bytes(b) => {
-            if let Ok(s) = std::str::from_utf8(b) {
-                if s.chars().all(|c| !c.is_control()) {
-                    return s.to_string();
-                }
-            }
-            hex::encode(&b[..32.min(b.len())])
-        }
-        Value::Bool(b) => b.to_string(),
-        Value::I32(n) => n.to_string(),
-        Value::I64(n) => n.to_string(),
-        Value::U32(n) => n.to_string(),
-        Value::U64(n) => n.to_string(),
-        Value::F32(n) => n.to_string(),
-        Value::F64(n) => n.to_string(),
-        Value::EnumNumber(n) => format!("enum({})", n),
-        _ => String::new(), // Complex types not supported inline
-    }
-}
-
-/// Escape control characters for display
-fn escape_control_chars(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '\n' => "\\n".to_string(),
-            '\r' => "\\r".to_string(),
-            '\t' => "\\t".to_string(),
-            c if c.is_control() => format!("\\x{:02x}", c as u32),
-            c => c.to_string(),
-        })
-        .collect()
-}
 // ==================== Stream Commands ====================
 
 /// Subscribe to a store stream - runs in background with introspection-based decoding
@@ -2086,7 +1894,12 @@ fn display_stream_event(
         .and_then(|s| pool?.get_message_by_name(s))
         .and_then(|desc| DynamicMessage::decode(desc, payload).ok())
     {
-        let _ = writeln!(w, "[Stream] {}", format_dynamic_message(&msg));
+        let sexpr = dynamic_message_to_sexpr(&msg);
+        let _ = writeln!(
+            w,
+            "[Stream] {}",
+            crate::display_helpers::render_sexpr_colored(&sexpr, 8)
+        );
     } else {
         let _ = writeln!(w, "[Stream] {} bytes", payload.len());
     }
