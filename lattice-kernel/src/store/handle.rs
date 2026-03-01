@@ -712,6 +712,30 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
                 .map_err(StoreError::Store)
         })
     }
+
+    fn inspect_branch(
+        &self,
+        heads: Vec<Hash>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<lattice_model::BranchInspection, StoreError>> + Send + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            self.tx
+                .send(ReplicationControllerCmd::InspectBranch {
+                    heads,
+                    resp: resp_tx,
+                })
+                .await
+                .map_err(|_| StoreError::ChannelClosed)?;
+            resp_rx
+                .await
+                .map_err(|_| StoreError::ChannelClosed)?
+                .map_err(StoreError::Store)
+        })
+    }
 }
 
 // ==================== StoreEventSource ====================

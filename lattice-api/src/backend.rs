@@ -4,6 +4,7 @@
 //! Uses proto-generated types from types.proto as the canonical DTOs.
 
 use lattice_model::weaver::{FloatingIntention, WitnessEntry};
+pub use lattice_model::BranchInspection;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -94,6 +95,11 @@ pub trait LatticeBackend: Send + Sync {
     fn store_peer_strategy(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>>;
     fn store_peer_invite(&self, store_id: Uuid) -> AsyncResult<'_, String>;
     fn store_peer_revoke(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()>;
+    fn store_inspect_branch(
+        &self,
+        store_id: Uuid,
+        heads: Vec<Vec<u8>>,
+    ) -> AsyncResult<'_, BranchInspection>;
 
     // ---- Dynamic store operations ----
     fn store_exec(&self, store_id: Uuid, method: &str, payload: &[u8]) -> AsyncResult<'_, Vec<u8>>;

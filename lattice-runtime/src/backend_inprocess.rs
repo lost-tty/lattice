@@ -7,7 +7,7 @@ use crate::NetworkService;
 use crate::StoreHandle;
 use lattice_api::proto::{StoreMeta, StoreRef};
 use lattice_model::store_info::PeerStrategy;
-use lattice_model::types::PubKey;
+use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, WitnessEntry};
 use lattice_node::Node;
 use lattice_systemstore::SystemBatch;
@@ -456,6 +456,32 @@ impl LatticeBackend for InProcessBackend {
                     }
                 })
                 .collect())
+        })
+    }
+
+    fn store_inspect_branch(
+        &self,
+        store_id: Uuid,
+        heads: Vec<Vec<u8>>,
+    ) -> AsyncResult<'_, BranchInspection> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            let inspector = store.as_inspector();
+            let hashes: Vec<Hash> = heads
+                .into_iter()
+                .map(|h| {
+                    Hash::try_from(h.as_slice()).map_err(|_| {
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "invalid hash length",
+                        )) as BackendError
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            inspector
+                .inspect_branch(hashes)
+                .await
+                .map_err(|e| Box::new(e) as BackendError)
         })
     }
 

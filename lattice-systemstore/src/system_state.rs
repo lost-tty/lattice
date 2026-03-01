@@ -215,12 +215,8 @@ impl lattice_model::DagQueries for ScopedDag<'_> {
         self.inner.find_lca(a, b)
     }
 
-    fn get_path(&self, from: &Hash, to: &Hash) -> anyhow::Result<Vec<IntentionInfo<'static>>> {
-        self.inner
-            .get_path(from, to)?
-            .into_iter()
-            .map(|info| Self::unwrap_payload(info, self.scope))
-            .collect()
+    fn get_path(&self, from: &Hash, to: &Hash) -> anyhow::Result<Vec<Hash>> {
+        self.inner.get_path(from, to)
     }
 
     fn is_ancestor(&self, ancestor: &Hash, descendant: &Hash) -> anyhow::Result<bool> {

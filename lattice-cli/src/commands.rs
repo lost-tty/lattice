@@ -219,6 +219,11 @@ pub enum DebugSubcommand {
         /// Hash prefix (hex)
         hash: String,
     },
+    /// Show branching structure between two (or more) head hashes
+    Branch {
+        /// Head hashes (hex prefixes), at least two
+        hashes: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -317,6 +322,15 @@ pub async fn handle_command(
                 Some(DebugSubcommand::Intention { hash }) => {
                     store_commands::cmd_store_debug_intention(backend, ctx.store_id, &hash, writer)
                         .await
+                }
+                Some(DebugSubcommand::Branch { hashes }) => {
+                    store_commands::cmd_store_debug_branch(
+                        backend,
+                        ctx.store_id,
+                        &hashes,
+                        writer,
+                    )
+                    .await
                 }
                 None => store_commands::cmd_store_debug(backend, ctx.store_id, writer).await,
             },

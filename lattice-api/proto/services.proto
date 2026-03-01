@@ -36,6 +36,9 @@ service StoreService {
   rpc RevokePeer(RevokePeerRequest) returns (Empty);
   rpc GetPeerStrategy(StoreId) returns (PeerStrategyResponse);
   
+  // Branch inspection (conflict analysis)
+  rpc InspectBranch(InspectBranchRequest) returns (InspectBranchResponse);
+
   // Root Store Operations
   rpc Join(JoinRequest) returns (JoinResponse);
   rpc Invite(StoreId) returns (InviteToken);

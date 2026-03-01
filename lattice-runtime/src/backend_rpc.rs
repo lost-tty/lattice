@@ -4,9 +4,11 @@
 
 use crate::backend::*;
 use lattice_api::proto::{
-    CreateStoreRequest, DeleteStoreRequest, Empty, ExecRequest, GetIntentionRequest, JoinRequest,
-    RevokePeerRequest, SetNameRequest, SetStoreNameRequest, StoreId, WitnessLogRequest,
+    CreateStoreRequest, DeleteStoreRequest, Empty, ExecRequest, GetIntentionRequest,
+    InspectBranchRequest, JoinRequest, RevokePeerRequest, SetNameRequest, SetStoreNameRequest,
+    StoreId, WitnessLogRequest,
 };
+use lattice_model::types::Hash;
 use lattice_api::RpcClient;
 use lattice_model::weaver::{FloatingIntention, WitnessEntry};
 use std::collections::HashMap;
@@ -321,6 +323,41 @@ impl LatticeBackend for RpcBackend {
                 Err(e) if e.code() == lattice_api::tonic::Code::NotFound => Ok(vec![]),
                 Err(e) => Err(e.into()),
             }
+        })
+    }
+
+    fn store_inspect_branch(
+        &self,
+        store_id: Uuid,
+        heads: Vec<Vec<u8>>,
+    ) -> AsyncResult<'_, BranchInspection> {
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client
+                .store
+                .inspect_branch(InspectBranchRequest {
+                    store_id: store_id.as_bytes().to_vec(),
+                    heads,
+                })
+                .await?;
+            let inner = resp.into_inner();
+
+            let lca = Hash::try_from(inner.lca.as_slice()).unwrap_or(Hash::ZERO);
+            let branches = inner
+                .branches
+                .into_iter()
+                .map(|bp| {
+                    let head = Hash::try_from(bp.head.as_slice()).unwrap_or(Hash::ZERO);
+                    let hashes = bp
+                        .hashes
+                        .into_iter()
+                        .map(|h| Hash::try_from(h.as_slice()).unwrap_or(Hash::ZERO))
+                        .collect();
+                    lattice_model::BranchPath { head, hashes }
+                })
+                .collect();
+
+            Ok(BranchInspection { lca, branches })
         })
     }
 

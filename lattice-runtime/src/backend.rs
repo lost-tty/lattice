@@ -10,6 +10,7 @@ pub use lattice_api::backend::{
     BackendError,
     BackendResult,
     BoxByteStream,
+    BranchInspection,
     EventReceiver,
     IntentionDetail,
     JoinFailedEvent,

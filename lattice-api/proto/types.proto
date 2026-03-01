@@ -269,6 +269,28 @@ message SystemListResponse {
 }
 
 // ============================================================================
+// Branch Inspection Types
+// ============================================================================
+
+// Request: given a set of head hashes, inspect their branching structure.
+message InspectBranchRequest {
+  bytes store_id = 1;
+  repeated bytes heads = 2;     // 2+ head hashes (32 bytes each)
+}
+
+// One branch: the path from LCA (inclusive) to head (inclusive).
+message BranchPath {
+  bytes head = 1;                    // The head hash this branch reaches
+  repeated bytes hashes = 2;        // Intention hashes in topo order (oldest first, head last)
+}
+
+// Response: LCA + per-head branch paths.
+message InspectBranchResponse {
+  bytes lca = 1;                // Lowest common ancestor hash (32 bytes, or empty if disjoint)
+  repeated BranchPath branches = 2;
+}
+
+// ============================================================================
 // Dynamic Store Types
 // ============================================================================
 

@@ -54,15 +54,83 @@ pub trait DagQueries: Send + Sync {
     /// bidirectional BFS over `Condition::V1` causal edges.
     fn find_lca(&self, a: &Hash, b: &Hash) -> anyhow::Result<Hash>;
 
-    /// Yields intentions between two DAG points in topological order.
+    /// Yields intention hashes between two DAG points in topological order.
     ///
-    /// `from` is exclusive, `to` is inclusive. Returns the path from
-    /// `from` to `to` following causal edges, topologically sorted
-    /// via reverse BFS + Kahn's algorithm.
-    fn get_path(&self, from: &Hash, to: &Hash) -> anyhow::Result<Vec<IntentionInfo<'static>>>;
+    /// `from` is exclusive, `to` is inclusive. Follows only `Condition::V1`
+    /// causal edges (not `store_prev`). Includes a forward reachability
+    /// pruning phase to exclude ancestors-of-`from` that get pulled in when
+    /// merge intentions have causal deps spanning across the `from` boundary.
+    /// Returns hashes topologically sorted via reverse BFS + Kahn's algorithm.
+    fn get_path(&self, from: &Hash, to: &Hash) -> anyhow::Result<Vec<Hash>>;
 
     /// Tests whether `ancestor` is a causal ancestor of `descendant`.
     fn is_ancestor(&self, ancestor: &Hash, descendant: &Hash) -> anyhow::Result<bool>;
+}
+
+/// Result of inspecting the branching structure of N head hashes.
+///
+/// Contains the lowest common ancestor and per-head paths from that LCA to each
+/// head, as topologically ordered hashes. Callers fetch full intention data as
+/// needed.
+#[derive(Debug, Clone)]
+pub struct BranchInspection {
+    /// Lowest common ancestor of all heads. `Hash::ZERO` if the heads are disjoint
+    /// (no common ancestor found within the store).
+    pub lca: Hash,
+    /// One entry per requested head: hashes from `lca` (inclusive) to that head
+    /// (inclusive), in topological order (oldest first, head last).
+    pub branches: Vec<BranchPath>,
+}
+
+/// A single branch: the sequence of intention hashes from the LCA to one head.
+#[derive(Debug, Clone)]
+pub struct BranchPath {
+    /// The head hash this branch reaches.
+    pub head: Hash,
+    /// Intention hashes in topological order (oldest first, head last).
+    /// Includes the LCA as the first element.
+    pub hashes: Vec<Hash>,
+}
+
+/// Compute a `BranchInspection` from a set of head hashes using `DagQueries`.
+///
+/// For exactly 2 heads, uses `find_lca` + `get_path` for each.
+/// For 1 head, LCA is the head itself and the single branch has just the LCA hash.
+/// For 0 heads, returns an empty result.
+/// For >2 heads, computes pairwise LCA and takes the deepest common ancestor.
+pub fn inspect_branches(dag: &dyn DagQueries, heads: &[Hash]) -> anyhow::Result<BranchInspection> {
+    if heads.is_empty() {
+        return Ok(BranchInspection {
+            lca: Hash::ZERO,
+            branches: vec![],
+        });
+    }
+    if heads.len() == 1 {
+        return Ok(BranchInspection {
+            lca: heads[0],
+            branches: vec![BranchPath {
+                head: heads[0],
+                hashes: vec![heads[0]],
+            }],
+        });
+    }
+
+    // Find LCA across all heads: pairwise reduction.
+    // LCA(a,b,c) = LCA(LCA(a,b), c)
+    let mut lca = dag.find_lca(&heads[0], &heads[1])?;
+    for head in &heads[2..] {
+        lca = dag.find_lca(&lca, head)?;
+    }
+
+    // Get causal path from LCA to each head, prepending the LCA hash itself
+    let mut branches = Vec::with_capacity(heads.len());
+    for &head in heads {
+        let mut hashes = vec![lca];
+        hashes.extend(dag.get_path(&lca, &head)?);
+        branches.push(BranchPath { head, hashes });
+    }
+
+    Ok(BranchInspection { lca, branches })
 }
 
 /// No-op DAG for tests and contexts where DAG access is not needed.
@@ -78,7 +146,7 @@ impl DagQueries for NullDag {
     fn find_lca(&self, _: &Hash, _: &Hash) -> anyhow::Result<Hash> {
         anyhow::bail!("NullDag: no DAG available")
     }
-    fn get_path(&self, _: &Hash, _: &Hash) -> anyhow::Result<Vec<IntentionInfo<'static>>> {
+    fn get_path(&self, _: &Hash, _: &Hash) -> anyhow::Result<Vec<Hash>> {
         anyhow::bail!("NullDag: no DAG available")
     }
     fn is_ancestor(&self, _: &Hash, _: &Hash) -> anyhow::Result<bool> {
@@ -125,7 +193,7 @@ impl DagQueries for HashMapDag {
     fn find_lca(&self, _: &Hash, _: &Hash) -> anyhow::Result<Hash> {
         anyhow::bail!("HashMapDag: not implemented")
     }
-    fn get_path(&self, _: &Hash, _: &Hash) -> anyhow::Result<Vec<IntentionInfo<'static>>> {
+    fn get_path(&self, _: &Hash, _: &Hash) -> anyhow::Result<Vec<Hash>> {
         anyhow::bail!("HashMapDag: not implemented")
     }
     fn is_ancestor(&self, _: &Hash, _: &Hash) -> anyhow::Result<bool> {

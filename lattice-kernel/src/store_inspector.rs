@@ -6,7 +6,7 @@
 use crate::store::StoreError;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, SignedIntention, WitnessEntry};
-use lattice_model::Uuid;
+use lattice_model::{BranchInspection, Uuid};
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -47,4 +47,10 @@ pub trait StoreInspector: Send + Sync {
         &self,
         hash_prefix: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, StoreError>> + Send + '_>>;
+
+    /// Inspect branching structure: LCA + paths from LCA to each head.
+    fn inspect_branch(
+        &self,
+        heads: Vec<Hash>,
+    ) -> Pin<Box<dyn Future<Output = Result<BranchInspection, StoreError>> + Send + '_>>;
 }

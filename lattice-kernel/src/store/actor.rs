@@ -64,6 +64,11 @@ pub enum ReplicationControllerCmd {
     FloatingIntentions {
         resp: oneshot::Sender<Vec<FloatingIntention>>,
     },
+    /// Inspect branching structure for a set of head hashes
+    InspectBranch {
+        heads: Vec<Hash>,
+        resp: oneshot::Sender<Result<lattice_model::BranchInspection, StateError>>,
+    },
     /// Shutdown the actor
     Shutdown,
 }
@@ -252,6 +257,12 @@ impl<S: StateMachine> ReplicationController<S> {
                 let store = self.intention_store.read().expect("Lock poisoned");
                 let floating = store.floating().unwrap_or_default();
                 let _ = resp.send(floating);
+            }
+            ReplicationControllerCmd::InspectBranch { heads, resp } => {
+                let store = self.intention_store.read().expect("Lock poisoned");
+                let result = lattice_model::inspect_branches(&*store, &heads)
+                    .map_err(|e| StateError::Backend(e.to_string()));
+                let _ = resp.send(result);
             }
             ReplicationControllerCmd::Shutdown => {
                 // Handled in select! above

@@ -767,8 +767,7 @@ impl IntentionStore {
 }
 
 impl IntentionStore {
-    /// Read an intention from an open table and return its parent edges
-    /// (`Condition::V1` deps + `store_prev`). Returns `None` for `Hash::ZERO`.
+    /// Read an intention and return only its `Condition::V1` causal deps.
     fn dag_parents(
         table: &redb::ReadOnlyTable<&[u8], &[u8]>,
         hash: &Hash,
@@ -780,30 +779,93 @@ impl IntentionStore {
             IntentionStoreError::InvalidData(format!("dag: missing intention {}", hash))
         })?;
         let signed = Self::decode_signed(val.value())?;
-        let lattice_model::weaver::Condition::V1(mut parents) = signed.intention.condition;
-        if signed.intention.store_prev != Hash::ZERO {
-            parents.push(signed.intention.store_prev);
-        }
+        let lattice_model::weaver::Condition::V1(parents) = signed.intention.condition;
         Ok(parents)
     }
+}
 
-    /// Read an intention from an open table and return the decoded `SignedIntention`
-    /// along with its parent edges. Returns `None` for `Hash::ZERO`.
-    fn dag_parents_with_signed(
-        table: &redb::ReadOnlyTable<&[u8], &[u8]>,
-        hash: &Hash,
-    ) -> Result<(SignedIntention, Vec<Hash>), IntentionStoreError> {
-        let val = table.get(hash.as_bytes().as_slice())?.ok_or_else(|| {
-            IntentionStoreError::InvalidData(format!("dag: missing intention {}", hash))
-        })?;
-        let signed = Self::decode_signed(val.value())?;
-        let lattice_model::weaver::Condition::V1(ref deps) = signed.intention.condition;
-        let mut parents = deps.clone();
-        if signed.intention.store_prev != Hash::ZERO {
-            parents.push(signed.intention.store_prev);
+// ---------------------------------------------------------------------------
+// Pure DAG helpers (no DB access — operate on hash→parents maps)
+// ---------------------------------------------------------------------------
+
+use std::collections::{HashSet, VecDeque};
+
+/// Prune a subgraph to forward-reachable descendants of `root`, then
+/// topologically sort the survivors using Kahn's algorithm.
+///
+/// `children` is the forward adjacency map (parent → children) built
+/// during the reverse BFS so we don't traverse the edges a second time.
+///
+/// Returns hashes in causal order (roots first). Returns an empty vec if
+/// nothing is reachable from `root`.
+fn prune_and_topo_sort(
+    subgraph: &mut HashMap<Hash, Vec<Hash>>,
+    children: &mut HashMap<Hash, Vec<Hash>>,
+    root: &Hash,
+) -> Vec<Hash> {
+    // Forward BFS from root to find reachable nodes.
+    let mut reachable: HashSet<Hash> = HashSet::new();
+    let mut frontier: VecDeque<Hash> = VecDeque::new();
+    if let Some(kids) = children.get(root) {
+        for &k in kids {
+            reachable.insert(k);
+            frontier.push_back(k);
         }
-        Ok((signed, parents))
     }
+    while let Some(node) = frontier.pop_front() {
+        if let Some(kids) = children.get(&node) {
+            for &k in kids {
+                if reachable.insert(k) {
+                    frontier.push_back(k);
+                }
+            }
+        }
+    }
+
+    // Prune unreachable nodes.
+    subgraph.retain(|h, _| reachable.contains(h));
+    if subgraph.is_empty() {
+        return vec![];
+    }
+    children.retain(|h, _| *h == *root || reachable.contains(h));
+    for kids in children.values_mut() {
+        kids.retain(|h| reachable.contains(h));
+    }
+
+    // Kahn's topo sort using the pruned children map.
+    let mut in_degree: HashMap<Hash, usize> = HashMap::with_capacity(subgraph.len());
+    for &hash in subgraph.keys() {
+        in_degree.insert(hash, 0);
+    }
+    for (&hash, parents) in subgraph.iter() {
+        for &parent in parents {
+            if subgraph.contains_key(&parent) {
+                *in_degree.entry(hash).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut queue: VecDeque<Hash> = in_degree
+        .iter()
+        .filter(|(_, &deg)| deg == 0)
+        .map(|(&h, _)| h)
+        .collect();
+
+    let mut result: Vec<Hash> = Vec::with_capacity(subgraph.len());
+    while let Some(hash) = queue.pop_front() {
+        result.push(hash);
+        if let Some(kids) = children.get(&hash) {
+            for &child in kids {
+                if let Some(deg) = in_degree.get_mut(&child) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(child);
+                    }
+                }
+            }
+        }
+    }
+    result
 }
 
 impl lattice_model::DagQueries for IntentionStore {
@@ -891,13 +953,7 @@ impl lattice_model::DagQueries for IntentionStore {
         anyhow::bail!("find_lca: no common ancestor found for {} and {}", a, b)
     }
 
-    fn get_path(
-        &self,
-        from: &Hash,
-        to: &Hash,
-    ) -> anyhow::Result<Vec<lattice_model::IntentionInfo<'static>>> {
-        use std::collections::{HashMap, HashSet, VecDeque};
-
+    fn get_path(&self, from: &Hash, to: &Hash) -> anyhow::Result<Vec<Hash>> {
         if from == to {
             return Ok(vec![]);
         }
@@ -905,8 +961,10 @@ impl lattice_model::DagQueries for IntentionStore {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_INTENTIONS)?;
 
-        // Phase 1: Reverse BFS from `to` back to `from` to discover the subgraph.
-        let mut subgraph: HashMap<Hash, (SignedIntention, Vec<Hash>)> = HashMap::new();
+        // Reverse BFS from `to` back to `from` using only causal edges.
+        // Build both the parent map and forward children map in one pass.
+        let mut subgraph: HashMap<Hash, Vec<Hash>> = HashMap::new();
+        let mut children: HashMap<Hash, Vec<Hash>> = HashMap::new();
         let mut frontier: VecDeque<Hash> = VecDeque::new();
         let mut visited: HashSet<Hash> = HashSet::new();
 
@@ -924,66 +982,21 @@ impl lattice_model::DagQueries for IntentionStore {
                 continue;
             }
 
-            let (signed, parents) = Self::dag_parents_with_signed(&table, &node)?;
-            for &p in &parents {
+            let causal_parents = Self::dag_parents(&table, &node)?;
+            for &p in &causal_parents {
+                children.entry(p).or_default().push(node);
                 if visited.insert(p) {
                     frontier.push_back(p);
                 }
             }
-            subgraph.insert(node, (signed, parents));
+            subgraph.insert(node, causal_parents);
         }
 
         if subgraph.is_empty() {
             return Ok(vec![]);
         }
 
-        // Phase 2: Kahn's topological sort over the subgraph.
-        let subgraph_keys: HashSet<Hash> = subgraph.keys().copied().collect();
-        let mut in_degree: HashMap<Hash, usize> = HashMap::new();
-        let mut children: HashMap<Hash, Vec<Hash>> = HashMap::new();
-
-        for (&hash, (_, parents)) in &subgraph {
-            in_degree.entry(hash).or_insert(0);
-            for &parent in parents {
-                if subgraph_keys.contains(&parent) {
-                    *in_degree.entry(hash).or_insert(0) += 1;
-                    children.entry(parent).or_default().push(hash);
-                }
-            }
-        }
-
-        let mut queue: VecDeque<Hash> = in_degree
-            .iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(&h, _)| h)
-            .collect();
-
-        let mut result: Vec<lattice_model::IntentionInfo<'static>> =
-            Vec::with_capacity(subgraph.len());
-
-        while let Some(hash) = queue.pop_front() {
-            if let Some((signed, _)) = subgraph.get(&hash) {
-                let intention = &signed.intention;
-                result.push(lattice_model::IntentionInfo {
-                    hash: intention.hash(),
-                    payload: intention.ops.clone().into(),
-                    timestamp: intention.timestamp,
-                    author: intention.author,
-                });
-            }
-            if let Some(kids) = children.get(&hash) {
-                for &child in kids {
-                    if let Some(deg) = in_degree.get_mut(&child) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push_back(child);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(result)
+        Ok(prune_and_topo_sort(&mut subgraph, &mut children, from))
     }
 
     fn is_ancestor(&self, ancestor: &Hash, descendant: &Hash) -> anyhow::Result<bool> {
@@ -2080,9 +2093,9 @@ mod tests {
     /// ```text
     ///     A        (author1, store_prev=ZERO, deps=[])
     ///    / \
-    ///   B   C      (B: author1, prev=A; C: author2, prev=ZERO, deps=[A])
+    ///   B   C      (B: author1, prev=A, deps=[A]; C: author2, prev=ZERO, deps=[A])
     ///    \ /
-    ///     D        (author1, prev=B, deps=[C])
+    ///     D        (author1, prev=B, deps=[B, C])
     /// ```
     fn build_diamond_dag() -> (IntentionStore, Hash, Hash, Hash, Hash) {
         let mut store = open_store_in_memory();
@@ -2093,7 +2106,7 @@ mod tests {
         let signed_a = SignedIntention::sign(int_a.clone(), &key1);
         let hash_a = store.insert(&signed_a).unwrap();
 
-        let int_b = make_intention(pk1, hash_a, vec![0xB]);
+        let int_b = make_intention_with_deps(pk1, hash_a, vec![hash_a], vec![0xB]);
         let signed_b = SignedIntention::sign(int_b.clone(), &key1);
         let hash_b = store.insert(&signed_b).unwrap();
 
@@ -2101,7 +2114,7 @@ mod tests {
         let signed_c = SignedIntention::sign(int_c.clone(), &key2);
         let hash_c = store.insert(&signed_c).unwrap();
 
-        let int_d = make_intention_with_deps(pk1, hash_b, vec![hash_c], vec![0xD]);
+        let int_d = make_intention_with_deps(pk1, hash_b, vec![hash_b, hash_c], vec![0xD]);
         let signed_d = SignedIntention::sign(int_d.clone(), &key1);
         let hash_d = store.insert(&signed_d).unwrap();
 
@@ -2109,6 +2122,7 @@ mod tests {
     }
 
     /// Build a linear chain A → B → C → D and return the store + hashes.
+    /// Each node causally depends on its predecessor via `Condition::V1` deps.
     fn build_linear_chain() -> (IntentionStore, Hash, Hash, Hash, Hash) {
         let mut store = open_store_in_memory();
         let (key, pk) = make_key();
@@ -2117,15 +2131,15 @@ mod tests {
         let signed_a = SignedIntention::sign(int_a.clone(), &key);
         let hash_a = store.insert(&signed_a).unwrap();
 
-        let int_b = make_intention(pk, hash_a, vec![0xB]);
+        let int_b = make_intention_with_deps(pk, hash_a, vec![hash_a], vec![0xB]);
         let signed_b = SignedIntention::sign(int_b.clone(), &key);
         let hash_b = store.insert(&signed_b).unwrap();
 
-        let int_c = make_intention(pk, hash_b, vec![0xC]);
+        let int_c = make_intention_with_deps(pk, hash_b, vec![hash_b], vec![0xC]);
         let signed_c = SignedIntention::sign(int_c.clone(), &key);
         let hash_c = store.insert(&signed_c).unwrap();
 
-        let int_d = make_intention(pk, hash_c, vec![0xD]);
+        let int_d = make_intention_with_deps(pk, hash_c, vec![hash_c], vec![0xD]);
         let signed_d = SignedIntention::sign(int_d.clone(), &key);
         let hash_d = store.insert(&signed_d).unwrap();
 
@@ -2137,13 +2151,13 @@ mod tests {
     /// ```text
     ///       A           (author1, root)
     ///      / \
-    ///     B   C         (B: author1; C: author2, deps=[A])
+    ///     B   C         (B: author1, deps=[A]; C: author2, deps=[A])
     ///      \ /
-    ///       D           (author1, prev=B, deps=[C])  — first merge
+    ///       D           (author1, prev=B, deps=[B, C])  — first merge
     ///      / \
-    ///     E   F         (E: author1; F: author2, deps=[D])
+    ///     E   F         (E: author1, deps=[D]; F: author2, deps=[D])
     ///      \ /
-    ///       G           (author1, prev=E, deps=[F])  — second merge
+    ///       G           (author1, prev=E, deps=[E, F])  — second merge
     /// ```
     fn build_double_diamond() -> (IntentionStore, [Hash; 7]) {
         let mut store = open_store_in_memory();
@@ -2155,7 +2169,7 @@ mod tests {
             .insert(&SignedIntention::sign(int_a.clone(), &key1))
             .unwrap();
 
-        let int_b = make_intention(pk1, ha, vec![0xB]);
+        let int_b = make_intention_with_deps(pk1, ha, vec![ha], vec![0xB]);
         let hb = store
             .insert(&SignedIntention::sign(int_b.clone(), &key1))
             .unwrap();
@@ -2165,12 +2179,12 @@ mod tests {
             .insert(&SignedIntention::sign(int_c.clone(), &key2))
             .unwrap();
 
-        let int_d = make_intention_with_deps(pk1, hb, vec![hc], vec![0xD]);
+        let int_d = make_intention_with_deps(pk1, hb, vec![hb, hc], vec![0xD]);
         let hd = store
             .insert(&SignedIntention::sign(int_d.clone(), &key1))
             .unwrap();
 
-        let int_e = make_intention(pk1, hd, vec![0xE]);
+        let int_e = make_intention_with_deps(pk1, hd, vec![hd], vec![0xE]);
         let he = store
             .insert(&SignedIntention::sign(int_e.clone(), &key1))
             .unwrap();
@@ -2180,7 +2194,7 @@ mod tests {
             .insert(&SignedIntention::sign(int_f.clone(), &key2))
             .unwrap();
 
-        let int_g = make_intention_with_deps(pk1, he, vec![hf], vec![0x77]);
+        let int_g = make_intention_with_deps(pk1, he, vec![he, hf], vec![0x77]);
         let hg = store
             .insert(&SignedIntention::sign(int_g.clone(), &key1))
             .unwrap();
@@ -2196,6 +2210,7 @@ mod tests {
     ///   B   C → D → E → F    (long branch via author2)
     ///   (short branch, author1)
     /// ```
+    /// All edges are expressed via `Condition::V1` causal deps.
     fn build_asymmetric_dag() -> (IntentionStore, Hash, Hash, Hash, Hash, Hash, Hash) {
         let mut store = open_store_in_memory();
         let (key1, pk1) = make_key();
@@ -2207,7 +2222,7 @@ mod tests {
             .unwrap();
 
         // Short branch
-        let int_b = make_intention(pk1, ha, vec![0xB]);
+        let int_b = make_intention_with_deps(pk1, ha, vec![ha], vec![0xB]);
         let hb = store
             .insert(&SignedIntention::sign(int_b.clone(), &key1))
             .unwrap();
@@ -2218,17 +2233,17 @@ mod tests {
             .insert(&SignedIntention::sign(int_c.clone(), &key2))
             .unwrap();
 
-        let int_d = make_intention(pk2, hc, vec![0xD]);
+        let int_d = make_intention_with_deps(pk2, hc, vec![hc], vec![0xD]);
         let hd = store
             .insert(&SignedIntention::sign(int_d.clone(), &key2))
             .unwrap();
 
-        let int_e = make_intention(pk2, hd, vec![0xE]);
+        let int_e = make_intention_with_deps(pk2, hd, vec![hd], vec![0xE]);
         let he = store
             .insert(&SignedIntention::sign(int_e.clone(), &key2))
             .unwrap();
 
-        let int_f = make_intention(pk2, he, vec![0xF]);
+        let int_f = make_intention_with_deps(pk2, he, vec![he], vec![0xF]);
         let hf = store
             .insert(&SignedIntention::sign(int_f.clone(), &key2))
             .unwrap();
@@ -2422,8 +2437,7 @@ mod tests {
     fn get_path_direct_parent() {
         let (store, hash_a, hash_b, _, _) = build_diamond_dag();
         let path = store.get_path(&hash_a, &hash_b).unwrap();
-        assert_eq!(path.len(), 1);
-        assert_eq!(path[0].hash, hash_b);
+        assert_eq!(path, vec![hash_b]);
     }
 
     #[test]
@@ -2431,21 +2445,17 @@ mod tests {
         let (store, hash_a, hash_b, hash_c, hash_d) = build_diamond_dag();
         let path = store.get_path(&hash_a, &hash_d).unwrap();
         assert_eq!(path.len(), 3);
-
-        let hashes: Vec<Hash> = path.iter().map(|i| i.hash).collect();
-        assert!(hashes.contains(&hash_b));
-        assert!(hashes.contains(&hash_c));
-        assert_eq!(*hashes.last().unwrap(), hash_d);
+        assert!(path.contains(&hash_b));
+        assert!(path.contains(&hash_c));
+        assert_eq!(*path.last().unwrap(), hash_d);
     }
 
     #[test]
     fn get_path_partial() {
-        let (store, _, hash_b, hash_c, hash_d) = build_diamond_dag();
+        let (store, _, hash_b, _hash_c, hash_d) = build_diamond_dag();
         let path = store.get_path(&hash_b, &hash_d).unwrap();
-        let hashes: Vec<Hash> = path.iter().map(|i| i.hash).collect();
-        assert!(hashes.contains(&hash_d));
-        // C is included because D causally depends on it
-        assert!(hashes.contains(&hash_c));
+        // Only D: C is not a descendant of B (forward pruning removes it).
+        assert_eq!(path, vec![hash_d]);
     }
 
     #[test]
@@ -2453,16 +2463,11 @@ mod tests {
         let (store, ha, hb, hc, hd) = build_linear_chain();
         // Full chain
         let path = store.get_path(&ha, &hd).unwrap();
-        assert_eq!(path.len(), 3);
-        assert_eq!(path[0].hash, hb);
-        assert_eq!(path[1].hash, hc);
-        assert_eq!(path[2].hash, hd);
+        assert_eq!(path, vec![hb, hc, hd]);
 
         // Partial chain
         let path = store.get_path(&hb, &hd).unwrap();
-        assert_eq!(path.len(), 2);
-        assert_eq!(path[0].hash, hc);
-        assert_eq!(path[1].hash, hd);
+        assert_eq!(path, vec![hc, hd]);
     }
 
     #[test]
@@ -2470,22 +2475,21 @@ mod tests {
         // In the returned path, every node must appear after all its parents.
         let (store, [ha, _hb, _hc, _hd, _he, _hf, hg]) = build_double_diamond();
         let path = store.get_path(&ha, &hg).unwrap();
-        let hashes: Vec<Hash> = path.iter().map(|i| i.hash).collect();
 
         // Build position map
         let pos: std::collections::HashMap<Hash, usize> =
-            hashes.iter().enumerate().map(|(i, h)| (*h, i)).collect();
+            path.iter().enumerate().map(|(i, h)| (*h, i)).collect();
 
         // For each node in the path, verify all its in-subgraph parents
         // appear earlier. We re-derive parents by reading from the store.
-        for info in &path {
-            let signed = store.get(&info.hash).unwrap().unwrap();
+        for &hash in &path {
+            let signed = store.get(&hash).unwrap().unwrap();
             let Condition::V1(ref deps) = signed.intention.condition;
             let mut parents: Vec<Hash> = deps.clone();
             if signed.intention.store_prev != Hash::ZERO {
                 parents.push(signed.intention.store_prev);
             }
-            let my_pos = pos[&info.hash];
+            let my_pos = pos[&hash];
             for parent in parents {
                 if let Some(&parent_pos) = pos.get(&parent) {
                     assert!(
@@ -2493,7 +2497,7 @@ mod tests {
                         "topo violation: parent {} at pos {} but child {} at pos {}",
                         parent,
                         parent_pos,
-                        info.hash,
+                        hash,
                         my_pos
                     );
                 }
@@ -2507,27 +2511,21 @@ mod tests {
         let (store, [ha, hb, hc, hd, he, hf, hg]) = build_double_diamond();
         let path = store.get_path(&ha, &hg).unwrap();
         assert_eq!(path.len(), 6); // everything except A
-
-        let hashes: Vec<Hash> = path.iter().map(|i| i.hash).collect();
         for h in [hb, hc, hd, he, hf, hg] {
-            assert!(hashes.contains(&h), "path should contain {}", h);
+            assert!(path.contains(&h), "path should contain {}", h);
         }
-        assert_eq!(*hashes.last().unwrap(), hg);
+        assert_eq!(*path.last().unwrap(), hg);
     }
 
     #[test]
     fn get_path_unrelated_from() {
-        // `from` is not an ancestor of `to` — the BFS from `to` will
-        // never hit `from`, so the subgraph extends back to genesis.
+        // `from` is not an ancestor of `to` — B and C are siblings (both
+        // depend on A). C is not a causal descendant of B.
         let (store, _ha, hash_b, hash_c, _hd) = build_diamond_dag();
-        // B and C are siblings. get_path(B, C) — C doesn't descend from B.
-        // The BFS from C goes: C → deps=[A]. A != B, so A is explored.
-        // A → no parents (store_prev=ZERO). Subgraph = {C, A} minus
-        // boundary {B}. A is included since it's not B.
+        // Forward reachability from B finds no children in the subgraph,
+        // so the entire subgraph is pruned and the result is empty.
         let path = store.get_path(&hash_b, &hash_c).unwrap();
-        let hashes: Vec<Hash> = path.iter().map(|i| i.hash).collect();
-        // C must be in the path (it's `to`)
-        assert!(hashes.contains(&hash_c));
+        assert!(path.is_empty());
     }
 
     #[test]
@@ -2535,17 +2533,5 @@ mod tests {
         let (store, hash_a, _, _, _) = build_diamond_dag();
         let bogus = Hash([0xFF; 32]);
         assert!(store.get_path(&hash_a, &bogus).is_err());
-    }
-
-    #[test]
-    fn get_path_payload_preserved() {
-        // Verify IntentionInfo fields are correct, not just hashes
-        let (store, hash_a, hash_b, _, _) = build_diamond_dag();
-        let path = store.get_path(&hash_a, &hash_b).unwrap();
-        assert_eq!(path.len(), 1);
-        assert_eq!(path[0].hash, hash_b);
-        assert_eq!(path[0].payload, vec![0xB]);
-        let (_, pk1) = make_key();
-        assert_eq!(path[0].author, pk1);
     }
 }

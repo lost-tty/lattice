@@ -71,9 +71,7 @@ Reduce what state machines store per conflict domain. Currently each key persist
 ### 14F: Conflict Surfacing
 - [x] **Conflict detection on read.** `get(key)` returns `GetResult { value, conflicted }`. `list()` returns `KeyValuePair { key, value, conflicted }`. Both check `heads.len() > 1` during decode — no DAG query needed.
 - [x] **`Inspect` command.** `Inspect key=<k>` returns full conflict state: `exists`, `value`, `tombstone`, `conflicted`, `heads[]` (all head hashes, winner first), `head_count`. Typed API: `KvStoreExt::inspect() -> KeyInspection`. Each head hash can be investigated further with `debug intention <hash>`.
-- [ ] **Conflict detail query.** Client can dereference the head hashes into the DAG to get full intention metadata: payloads (the conflicting values), authors, timestamps, causal deps. This is the slow path, only used for HITL or debugging. Requires plumbing `DagQueries` to `CommandHandler` (currently only available at apply time).
 - [ ] **Branch inspection.** Given head hashes, the kernel provides LCA (fork point), paths from fork to each head, branch metadata. Uses 14A primitives.
-- [ ] **`history --from <hash> [--from <hash>]`.** Walk backward from one or more intention hashes, showing the causal ancestry subgraph. With a single hash: linear chain to genesis. With multiple hashes (e.g. from `Inspect` on a conflicted key): show the fork — walk both branches back to their LCA, rendering the divergence. Builds on `DagQueries::get_path()` and `find_lca()`.
 
 ---
 

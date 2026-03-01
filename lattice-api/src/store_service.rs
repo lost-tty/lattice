@@ -2,8 +2,9 @@
 
 use crate::backend::Backend;
 use crate::proto::{
-    store_service_server::StoreService, CreateStoreRequest, DebugInfo, DeleteStoreRequest, Empty,
-    FloatingIntentionsResponse, GetIntentionRequest, GetIntentionResponse, PeerStrategyResponse,
+    store_service_server::StoreService, BranchPath, CreateStoreRequest, DebugInfo,
+    DeleteStoreRequest, Empty, FloatingIntentionsResponse, GetIntentionRequest,
+    GetIntentionResponse, InspectBranchRequest, InspectBranchResponse, PeerStrategyResponse,
     SetStoreNameRequest, StoreDetails, StoreId, StoreList, StoreMeta, StoreNameResponse, StoreRef,
     SystemEntry, SystemListResponse, WitnessLogRequest, WitnessLogResponse,
 };
@@ -290,6 +291,35 @@ impl StoreService for StoreServiceImpl {
             .store_peer_invite(store_id)
             .await
             .map(|token| Response::new(crate::proto::InviteToken { token }))
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    async fn inspect_branch(
+        &self,
+        request: Request<InspectBranchRequest>,
+    ) -> Result<Response<InspectBranchResponse>, Status> {
+        let req = request.into_inner();
+        let store_id = Self::parse_uuid(&req.store_id)?;
+        self.backend
+            .store_inspect_branch(store_id, req.heads)
+            .await
+            .map(|inspection| {
+                Response::new(InspectBranchResponse {
+                    lca: inspection.lca.as_bytes().to_vec(),
+                    branches: inspection
+                        .branches
+                        .into_iter()
+                        .map(|bp| BranchPath {
+                            head: bp.head.as_bytes().to_vec(),
+                            hashes: bp
+                                .hashes
+                                .into_iter()
+                                .map(|h| h.as_bytes().to_vec())
+                                .collect(),
+                        })
+                        .collect(),
+                })
+            })
             .map_err(|e| Status::internal(e.to_string()))
     }
 }

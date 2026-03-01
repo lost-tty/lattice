@@ -577,6 +577,114 @@ pub async fn cmd_store_debug_intention(
     Ok(Continue)
 }
 
+pub async fn cmd_store_debug_branch(
+    backend: &dyn LatticeBackend,
+    store_id: Option<Uuid>,
+    hashes: &[String],
+    writer: Writer,
+) -> CmdResult {
+    let mut w = writer.clone();
+
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "No store selected.");
+            return Ok(Continue);
+        }
+    };
+
+    if hashes.len() < 2 {
+        let _ = writeln!(w, "Need at least two head hashes.");
+        return Ok(Continue);
+    }
+
+    // Parse hex hashes
+    let mut head_bytes: Vec<Vec<u8>> = Vec::new();
+    for h in hashes {
+        let h = h.trim_end_matches('…');
+        match hex::decode(h.to_lowercase()) {
+            Ok(b) if !b.is_empty() && b.len() <= 32 => head_bytes.push(b),
+            _ => {
+                let _ = writeln!(w, "Invalid hex hash: {}", h);
+                return Ok(Continue);
+            }
+        }
+    }
+
+    // Resolve prefixes to full hashes
+    let mut full_hashes: Vec<Vec<u8>> = Vec::new();
+    for prefix in &head_bytes {
+        match backend.store_get_intention(store_id, prefix).await {
+            Ok(results) if results.len() == 1 => {
+                full_hashes.push(results[0].intention.hash.clone());
+            }
+            Ok(results) if results.is_empty() => {
+                let _ = writeln!(w, "No intention found for prefix {}", hex::encode(prefix));
+                return Ok(Continue);
+            }
+            Ok(results) => {
+                let matches: Vec<String> =
+                    results.iter().map(|d| hex::encode(&d.intention.hash)).collect();
+                let _ = writeln!(
+                    w,
+                    "Ambiguous prefix {}: {}",
+                    hex::encode(prefix),
+                    matches.join(", ")
+                );
+                return Ok(Continue);
+            }
+            Err(e) => {
+                let _ = writeln!(w, "Error: {}", e);
+                return Ok(Continue);
+            }
+        }
+    }
+
+    match backend
+        .store_inspect_branch(store_id, full_hashes.clone())
+        .await
+    {
+        Ok(inspection) => {
+            let lca_hex = hex::encode(inspection.lca.as_bytes());
+            let _ = writeln!(w, "LCA: {}…\n", &lca_hex[..12.min(lca_hex.len())]);
+
+            for (i, branch) in inspection.branches.iter().enumerate() {
+                let head_hex = hex::encode(branch.head.as_bytes());
+                let _ = writeln!(
+                    w,
+                    "Branch {} → {}… ({} intention{})",
+                    i + 1,
+                    &head_hex[..12.min(head_hex.len())],
+                    branch.hashes.len(),
+                    if branch.hashes.len() == 1 { "" } else { "s" }
+                );
+                for hash in &branch.hashes {
+                    let label = match backend
+                        .store_get_intention(store_id, hash.as_bytes())
+                        .await
+                    {
+                        Ok(results) if results.len() == 1 => {
+                            let sexpr = detail_to_sexpr_short(&results[0]);
+                            crate::display_helpers::render_sexpr_colored(&sexpr, 8)
+                        }
+                        _ => {
+                            let hash_hex = hex::encode(hash.as_bytes());
+                            format!("{}…", &hash_hex[..12.min(hash_hex.len())])
+                        }
+                    };
+                    let _ = writeln!(w, "  {}", label);
+                }
+                let _ = writeln!(w);
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+        }
+    }
+
+    Ok(Continue)
+}
+
 fn detail_to_sexpr(detail: &lattice_runtime::IntentionDetail) -> SExpr {
     let intention = &detail.intention;
     let mut fields: Vec<SExpr> = vec![SExpr::sym("intention")];
