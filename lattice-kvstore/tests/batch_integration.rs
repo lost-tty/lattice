@@ -33,7 +33,7 @@ async fn test_batch_deduplication() {
         .expect("commit failed");
 
     let val = store.get(b"key".to_vec()).await.unwrap();
-    assert_eq!(val, Some(b"final_val".to_vec()));
+    assert_eq!(val.value, Some(b"final_val".to_vec()));
 }
 
 #[tokio::test]
@@ -53,10 +53,10 @@ async fn test_batch_large() {
 
     // Verify a few random keys
     let v0 = store.get(b"k0".to_vec()).await.unwrap();
-    assert_eq!(v0, Some(b"v0".to_vec()));
+    assert_eq!(v0.value, Some(b"v0".to_vec()));
 
     let v99 = store.get(b"k99".to_vec()).await.unwrap();
-    assert_eq!(v99, Some(b"v99".to_vec()));
+    assert_eq!(v99.value, Some(b"v99".to_vec()));
 }
 
 #[tokio::test]
@@ -67,7 +67,7 @@ async fn test_batch_empty_key_rejected() {
 
     if let Ok(_) = res {
         let val = store.get(b"".to_vec()).await.unwrap();
-        assert_eq!(val, Some(b"val".to_vec()));
+        assert_eq!(val.value, Some(b"val".to_vec()));
     }
 }
 
@@ -86,5 +86,5 @@ async fn test_batch_binary_keys() {
         .expect("binary batch failed");
 
     let res = store.get(key).await.unwrap();
-    assert_eq!(res, Some(val));
+    assert_eq!(res.value, Some(val));
 }

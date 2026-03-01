@@ -19,9 +19,11 @@ async fn wait_for_entry(store: &Arc<dyn StoreHandle>, key: &[u8], expected: &[u8
     let start = std::time::Instant::now();
 
     while start.elapsed() < timeout {
-        if let Ok(Some(val)) = store.get(key.to_vec()).await {
-            if val == expected {
-                return true;
+        if let Ok(result) = store.get(key.to_vec()).await {
+            if let Some(val) = result.value {
+                if val == expected {
+                    return true;
+                }
             }
         }
         sleep(Duration::from_millis(50)).await;

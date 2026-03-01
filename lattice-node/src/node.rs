@@ -775,7 +775,7 @@ mod tests {
             .await
             .expect("put failed");
         let val = store.get(b"/key".to_vec()).await.expect("get failed");
-        assert_eq!(val, Some(b"value".to_vec()));
+        assert_eq!(val.value, Some(b"value".to_vec()));
 
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -812,10 +812,10 @@ mod tests {
             .open(store_b, STORE_TYPE_KVSTORE)
             .expect("open B");
         let val_b = store_b.get(b"/key".to_vec()).await.expect("B get");
-        assert_eq!(val_b, None);
+        assert_eq!(val_b.value, None);
 
         let val_a = store_a.get(b"/key".to_vec()).await.expect("A get");
-        assert_eq!(val_a, Some(b"from A".to_vec()));
+        assert_eq!(val_a.value, Some(b"from A".to_vec()));
 
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -1097,9 +1097,9 @@ mod tests {
         let b_val = store_b.get(b"/key".to_vec()).await.expect("B get");
 
         // A sees "from A" (its own write wins locally)
-        assert_eq!(a_val, Some(b"from A".to_vec()));
+        assert_eq!(a_val.value, Some(b"from A".to_vec()));
         // B sees "from B" (its own write wins locally)
-        assert_eq!(b_val, Some(b"from B".to_vec()));
+        assert_eq!(b_val.value, Some(b"from B".to_vec()));
 
         // Cleanup
         let _ = std::fs::remove_dir_all(data_dir_a.base());

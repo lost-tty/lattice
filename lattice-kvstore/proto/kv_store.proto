@@ -8,6 +8,7 @@ service KvStore {
     rpc Delete (DeleteRequest) returns (DeleteResponse);
     rpc List (ListRequest) returns (ListResponse);
     rpc Batch (BatchRequest) returns (BatchResponse);
+    rpc Inspect (InspectRequest) returns (InspectResponse);
 }
 
 // --- Batch Operations ---
@@ -38,6 +39,21 @@ message GetRequest {
 
 message GetResponse {
     optional bytes value = 1;
+    bool conflicted = 2;  // true when heads.len() > 1 (concurrent writes exist)
+}
+
+message InspectRequest {
+    bytes key = 1;
+}
+
+message InspectResponse {
+    bytes key = 1;                // Echo back the key
+    bool exists = 2;              // true if the key has any state (value or tombstone)
+    optional bytes value = 3;     // LWW winner value (None for tombstone / missing)
+    bool tombstone = 4;           // true if the winner is a delete
+    bool conflicted = 5;          // true when heads.len() > 1
+    repeated bytes heads = 6;     // Intention hashes of all heads (heads[0] = winner)
+    uint32 head_count = 7;        // Convenience: heads.len()
 }
 
 message DeleteRequest {
@@ -60,6 +76,7 @@ message ListResponse {
 message KeyValuePair {
     bytes key = 1;
     bytes value = 2;
+    bool conflicted = 3;  // true when heads.len() > 1 (concurrent writes exist)
 }
 
 // --- Payload Types (log entry format) ---

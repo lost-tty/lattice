@@ -54,7 +54,7 @@ async fn test_large_dataset_sync() {
         let key = format!("/key/{}", i).into_bytes();
         let expected_val = format!("val_{}", i).into_bytes();
         let val = store_b.get(key).await.expect("get");
-        assert_eq!(val, Some(expected_val), "Mismatch at index {}", i);
+        assert_eq!(val.value, Some(expected_val), "Mismatch at index {}", i);
     }
 }
 
@@ -88,14 +88,14 @@ async fn test_bidirectional_sync() {
             .get(format!("/b/{}", i).into_bytes())
             .await
             .expect("get");
-        assert_eq!(val, Some(b"val_b".to_vec()), "A missing B's data at {}", i);
+        assert_eq!(val.value, Some(b"val_b".to_vec()), "A missing B's data at {}", i);
     }
     for i in 0..COUNT {
         let val = store_b
             .get(format!("/a/{}", i).into_bytes())
             .await
             .expect("get");
-        assert_eq!(val, Some(b"val_a".to_vec()), "B missing A's data at {}", i);
+        assert_eq!(val.value, Some(b"val_a".to_vec()), "B missing A's data at {}", i);
     }
 }
 
@@ -162,14 +162,14 @@ async fn test_interleaved_modifications() {
             .get(format!("/live/{}", i).into_bytes())
             .await
             .expect("get");
-        assert_eq!(val, Some(b"val".to_vec()), "Missing live data at {}", i);
+        assert_eq!(val.value, Some(b"val".to_vec()), "Missing live data at {}", i);
     }
     for i in 0..COUNT {
         let val = store_b
             .get(format!("/init/{}", i).into_bytes())
             .await
             .expect("get");
-        assert_eq!(val, Some(b"val".to_vec()), "Missing init data at {}", i);
+        assert_eq!(val.value, Some(b"val".to_vec()), "Missing init data at {}", i);
     }
 }
 
@@ -254,11 +254,11 @@ async fn test_partition_recovery() {
     server_b.sync_all_by_id(store_id).await.expect("sync b");
     server_c.sync_all_by_id(store_id).await.expect("sync c");
     assert_eq!(
-        store_b.get(b"shared_key".to_vec()).await.unwrap(),
+        store_b.get(b"shared_key".to_vec()).await.unwrap().value,
         Some(b"shared_val".to_vec())
     );
     assert_eq!(
-        store_c.get(b"shared_key".to_vec()).await.unwrap(),
+        store_c.get(b"shared_key".to_vec()).await.unwrap().value,
         Some(b"shared_val".to_vec())
     );
 
@@ -334,13 +334,13 @@ async fn test_partition_recovery() {
     // === Phase 4: Validation ===
     for i in 0..COUNT {
         assert_eq!(
-            store_a.get(format!("/b/{}", i).into_bytes()).await.unwrap(),
+            store_a.get(format!("/b/{}", i).into_bytes()).await.unwrap().value,
             Some(b"val_b".to_vec()),
             "A missing B {}",
             i
         );
         assert_eq!(
-            store_a.get(format!("/c/{}", i).into_bytes()).await.unwrap(),
+            store_a.get(format!("/c/{}", i).into_bytes()).await.unwrap().value,
             Some(b"val_c".to_vec()),
             "A missing C {}",
             i
@@ -348,13 +348,13 @@ async fn test_partition_recovery() {
     }
     for i in 0..COUNT {
         assert_eq!(
-            store_b.get(format!("/a/{}", i).into_bytes()).await.unwrap(),
+            store_b.get(format!("/a/{}", i).into_bytes()).await.unwrap().value,
             Some(b"val_a".to_vec()),
             "B missing A {}",
             i
         );
         assert_eq!(
-            store_b.get(format!("/c/{}", i).into_bytes()).await.unwrap(),
+            store_b.get(format!("/c/{}", i).into_bytes()).await.unwrap().value,
             Some(b"val_c".to_vec()),
             "B missing C {}",
             i
@@ -362,13 +362,13 @@ async fn test_partition_recovery() {
     }
     for i in 0..COUNT {
         assert_eq!(
-            store_c.get(format!("/a/{}", i).into_bytes()).await.unwrap(),
+            store_c.get(format!("/a/{}", i).into_bytes()).await.unwrap().value,
             Some(b"val_a".to_vec()),
             "C missing A {}",
             i
         );
         assert_eq!(
-            store_c.get(format!("/b/{}", i).into_bytes()).await.unwrap(),
+            store_c.get(format!("/b/{}", i).into_bytes()).await.unwrap().value,
             Some(b"val_b".to_vec()),
             "C missing B {}",
             i

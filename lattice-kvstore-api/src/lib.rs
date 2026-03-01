@@ -41,18 +41,50 @@ impl std::fmt::Display for DispatchError {
 
 impl std::error::Error for DispatchError {}
 
+/// Result of a `get()` call, containing the materialized value and conflict status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetResult {
+    /// The LWW-resolved value, or `None` for missing keys / tombstones.
+    pub value: Option<Vec<u8>>,
+    /// `true` when multiple concurrent heads exist for this key (i.e. `heads.len() > 1`).
+    /// The returned value is still the LWW winner — this flag is purely informational.
+    pub conflicted: bool,
+}
+
+/// Full inspection of a key's conflict state.
+///
+/// Returned by [`KvStoreExt::inspect()`]. Contains the materialized value,
+/// tombstone/conflict flags, and the raw head hashes for further DAG lookups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyInspection {
+    /// Whether the key has any state at all (value or tombstone).
+    pub exists: bool,
+    /// The LWW winner value, or `None` for tombstone / missing.
+    pub value: Option<Vec<u8>>,
+    /// `true` if the winner is a delete (tombstone).
+    pub tombstone: bool,
+    /// `true` when `heads.len() > 1` (concurrent writes exist).
+    pub conflicted: bool,
+    /// All head hashes. `heads[0]` is the LWW winner; rest are concurrent losers.
+    pub heads: Vec<Hash>,
+}
+
 /// Extension trait for typed KV operations via dispatch.
 ///
 /// This allows any `CommandDispatcher` (including `KvHandle` and `Arc<dyn StoreHandle>`)
 /// to accept typed KV operations, ensuring all calls go through the reflection layer.
 pub trait KvStoreExt: CommandDispatcher + StreamReflectable {
-    /// Get valid value for key (LWW)
+    /// Get valid value for key (LWW), with conflict detection.
+    ///
+    /// Returns a [`GetResult`] containing the materialized value and a `conflicted` flag.
+    /// When `conflicted` is `true`, concurrent writes exist — the value is still the
+    /// deterministic LWW winner, but callers may want to surface the conflict to users.
     fn get(
         &self,
         key: Vec<u8>,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>>>
+            dyn Future<Output = Result<GetResult, Box<dyn std::error::Error + Send + Sync>>>
                 + Send
                 + '_,
         >,
@@ -115,6 +147,23 @@ pub trait KvStoreExt: CommandDispatcher + StreamReflectable {
         >,
     >;
 
+    /// Inspect a key's full conflict state: value, tombstone/conflict flags, and head hashes.
+    ///
+    /// Returns a [`KeyInspection`] with all on-disk metadata for the key.
+    /// Use this to diagnose conflicts — the `heads` field contains the intention
+    /// hashes that can be looked up via `debug intention <hash>` for full details.
+    fn inspect(
+        &self,
+        key: Vec<u8>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<KeyInspection, Box<dyn std::error::Error + Send + Sync>>,
+                > + Send
+                + '_,
+        >,
+    >;
+
     /// Watch for changes matching a pattern via stream subscription
     fn watch(
         &self,
@@ -167,7 +216,7 @@ impl<T: CommandDispatcher + StreamReflectable + ?Sized> KvStoreExt for T {
         key: Vec<u8>,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>>>
+            dyn Future<Output = Result<GetResult, Box<dyn std::error::Error + Send + Sync>>>
                 + Send
                 + '_,
         >,
@@ -178,7 +227,46 @@ impl<T: CommandDispatcher + StreamReflectable + ?Sized> KvStoreExt for T {
                 verbose: false,
             };
             let resp: GetResponse = invoke_command(self, "Get", req).await?;
-            Ok(resp.value)
+            Ok(GetResult {
+                value: resp.value,
+                conflicted: resp.conflicted,
+            })
+        })
+    }
+
+    fn inspect(
+        &self,
+        key: Vec<u8>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<KeyInspection, Box<dyn std::error::Error + Send + Sync>>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let req = InspectRequest { key };
+            let resp: InspectResponse = invoke_command(self, "Inspect", req).await?;
+            let heads = resp
+                .heads
+                .into_iter()
+                .map(|h| {
+                    if h.len() != 32 {
+                        return Err("Invalid hash length in heads".into());
+                    }
+                    let mut bytes = [0u8; 32];
+                    bytes.copy_from_slice(&h);
+                    Ok(Hash::from(bytes))
+                })
+                .collect::<Result<Vec<Hash>, Box<dyn std::error::Error + Send + Sync>>>()?;
+            Ok(KeyInspection {
+                exists: resp.exists,
+                value: resp.value,
+                tombstone: resp.tombstone,
+                conflicted: resp.conflicted,
+                heads,
+            })
         })
     }
 

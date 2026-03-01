@@ -266,7 +266,7 @@ impl<'a> ReadOnlySystemTable<'a> {
             .range(b"peer/".as_slice()..b"peer0".as_slice())
             .map_err(|e| e.to_string())?
         {
-            let (key_bytes, value) = result.map_err(|e| e.to_string())?;
+            let (key_bytes, value, _conflicted) = result.map_err(|e| e.to_string())?;
             let key_str = std::str::from_utf8(&key_bytes).map_err(|_| "Invalid key")?;
 
             // Parse peer/{pk_hex}/status
@@ -323,7 +323,7 @@ impl<'a> ReadOnlySystemTable<'a> {
             .range(prefix.as_slice()..prefix_end.as_slice())
             .map_err(|e| e.to_string())?
         {
-            let (key_bytes, value) = result.map_err(|e| e.to_string())?;
+            let (key_bytes, value, _conflicted) = result.map_err(|e| e.to_string())?;
 
             // Expected format: "child/" + uuid-string(36) + "/name"
             if !key_bytes.ends_with(b"/name") {
@@ -467,7 +467,7 @@ impl<'a> ReadOnlySystemTable<'a> {
 
         // Iterate over all keys in the table
         for result in self.table.iter().map_err(|e| e.to_string())? {
-            let (key_bytes, value) = result.map_err(|e| e.to_string())?;
+            let (key_bytes, value, _conflicted) = result.map_err(|e| e.to_string())?;
             let key_str = String::from_utf8_lossy(&key_bytes).to_string();
 
             if let Some(value) = value {

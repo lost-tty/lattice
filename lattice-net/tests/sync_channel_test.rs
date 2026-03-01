@@ -40,7 +40,7 @@ async fn test_channel_one_way_sync() {
             .get(format!("/key/{}", i).into_bytes())
             .await
             .expect("get");
-        assert_eq!(val, Some(b"val".to_vec()), "B missing item {}", i);
+        assert_eq!(val.value, Some(b"val".to_vec()), "B missing item {}", i);
     }
 }
 
@@ -73,13 +73,13 @@ async fn test_channel_bidirectional_sync() {
 
     // B should have A's data
     assert_eq!(
-        store_b.get(b"/a/x".to_vec()).await.unwrap(),
+        store_b.get(b"/a/x".to_vec()).await.unwrap().value,
         Some(b"val_x".to_vec()),
         "B missing A's data"
     );
     // A should have B's data (symmetric sync)
     assert_eq!(
-        store_a.get(b"/b/y".to_vec()).await.unwrap(),
+        store_a.get(b"/b/y".to_vec()).await.unwrap().value,
         Some(b"val_y".to_vec()),
         "A missing B's data"
     );
@@ -119,7 +119,7 @@ async fn test_channel_large_sync() {
             .await
             .expect("get");
         assert_eq!(
-            val,
+            val.value,
             Some(format!("val_{}", i).into_bytes()),
             "B missing item {}",
             i

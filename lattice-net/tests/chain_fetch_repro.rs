@@ -61,7 +61,8 @@ async fn test_chain_fetch_linear_gap() {
         let val = store_b
             .get(format!("/item/{}", i).into_bytes())
             .await
-            .unwrap();
+            .unwrap()
+            .value;
         assert_eq!(val, Some(b"val".to_vec()), "B missing item {}", i);
     }
 }

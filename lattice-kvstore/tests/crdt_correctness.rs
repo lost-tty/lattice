@@ -329,3 +329,275 @@ fn test_resurrection_causality() {
     );
     assert_eq!(state.get(key).unwrap(), Some(b"v2".to_vec()));
 }
+
+// ==================== Conflict Detection Tests ====================
+
+/// Test that get() via the typed API returns conflicted=true when concurrent writes exist.
+#[tokio::test]
+async fn test_get_conflict_flag_on_concurrent_writes() {
+    let store = TestStore::new();
+    let dag = HashMapDag::new();
+
+    let key = b"conflict_detect";
+    let author1 = PubKey::from([1u8; 32]);
+    let author2 = PubKey::from([2u8; 32]);
+    let hlc = HLC::now();
+
+    // Single write — not conflicted
+    let op1 = create_test_op(
+        key,
+        b"val1",
+        author1,
+        Hash::from([0xA1; 32]),
+        hlc,
+        Hash::ZERO,
+        &[],
+    );
+    dag.record(&op1);
+    store.state.apply(&op1, &dag).unwrap();
+
+    let result = store.get(key.to_vec()).await.unwrap();
+    assert!(
+        !result.conflicted,
+        "Single write should not be conflicted"
+    );
+    assert_eq!(result.value, Some(b"val1".to_vec()));
+
+    // Concurrent write — conflicted
+    let op2 = create_test_op(
+        key,
+        b"val2",
+        author2,
+        Hash::from([0xB2; 32]),
+        hlc,
+        Hash::ZERO,
+        &[],
+    );
+    dag.record(&op2);
+    store.state.apply(&op2, &dag).unwrap();
+
+    let result = store.get(key.to_vec()).await.unwrap();
+    assert!(
+        result.conflicted,
+        "Concurrent writes should flag as conflicted"
+    );
+    assert!(
+        result.value.is_some(),
+        "LWW winner should still be returned"
+    );
+}
+
+/// Test that get() returns conflicted=false after a merge resolves the conflict.
+#[tokio::test]
+async fn test_get_conflict_flag_cleared_after_merge() {
+    let store = TestStore::new();
+    let dag = HashMapDag::new();
+
+    let key = b"merge_detect";
+    let author1 = PubKey::from([1u8; 32]);
+    let author2 = PubKey::from([2u8; 32]);
+    let hlc = HLC::now();
+    let hash1 = Hash::from([0xA1; 32]);
+    let hash2 = Hash::from([0xB2; 32]);
+
+    // Two concurrent writes — conflicted
+    let op1 = create_test_op(key, b"val1", author1, hash1, hlc, Hash::ZERO, &[]);
+    let op2 = create_test_op(key, b"val2", author2, hash2, hlc, Hash::ZERO, &[]);
+    dag.record(&op1);
+    dag.record(&op2);
+    store.state.apply(&op1, &dag).unwrap();
+    store.state.apply(&op2, &dag).unwrap();
+
+    let result = store.get(key.to_vec()).await.unwrap();
+    assert!(result.conflicted, "Should be conflicted before merge");
+
+    // Merge: new op that causally depends on both heads
+    let hlc3 = next_hlc(hlc);
+    let hash3 = Hash::from([0xC3; 32]);
+    let op3 = create_test_op(
+        key,
+        b"merged",
+        author1,
+        hash3,
+        hlc3,
+        hash1, // prev_hash: author1's previous op
+        &[hash1, hash2],
+    );
+    dag.record(&op3);
+    store.state.apply(&op3, &dag).unwrap();
+
+    let result = store.get(key.to_vec()).await.unwrap();
+    assert!(
+        !result.conflicted,
+        "Conflict should be resolved after merge"
+    );
+    assert_eq!(result.value, Some(b"merged".to_vec()));
+}
+
+/// Test that get() returns conflicted=false for missing keys.
+#[tokio::test]
+async fn test_get_conflict_flag_missing_key() {
+    let store = TestStore::new();
+
+    let result = store.get(b"nonexistent".to_vec()).await.unwrap();
+    assert!(!result.conflicted, "Missing key should not be conflicted");
+    assert_eq!(result.value, None);
+}
+
+/// Test that list() surfaces the conflicted flag per item.
+#[tokio::test]
+async fn test_list_conflict_flag() {
+    let store = TestStore::new();
+    let dag = HashMapDag::new();
+
+    let author1 = PubKey::from([1u8; 32]);
+    let author2 = PubKey::from([2u8; 32]);
+    let hlc = HLC::now();
+
+    // Key A: single write — not conflicted
+    let op_a = create_test_op(
+        b"a",
+        b"val_a",
+        author1,
+        Hash::from([0x01; 32]),
+        hlc,
+        Hash::ZERO,
+        &[],
+    );
+    dag.record(&op_a);
+    store.state.apply(&op_a, &dag).unwrap();
+
+    // Key B: concurrent writes — conflicted
+    let op_b1 = create_test_op(
+        b"b",
+        b"val_b1",
+        author1,
+        Hash::from([0x02; 32]),
+        hlc,
+        Hash::from([0x01; 32]), // prev_hash: author1's previous op (op_a)
+        &[],
+    );
+    let op_b2 = create_test_op(
+        b"b",
+        b"val_b2",
+        author2,
+        Hash::from([0x03; 32]),
+        hlc,
+        Hash::ZERO,
+        &[],
+    );
+    dag.record(&op_b1);
+    dag.record(&op_b2);
+    store.state.apply(&op_b1, &dag).unwrap();
+    store.state.apply(&op_b2, &dag).unwrap();
+
+    let items = store.list().await.unwrap();
+    assert_eq!(items.len(), 2, "Should have 2 live keys");
+
+    let item_a = items.iter().find(|i| i.key == b"a").expect("key 'a' missing");
+    let item_b = items.iter().find(|i| i.key == b"b").expect("key 'b' missing");
+
+    assert!(
+        !item_a.conflicted,
+        "Key 'a' with single write should not be conflicted"
+    );
+    assert!(
+        item_b.conflicted,
+        "Key 'b' with concurrent writes should be conflicted"
+    );
+}
+
+// ==================== Inspect Command Tests ====================
+
+/// Test inspect on a missing key.
+#[tokio::test]
+async fn test_inspect_missing_key() {
+    let store = TestStore::new();
+
+    let info = store.inspect(b"nonexistent".to_vec()).await.unwrap();
+    assert!(!info.exists);
+    assert_eq!(info.value, None);
+    assert!(!info.tombstone);
+    assert!(!info.conflicted);
+    assert!(info.heads.is_empty());
+}
+
+/// Test inspect on a single live key.
+#[tokio::test]
+async fn test_inspect_single_head() {
+    let store = TestStore::new();
+    let dag = HashMapDag::new();
+
+    let key = b"inspect_single";
+    let author = PubKey::from([1u8; 32]);
+    let hlc = HLC::now();
+    let hash = Hash::from([0xAA; 32]);
+
+    let op = create_test_op(key, b"val", author, hash, hlc, Hash::ZERO, &[]);
+    dag.record(&op);
+    store.state.apply(&op, &dag).unwrap();
+
+    let info = store.inspect(key.to_vec()).await.unwrap();
+    assert!(info.exists);
+    assert_eq!(info.value, Some(b"val".to_vec()));
+    assert!(!info.tombstone);
+    assert!(!info.conflicted);
+    assert_eq!(info.heads, vec![hash]);
+}
+
+/// Test inspect on a tombstoned key.
+#[tokio::test]
+async fn test_inspect_tombstone() {
+    let store = TestStore::new();
+    let key = b"inspect_tomb";
+    let author = PubKey::from([1u8; 32]);
+    let hlc = HLC::now();
+    let put_hash = Hash::from([0xA1; 32]);
+
+    // Put then delete
+    let op1 = create_test_op(key, b"val", author, put_hash, hlc, Hash::ZERO, &[]);
+    store.state.apply(&op1, &NULL_DAG).unwrap();
+
+    let del_hlc = next_hlc(hlc);
+    let del_hash = Hash::from([0xA2; 32]);
+    let op2 = create_delete_op(key, author, del_hash, del_hlc, put_hash, &[put_hash]);
+    store.state.apply(&op2, &NULL_DAG).unwrap();
+
+    let info = store.inspect(key.to_vec()).await.unwrap();
+    assert!(info.exists);
+    assert_eq!(info.value, None);
+    assert!(info.tombstone);
+    assert!(!info.conflicted);
+    assert_eq!(info.heads, vec![del_hash]);
+}
+
+/// Test inspect on a conflicted key — shows both head hashes.
+#[tokio::test]
+async fn test_inspect_conflicted() {
+    let store = TestStore::new();
+    let dag = HashMapDag::new();
+
+    let key = b"inspect_conflict";
+    let author1 = PubKey::from([1u8; 32]);
+    let author2 = PubKey::from([2u8; 32]);
+    let hlc = HLC::now();
+    let hash1 = Hash::from([0xA1; 32]);
+    let hash2 = Hash::from([0xB2; 32]);
+
+    let op1 = create_test_op(key, b"v1", author1, hash1, hlc, Hash::ZERO, &[]);
+    let op2 = create_test_op(key, b"v2", author2, hash2, hlc, Hash::ZERO, &[]);
+    dag.record(&op1);
+    dag.record(&op2);
+    store.state.apply(&op1, &dag).unwrap();
+    store.state.apply(&op2, &dag).unwrap();
+
+    let info = store.inspect(key.to_vec()).await.unwrap();
+    assert!(info.exists);
+    assert!(info.value.is_some(), "LWW winner should be returned");
+    assert!(!info.tombstone);
+    assert!(info.conflicted);
+    assert_eq!(info.heads.len(), 2, "Should have 2 head hashes");
+    // Both hashes should be present (order: winner first)
+    assert!(info.heads.contains(&hash1));
+    assert!(info.heads.contains(&hash2));
+}

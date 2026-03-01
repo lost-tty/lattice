@@ -84,6 +84,49 @@ impl KvState {
             .map_err(|e| StateDbError::Conversion(e.to_string()))
     }
 
+    /// Get the materialized LWW value and conflict status for a key in a single read txn.
+    ///
+    /// Returns `(value, conflicted)` where `conflicted` is true when `heads.len() > 1`,
+    /// indicating concurrent writes exist for this key.
+    pub fn get_with_conflict(
+        &self,
+        key: &[u8],
+    ) -> Result<(Option<Vec<u8>>, bool), StateDbError> {
+        let txn = self.backend.db().begin_read()?;
+        let table = match txn.open_table(TABLE_DATA) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok((None, false)),
+            Err(e) => return Err(e.into()),
+        };
+        let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
+        ro.get_with_conflict(key)
+            .map_err(|e| StateDbError::Conversion(e.to_string()))
+    }
+
+    /// Full inspection of a key: value, tombstone/conflict status, and all head hashes.
+    pub fn inspect(
+        &self,
+        key: &[u8],
+    ) -> Result<lattice_kvtable::InspectResult, StateDbError> {
+        let txn = self.backend.db().begin_read()?;
+        let table = match txn.open_table(TABLE_DATA) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return Ok(lattice_kvtable::InspectResult {
+                    exists: false,
+                    value: None,
+                    tombstone: false,
+                    conflicted: false,
+                    heads: Vec::new(),
+                })
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
+        ro.inspect(key)
+            .map_err(|e| StateDbError::Conversion(e.to_string()))
+    }
+
     /// Return the head hashes for a key (for causal deps and conflict counting).
     pub fn head_hashes(&self, key: &[u8]) -> Result<Vec<Hash>, StateDbError> {
         let txn = self.backend.db().begin_read()?;
@@ -98,7 +141,7 @@ impl KvState {
     }
 
     /// Scan keys with optional prefix and regex filter.
-    /// Calls visitor for each matching entry with the LWW-resolved value.
+    /// Calls visitor for each matching entry with the LWW-resolved value and conflict status.
     /// Visitor returns Ok(true) to continue, Ok(false) to stop.
     pub fn scan<F>(
         &self,
@@ -107,7 +150,7 @@ impl KvState {
         mut visitor: F,
     ) -> Result<(), StateDbError>
     where
-        F: FnMut(Vec<u8>, Option<Vec<u8>>) -> Result<bool, StateDbError>,
+        F: FnMut(Vec<u8>, Option<Vec<u8>>, bool) -> Result<bool, StateDbError>,
     {
         let txn = self.backend.db().begin_read()?;
         let table = match txn.open_table(TABLE_DATA) {
@@ -121,7 +164,8 @@ impl KvState {
             .range(prefix..)
             .map_err(|e| StateDbError::Conversion(e.to_string()))?
         {
-            let (key, value) = result.map_err(|e| StateDbError::Conversion(e.to_string()))?;
+            let (key, value, conflicted) =
+                result.map_err(|e| StateDbError::Conversion(e.to_string()))?;
 
             if !key.starts_with(prefix) {
                 break;
@@ -133,7 +177,7 @@ impl KvState {
                 }
             }
 
-            if !visitor(key, value)? {
+            if !visitor(key, value, conflicted)? {
                 break;
             }
         }
@@ -257,6 +301,10 @@ impl Introspectable for KvState {
         docs.insert("Get".to_string(), "Get value for key".to_string());
         docs.insert("Delete".to_string(), "Delete a key".to_string());
         docs.insert("List".to_string(), "List keys by prefix".to_string());
+        docs.insert(
+            "Inspect".to_string(),
+            "Inspect a key: value, conflict status, and head hashes".to_string(),
+        );
         docs
     }
 
@@ -269,12 +317,23 @@ impl Introspectable for KvState {
         formats.insert("PutRequest.value".to_string(), FieldFormat::Utf8);
         formats.insert("GetRequest.key".to_string(), FieldFormat::Utf8);
         formats.insert("GetResponse.value".to_string(), FieldFormat::Utf8);
+        formats.insert("GetResponse.conflicted".to_string(), FieldFormat::Default);
         formats.insert("DeleteRequest.key".to_string(), FieldFormat::Utf8);
         formats.insert("ListRequest.prefix".to_string(), FieldFormat::Utf8);
 
         // List Item hints
         formats.insert("KeyValuePair.key".to_string(), FieldFormat::Utf8);
         formats.insert("KeyValuePair.value".to_string(), FieldFormat::Utf8);
+        formats.insert(
+            "KeyValuePair.conflicted".to_string(),
+            FieldFormat::Default,
+        );
+
+        // Inspect hints
+        formats.insert("InspectRequest.key".to_string(), FieldFormat::Utf8);
+        formats.insert("InspectResponse.key".to_string(), FieldFormat::Utf8);
+        formats.insert("InspectResponse.value".to_string(), FieldFormat::Utf8);
+        formats.insert("InspectResponse.heads".to_string(), FieldFormat::Hex);
 
         // Payload/Op hints (for log inspection)
         formats.insert("PutOp.value".to_string(), FieldFormat::Utf8);
@@ -485,7 +544,7 @@ impl KvState {
 
 use crate::proto::{
     BatchRequest, BatchResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse,
-    ListRequest, ListResponse, Operation, PutRequest, PutResponse,
+    InspectRequest, InspectResponse, ListRequest, ListResponse, Operation, PutRequest, PutResponse,
 };
 use lattice_model::StateWriter;
 use lattice_store_base::{dispatch::dispatch_method, CommandHandler};
@@ -543,6 +602,10 @@ impl CommandHandler for KvState {
                     })
                     .await
                 }
+                "Inspect" => {
+                    dispatch_method(method_name, request, desc, |req| self.handle_inspect(req))
+                        .await
+                }
                 _ => Err(format!("Unknown method: {}", method_name).into()),
             }
         })
@@ -596,10 +659,28 @@ impl KvState {
         &self,
         req: GetRequest,
     ) -> Result<GetResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let value = self
-            .get(&req.key)
+        let (value, conflicted) = self
+            .get_with_conflict(&req.key)
             .map_err(|e| format!("State error: {}", e))?;
-        Ok(GetResponse { value })
+        Ok(GetResponse { value, conflicted })
+    }
+
+    async fn handle_inspect(
+        &self,
+        req: InspectRequest,
+    ) -> Result<InspectResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let result = self
+            .inspect(&req.key)
+            .map_err(|e| format!("State error: {}", e))?;
+        Ok(InspectResponse {
+            key: req.key,
+            exists: result.exists,
+            value: result.value,
+            tombstone: result.tombstone,
+            conflicted: result.conflicted,
+            heads: result.heads.iter().map(|h| h.as_bytes().to_vec()).collect(),
+            head_count: result.heads.len() as u32,
+        })
     }
 
     async fn handle_list(
@@ -609,9 +690,13 @@ impl KvState {
         let mut items = Vec::new();
         let prefix = req.prefix;
 
-        self.scan(&prefix, None, |key, value| {
+        self.scan(&prefix, None, |key, value, conflicted| {
             if let Some(val) = value {
-                items.push(crate::proto::KeyValuePair { key, value: val });
+                items.push(crate::proto::KeyValuePair {
+                    key,
+                    value: val,
+                    conflicted,
+                });
             }
             Ok(true)
         })

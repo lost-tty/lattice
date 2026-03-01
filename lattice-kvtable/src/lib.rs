@@ -74,6 +74,58 @@ fn decode_lww(raw: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
     }
 }
 
+/// Decode raw bytes and resolve value + conflict status in one pass.
+/// Returns `(value, conflicted)` where `conflicted` is true when `heads.len() > 1`.
+fn decode_lww_with_conflict(raw: &[u8]) -> Result<(Option<Vec<u8>>, bool), KvTableError> {
+    let v = decode_value(raw)?;
+    let conflicted = v.heads.len() > 1;
+    let value = match v.kind {
+        Some(proto::value::Kind::Value(data)) => Some(data),
+        _ => None,
+    };
+    Ok((value, conflicted))
+}
+
+/// Full inspection result for a single key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectResult {
+    /// Whether the key has any state at all.
+    pub exists: bool,
+    /// The LWW winner value, or `None` for tombstone / missing.
+    pub value: Option<Vec<u8>>,
+    /// Whether the winner is a tombstone (delete).
+    pub tombstone: bool,
+    /// Whether concurrent heads exist (`heads.len() > 1`).
+    pub conflicted: bool,
+    /// All head hashes (`heads[0]` = LWW winner).
+    pub heads: Vec<Hash>,
+}
+
+/// Decode raw bytes into a full `InspectResult`.
+fn decode_inspect(raw: &[u8]) -> Result<InspectResult, KvTableError> {
+    let v = decode_value(raw)?;
+    let heads: Vec<Hash> = v
+        .heads
+        .iter()
+        .map(|h| {
+            Hash::try_from(h.as_slice())
+                .map_err(|_| KvTableError::Conversion("bad hash in heads".into()))
+        })
+        .collect::<Result<_, _>>()?;
+    let (value, tombstone) = match &v.kind {
+        Some(proto::value::Kind::Value(data)) => (Some(data.clone()), false),
+        Some(proto::value::Kind::Tombstone(_)) => (None, true),
+        None => (None, false),
+    };
+    Ok(InspectResult {
+        exists: true,
+        value,
+        tombstone,
+        conflicted: heads.len() > 1,
+        heads,
+    })
+}
+
 /// Decode raw bytes and extract head hashes as `Vec<Hash>`.
 fn decode_heads(raw: &[u8]) -> Result<Vec<Hash>, KvTableError> {
     let v = decode_value(raw)?;
@@ -239,11 +291,36 @@ impl<T: ReadableTable<&'static [u8], &'static [u8]>> ReadOnlyKVTable<T> {
         }
     }
 
+    /// Get the materialized LWW value and conflict status for a key.
+    ///
+    /// Returns `(value, conflicted)` where `conflicted` is true when `heads.len() > 1`,
+    /// indicating concurrent writes exist. Decodes once — no extra DAG query needed.
+    pub fn get_with_conflict(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, bool), KvTableError> {
+        match self.table.get(key)? {
+            Some(v) => decode_lww_with_conflict(v.value()),
+            None => Ok((None, false)),
+        }
+    }
+
     /// Return just the head hashes for a key.
     pub fn heads(&self, key: &[u8]) -> Result<Vec<Hash>, KvTableError> {
         match self.table.get(key)? {
             Some(v) => decode_heads(v.value()),
             None => Ok(Vec::new()),
+        }
+    }
+
+    /// Full inspection of a key: value, tombstone status, conflict flag, and all head hashes.
+    pub fn inspect(&self, key: &[u8]) -> Result<InspectResult, KvTableError> {
+        match self.table.get(key)? {
+            Some(v) => decode_inspect(v.value()),
+            None => Ok(InspectResult {
+                exists: false,
+                value: None,
+                tombstone: false,
+                conflicted: false,
+                heads: Vec::new(),
+            }),
         }
     }
 
@@ -275,14 +352,14 @@ impl<T: ReadableTable<&'static [u8], &'static [u8]>> ReadOnlyKVTable<T> {
 
 /// Iterator that wraps a redb `Range`, decoding and LWW-resolving each value.
 ///
-/// Yields `(Vec<u8>, Option<Vec<u8>>)`: owned key bytes and the resolved value
-/// (`None` for tombstones).
+/// Yields `(Vec<u8>, Option<Vec<u8>>, bool)`: owned key bytes, the resolved value
+/// (`None` for tombstones), and a `conflicted` flag (`true` when `heads.len() > 1`).
 pub struct LwwRange<'a> {
     inner: redb::Range<'a, &'static [u8], &'static [u8]>,
 }
 
 impl Iterator for LwwRange<'_> {
-    type Item = Result<(Vec<u8>, Option<Vec<u8>>), KvTableError>;
+    type Item = Result<(Vec<u8>, Option<Vec<u8>>, bool), KvTableError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let result = self.inner.next()?;
@@ -291,8 +368,8 @@ impl Iterator for LwwRange<'_> {
                 .map_err(|e| KvTableError::Storage(e.into()))
                 .and_then(|(k, v)| {
                     let key = k.value().to_vec();
-                    let value = decode_lww(v.value())?;
-                    Ok((key, value))
+                    let (value, conflicted) = decode_lww_with_conflict(v.value())?;
+                    Ok((key, value, conflicted))
                 }),
         )
     }
@@ -359,5 +436,107 @@ mod tests {
             assert_eq!(kvt.get(b"key").unwrap(), None);
         }
         txn.commit().unwrap();
+    }
+
+    #[test]
+    fn get_with_conflict_single_head() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            kvt.apply_head(b"key", &test_info(), &[], b"val".to_vec(), false, &NullDag)
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        let (value, conflicted) = ro.get_with_conflict(b"key").unwrap();
+        assert_eq!(value, Some(b"val".to_vec()));
+        assert!(!conflicted, "Single head should not be conflicted");
+    }
+
+    #[test]
+    fn get_with_conflict_multi_heads() {
+        use lattice_model::dag_queries::HashMapDag;
+        use lattice_model::state_machine::Op;
+
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let dag = HashMapDag::new();
+
+        // Apply two concurrent heads (different authors, same HLC, no deps)
+        let info1 = IntentionInfo {
+            hash: Hash::from([1u8; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+            timestamp: lattice_model::hlc::HLC::new(1, 0),
+            author: PubKey::from([0xAA; 32]),
+        };
+        let info2 = IntentionInfo {
+            hash: Hash::from([2u8; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+            timestamp: lattice_model::hlc::HLC::new(1, 0),
+            author: PubKey::from([0xBB; 32]),
+        };
+
+        // First apply needs no DAG (no existing heads), second needs the first in the DAG
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            // First head — no existing heads, so NullDag suffices
+            kvt.apply_head(b"key", &info1, &[], b"v1".to_vec(), false, &NullDag)
+                .unwrap();
+
+            // Record info1 so the DAG can look it up during LWW comparison
+            let empty_deps: Vec<Hash> = vec![];
+            let op1 = Op {
+                info: info1.clone(),
+                causal_deps: &empty_deps,
+                prev_hash: Hash::ZERO,
+            };
+            dag.record(&op1);
+
+            // Second head — concurrent, DAG needed to compare against current winner
+            kvt.apply_head(b"key", &info2, &[], b"v2".to_vec(), false, &dag)
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        let (value, conflicted) = ro.get_with_conflict(b"key").unwrap();
+        assert!(value.is_some(), "LWW winner should be returned");
+        assert!(conflicted, "Two concurrent heads should be conflicted");
+    }
+
+    #[test]
+    fn get_with_conflict_missing_key() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            txn.open_table(TEST_TABLE).unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        let (value, conflicted) = ro.get_with_conflict(b"nope").unwrap();
+        assert_eq!(value, None);
+        assert!(!conflicted);
     }
 }

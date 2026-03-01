@@ -93,7 +93,8 @@ async fn test_explicit_sync() {
         store_b
             .get(b"/data".to_vec())
             .await
-            .unwrap_or(None)
+            .ok()
+            .and_then(|r| r.value)
             .is_none(),
         "B should not have data before sync"
     );
@@ -108,7 +109,7 @@ async fn test_explicit_sync() {
 
     // Verify entry arrived after sync - no sleep needed, proves RPC pull worked
     let val = store_b.get(b"/data".to_vec()).await.expect("get");
-    assert_eq!(val, Some(b"test".to_vec()));
+    assert_eq!(val.value, Some(b"test".to_vec()));
 
     let _ = std::fs::remove_dir_all(data_a.base());
     let _ = std::fs::remove_dir_all(data_b.base());
@@ -185,7 +186,8 @@ async fn test_sync_multiple_entries() {
         store_b
             .get(b"/key1".to_vec())
             .await
-            .unwrap_or(None)
+            .ok()
+            .and_then(|r| r.value)
             .is_none(),
         "B should not have data before sync"
     );
@@ -198,7 +200,7 @@ async fn test_sync_multiple_entries() {
         let key = format!("/key{}", i);
         let expected = format!("value{}", i);
         let val = store_b.get(key.as_bytes().to_vec()).await.expect("get");
-        assert_eq!(val, Some(expected.into_bytes()), "key{} should sync", i);
+        assert_eq!(val.value, Some(expected.into_bytes()), "key{} should sync", i);
     }
 
     let _ = std::fs::remove_dir_all(data_a.base());

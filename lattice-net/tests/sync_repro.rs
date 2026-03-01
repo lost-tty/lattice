@@ -37,7 +37,7 @@ async fn test_one_way_sync() {
             .get(format!("/key/{}", i).into_bytes())
             .await
             .expect("get");
-        assert_eq!(val, Some(b"val".to_vec()), "B missing item {}", i);
+        assert_eq!(val.value, Some(b"val".to_vec()), "B missing item {}", i);
     }
 }
 
@@ -75,7 +75,7 @@ async fn test_bidirectional_sync() {
     // Verification
     // B should have A's item (Pull worked)
     assert_eq!(
-        store_b.get(b"/a/x".to_vec()).await.unwrap(),
+        store_b.get(b"/a/x".to_vec()).await.unwrap().value,
         Some(b"val_x".to_vec()),
         "B missing A's data"
     );
@@ -83,7 +83,7 @@ async fn test_bidirectional_sync() {
     // A should have B's item (Push worked? OR Negentropy symmetric sync worked?)
     // If this fails, then sync is NOT symmetric in one pass.
     assert_eq!(
-        store_a.get(b"/b/y".to_vec()).await.unwrap(),
+        store_a.get(b"/b/y".to_vec()).await.unwrap().value,
         Some(b"val_y".to_vec()),
         "A missing B's data (Symmetric Sync Failed)"
     );
@@ -125,7 +125,7 @@ async fn test_large_sync() {
             .await
             .expect("get");
         assert_eq!(
-            val,
+            val.value,
             Some(format!("val_{}", i).into_bytes()),
             "B missing item {}",
             i
@@ -213,7 +213,7 @@ async fn test_partition_repro() {
             .await
             .expect("get");
         assert!(
-            val.is_none(),
+            val.value.is_none(),
             "B received data via gossip even though disabled! Item {}",
             i
         );
@@ -231,6 +231,6 @@ async fn test_partition_repro() {
             .get(format!("/new/{}", i).into_bytes())
             .await
             .expect("get");
-        assert_eq!(val, Some(b"val_new".to_vec()), "B missing new item {}", i);
+        assert_eq!(val.value, Some(b"val_new".to_vec()), "B missing new item {}", i);
     }
 }
