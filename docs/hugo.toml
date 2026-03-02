@@ -122,6 +122,11 @@ theme = "lattice-theme"
     parent = "design"
     weight = 70
   [[menus.main]]
+    name = "Multi-App Device Model"
+    pageRef = "/design/multi-app-device"
+    parent = "design"
+    weight = 75
+  [[menus.main]]
     name = "Research & Protocol Evolution"
     pageRef = "/design/research"
     parent = "design"
