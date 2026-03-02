@@ -31,14 +31,35 @@ pub fn content_hash(data: &[u8]) -> Hash {
 // Ed25519 signing
 // ---------------------------------------------------------------------------
 
-/// Sign a BLAKE3 content hash with an Ed25519 signing key.
+/// Trait for signing BLAKE3 content hashes.
 ///
-/// This is the canonical signing pattern in Lattice: compute `blake3(content)`,
-/// then sign the 32-byte digest. Both intentions and witness records use this.
+/// The single abstraction point for all signing in Lattice. Implemented by
+/// `NodeIdentity` (in-process Ed25519) and potentially by HSM/TPM backends.
+pub trait HashSigner: Send + Sync {
+    fn sign_hash(&self, hash: &Hash) -> Signature;
+}
+
+/// Blanket impl: `&T` where `T: HashSigner` is also a `HashSigner`.
+impl<T: HashSigner> HashSigner for &T {
+    fn sign_hash(&self, hash: &Hash) -> Signature {
+        (**self).sign_hash(hash)
+    }
+}
+
+/// Impl for raw Ed25519 signing key (in-process software signer).
+impl HashSigner for ed25519_dalek::SigningKey {
+    fn sign_hash(&self, hash: &Hash) -> Signature {
+        use ed25519_dalek::Signer;
+        let sig = self.sign(hash.as_bytes());
+        Signature(sig.to_bytes())
+    }
+}
+
+/// Sign a BLAKE3 content hash with a raw Ed25519 signing key.
+///
+/// Convenience function. Prefer using `HashSigner` trait for new code.
 pub fn sign_hash(signing_key: &ed25519_dalek::SigningKey, hash: &Hash) -> Signature {
-    use ed25519_dalek::Signer;
-    let sig = signing_key.sign(hash.as_bytes());
-    Signature(sig.to_bytes())
+    signing_key.sign_hash(hash)
 }
 
 // ---------------------------------------------------------------------------

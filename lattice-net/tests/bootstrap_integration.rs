@@ -41,7 +41,7 @@ impl StateMachine for MockState {
 async fn create_store(id: Uuid, identity: NodeIdentity) -> Arc<Store<MockState>> {
     let state = Arc::new(MockState);
     let config = StorageConfig::InMemory;
-    let opened = OpenedStore::new(id, &config, state, identity.signing_key()).unwrap();
+    let opened = OpenedStore::new(id, &config, state).unwrap();
     let (handle, _info, runner) = opened.into_handle(identity).unwrap();
 
     tokio::spawn(async move {
@@ -57,8 +57,8 @@ async fn test_bootstrap_clone_flow() {
     let store_id = Uuid::new_v4();
 
     // Peer A (Source)
-    let node_a_id = NodeIdentity::generate();
-    let store_a = create_store(store_id, node_a_id.clone()).await;
+    let identity_a = NodeIdentity::generate();
+    let store_a = create_store(store_id, identity_a.clone()).await;
 
     // Generate some data in A
     let mut expected_witnesses = Vec::new();
@@ -69,8 +69,8 @@ async fn test_bootstrap_clone_flow() {
     }
 
     // Peer B (Target/Clone)
-    let node_b_id = NodeIdentity::generate();
-    let store_b = create_store(store_id, node_b_id.clone()).await;
+    let identity_b = NodeIdentity::generate();
+    let store_b = create_store(store_id, identity_b.clone()).await;
 
     // A. Verify Store A can scan witness log
     // scan_witness_log returns the stream directly
@@ -117,21 +117,20 @@ async fn test_bootstrap_clone_flow() {
         };
 
         let content_bytes = content.encode_to_vec();
-        // Sign with A's key (since A witnessed them)
-        // MUST hash content before signing to match verify_witness logic
-        use ed25519_dalek::Signer;
-        let digest = blake3::hash(&content_bytes);
-        let sig = node_a_id.signing_key().sign(digest.as_bytes());
+        // Sign with A's identity via HashSigner (blake3 hash + ed25519 sign)
+        use lattice_model::crypto::HashSigner;
+        let digest = lattice_model::crypto::content_hash(&content_bytes);
+        let sig = identity_a.sign_hash(&digest);
 
         let record = lattice_kernel::proto::weaver::WitnessRecord {
             content: content_bytes,
-            signature: sig.to_bytes().to_vec(),
+            signature: sig.0.to_vec(),
         };
         witness_records.push(record);
     }
 
     // C. Perform Ingest on B
-    let peer_a_pk = node_a_id.public_key();
+    let peer_a_pk = identity_a.public_key();
     store_b
         .ingest_witness_batch(witness_records, intentions_list, peer_a_pk)
         .await

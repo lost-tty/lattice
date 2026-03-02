@@ -277,7 +277,7 @@ mod tests {
             ops: vec![1, 2, 3, 4],
         };
         let hash = intention.hash();
-        let signed = SignedIntention::sign(intention, identity.signing_key());
+        let signed = SignedIntention::sign(intention, &identity);
 
         let p: proto::SignedIntention = signed.into();
 

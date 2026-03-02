@@ -161,7 +161,7 @@ impl NodeBuilder {
     pub fn build(self) -> Result<Node, NodeError> {
         self.data_dir.ensure_dirs()?;
 
-        let (node, is_new) = NodeIdentity::load_or_generate(&self.data_dir.identity_key())?;
+        let (node_identity, is_new) = NodeIdentity::load_or_generate(&self.data_dir.identity_key())?;
 
         let meta = MetaStore::open(self.data_dir.meta_db())?;
 
@@ -183,12 +183,12 @@ impl NodeBuilder {
         // Use provided net_tx or create a fallback (for testing/non-networked usage)
         let net_tx = self.net_tx.unwrap_or_else(|| broadcast::channel(64).0);
 
-        let node = std::sync::Arc::new(node);
+        let node_identity = std::sync::Arc::new(node_identity);
         let meta = std::sync::Arc::new(meta);
         let registry = std::sync::Arc::new(if self.in_memory {
-            StoreRegistry::new_in_memory(self.data_dir.clone(), meta.clone(), node.clone())
+            StoreRegistry::new_in_memory(self.data_dir.clone(), meta.clone(), node_identity.clone())
         } else {
-            StoreRegistry::new(self.data_dir.clone(), meta.clone(), node.clone())
+            StoreRegistry::new(self.data_dir.clone(), meta.clone(), node_identity.clone())
         });
         let store_manager = std::sync::Arc::new(crate::StoreManager::new(
             registry.clone(),
@@ -204,7 +204,7 @@ impl NodeBuilder {
 
         Ok(Node {
             data_dir: self.data_dir,
-            node,
+            node_identity,
             meta,
             registry,
             store_manager,
@@ -218,7 +218,7 @@ impl NodeBuilder {
 /// A local Lattice node (manages identity and store registry)
 pub struct Node {
     data_dir: DataDir,
-    node: std::sync::Arc<NodeIdentity>,
+    node_identity: std::sync::Arc<NodeIdentity>,
     meta: std::sync::Arc<MetaStore>,
     registry: std::sync::Arc<StoreRegistry>,
     /// Store manager (shared by all meshes)
@@ -238,7 +238,7 @@ impl Node {
 
     pub fn info(&self) -> NodeInfo {
         NodeInfo {
-            node_id: hex::encode(self.node.public_key()),
+            node_id: hex::encode(self.node_identity.public_key()),
             data_path: self.data_dir.base().display().to_string(),
             stores: self
                 .meta
@@ -261,7 +261,7 @@ impl Node {
     }
 
     pub fn node_id(&self) -> PubKey {
-        self.node.public_key()
+        self.node_identity.public_key()
     }
 
     /// Subscribe to node events (e.g., root store activation)
@@ -276,13 +276,7 @@ impl Node {
 
     /// Get the node's identity (keypair wrapper).
     pub fn identity(&self) -> &NodeIdentity {
-        &self.node
-    }
-
-    /// Get the signing key for Iroh integration (same Ed25519 key).
-    /// Use `.to_bytes()` when raw bytes are needed.
-    pub fn signing_key(&self) -> &ed25519_dalek::SigningKey {
-        self.node.signing_key()
+        &self.node_identity
     }
 
     pub fn data_path(&self) -> &Path {
@@ -312,7 +306,7 @@ impl Node {
             .get_peer_manager(&store_id)
             .ok_or_else(|| NodeError::StoreManager(crate::StoreManagerError::NotFound(store_id)))?;
         if let Some(name) = self.name() {
-            pm.set_peer_name(self.node.public_key(), &name)
+            pm.set_peer_name(self.node_identity.public_key(), &name)
                 .await
                 .map_err(NodeError::PeerManager)?;
         }
@@ -598,7 +592,7 @@ impl Node {
             )?;
 
             // 5. Initialize Peer Self-Status
-            let pubkey = self.node.public_key();
+            let pubkey = self.node_identity.public_key();
 
             if !name.is_empty() {
                 peer_manager.set_peer_name(pubkey, &name).await?;
@@ -623,7 +617,7 @@ use lattice_model::{
 
 impl NodeProvider for Node {
     fn node_id(&self) -> PubKey {
-        self.node.public_key()
+        self.node_identity.public_key()
     }
 
     fn emit_user_event(&self, event: UserEvent) {

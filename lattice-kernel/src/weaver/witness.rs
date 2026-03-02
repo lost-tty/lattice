@@ -11,12 +11,9 @@ use prost::Message;
 /// Sign protobuf-encoded `WitnessContent` bytes, producing a `WitnessRecord` envelope.
 ///
 /// Signature covers `blake3(content_bytes)`.
-pub fn sign_witness(
-    content_bytes: Vec<u8>,
-    signing_key: &ed25519_dalek::SigningKey,
-) -> WitnessRecord {
+pub fn sign_witness(content_bytes: Vec<u8>, signer: &dyn crypto::HashSigner) -> WitnessRecord {
     let hash = crypto::content_hash(&content_bytes);
-    let sig = crypto::sign_hash(signing_key, &hash);
+    let sig = signer.sign_hash(&hash);
     WitnessRecord {
         content: content_bytes,
         signature: sig.0.to_vec(),

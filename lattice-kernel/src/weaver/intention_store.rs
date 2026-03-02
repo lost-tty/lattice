@@ -86,9 +86,6 @@ pub struct IntentionStore {
     /// `Hash::ZERO` when the witness log is empty (genesis sentinel).
     last_witness_hash: Hash,
 
-    /// Key used to sign witness records.
-    signing_key: ed25519_dalek::SigningKey,
-
     /// XOR fingerprint of all intention hashes in TABLE_INTENTIONS.
     /// Derived on startup, maintained incrementally on insert().
     table_fingerprint: Hash,
@@ -100,11 +97,7 @@ impl IntentionStore {
     /// Reads persisted metadata (author tips, witness_seq, last_witness_hash)
     /// from dedicated tables for O(1) startup. Falls back to a full witness
     /// log replay if the meta table is empty (first open after migration).
-    pub fn open(
-        store_id: Uuid,
-        config: &StorageConfig,
-        signing_key: &ed25519_dalek::SigningKey,
-    ) -> Result<Self, IntentionStoreError> {
+    pub fn open(store_id: Uuid, config: &StorageConfig) -> Result<Self, IntentionStoreError> {
         let db = match config {
             StorageConfig::File(dir) => {
                 std::fs::create_dir_all(dir).map_err(|e| {
@@ -117,15 +110,11 @@ impl IntentionStore {
                 Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?
             }
         };
-        Self::init(db, store_id, signing_key)
+        Self::init(db, store_id)
     }
 
     /// Shared init: create tables, load persisted state, derive fingerprint.
-    fn init(
-        db: Database,
-        store_id: Uuid,
-        signing_key: &ed25519_dalek::SigningKey,
-    ) -> Result<Self, IntentionStoreError> {
+    fn init(db: Database, store_id: Uuid) -> Result<Self, IntentionStoreError> {
         // Ensure all tables exist
         {
             let write_txn = db.begin_write()?;
@@ -144,7 +133,6 @@ impl IntentionStore {
             author_tips: HashMap::new(),
             witness_seq: 0,
             last_witness_hash: Hash::ZERO,
-            signing_key: signing_key.clone(),
             table_fingerprint: Hash::ZERO,
         };
 
@@ -380,6 +368,7 @@ impl IntentionStore {
         &mut self,
         intention: &Intention,
         wall_time: u64,
+        signer: &dyn lattice_model::crypto::HashSigner,
     ) -> Result<WitnessRecord, IntentionStoreError> {
         let hash = intention.hash();
         if self.is_witnessed(&hash)? {
@@ -387,7 +376,7 @@ impl IntentionStore {
         }
         let content_bytes =
             Self::encode_witness_content(&hash, wall_time, &self.store_id, &self.last_witness_hash);
-        let record = sign_witness(content_bytes.clone(), &self.signing_key);
+        let record = sign_witness(content_bytes.clone(), signer);
         let proto_bytes = record.encode_to_vec();
 
         let seq = self.witness_seq + 1;
@@ -1104,9 +1093,9 @@ mod tests {
         assert_eq!(store.author_tip(&pk), Hash::ZERO);
 
         // Witness them — tip updates on witness
-        store.witness(&i1, 100).unwrap();
+        store.witness(&i1, 100, &test_signing_key()).unwrap();
         assert_eq!(store.author_tip(&pk), i1.hash());
-        store.witness(&i2, 200).unwrap();
+        store.witness(&i2, 200, &test_signing_key()).unwrap();
         assert_eq!(store.author_tip(&pk), i2.hash());
 
         assert_eq!(store.intention_count().unwrap(), 2);
@@ -1125,7 +1114,7 @@ mod tests {
         // Tip not updated on insert — only on witness
         assert_eq!(store.author_tip(&pk), Hash::ZERO);
 
-        store.witness(&i1, 100).unwrap();
+        store.witness(&i1, 100, &test_signing_key()).unwrap();
         assert_eq!(store.author_tip(&pk), h1);
 
         let i2 = make_intention(pk, h1, vec![2]);
@@ -1133,7 +1122,7 @@ mod tests {
         let h2 = store.insert(&s2).unwrap();
         // Still h1 until i2 is witnessed
         assert_eq!(store.author_tip(&pk), h1);
-        store.witness(&i2, 200).unwrap();
+        store.witness(&i2, 200, &test_signing_key()).unwrap();
         assert_eq!(store.author_tip(&pk), h2);
     }
 
@@ -1146,21 +1135,11 @@ mod tests {
     }
 
     fn open_store(dir: &Path) -> IntentionStore {
-        IntentionStore::open(
-            test_store_id(),
-            &StorageConfig::File(dir.to_path_buf()),
-            &test_signing_key(),
-        )
-        .unwrap()
+        IntentionStore::open(test_store_id(), &StorageConfig::File(dir.to_path_buf())).unwrap()
     }
 
     fn open_store_in_memory() -> IntentionStore {
-        IntentionStore::open(
-            test_store_id(),
-            &StorageConfig::InMemory,
-            &test_signing_key(),
-        )
-        .unwrap()
+        IntentionStore::open(test_store_id(), &StorageConfig::InMemory).unwrap()
     }
 
     #[test]
@@ -1173,7 +1152,9 @@ mod tests {
         let s = SignedIntention::sign(i.clone(), &key);
         store.insert(&s).unwrap();
 
-        let record = store.witness(&i, 1_700_000_000_000).unwrap();
+        let record = store
+            .witness(&i, 1_700_000_000_000, &test_signing_key())
+            .unwrap();
         // Tip is set by insert, not witness
         assert_eq!(store.author_tip(&pk), h);
 
@@ -1193,7 +1174,7 @@ mod tests {
 
         let i = make_intention(pk, Hash::ZERO, vec![1]);
         let h = i.hash();
-        store.witness(&i, 42_000).unwrap();
+        store.witness(&i, 42_000, &test_signing_key()).unwrap();
 
         let log = store.witness_log().unwrap();
         assert_eq!(log.len(), 1);
@@ -1227,17 +1208,17 @@ mod tests {
             let i1 = make_intention(pk, Hash::ZERO, vec![1]);
             let s1 = SignedIntention::sign(i1.clone(), &key);
             store.insert(&s1).unwrap();
-            store.witness(&i1, 100).unwrap();
+            store.witness(&i1, 100, &test_signing_key()).unwrap();
 
             let i2 = make_intention(pk, i1.hash(), vec![2]);
             let s2 = SignedIntention::sign(i2.clone(), &key);
             store.insert(&s2).unwrap();
-            store.witness(&i2, 200).unwrap();
+            store.witness(&i2, 200, &test_signing_key()).unwrap();
 
             let i3 = make_intention(pk, i2.hash(), vec![3]);
             let s3 = SignedIntention::sign(i3.clone(), &key);
             store.insert(&s3).unwrap();
-            store.witness(&i3, 300).unwrap();
+            store.witness(&i3, 300, &test_signing_key()).unwrap();
 
             // Verify chain: each record's prev_hash == blake3(previous record.content)
             let log = store.witness_log().unwrap();
@@ -1277,7 +1258,7 @@ mod tests {
         );
         let s4 = SignedIntention::sign(i4.clone(), &key);
         store.insert(&s4).unwrap();
-        store.witness(&i4, 400).unwrap();
+        store.witness(&i4, 400, &test_signing_key()).unwrap();
 
         // Verify the 4th entry chains to the 3rd
         let log = store.witness_log().unwrap();
@@ -1302,12 +1283,12 @@ mod tests {
             let i1 = make_intention(pk, Hash::ZERO, vec![1]);
             let s1 = SignedIntention::sign(i1.clone(), &key);
             let h1 = store.insert(&s1).unwrap();
-            store.witness(&i1, 100).unwrap();
+            store.witness(&i1, 100, &test_signing_key()).unwrap();
 
             let i2 = make_intention(pk, h1, vec![2]);
             let s2 = SignedIntention::sign(i2.clone(), &key);
             h2 = store.insert(&s2).unwrap();
-            store.witness(&i2, 200).unwrap();
+            store.witness(&i2, 200, &test_signing_key()).unwrap();
         }
 
         let mut store = open_store(dir.path());
@@ -1318,7 +1299,7 @@ mod tests {
         let i3 = make_intention(pk, h2, vec![3]);
         let s3 = SignedIntention::sign(i3.clone(), &key);
         let _h3 = store.insert(&s3).unwrap();
-        store.witness(&i3, 300).unwrap();
+        store.witness(&i3, 300, &test_signing_key()).unwrap();
         assert_eq!(store.intention_count().unwrap(), 3);
     }
 
@@ -1357,11 +1338,11 @@ mod tests {
                 .insert(&SignedIntention::sign(a3.clone(), &key))
                 .unwrap();
 
-            store.witness(&a1, 100).unwrap();
+            store.witness(&a1, 100, &test_signing_key()).unwrap();
             assert_eq!(store.author_tip(&pk), a1.hash());
 
             // Skip A2, witness A3 directly
-            store.witness(&a3, 300).unwrap();
+            store.witness(&a3, 300, &test_signing_key()).unwrap();
             assert_eq!(store.author_tip(&pk), a3.hash());
         }
 
@@ -1495,7 +1476,7 @@ mod tests {
         assert_eq!(at_zero[0].intention.hash(), ha);
 
         // Witness A — removes it from floating, B becomes next in line
-        store.witness(&ia, 100).unwrap();
+        store.witness(&ia, 100, &test_signing_key()).unwrap();
         assert!(store.is_witnessed(&ha).unwrap());
         assert_eq!(store.floating().unwrap().len(), 2);
         assert!(store.floating_by_prev(&Hash::ZERO).unwrap().is_empty());
@@ -1505,7 +1486,7 @@ mod tests {
         assert_eq!(at_ha.len(), 1);
 
         // Witness B
-        store.witness(&ib, 200).unwrap();
+        store.witness(&ib, 200, &test_signing_key()).unwrap();
         assert!(store.is_witnessed(&hb).unwrap());
         assert_eq!(store.floating().unwrap().len(), 1);
 
@@ -1564,29 +1545,29 @@ mod tests {
         assert_eq!(store.author_tip(&bob), Hash::ZERO);
 
         // Witness A1
-        store.witness(&a1, 100).unwrap();
+        store.witness(&a1, 100, &test_signing_key()).unwrap();
         assert!(store.is_witnessed(&a1.hash()).unwrap());
         assert_eq!(store.author_tip(&alice), a1.hash());
         assert_eq!(store.floating().unwrap().len(), 4);
 
         // Witness B1
-        store.witness(&b1, 200).unwrap();
+        store.witness(&b1, 200, &test_signing_key()).unwrap();
         assert!(store.is_witnessed(&b1.hash()).unwrap());
         assert_eq!(store.author_tip(&bob), b1.hash());
         assert_eq!(store.floating().unwrap().len(), 3);
 
         // Witness A2 — this satisfies B2's causal dep
-        store.witness(&a2, 300).unwrap();
+        store.witness(&a2, 300, &test_signing_key()).unwrap();
         assert_eq!(store.author_tip(&alice), a2.hash());
         assert_eq!(store.floating().unwrap().len(), 2);
 
         // Witness B2 — its causal dep (A2) is now witnessed
-        store.witness(&b2, 400).unwrap();
+        store.witness(&b2, 400, &test_signing_key()).unwrap();
         assert_eq!(store.author_tip(&bob), b2.hash());
         assert_eq!(store.floating().unwrap().len(), 1);
 
         // Witness A3
-        store.witness(&a3, 500).unwrap();
+        store.witness(&a3, 500, &test_signing_key()).unwrap();
         assert_eq!(store.author_tip(&alice), a3.hash());
         assert_eq!(store.floating().unwrap().len(), 0);
 
@@ -1640,17 +1621,17 @@ mod tests {
             let i1 = make_intention(pk, Hash::ZERO, vec![1]);
             let s1 = SignedIntention::sign(i1.clone(), &key);
             store.insert(&s1).unwrap();
-            store.witness(&i1, 100).unwrap();
+            store.witness(&i1, 100, &test_signing_key()).unwrap();
 
             let i2 = make_intention(pk, i1.hash(), vec![2]);
             let s2 = SignedIntention::sign(i2.clone(), &key);
             store.insert(&s2).unwrap();
-            store.witness(&i2, 200).unwrap();
+            store.witness(&i2, 200, &test_signing_key()).unwrap();
 
             let i3 = make_intention(pk, i2.hash(), vec![3]);
             let s3 = SignedIntention::sign(i3.clone(), &key);
             store.insert(&s3).unwrap();
-            store.witness(&i3, 300).unwrap();
+            store.witness(&i3, 300, &test_signing_key()).unwrap();
         }
 
         // Corrupt W2: overwrite its value with garbage bytes,
@@ -1697,7 +1678,6 @@ mod tests {
         let result = IntentionStore::open(
             test_store_id(),
             &StorageConfig::File(dir.path().to_path_buf()),
-            &test_signing_key(),
         );
         match result {
             Ok(_) => panic!("Store should reject corrupted witness chain"),
@@ -1722,13 +1702,13 @@ mod tests {
         store
             .insert(&SignedIntention::sign(i1.clone(), &key))
             .unwrap();
-        store.witness(&i1, u64::MAX).unwrap();
+        store.witness(&i1, u64::MAX, &test_signing_key()).unwrap();
 
         let i2 = make_intention(pk, i1.hash(), vec![2]);
         store
             .insert(&SignedIntention::sign(i2.clone(), &key))
             .unwrap();
-        store.witness(&i2, 0).unwrap();
+        store.witness(&i2, 0, &test_signing_key()).unwrap();
 
         assert_eq!(store.author_tip(&pk), i2.hash());
         assert_eq!(store.intention_count().unwrap(), 2);
@@ -1751,10 +1731,10 @@ mod tests {
         store
             .insert(&SignedIntention::sign(i1.clone(), &key))
             .unwrap();
-        store.witness(&i1, 100).unwrap();
+        store.witness(&i1, 100, &test_signing_key()).unwrap();
 
         // Second witness of same intention should fail
-        let err = store.witness(&i1, 200).unwrap_err();
+        let err = store.witness(&i1, 200, &test_signing_key()).unwrap_err();
         assert!(
             err.to_string().contains("already witnessed"),
             "Expected AlreadyWitnessed, got: {err}"
@@ -2017,7 +1997,7 @@ mod tests {
             store
                 .insert(&SignedIntention::sign(i1.clone(), &key))
                 .unwrap();
-            store.witness(&i1, 100).unwrap();
+            store.witness(&i1, 100, &test_signing_key()).unwrap();
             let i2 = make_intention(pk, i1.hash(), vec![2]);
             store
                 .insert(&SignedIntention::sign(i2.clone(), &key))

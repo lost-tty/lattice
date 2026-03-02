@@ -51,15 +51,15 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let store_dir = tmp_dir.path().to_path_buf();
         let store_id = Uuid::new_v4();
-        let node = NodeIdentity::generate();
+        let identity = NodeIdentity::generate();
 
         // Phase 1: Create store and write data
         {
             let state = Arc::new(TestStateMachine::new());
             let config = StorageConfig::File(store_dir.clone());
             let opened =
-                OpenedStore::new(store_id, &config, state, node.signing_key()).unwrap();
-            let (handle, _info, runner) = opened.into_handle(node.clone()).unwrap();
+                OpenedStore::new(store_id, &config, state).unwrap();
+            let (handle, _info, runner) = opened.into_handle(identity.clone()).unwrap();
             let _actor = tokio::spawn(async move { runner.run().await });
 
             let _h1 = handle.submit(b"entry1".to_vec(), vec![]).await.unwrap();
@@ -87,7 +87,7 @@ mod tests {
         // Phase 3: Reopen — redb should detect corruption
         let state = Arc::new(TestStateMachine::new());
         let config = StorageConfig::File(store_dir);
-        let result = OpenedStore::new(store_id, &config, state.clone(), node.signing_key());
+        let result = OpenedStore::new(store_id, &config, state.clone());
 
         match result {
             Err(e) => {
@@ -95,7 +95,7 @@ mod tests {
             }
             Ok(opened) => {
                 // redb may have repaired via its WAL — verify state consistency
-                let (handle, _info, runner) = opened.into_handle(node.clone()).unwrap();
+                let (handle, _info, runner) = opened.into_handle(identity.clone()).unwrap();
                 let _actor = tokio::spawn(async move { runner.run().await });
 
                 let tips = handle.author_tips().await.unwrap();
@@ -121,15 +121,15 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let store_dir = tmp_dir.path().to_path_buf();
         let store_id = Uuid::new_v4();
-        let node = NodeIdentity::generate();
+        let identity = NodeIdentity::generate();
 
         // Phase 1: Create and populate store
         {
             let state = Arc::new(TestStateMachine::new());
             let config = StorageConfig::File(store_dir.clone());
             let opened =
-                OpenedStore::new(store_id, &config, state, node.signing_key()).unwrap();
-            let (handle, _info, runner) = opened.into_handle(node.clone()).unwrap();
+                OpenedStore::new(store_id, &config, state).unwrap();
+            let (handle, _info, runner) = opened.into_handle(identity.clone()).unwrap();
             let _actor = tokio::spawn(async move { runner.run().await });
 
             let _ = handle.submit(b"data".to_vec(), vec![]).await.unwrap();
@@ -143,9 +143,9 @@ mod tests {
         // Phase 3: Reopen — should start fresh
         let state = Arc::new(TestStateMachine::new());
         let config = StorageConfig::File(store_dir);
-        let opened = OpenedStore::new(store_id, &config, state.clone(), node.signing_key())
+        let opened = OpenedStore::new(store_id, &config, state.clone())
             .expect("Should create fresh store when db is missing");
-        let (handle, _info, runner) = opened.into_handle(node.clone()).unwrap();
+        let (handle, _info, runner) = opened.into_handle(identity.clone()).unwrap();
         let _actor = tokio::spawn(async move { runner.run().await });
 
         let tips = handle.author_tips().await.unwrap();

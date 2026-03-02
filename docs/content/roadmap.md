@@ -32,6 +32,7 @@ title: "Roadmap"
 - [ ] **Refactor `SyncSession::run` termination** (`lattice-net/src/network/sync_session.rs`): Bidirectional sync is broken — initiator terminates before handling responder's `FetchIntentions` when `reconcile_load == 0 && active_fetches == 0`. Root cause: `Done` (from `Reconciler`) is sent before `FetchIntentions` on the wire, and the peer uses `reconcile_load == 0` as exit condition. Needs a proper termination protocol — either reorder messages so `Done` follows `FetchIntentions`, add a session-level "finished" signal, or use half-close. Affects `test_channel_bidirectional_sync` and `test_bidirectional_sync`.
 - [ ] **Fix `SyncSession` silent ingest error swallowing**: `IntentionResponse` handler (line ~155) silently ignores `ingest_intention` failures via `.is_ok()`. Broken chain errors (`store_prev` pointing to unapplied intention) produce `FATAL: State divergence` log but the error is dropped. Needs: (a) propagate or log the error, (b) investigate out-of-order intention delivery causing chain breaks.
 - [ ] **Fix flaky `test_interleaved_modifications`** (`lattice-net/tests/sync_stress.rs`): intermittent failure
+- [ ] Review docs/
 
 ---
 
@@ -182,13 +183,14 @@ Run the kernel on the RP2350.
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 - [x] ~~**Payload Validation Strategy**~~: Decided: stall on failure. `apply()` returns `Err` for unrecognized payloads, which stalls the author's chain (not witnessed, blocks subsequent intentions). This prevents silent state divergence from version skew. Semantic validation (empty keys etc.) happens at the API/CommandHandler layer before signing. Contract documented on `StateMachine` and `StateLogic` traits.
-- [ ] **Signer Trait**: Introduce a `Signer` trait (sign hash → signature) to avoid passing raw `SigningKey` through the stack. Affects intention creation (`SignedIntention::sign`), witness signing (`WitnessRecord::sign`), and the M11 migration path.
+- [x] ~~**Signer Trait**~~: `HashSigner` trait introduced in `crypto.rs`. All signing call sites (`SignedIntention::sign`, `sign_witness`, `IntentionStore::witness`) now take `&dyn HashSigner`. Implemented for `ed25519_dalek::SigningKey` (software) and `NodeIdentity` (delegates). Only remaining raw `signing_key()` accessor is Iroh transport (needs key bytes for QUIC identity) — documented as HSM boundary.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
 - [ ] **DAG Reachability Index**: `DagQueries` methods (`find_lca`, `is_ancestor`, `get_path`) use naive BFS. For large DAGs, add generation numbers (prune impossible ancestors by depth) or bloom filters (compact ancestor summaries) for O(log N) reachability. Not needed until BFS becomes a bottleneck.
 - [ ] **Sync Trigger & Bootstrap Controller Review**: Review how and when sync is triggered (currently ad-hoc in `active_peer_ids` or `complete_join_handshake`). Consider introducing a dedicated `BootstrapController` to manage initial sync state, retry logic, and transition to steady-state gossip/sync.
 - [ ] Unify `IntentionInfo` and `Op` into a single type in StateMachine::apply().
 - [ ] **Clean up**: Remove map_err wherever possible.
 - [ ] **`complete_join` hardcodes `STORE_TYPE_KVSTORE`**: `Node::complete_join()` calls `store_manager.open(store_id, STORE_TYPE_KVSTORE)` instead of using the actual store type. The store type should be communicated through the join protocol (invite token or `JoinResponse`). Blocks dropping `lattice-kvstore` as a dev-dependency from crates that only need NullState for testing. Affects `lattice-net-iroh` and `lattice-net` tests.
+- [ ] **Decouple Iroh transport key from lattice signing identity**: Iroh requires raw `SigningKey` bytes to derive its QUIC node identity (`lattice-net-iroh/src/transport.rs`), which is incompatible with HSM/TPM backends where the private key never leaves the hardware. Options: (1) derive a transport subkey from the HSM if it supports ECDH/key derivation, (2) give Iroh its own ephemeral key and add a post-connect attestation protocol to bind transport identity to lattice `PubKey`, (3) wait for Iroh to support trait-based signing. Option 2 also decouples transport identity from signing identity, which helps with key rotation and multi-device. Trade-off: nodes can no longer assume Iroh `NodeId` == lattice `PubKey`, so a mapping/attestation step is needed after connection.
 
 ---
 

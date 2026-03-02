@@ -112,7 +112,7 @@ pub struct ReplicationController<S: StateMachine> {
     store_id: Uuid,
     state: std::sync::Arc<S>,
     intention_store: std::sync::Arc<std::sync::RwLock<IntentionStore>>,
-    node: NodeIdentity,
+    node_identity: NodeIdentity,
 
     rx: mpsc::Receiver<ReplicationControllerCmd>,
     /// Broadcast sender for emitting intentions after they're committed locally
@@ -125,7 +125,7 @@ impl<S: StateMachine> ReplicationController<S> {
         store_id: Uuid,
         state: std::sync::Arc<S>,
         intention_store: std::sync::Arc<std::sync::RwLock<IntentionStore>>,
-        node: NodeIdentity,
+        node_identity: NodeIdentity,
         rx: mpsc::Receiver<ReplicationControllerCmd>,
         intention_tx: broadcast::Sender<SignedIntention>,
     ) -> Result<Self, StateError> {
@@ -133,7 +133,7 @@ impl<S: StateMachine> ReplicationController<S> {
             store_id,
             state,
             intention_store,
-            node,
+            node_identity,
             rx,
             intention_tx,
         })
@@ -277,7 +277,7 @@ impl<S: StateMachine> ReplicationController<S> {
         payload: Vec<u8>,
         causal_deps: Vec<Hash>,
     ) -> Result<Hash, ReplicationControllerError> {
-        let author = self.node.public_key();
+        let author = self.node_identity.public_key();
         let store_prev = store.author_tip(&author);
 
         let intention = Intention {
@@ -289,7 +289,7 @@ impl<S: StateMachine> ReplicationController<S> {
             ops: payload,
         };
 
-        let signed = SignedIntention::sign(intention, self.node.signing_key());
+        let signed = SignedIntention::sign(intention, &self.node_identity);
 
         // Verify round-trip before persisting
         signed.verify().map_err(|_| {
@@ -556,7 +556,7 @@ impl<S: StateMachine> ReplicationController<S> {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let _ = store.witness(&intention, wall_time);
+        let _ = store.witness(&intention, wall_time, &self.node_identity);
 
         Ok(())
     }
@@ -622,7 +622,7 @@ mod tests {
 
     fn open_test_store(
         store_id: Uuid,
-        node: NodeIdentity,
+        node_identity: NodeIdentity,
     ) -> Result<
         (
             crate::store::Store<MockStateMachine>,
@@ -636,9 +636,8 @@ mod tests {
             store_id,
             &lattice_model::StorageConfig::InMemory,
             state.clone(),
-            node.signing_key(),
         )?;
-        let (handle, info, runner) = opened.into_handle(node)?;
+        let (handle, info, runner) = opened.into_handle(node_identity)?;
         let join_handle = tokio::spawn(async move { runner.run().await });
         Ok((handle, info, join_handle))
     }
@@ -646,9 +645,9 @@ mod tests {
     #[tokio::test]
     async fn test_submit_and_author_tips() {
 
-        let node = NodeIdentity::generate();
+        let identity = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node.clone()).unwrap();
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
 
         // Submit a payload
         let hash = handle.submit(b"hello".to_vec(), vec![]).await.unwrap();
@@ -656,7 +655,7 @@ mod tests {
         // Check author tips
         let tips = handle.author_tips().await.unwrap();
         assert_eq!(tips.len(), 1);
-        assert_eq!(tips[&node.public_key()], hash);
+        assert_eq!(tips[&identity.public_key()], hash);
 
         // Check state was applied
         assert!(handle.state().has_applied(hash));
@@ -667,21 +666,21 @@ mod tests {
     #[tokio::test]
     async fn test_ingest_intention() {
 
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
-        // Create an intention from node_b
+        // Create an intention from identity_b
         let intention = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"from_peer".to_vec(),
         };
-        let signed = SignedIntention::sign(intention, node_b.signing_key());
+        let signed = SignedIntention::sign(intention, &identity_b);
         let hash = signed.intention.hash();
 
         // Ingest it
@@ -692,7 +691,7 @@ mod tests {
 
         // Verify tips
         let tips = handle.author_tips().await.unwrap();
-        assert_eq!(tips[&node_b.public_key()], hash);
+        assert_eq!(tips[&identity_b.public_key()], hash);
 
         handle.close().await;
     }
@@ -700,9 +699,9 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_intentions() {
 
-        let node = NodeIdentity::generate();
+        let identity = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node.clone()).unwrap();
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
 
         let hash1 = handle.submit(b"op1".to_vec(), vec![]).await.unwrap();
         let hash2 = handle.submit(b"op2".to_vec(), vec![]).await.unwrap();
@@ -721,20 +720,20 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_ingest_is_idempotent() {
 
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
         let intention = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"data".to_vec(),
         };
-        let signed = SignedIntention::sign(intention, node_b.signing_key());
+        let signed = SignedIntention::sign(intention, &identity_b);
 
         // Ingest twice
         handle.ingest_intention(signed.clone()).await.unwrap();
@@ -746,43 +745,43 @@ mod tests {
     #[tokio::test]
     async fn test_out_of_order_chain_arrival() {
 
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
         // Build a chain: i1 -> i2 -> i3
         let i1 = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"op1".to_vec(),
         };
-        let s1 = SignedIntention::sign(i1, node_b.signing_key());
+        let s1 = SignedIntention::sign(i1, &identity_b);
         let h1 = s1.intention.hash();
 
         let i2 = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: h1,
             condition: Condition::v1(vec![]),
             ops: b"op2".to_vec(),
         };
-        let s2 = SignedIntention::sign(i2, node_b.signing_key());
+        let s2 = SignedIntention::sign(i2, &identity_b);
         let h2 = s2.intention.hash();
 
         let i3 = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: h2,
             condition: Condition::v1(vec![]),
             ops: b"op3".to_vec(),
         };
-        let s3 = SignedIntention::sign(i3, node_b.signing_key());
+        let s3 = SignedIntention::sign(i3, &identity_b);
         let h3 = s3.intention.hash();
 
         // Ingest tip first — should float
@@ -818,33 +817,33 @@ mod tests {
     #[tokio::test]
     async fn test_cross_author_causal_dep() {
 
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
-        let node_c = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
+        let identity_c = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
         // B's intention depends on C's intention (causal dep)
         let i_c = Intention {
-            author: node_c.public_key(),
+            author: identity_c.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"from_c".to_vec(),
         };
-        let s_c = SignedIntention::sign(i_c, node_c.signing_key());
+        let s_c = SignedIntention::sign(i_c, &identity_c);
         let h_c = s_c.intention.hash();
 
         let i_b = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![h_c]), // depends on C
             ops: b"from_b".to_vec(),
         };
-        let s_b = SignedIntention::sign(i_b, node_b.signing_key());
+        let s_b = SignedIntention::sign(i_b, &identity_b);
         let h_b = s_b.intention.hash();
 
         // Ingest B first — should float (C not present)
@@ -865,46 +864,46 @@ mod tests {
     #[tokio::test]
     async fn test_diamond_dependency() {
 
-        let node_local = NodeIdentity::generate();
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
-        let node_c = NodeIdentity::generate();
+        let identity_local = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
+        let identity_c = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_local.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_local.clone()).unwrap();
 
         // A and B are independent roots
         let i_a = Intention {
-            author: node_a.public_key(),
+            author: identity_a.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"from_a".to_vec(),
         };
-        let s_a = SignedIntention::sign(i_a, node_a.signing_key());
+        let s_a = SignedIntention::sign(i_a, &identity_a);
         let h_a = s_a.intention.hash();
 
         let i_b = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"from_b".to_vec(),
         };
-        let s_b = SignedIntention::sign(i_b, node_b.signing_key());
+        let s_b = SignedIntention::sign(i_b, &identity_b);
         let h_b = s_b.intention.hash();
 
         // C depends on both A and B
         let i_c = Intention {
-            author: node_c.public_key(),
+            author: identity_c.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![h_a, h_b]),
             ops: b"from_c".to_vec(),
         };
-        let s_c = SignedIntention::sign(i_c, node_c.signing_key());
+        let s_c = SignedIntention::sign(i_c, &identity_c);
         let h_c = s_c.intention.hash();
 
         // Ingest C first — floats (neither A nor B present)
@@ -930,23 +929,23 @@ mod tests {
     #[tokio::test]
     async fn test_missing_external_dep_floats() {
 
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
         // A non-existent hash
         let phantom_hash = Hash::from([0xDEu8; 32]);
 
         let i_b = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![phantom_hash]),
             ops: b"blocked".to_vec(),
         };
-        let s_b = SignedIntention::sign(i_b, node_b.signing_key());
+        let s_b = SignedIntention::sign(i_b, &identity_b);
         let h_b = s_b.intention.hash();
 
         // Ingest — should float permanently (dep never arrives)
@@ -957,16 +956,16 @@ mod tests {
         );
 
         // Verify the floating one doesn't block other *authors*
-        let node_d = NodeIdentity::generate();
+        let identity_d = NodeIdentity::generate();
         let i_d = Intention {
-            author: node_d.public_key(),
+            author: identity_d.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"independent".to_vec(),
         };
-        let s_d = SignedIntention::sign(i_d, node_d.signing_key());
+        let s_d = SignedIntention::sign(i_d, &identity_d);
         let h_d = s_d.intention.hash();
 
         handle.ingest_intention(s_d.clone()).await.unwrap();
@@ -985,20 +984,20 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_ingest_no_duplicate_witness() {
 
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
         let i_b = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"hello".to_vec(),
         };
-        let s_b = SignedIntention::sign(i_b, node_b.signing_key());
+        let s_b = SignedIntention::sign(i_b, &identity_b);
 
         // First ingest — should succeed and create one witness record
         handle.ingest_intention(s_b.clone()).await.unwrap();
@@ -1019,9 +1018,9 @@ mod tests {
     #[tokio::test]
     async fn test_local_submit_creates_witness() {
 
-        let node = NodeIdentity::generate();
+        let identity = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node.clone()).unwrap();
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
 
         let hash = handle.submit(b"hello".to_vec(), vec![]).await.unwrap();
 
@@ -1045,9 +1044,9 @@ mod tests {
     #[tokio::test]
     async fn test_history_order_matches_apply_order() {
 
-        let node = NodeIdentity::generate();
+        let identity = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node.clone()).unwrap();
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
 
         let h1 = handle.submit(b"op1".to_vec(), vec![]).await.unwrap();
         let h2 = handle.submit(b"op2".to_vec(), vec![]).await.unwrap();
@@ -1079,20 +1078,20 @@ mod tests {
     #[tokio::test]
     async fn test_ingested_intention_creates_witness() {
 
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
         let intention = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"from_peer".to_vec(),
         };
-        let signed = SignedIntention::sign(intention, node_b.signing_key());
+        let signed = SignedIntention::sign(intention, &identity_b);
         let hash = signed.intention.hash();
 
         handle.ingest_intention(signed).await.unwrap();
@@ -1110,43 +1109,43 @@ mod tests {
     #[tokio::test]
     async fn test_out_of_order_cascade_witness_order() {
 
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
         // Build chain: i1 -> i2 -> i3
         let i1 = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"op1".to_vec(),
         };
-        let s1 = SignedIntention::sign(i1, node_b.signing_key());
+        let s1 = SignedIntention::sign(i1, &identity_b);
         let h1 = s1.intention.hash();
 
         let i2 = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: h1,
             condition: Condition::v1(vec![]),
             ops: b"op2".to_vec(),
         };
-        let s2 = SignedIntention::sign(i2, node_b.signing_key());
+        let s2 = SignedIntention::sign(i2, &identity_b);
         let h2 = s2.intention.hash();
 
         let i3 = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: h2,
             condition: Condition::v1(vec![]),
             ops: b"op3".to_vec(),
         };
-        let s3 = SignedIntention::sign(i3, node_b.signing_key());
+        let s3 = SignedIntention::sign(i3, &identity_b);
         let h3 = s3.intention.hash();
 
         // Ingest out of order: tip first, then middle, then root
@@ -1187,20 +1186,20 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_signature_rejected() {
 
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
         let intention = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"legit payload".to_vec(),
         };
-        let mut signed = SignedIntention::sign(intention, node_b.signing_key());
+        let mut signed = SignedIntention::sign(intention, &identity_b);
 
         // Corrupt the signature
         signed.signature.0[0] ^= 0xFF;
@@ -1227,22 +1226,22 @@ mod tests {
     #[tokio::test]
     async fn test_store_id_mismatch_rejected() {
 
-        let node_a = NodeIdentity::generate();
-        let node_b = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
         // Create intention targeting a DIFFERENT store
         let wrong_store = Uuid::new_v4();
         let intention = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: wrong_store,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"wrong store".to_vec(),
         };
-        let signed = SignedIntention::sign(intention, node_b.signing_key());
+        let signed = SignedIntention::sign(intention, &identity_b);
 
         let result = handle.ingest_intention(signed).await;
         assert!(result.is_err(), "mismatched store_id should be rejected");
@@ -1266,9 +1265,9 @@ mod tests {
     #[tokio::test]
     async fn test_hlc_monotonicity() {
 
-        let node = NodeIdentity::generate();
+        let identity = NodeIdentity::generate();
         let (handle, _info, _join) =
-            open_test_store(TEST_STORE, node.clone()).unwrap();
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
 
         let mut hashes = Vec::new();
         // Submit 50 intentions rapidly
@@ -1358,7 +1357,7 @@ mod tests {
 
     fn open_failing_test_store(
         store_id: Uuid,
-        node: NodeIdentity,
+        node_identity: NodeIdentity,
     ) -> Result<
         (
             crate::store::Store<FailingMockStateMachine>,
@@ -1372,9 +1371,8 @@ mod tests {
             store_id,
             &lattice_model::StorageConfig::InMemory,
             state.clone(),
-            node.signing_key(),
         )?;
-        let (handle, info, runner) = opened.into_handle(node)?;
+        let (handle, info, runner) = opened.into_handle(node_identity)?;
         let join_handle = tokio::spawn(async move { runner.run().await });
         Ok((handle, info, join_handle))
     }
@@ -1385,37 +1383,37 @@ mod tests {
     /// - Other authors are unaffected
     #[tokio::test]
     async fn test_malformed_payload_stalls_author_chain() {
-        let node_a = NodeIdentity::generate(); // local node
-        let node_b = NodeIdentity::generate(); // peer with bad payload
-        let node_c = NodeIdentity::generate(); // unrelated peer
+        let identity_a = NodeIdentity::generate(); // local node
+        let identity_b = NodeIdentity::generate(); // peer with bad payload
+        let identity_c = NodeIdentity::generate(); // unrelated peer
 
         let (handle, _info, _join) =
-            open_failing_test_store(TEST_STORE, node_a.clone()).unwrap();
+            open_failing_test_store(TEST_STORE, identity_a.clone()).unwrap();
 
-        // 1. Ingest a valid intention from node_b (genesis)
+        // 1. Ingest a valid intention from identity_b (genesis)
         let i1 = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"valid_op".to_vec(),
         };
-        let s1 = SignedIntention::sign(i1, node_b.signing_key());
+        let s1 = SignedIntention::sign(i1, &identity_b);
         let h1 = s1.intention.hash();
         handle.ingest_intention(s1).await.unwrap();
         assert!(handle.state().has_applied(h1), "valid op should be applied");
 
-        // 2. Ingest a malformed intention from node_b (chain continues)
+        // 2. Ingest a malformed intention from identity_b (chain continues)
         let i2 = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: h1,
             condition: Condition::v1(vec![]),
             ops: b"INVALID_payload".to_vec(),
         };
-        let s2 = SignedIntention::sign(i2, node_b.signing_key());
+        let s2 = SignedIntention::sign(i2, &identity_b);
         let h2 = s2.intention.hash();
 
         // Ingest succeeds (intention is stored) but apply is skipped (stalled)
@@ -1425,17 +1423,17 @@ mod tests {
             "malformed op must NOT be applied"
         );
 
-        // 3. Ingest a valid follow-up from node_b — should also fail
+        // 3. Ingest a valid follow-up from identity_b — should also fail
         //    because the bad intention stalled the chain at h1
         let i3 = Intention {
-            author: node_b.public_key(),
+            author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: h2,
             condition: Condition::v1(vec![]),
             ops: b"valid_followup".to_vec(),
         };
-        let s3 = SignedIntention::sign(i3, node_b.signing_key());
+        let s3 = SignedIntention::sign(i3, &identity_b);
         let h3 = s3.intention.hash();
 
         // The follow-up floats (its store_prev h2 is not witnessed).
@@ -1447,16 +1445,16 @@ mod tests {
             "follow-up after stalled chain must NOT be applied"
         );
 
-        // 4. A different author (node_c) should be completely unaffected
+        // 4. A different author (identity_c) should be completely unaffected
         let i4 = Intention {
-            author: node_c.public_key(),
+            author: identity_c.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
             store_id: TEST_STORE,
             store_prev: Hash::ZERO,
             condition: Condition::v1(vec![]),
             ops: b"other_author_op".to_vec(),
         };
-        let s4 = SignedIntention::sign(i4, node_c.signing_key());
+        let s4 = SignedIntention::sign(i4, &identity_c);
         let h4 = s4.intention.hash();
         handle.ingest_intention(s4).await.unwrap();
         assert!(

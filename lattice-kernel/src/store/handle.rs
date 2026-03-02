@@ -152,9 +152,8 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
         store_id: Uuid,
         config: &lattice_model::StorageConfig,
         state: Arc<S>,
-        signing_key: &ed25519_dalek::SigningKey,
     ) -> Result<Self, super::StateError> {
-        let intention_store = IntentionStore::open(store_id, config, signing_key)?;
+        let intention_store = IntentionStore::open(store_id, config)?;
         let entries_replayed = replay_intentions(&intention_store, &state)?;
 
         Ok(Self {
@@ -172,7 +171,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
     /// Spawn actor and get a handle. Consumes the OpenedStore.
     pub fn into_handle(
         self,
-        node: NodeIdentity,
+        node_identity: NodeIdentity,
     ) -> Result<(Store<S>, StoreInfo, ActorRunner<S>), super::StateError> {
         let (tx, rx) = mpsc::channel(32);
         let (intention_tx, _rx) = broadcast::channel(64);
@@ -187,7 +186,7 @@ impl<S: StateMachine + 'static> OpenedStore<S> {
             self.store_id,
             self.state.clone(),
             intention_store.clone(),
-            node,
+            node_identity,
             rx,
             intention_tx.clone(),
         )?;

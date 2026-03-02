@@ -128,10 +128,10 @@ pub struct SignedIntention {
 }
 
 impl SignedIntention {
-    /// Create a signed intention from an unsigned body and a signing key.
-    pub fn sign(intention: Intention, signing_key: &ed25519_dalek::SigningKey) -> Self {
+    /// Create a signed intention from an unsigned body and a signer.
+    pub fn sign(intention: Intention, signer: &dyn crate::crypto::HashSigner) -> Self {
         let hash = intention.hash();
-        let signature = crate::crypto::sign_hash(signing_key, &hash);
+        let signature = signer.sign_hash(&hash);
         SignedIntention {
             intention,
             signature,

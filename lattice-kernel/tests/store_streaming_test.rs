@@ -42,11 +42,11 @@ async fn test_scan_witness_log_streaming() -> Result<(), Box<dyn std::error::Err
     // Create store
     let store_id = Uuid::new_v4();
     let state = Arc::new(MockStateMachine::default());
-    let node = NodeIdentity::generate();
+    let identity = NodeIdentity::generate();
 
     // Open store in memory
-    let opened = OpenedStore::new(store_id, &lattice_model::StorageConfig::InMemory, state, node.signing_key())?;
-    let (handle, _info, runner) = opened.into_handle(node.clone())?;
+    let opened = OpenedStore::new(store_id, &lattice_model::StorageConfig::InMemory, state)?;
+    let (handle, _info, runner) = opened.into_handle(identity.clone())?;
 
     // Spawn runner to process requests
     tokio::spawn(async move {

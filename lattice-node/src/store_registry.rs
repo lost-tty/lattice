@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 pub struct StoreRegistry {
     data_dir: DataDir,
     meta: Arc<MetaStore>,
-    node: Arc<NodeIdentity>,
+    node_identity: Arc<NodeIdentity>,
     stores: RwLock<HashMap<Uuid, Box<dyn RegistryEntry>>>,
     /// Tracked actor task handles for clean shutdown
     handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -29,11 +29,11 @@ pub struct StoreRegistry {
 
 impl StoreRegistry {
     /// Create a new store registry (file-backed).
-    pub fn new(data_dir: DataDir, meta: Arc<MetaStore>, node: Arc<NodeIdentity>) -> Self {
+    pub fn new(data_dir: DataDir, meta: Arc<MetaStore>, node_identity: Arc<NodeIdentity>) -> Self {
         Self {
             data_dir,
             meta,
-            node,
+            node_identity,
             stores: RwLock::new(HashMap::new()),
             handles: std::sync::Mutex::new(Vec::new()),
             in_memory: false,
@@ -42,10 +42,10 @@ impl StoreRegistry {
 
     /// Create a new store registry with in-memory storage.
     /// Stores will use `StorageConfig::InMemory` for both state and intentions.
-    pub fn new_in_memory(data_dir: DataDir, meta: Arc<MetaStore>, node: Arc<NodeIdentity>) -> Self {
+    pub fn new_in_memory(data_dir: DataDir, meta: Arc<MetaStore>, node_identity: Arc<NodeIdentity>) -> Self {
         Self {
             in_memory: true,
-            ..Self::new(data_dir, meta, node)
+            ..Self::new(data_dir, meta, node_identity)
         }
     }
 
@@ -103,7 +103,7 @@ impl StoreRegistry {
 
         // Open Initial State (creates db) using provided function
         let state = Arc::new(open_fn(&state_config)?);
-        let _ = OpenedStore::new(store_id, &intentions_config, state, self.node.signing_key())?;
+        let _ = OpenedStore::new(store_id, &intentions_config, state)?;
 
         // Register in meta
         self.meta.add_store(store_id, Uuid::nil()).map_err(|e| {
@@ -153,8 +153,8 @@ impl StoreRegistry {
         let intentions_config = self.intentions_config(store_id);
 
         let state = Arc::new(open_fn(&state_config)?);
-        let opened = OpenedStore::new(store_id, &intentions_config, state, self.node.signing_key())?;
-        let (store_handle, info, runner) = opened.into_handle((*self.node).clone())?;
+        let opened = OpenedStore::new(store_id, &intentions_config, state)?;
+        let (store_handle, info, runner) = opened.into_handle((*self.node_identity).clone())?;
 
         // Spawn the actor runner as tokio task
         let task_handle = tokio::spawn(async move { runner.run().await });

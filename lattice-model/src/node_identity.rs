@@ -103,8 +103,13 @@ impl NodeIdentity {
         PubKey::from(self.signing_key.verifying_key().to_bytes())
     }
 
-    /// Get the signing key for creating signatures and Iroh integration.
-    /// Use `.to_bytes()` when raw bytes are needed.
+    /// Access the raw Ed25519 signing key.
+    ///
+    /// **HSM boundary**: This accessor extracts key material from memory, which
+    /// is incompatible with hardware-backed signers (HSM/TPM) where the private
+    /// key never leaves the device. New code should use the `HashSigner` trait
+    /// instead. The remaining callers are:
+    /// - Iroh transport (needs raw bytes to derive QUIC identity)
     pub fn signing_key(&self) -> &SigningKey {
         &self.signing_key
     }
@@ -113,7 +118,15 @@ impl NodeIdentity {
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key.sign(message)
     }
+}
 
+impl crate::crypto::HashSigner for NodeIdentity {
+    fn sign_hash(&self, hash: &crate::types::Hash) -> crate::types::Signature {
+        crate::crypto::sign_hash(&self.signing_key, hash)
+    }
+}
+
+impl NodeIdentity {
     /// Verify a signature against this node's public key.
     pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), NodeError> {
         self.verifying_key()
