@@ -263,9 +263,14 @@ fn try_render_table(
         }
     }
 
-    // Verify all rows have the same field names and extract cell values
+    // Verify all rows have the same field names and extract cell values.
+    // All cells are rendered inline initially; the last column may be
+    // re-rendered with pretty-printing if it overflows the terminal width.
     let num_cols = headers.len();
+    let last_col = num_cols - 1;
     let mut cells: Vec<Vec<String>> = Vec::with_capacity(rows.len());
+    // Collect last-column SExpr values for potential re-rendering
+    let mut last_col_exprs: Vec<&SExpr> = Vec::with_capacity(rows.len());
     for row in &row_lists {
         let mut row_cells: Vec<String> = Vec::with_capacity(num_cols);
         for (i, field) in row[1..].iter().enumerate() {
@@ -276,6 +281,9 @@ fn try_render_table(
                         _ => return None, // field name mismatch
                     }
                     row_cells.push(render_sexpr_colored(&pair[1], max_hex_bytes));
+                    if i == last_col {
+                        last_col_exprs.push(&pair[1]);
+                    }
                 }
                 _ => return None,
             }
@@ -283,9 +291,12 @@ fn try_render_table(
         cells.push(row_cells);
     }
 
-    // Compute column widths (max of header and all cell values, using visible width)
+    // Compute column widths (exclude last column — it flows freely)
     let col_widths: Vec<usize> = (0..num_cols)
         .map(|i| {
+            if i == last_col {
+                return 0;
+            }
             let header_w = headers[i].width();
             let max_cell_w = cells
                 .iter()
@@ -296,8 +307,21 @@ fn try_render_table(
         })
         .collect();
 
-    // Render
     let pad = "  ".repeat(indent);
+    let last_col_offset = pad.len() + col_widths[..last_col].iter().map(|w| w + 2).sum::<usize>();
+    let term_width = terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(120);
+
+    // Re-render last column cells with pretty-printing if they overflow
+    for (row_idx, row) in cells.iter_mut().enumerate() {
+        let inline_width = strip_ansi(&row[last_col]).width();
+        if last_col_offset + inline_width > term_width {
+            row[last_col] = fmt_pretty_colored(last_col_exprs[row_idx], max_hex_bytes, 0);
+        }
+    }
+
+    // Render
     let mut out = String::new();
 
     // Header line
@@ -308,7 +332,6 @@ fn try_render_table(
         let visible_len = h.width();
         out.push_str(&styled);
         if i + 1 < num_cols {
-            // pad to column width + gap
             for _ in 0..(w - visible_len + 2) {
                 out.push(' ');
             }
@@ -320,10 +343,21 @@ fn try_render_table(
     for row in &cells {
         out.push_str(&pad);
         for (i, cell) in row.iter().enumerate() {
-            let w = col_widths[i];
-            let visible_len = strip_ansi(cell).width();
-            out.push_str(cell);
-            if i + 1 < num_cols {
+            if i == last_col {
+                // Last column: handle potential multi-line content
+                let lines: Vec<&str> = cell.split('\n').collect();
+                out.push_str(lines[0]);
+                for cont_line in &lines[1..] {
+                    out.push('\n');
+                    for _ in 0..last_col_offset {
+                        out.push(' ');
+                    }
+                    out.push_str(cont_line);
+                }
+            } else {
+                let w = col_widths[i];
+                let visible_len = strip_ansi(cell).width();
+                out.push_str(cell);
                 for _ in 0..(w - visible_len + 2) {
                     out.push(' ');
                 }
@@ -340,7 +374,7 @@ fn try_render_table(
 }
 
 /// Strip ANSI escape sequences for visible-width measurement.
-fn strip_ansi(s: &str) -> String {
+pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_escape = false;
     for c in s.chars() {

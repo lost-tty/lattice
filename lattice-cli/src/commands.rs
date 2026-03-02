@@ -184,7 +184,7 @@ pub enum StoreSubcommand {
     /// Debug store internals
     Debug {
         #[command(subcommand)]
-        sub: Option<DebugSubcommand>,
+        sub: DebugSubcommand,
     },
     /// Show history
     History,
@@ -214,6 +214,14 @@ pub enum StoreSubcommand {
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum DebugSubcommand {
+    /// Show per-author tip hashes
+    Tips,
+    /// Show the witness log chain
+    Log,
+    /// Show all intentions (via witness log)
+    Intentions,
+    /// Show floating (unresolved) intentions
+    Floating,
     /// Inspect a single intention by hash prefix
     Intention {
         /// Hash prefix (hex)
@@ -319,11 +327,23 @@ pub async fn handle_command(
                 store_commands::cmd_store_status(backend, ctx.store_id, writer).await
             }
             StoreSubcommand::Debug { sub } => match sub {
-                Some(DebugSubcommand::Intention { hash }) => {
+                DebugSubcommand::Tips => {
+                    store_commands::cmd_store_debug_tips(backend, ctx.store_id, writer).await
+                }
+                DebugSubcommand::Log => {
+                    store_commands::cmd_store_debug_log(backend, ctx.store_id, writer).await
+                }
+                DebugSubcommand::Intentions => {
+                    store_commands::cmd_store_debug_intentions(backend, ctx.store_id, writer).await
+                }
+                DebugSubcommand::Floating => {
+                    store_commands::cmd_store_debug_floating(backend, ctx.store_id, writer).await
+                }
+                DebugSubcommand::Intention { hash } => {
                     store_commands::cmd_store_debug_intention(backend, ctx.store_id, &hash, writer)
                         .await
                 }
-                Some(DebugSubcommand::Branch { hashes }) => {
+                DebugSubcommand::Branch { hashes } => {
                     store_commands::cmd_store_debug_branch(
                         backend,
                         ctx.store_id,
@@ -332,7 +352,6 @@ pub async fn handle_command(
                     )
                     .await
                 }
-                None => store_commands::cmd_store_debug(backend, ctx.store_id, writer).await,
             },
             StoreSubcommand::History => {
                 store_commands::cmd_history(backend, ctx.store_id, writer).await

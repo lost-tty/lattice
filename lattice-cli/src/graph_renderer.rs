@@ -3,7 +3,9 @@
 //!
 //! Design inspired by git-graph: https://github.com/mlange-42/git-graph (MIT)
 
-use crate::display_helpers::{ansi_code, author_color, render_sexpr_colored};
+use crate::display_helpers::{
+    ansi_code, author_color, render_sexpr_colored, render_sexpr_pretty_colored, strip_ansi,
+};
 use lattice_runtime::{Hash, PubKey, SExpr};
 use std::fmt::Write;
 
@@ -248,7 +250,25 @@ impl Grid {
         }
     }
 
-    /// Render grid to string, appending text labels on the right
+    /// Render the vertical-line columns for row `y` (used on label continuation lines).
+    /// Shows `│` where vertical lines pass through, spaces elsewhere.
+    fn render_vlines(&self, y: usize, output: &mut String) {
+        for x in 0..self.width {
+            let cell = self.get(x, y);
+            let has_vertical =
+                matches!(cell.character, VER | CROSS | VER_L | VER_R | HOR_U | HOR_D);
+            if has_vertical && cell.color > 0 {
+                let _ = write!(output, "\x1b[{}m│\x1b[0m", cell.color);
+            } else if has_vertical {
+                output.push('│');
+            } else {
+                output.push(' ');
+            }
+        }
+    }
+
+    /// Render grid to string, appending text labels on the right.
+    /// Multi-line labels have continuation lines showing vertical graph lines.
     pub fn render(&self, labels: &[String]) -> String {
         let mut output = String::new();
 
@@ -257,17 +277,22 @@ impl Grid {
             for x in 0..self.width {
                 let cell = self.get(x, y);
                 if cell.color > 0 {
-                    // Output with color
                     let _ = write!(output, "\x1b[{}m{}\x1b[0m", cell.color, cell.to_char());
                 } else {
                     output.push(cell.to_char());
                 }
             }
 
-            // Append label if present
+            // Append label if present, handling multi-line wrapping
             if let Some(label) = labels.get(y) {
                 if !label.is_empty() {
-                    let _ = write!(output, " {}", label);
+                    let lines: Vec<&str> = label.split('\n').collect();
+                    let _ = write!(output, " {}", lines[0]);
+                    for cont_line in &lines[1..] {
+                        output.push('\n');
+                        self.render_vlines(y, &mut output);
+                        let _ = write!(output, " {}", cont_line);
+                    }
                 }
             }
 
@@ -562,8 +587,18 @@ pub fn render_dag(entries: &std::collections::HashMap<Hash, RenderEntry>, _key: 
         };
         grid.set_colored(grid_x, row, marker, 0, color_code); // Entries have highest priority
 
-        // Render full intention as single-line SExpr
-        labels[row] = render_sexpr_colored(&entry.intention, 4);
+        // Render intention — inline if it fits, pretty-wrapped if it overflows
+        let inline = render_sexpr_colored(&entry.intention, 4);
+        let label_start = grid_width + 1; // grid chars + space
+        let term_width = terminal_size::terminal_size()
+            .map(|(w, _)| w.0 as usize)
+            .unwrap_or(120);
+        let inline_width = unicode_width::UnicodeWidthStr::width(strip_ansi(&inline).as_str());
+        if label_start + inline_width > term_width {
+            labels[row] = render_sexpr_pretty_colored(&entry.intention, 4);
+        } else {
+            labels[row] = inline;
+        }
 
         // Draw connections to parents (use parents_in_set from above)
         for (p_idx, parent) in parents_in_set.iter().enumerate() {

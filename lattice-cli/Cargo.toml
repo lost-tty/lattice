@@ -32,3 +32,4 @@ owo-colors = "4.2"
 bs58 = { version = "0.5", features = ["check"] }
 unicode-width = "0.1"
 anyhow = "1.0.100"
+terminal_size = "0.4.3"

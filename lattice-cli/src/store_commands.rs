@@ -423,7 +423,7 @@ pub async fn cmd_store_sync(
     Ok(Continue)
 }
 
-pub async fn cmd_store_debug(
+pub async fn cmd_store_debug_tips(
     backend: &dyn LatticeBackend,
     store_id: Option<Uuid>,
     writer: Writer,
@@ -438,88 +438,141 @@ pub async fn cmd_store_debug(
         }
     };
 
-    let mut sections: Vec<SExpr> = vec![SExpr::sym("store-debug")];
-
-    // ---- Author Tips ----
     let authors = backend.store_debug(store_id).await.unwrap_or_default();
-    {
-        let mut tips = vec![SExpr::sym("author-tips")];
-        for a in &authors {
-            tips.push(SExpr::list(vec![
-                SExpr::raw(a.public_key.clone()),
-                SExpr::sym(":tip"),
-                SExpr::raw(a.hash.clone()),
-            ]));
-        }
-        sections.push(SExpr::list(tips));
-    }
-
-    // ---- Witness Log ----
-    let witness_entries = backend
-        .store_witness_log(store_id)
-        .await
-        .unwrap_or_default();
-    {
-        let mut log = vec![SExpr::sym("witness-log")];
-        for entry in &witness_entries {
-            if let Ok(content) = lattice_runtime::WitnessContent::decode(entry.content.as_slice()) {
-                let fields = vec![
-                    SExpr::num(entry.seq),
-                    SExpr::sym(":hash"),
-                    SExpr::raw(entry.content_hash.to_vec()),
-                    SExpr::sym(":intention"),
-                    SExpr::raw(content.intention_hash.clone()),
-                    SExpr::sym(":wall"),
-                    SExpr::num(content.wall_time),
-                    SExpr::sym(":prev"),
-                    SExpr::raw(content.prev_hash.clone()),
-                    SExpr::sym(":sig"),
-                    SExpr::raw(entry.signature.clone()),
-                ];
-                log.push(SExpr::list(fields));
-            }
-        }
-        sections.push(SExpr::list(log));
-    }
-
-    // ---- Intentions (fetched via witness log hashes) ----
-    {
-        let mut intentions = vec![SExpr::sym("intentions")];
-        for entry in &witness_entries {
-            if let Ok(content) = lattice_runtime::WitnessContent::decode(entry.content.as_slice()) {
-                let details = backend
-                    .store_get_intention(store_id, &content.intention_hash)
-                    .await
-                    .unwrap_or_default();
-                if let Some(detail) = details.into_iter().next() {
-                    intentions.push(detail_to_sexpr(&detail));
-                }
-            }
-        }
-        sections.push(SExpr::list(intentions));
-    }
-
-    // ---- Floating Intentions ----
-    let floating = backend.store_floating(store_id).await.unwrap_or_default();
-    {
-        let mut floats = vec![SExpr::sym("floating")];
-        for f in &floating {
-            let hash = f.signed.intention.hash();
-            let details = backend
-                .store_get_intention(store_id, hash.as_bytes())
-                .await
-                .unwrap_or_default();
-            if let Some(detail) = details.into_iter().next() {
-                floats.push(detail_to_sexpr(&detail));
-            }
-        }
-        sections.push(SExpr::list(floats));
+    let mut tips = vec![SExpr::sym("author-tips")];
+    for a in &authors {
+        tips.push(SExpr::list(vec![
+            SExpr::sym("AuthorTip"),
+            SExpr::list(vec![SExpr::sym("author"), SExpr::raw(a.public_key.clone())]),
+            SExpr::list(vec![SExpr::sym("tip"), SExpr::raw(a.hash.clone())]),
+        ]));
     }
 
     let _ = writeln!(
         w,
         "{}",
-        crate::display_helpers::render_sexpr_pretty_colored(&SExpr::list(sections), 8)
+        crate::display_helpers::render_sexpr_pretty_colored(&SExpr::list(tips), 4)
+    );
+
+    Ok(Continue)
+}
+
+pub async fn cmd_store_debug_log(
+    backend: &dyn LatticeBackend,
+    store_id: Option<Uuid>,
+    writer: Writer,
+) -> CmdResult {
+    let mut w = writer.clone();
+
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "No store selected.");
+            return Ok(Continue);
+        }
+    };
+
+    let witness_entries = backend
+        .store_witness_log(store_id)
+        .await
+        .unwrap_or_default();
+    let mut log = vec![SExpr::sym("witness-log")];
+    for entry in &witness_entries {
+        if let Ok(content) = lattice_runtime::WitnessContent::decode(entry.content.as_slice()) {
+            log.push(SExpr::list(vec![
+                SExpr::sym("WitnessEntry"),
+                SExpr::list(vec![SExpr::sym("seq"), SExpr::num(entry.seq)]),
+                SExpr::list(vec![SExpr::sym("hash"), SExpr::raw(entry.content_hash.to_vec())]),
+                SExpr::list(vec![SExpr::sym("intention"), SExpr::raw(content.intention_hash.clone())]),
+                SExpr::list(vec![SExpr::sym("wall"), SExpr::num(content.wall_time)]),
+                SExpr::list(vec![SExpr::sym("prev"), SExpr::raw(content.prev_hash.clone())]),
+                SExpr::list(vec![SExpr::sym("sig"), SExpr::raw(entry.signature.clone())]),
+            ]));
+        }
+    }
+
+    let _ = writeln!(
+        w,
+        "{}",
+        crate::display_helpers::render_sexpr_pretty_colored(&SExpr::list(log), 4)
+    );
+
+    Ok(Continue)
+}
+
+pub async fn cmd_store_debug_intentions(
+    backend: &dyn LatticeBackend,
+    store_id: Option<Uuid>,
+    writer: Writer,
+) -> CmdResult {
+    let mut w = writer.clone();
+
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "No store selected.");
+            return Ok(Continue);
+        }
+    };
+
+    let witness_entries = backend
+        .store_witness_log(store_id)
+        .await
+        .unwrap_or_default();
+    let mut intentions = vec![SExpr::sym("intentions")];
+    for entry in &witness_entries {
+        if let Ok(content) = lattice_runtime::WitnessContent::decode(entry.content.as_slice()) {
+            let details = backend
+                .store_get_intention(store_id, &content.intention_hash)
+                .await
+                .unwrap_or_default();
+            if let Some(detail) = details.into_iter().next() {
+                intentions.push(detail_to_sexpr_row(&detail));
+            }
+        }
+    }
+
+    let _ = writeln!(
+        w,
+        "{}",
+        crate::display_helpers::render_sexpr_pretty_colored(&SExpr::list(intentions), 4)
+    );
+
+    Ok(Continue)
+}
+
+pub async fn cmd_store_debug_floating(
+    backend: &dyn LatticeBackend,
+    store_id: Option<Uuid>,
+    writer: Writer,
+) -> CmdResult {
+    let mut w = writer.clone();
+
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "No store selected.");
+            return Ok(Continue);
+        }
+    };
+
+    let floating = backend.store_floating(store_id).await.unwrap_or_default();
+    let mut floats = vec![SExpr::sym("floating")];
+    for f in &floating {
+        let hash = f.signed.intention.hash();
+        let details = backend
+            .store_get_intention(store_id, hash.as_bytes())
+            .await
+            .unwrap_or_default();
+        if let Some(detail) = details.into_iter().next() {
+            floats.push(detail_to_sexpr_row(&detail));
+        }
+    }
+
+    let _ = writeln!(
+        w,
+        "{}",
+        crate::display_helpers::render_sexpr_pretty_colored(&SExpr::list(floats), 4)
     );
 
     Ok(Continue)
@@ -744,6 +797,64 @@ fn detail_to_sexpr(detail: &lattice_runtime::IntentionDetail) -> SExpr {
         ops_items.extend(detail.ops.clone());
         fields.push(SExpr::list(ops_items));
     }
+
+    SExpr::list(fields)
+}
+
+/// Table-friendly format: every field is a strict `(sym val)` pair.
+/// Suitable for table rendering in `debug intentions` and `debug floating`.
+fn detail_to_sexpr_row(detail: &lattice_runtime::IntentionDetail) -> SExpr {
+    let intention = &detail.intention;
+    let mut fields: Vec<SExpr> = vec![SExpr::sym("Intention")];
+
+    fields.push(SExpr::list(vec![
+        SExpr::sym("hash"),
+        SExpr::raw(intention.hash.clone()),
+    ]));
+    fields.push(SExpr::list(vec![
+        SExpr::sym("author"),
+        SExpr::raw(intention.author.clone()),
+    ]));
+    fields.push(SExpr::list(vec![
+        SExpr::sym("store-prev"),
+        SExpr::raw(intention.store_prev.clone()),
+    ]));
+
+    // Condition as a single value
+    let cond_val = if let Some(ref cond) = intention.condition {
+        if let Some(ref c) = cond.kind {
+            match c {
+                lattice_runtime::condition::Kind::V1(deps) => {
+                    let mut items = vec![SExpr::sym("v1")];
+                    for h in &deps.hashes {
+                        items.push(SExpr::raw(h.clone()));
+                    }
+                    SExpr::list(items)
+                }
+            }
+        } else {
+            SExpr::sym("none")
+        }
+    } else {
+        SExpr::sym("none")
+    };
+    fields.push(SExpr::list(vec![SExpr::sym("condition"), cond_val]));
+
+    // Timestamp as wall time
+    let wall = intention
+        .timestamp
+        .as_ref()
+        .map(|ts| ts.wall_time)
+        .unwrap_or(0);
+    fields.push(SExpr::list(vec![SExpr::sym("wall"), SExpr::num(wall)]));
+
+    // Ops as a single value
+    let ops_val = if detail.ops.len() == 1 {
+        detail.ops[0].clone()
+    } else {
+        SExpr::list(detail.ops.clone())
+    };
+    fields.push(SExpr::list(vec![SExpr::sym("ops"), ops_val]));
 
     SExpr::list(fields)
 }
