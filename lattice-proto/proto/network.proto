@@ -34,7 +34,14 @@ message PeerMessage {
     FetchChain fetch_chain = 6;
     BootstrapRequest bootstrap_request = 7;
     BootstrapResponse bootstrap_response = 8;
+    SyncDone sync_done = 9;
   }
+}
+
+// Session-level signal: "I have no more reconcile or fetch work to initiate."
+// Both sides must send AND receive this before the session can close.
+message SyncDone {
+  bytes store_id = 1;
 }
 
 // 7. Bootstrap (Clone) Protocol
@@ -79,9 +86,14 @@ message GossipMessage {
 }
 
 // 6. Reconciliation Protocol (Negentropy)
+//
+// A ReconcilePayload carries one or more ReconcileMessages as a single
+// atomic response.  When the reconciler splits a range it produces two
+// sub-fingerprints — these are sent together so the receiver always
+// processes the full fan-out before evaluating termination.
 message ReconcilePayload {
   bytes store_id = 1;
-  ReconcileMessage message = 2;
+  repeated ReconcileMessage messages = 3;
 }
 
 message ReconcileMessage {

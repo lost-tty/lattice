@@ -29,9 +29,9 @@ title: "Roadmap"
 - [ ] Remove all sleep calls if possible
 - [ ] Review code base
 - [ ] **Fix `complete_join` store type hardcode** and drop `lattice-kvstore` dev-dependency from `lattice-net-iroh` and (where possible) `lattice-net`
-- [ ] **Refactor `SyncSession::run` termination** (`lattice-net/src/network/sync_session.rs`): Bidirectional sync is broken — initiator terminates before handling responder's `FetchIntentions` when `reconcile_load == 0 && active_fetches == 0`. Root cause: `Done` (from `Reconciler`) is sent before `FetchIntentions` on the wire, and the peer uses `reconcile_load == 0` as exit condition. Needs a proper termination protocol — either reorder messages so `Done` follows `FetchIntentions`, add a session-level "finished" signal, or use half-close. Affects `test_channel_bidirectional_sync` and `test_bidirectional_sync`.
+- [x] ~~**Refactor `SyncSession::run` termination**~~: Fixed via two-phase `SyncDone` handshake with batched `ReconcilePayload` (fan-out messages sent atomically). Replaced broken `reconcile_load` counter with 1:1 payload-level balance, explicit `SyncDone` message, and strict disconnect handling (`Stream closed before SyncDone handshake completed`). See `sync_termination_test.rs`.
 - [ ] **Fix `SyncSession` silent ingest error swallowing**: `IntentionResponse` handler (line ~155) silently ignores `ingest_intention` failures via `.is_ok()`. Broken chain errors (`store_prev` pointing to unapplied intention) produce `FATAL: State divergence` log but the error is dropped. Needs: (a) propagate or log the error, (b) investigate out-of-order intention delivery causing chain breaks.
-- [ ] **Fix flaky `test_interleaved_modifications`** (`lattice-net/tests/sync_stress.rs`): intermittent failure
+- [x] ~~**Fix flaky `test_interleaved_modifications`**~~: Root cause was premature session termination from fan-out counter desync. Fixed by batched `ReconcilePayload` + two-phase `SyncDone`.
 - [ ] Review docs/
 
 ---
@@ -154,8 +154,7 @@ Scriptable simulation framework for testing Lattice networking at scale. Built o
 - [ ] **Simulator library** (`Simulator` API): Scriptable — `add_node`, `take_offline`, `bring_online`, `join_store`, `put`, `sync`, `assert_converged`
 - [ ] **Rhai scripting**: Embed Rhai for scenario scripts (loops, conditionals, dynamic topology changes)
 - [ ] **Standalone binary**: CLI that loads and runs `.rhai` scenario files
-- [ ] **Fix flaky `test_large_dataset_sync`:** Intermittent partial sync failures (misses items). Likely race between auto_sync boot task and explicit `sync_all_by_id`. Currently mitigated by disabling auto_sync in test.
-- [ ] **Gate:** 20+ node convergence simulation with metrics: sync calls, items transferred, convergence %, wall-clock time
+[ ] **Gate:** 20+ node convergence simulation with metrics: sync calls, items transferred, convergence %, wall-clock time
 
 ---
 
@@ -187,7 +186,7 @@ Run the kernel on the RP2350.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
 - [ ] **DAG Reachability Index**: `DagQueries` methods (`find_lca`, `is_ancestor`, `get_path`) use naive BFS. For large DAGs, add generation numbers (prune impossible ancestors by depth) or bloom filters (compact ancestor summaries) for O(log N) reachability. Not needed until BFS becomes a bottleneck.
 - [ ] **Sync Trigger & Bootstrap Controller Review**: Review how and when sync is triggered (currently ad-hoc in `active_peer_ids` or `complete_join_handshake`). Consider introducing a dedicated `BootstrapController` to manage initial sync state, retry logic, and transition to steady-state gossip/sync.
-- [ ] Unify `IntentionInfo` and `Op` into a single type in StateMachine::apply().
+- [x] Unify `IntentionInfo` and `Op` into a single type in StateMachine::apply().
 - [ ] **Clean up**: Remove map_err wherever possible.
 - [ ] **`complete_join` hardcodes `STORE_TYPE_KVSTORE`**: `Node::complete_join()` calls `store_manager.open(store_id, STORE_TYPE_KVSTORE)` instead of using the actual store type. The store type should be communicated through the join protocol (invite token or `JoinResponse`). Blocks dropping `lattice-kvstore` as a dev-dependency from crates that only need NullState for testing. Affects `lattice-net-iroh` and `lattice-net` tests.
 - [ ] **Decouple Iroh transport key from lattice signing identity**: Iroh requires raw `SigningKey` bytes to derive its QUIC node identity (`lattice-net-iroh/src/transport.rs`), which is incompatible with HSM/TPM backends where the private key never leaves the hardware. Options: (1) derive a transport subkey from the HSM if it supports ECDH/key derivation, (2) give Iroh its own ephemeral key and add a post-connect attestation protocol to bind transport identity to lattice `PubKey`, (3) wait for Iroh to support trait-based signing. Option 2 also decouples transport identity from signing identity, which helps with key rotation and multi-device. Trade-off: nodes can no longer assume Iroh `NodeId` == lattice `PubKey`, so a mapping/attestation step is needed after connection.
