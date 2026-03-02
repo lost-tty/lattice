@@ -18,60 +18,7 @@ title: "Roadmap"
 | **M11**          | Weaver Migration & Protocol Sync: Intention DAG (`IntentionStore`), Negentropy set reconciliation, Smart Chain Fetch, stream-based Bootstrap (Clone) Protocol without gossip storms |
 | **M12**          | Network Abstraction & Simulation: `Transport`/`GossipLayer` traits, `IrohTransport` extracted to `lattice-net-iroh`, `ChannelTransport`/`BroadcastGossip` in `lattice-net-sim`, gossip lag tracking, event-driven gap handling, `SessionTracker` decoupling, symmetric Negentropy sync |
 | **M13**          | Crate Dependency Architecture: removed `lattice-kernel` from `lattice-net`, `lattice-net-types`, `lattice-systemstore`; moved proto types to `lattice-proto`; elevated shared types to `lattice-store-base`; removed phantom deps from `lattice-bindings` and `lattice-api`; moved `WatchEvent`/`WatchEventKind` from `kvstore-api` to `kvstore` (flipped dependency); `kvstore-api` demoted to dev-dep in `lattice-node`; `RuntimeBuilder::with_opener()` plugin mechanism with `core-stores` feature flag; store type constants removed from `lattice-node` re-exports |
-
----
-
-## Milestone 14: Slim Down Persistent State
-
-Reduce what state machines store per conflict domain. Currently each key persists a full `HeadList` with duplicated values, HLC, author, and tombstone flags per head. Replace with: a materialized value (the resolved projection) plus a list of intention hashes (pointers into the DAG). Values, timestamps, and authorship live in the DAG — the state machine stores just enough to track conflicts and build `causal_deps`.
-
-> **See:** [Conflict Resolution Architecture](design/meet-vs-crdt/) for the full design analysis.
->
-> **Key insight:** The `Head` struct duplicates data that already exists in the intention DAG. Each head's value is a copy of the intention payload; its HLC, author, and hash are copies of intention metadata. By storing only intention hashes per conflict domain, state machines become thinner while retaining the ability to detect conflicts, build `causal_deps`, and surface branch information to clients. Conflict semantics (what constitutes a conflict domain, how to resolve) remain store-specific — the kernel provides DAG primitives, each state machine decides how to use them.
-
-### 14A: DAG Query Primitives ✅
-- [x] **`DagQueries` trait.** Defined in `lattice-model/src/dag_queries.rs`. Interface for state machines to query the intention DAG without depending on `IntentionStore` internals. Mockable for testing.
-- [x] **`IntentionInfo` struct.** `{ hash, payload, timestamp, author }` — owned intention data without DAG plumbing. Return type for DAG queries.
-- [x] **`get_intention(hash) → IntentionInfo`:** Dereferences an intention hash into its data.
-- [x] **`find_lca(a, b) → Hash`:** Lowest common ancestor via alternating bidirectional BFS over `Condition::V1` deps + `store_prev` edges.
-- [x] **`get_path(from, to) → Vec<IntentionInfo>`:** Intentions between two DAG points in topological order. Reverse BFS to discover subgraph + Kahn's sort.
-- [x] **`is_ancestor(ancestor, descendant) → bool`:** DAG reachability via backward BFS from descendant.
-- [x] **Implemented on `IntentionStore`.** Synchronous over redb. Shared `dag_parents()` helper eliminates duplication across methods. No async wrapper needed — state machines run synchronously inside the actor which already holds the `IntentionStore`.
-
-### 14B: `KVTable` — Unified State Engine
-- [x] **Extract a generic `KVTable` from KvState and SystemTable.** Both implement identical `apply_head()` logic — causal subsumption, idempotency check, deterministic sort, encode/store. Both use the same underlying format (`TableDefinition<&[u8], &[u8]>` with protobuf-encoded `HeadList` values). Pure refactor — no format change, same behavior, shared code.
-- [x] **`KVTable::apply()`:** Wraps the existing `apply_head()` logic. Takes key, new head, causal_deps. One implementation replaces the duplicate in KvState and SystemTable.
-- [x] **`KVTable::get()`:** Returns decoded `HeadList` for a key (same as current behavior, just shared).
-- [x] **`KVTable::heads()`:** Returns head hashes for a key. Used for `causal_deps` on writes and conflict surfacing.
-- [x] **KvState uses `KVTable`.** `mutate()` decodes `KvPayload`, calls `KVTable::apply()` per put/delete. `get()` delegates to `KVTable::get()`. `apply_head()` removed.
-- [x] **SystemTable uses `KVTable`.** All `set_*`/`add_*`/`remove_*` methods construct the string key and encoded value, then call `KVTable::apply()`. `apply_head()` removed. The typed accessor methods stay — they provide the key schema and value encoding — but the engine underneath is shared.
-- [x] **Future store types get `KVTable` for free.** A document store, filesystem metadata store, or any KV-shaped conflict domain uses the same engine out of the box.
-
-### 14C: KVTable API
-- [x] **`KVTable::get()` returns materialized value.** `get() -> Option<Vec<u8>>` instead of `Vec<Head>`. `None` for missing keys or tombstone-only. Callers no longer call `.lww()`.
-- [x] **Migrate KvState callers.** `handle_get` uses `get()` directly. `handle_put`/`handle_delete`/`handle_batch` use `heads()` for causal deps. Remove `.lww()` calls. `scan()` returns `(key, Option<value>)` instead of `(key, Vec<Head>)`.
-- [x] **Migrate SystemTable callers.** `ReadOnlySystemTable` owns a `ReadOnlyKVTable` (not a raw redb table). Point lookups delegate to `get()`/`heads()`. `get_deps()` removed — callers use `head_hashes()` directly. Range sites (`get_peers`, `get_children`, `list_all`) use `ReadOnlyKVTable::range()`/`iter()` via `LwwRange` iterator. No crate outside `lattice-kvtable` calls `decode_heads` or `decode_lww`.
-- [x] **`ReadOnlyKVTable::range()` and `iter()`.** `LwwRange` iterator adapter wraps redb `Range`, decodes `HeadList` and LWW-resolves each value internally. Yields `(Vec<u8>, Option<Vec<u8>>)` — owned key bytes and resolved value (`None` for tombstones). Callers never see raw proto encoding.
-- [x] **`KvState::mutate()` returns resolved values.** `apply_head()` returns `ApplyResult { value: Option<Vec<u8>> }` (LWW-resolved) instead of `HeadChange { new_heads: Vec<Head> }`. Write-path callers no longer call `lww()` on results.
-
-### 14D: Slim Down Storage Format ✅
-- [x] **`StateMachine::apply` receives `&dyn DagQueries`.** Threaded from kernel actor (`IntentionStore` implements `DagQueries`) through `StateMachine::apply` → `StateLogic::mutate` → `KVTable::apply_head`, and `SystemLayer::apply` → `SystemTable`.
-- [x] **`KVTable::apply()` resolves LWW at write time.** Compares incoming HLC/author against current winner via DAG lookup. `get()` returns the value directly — no more read-time resolution.
-- [x] **New on-disk format.** `proto::Value { oneof kind { value | tombstone }, heads[] }` in `lattice-kvtable/proto/value.proto`. `heads[0]` is the LWW winner. HLC/author not stored — looked up from the DAG on demand. `oneof` distinguishes live entries (including empty values) from tombstones at the type level.
-- [x] **Removed `HeadList`/`HeadInfo` from `storage.proto`.** Dead code — `lattice-kvtable` no longer depends on `lattice-proto`. Conversion impls (`Head ↔ HeadInfo`) and re-exports (`lattice-storage::head`, `lattice-kvstore::Head`) removed.
-- [x] **Moved `kv_store.proto` to `lattice-kvstore/proto/`.** KV service/payload protos (`PutRequest`, `KvPayload`, `WatchEventProto`, etc.) compiled locally. `lattice-kvstore` and `lattice-kvstore-api` no longer depend on `lattice-proto`. `Operation` helper impls moved to `lattice-kvstore::proto`.
-
-### 14E: Clean Up `StateMachine` Interface ✅
-- [x] **`Op` embeds `IntentionInfo`.** `Op { info: IntentionInfo<'a>, causal_deps, prev_hash }`. `IntentionInfo` uses `Cow<'a, [u8]>` for payload — borrowed in `Op` (from in-flight intention), owned in `DagQueries` results (from DB). Same type in both contexts. `prev_hash` stays in `Op` because `verify_and_update_tip` needs it atomically in the same write transaction.
-- [x] **Remove `Head` struct from `lattice-model`.** No longer persisted. Intention metadata (HLC, author) is accessed from the DAG when needed (conflict reads, HITL).
-- [x] **Remove `Merge` trait from `lattice-model`.** `lww()`, `fww()`, `all()` operate on `[Head]` slices which no longer exist. LWW resolution is inlined in `KVTable::apply()` as an HLC comparison. FWW / multi-value can be added later as apply-time strategies if needed.
-- [x] **Update `architecture.md`.** State Machines section updated to reflect `KVTable` engine, write-time LWW resolution, and slim storage format (materialized value + intention hash pointers).
-- [x] **`ScopedDag` wrapper.** `SystemLayer` wraps `&dyn DagQueries` before passing to each side: `AppData` scope unwraps inner app bytes, `System` scope unwraps `SystemOp` bytes. Ensures `op.info.payload` and `dag.get_intention().payload` are in the same coordinate system for both app state machines and the system table.
-
-### 14F: Conflict Surfacing
-- [x] **Conflict detection on read.** `get(key)` returns `GetResult { value, conflicted }`. `list()` returns `KeyValuePair { key, value, conflicted }`. Both check `heads.len() > 1` during decode — no DAG query needed.
-- [x] **`Inspect` command.** `Inspect key=<k>` returns full conflict state: `exists`, `value`, `tombstone`, `conflicted`, `heads[]` (all head hashes, winner first), `head_count`. Typed API: `KvStoreExt::inspect() -> KeyInspection`. Each head hash can be investigated further with `debug intention <hash>`.
-- [ ] **Branch inspection.** Given head hashes, the kernel provides LCA (fork point), paths from fork to each head, branch metadata. Uses 14A primitives.
+| **M14**          | Slim Down Persistent State: `DagQueries` trait with `find_lca`/`get_path`/`is_ancestor` (causal-only BFS), `KVTable` unified state engine (shared by KvState + SystemTable), write-time LWW resolution, slim on-disk format (materialized value + intention hash pointers), `ScopedDag` wrapper, conflict detection on read (`get`/`list` return `conflicted` flag), `Inspect` command for full conflict state, branch inspection (`store debug branch`) via LCA + path traversal |
 
 ---
 
@@ -232,7 +179,6 @@ Run the kernel on the RP2350.
 
 ## Technical Debt
 
-- [ ] **REGRESSION**: history command list filtering (backend side) capability
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
 - [ ] **Store Name Lookup Optimization**: `find_store_name()` in `store_service.rs` and `backend_inprocess.rs` does O(meshes × stores) linear search. Store names live in mesh root KV stores (StoreDeclaration). Consider caching in StoreManager or adding index.
 - [ ] **Data Directory Lock File**: Investigate lock file mechanism to prevent multiple processes from using the same data directory simultaneously (daemon + embedded app conflict). Options: flock, PID file, or socket-based detection.
@@ -277,7 +223,7 @@ Run the kernel on the RP2350.
 - **USB Gadget Node**: Hardware device (Pi Zero, RISC-V dongle) that enumerates as a USB Ethernet gadget and runs a Lattice node, peering with the host over the virtual interface.
 - **Blind Ops / Cryptographic Revealing** (research): Encrypted intention payloads revealed only to nodes possessing specific keys (Convergent Encryption or ZK proofs). Enables selective disclosure within atomic transactions.
 - **Epoch Key Encryption**: Shared symmetric key for O(1) gossip payload encryption, enabling efficient peer revocation. See [Epoch Key Encryption](design/epoch-key-encryption/) for the full design.
-- **S-Expression Intention View**: Enhance `store history` and `store debug` to optionally display Intentions as S-expressions, providing a structured, verifiable view of the underlying data for debugging.
+- ~~**S-Expression Intention View**~~: Done. All CLI output uses `SExpr` → `render_sexpr_colored`/`render_sexpr_pretty_colored`. Dynamic dispatch (`exec`/`stream`) responses converted via `dynamic_message_to_sexpr` (in `lattice-model/src/sexpr.rs`). Table auto-detection for homogeneous record lists. Terminal-width-aware wrapping in both table renderer and graph renderer. `store debug` split into subcommands (`tips`, `log`, `intentions`, `floating`, `intention`, `branch`).
 - **Async/Task-Based Bootstrapping**:
     - Treat bootstrapping as a persistent state/task (`StoreState::Bootstrapping`).
     - Retry indefinitely if peers are unavailable.

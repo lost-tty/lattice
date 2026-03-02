@@ -127,10 +127,6 @@ impl Introspectable for dyn StoreHandle {
         self.as_dispatcher().field_formats()
     }
 
-    fn matches_filter(&self, payload: &prost_reflect::DynamicMessage, filter: &str) -> bool {
-        self.as_dispatcher().matches_filter(payload, filter)
-    }
-
     fn summarize_payload(
         &self,
         payload: &prost_reflect::DynamicMessage,

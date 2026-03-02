@@ -273,17 +273,6 @@ impl lattice_store_base::Introspectable for LogState {
         std::collections::HashMap::new()
     }
 
-    fn matches_filter(&self, payload: &prost_reflect::DynamicMessage, filter: &str) -> bool {
-        // Simple substring match on content
-        if let Some(content) = payload.get_field_by_name("content") {
-            if let Some(bytes) = content.as_bytes() {
-                let content_str = String::from_utf8_lossy(bytes);
-                return content_str.contains(filter);
-            }
-        }
-        false
-    }
-
     fn summarize_payload(
         &self,
         payload: &prost_reflect::DynamicMessage,

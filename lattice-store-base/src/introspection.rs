@@ -46,13 +46,6 @@ pub trait Introspectable: Send + Sync {
         std::collections::HashMap::new()
     }
 
-    /// Check if a log payload matches a user-specified filter.
-    ///
-    /// The default implementation returns false (no matches).
-    fn matches_filter(&self, _payload: &DynamicMessage, _filter: &str) -> bool {
-        false
-    }
-
     /// Summarize a payload for history display.
     /// Returns structured s-expression summaries (e.g. `(put "key" "val")`).
     fn summarize_payload(&self, _payload: &DynamicMessage) -> Vec<SExpr> {
@@ -169,10 +162,6 @@ impl<T: Introspectable + ?Sized> Introspectable for std::sync::Arc<T> {
 
     fn field_formats(&self) -> std::collections::HashMap<String, FieldFormat> {
         (**self).field_formats()
-    }
-
-    fn matches_filter(&self, payload: &DynamicMessage, filter: &str) -> bool {
-        (**self).matches_filter(payload, filter)
     }
 
     fn summarize_payload(&self, payload: &DynamicMessage) -> Vec<SExpr> {

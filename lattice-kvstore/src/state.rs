@@ -19,7 +19,7 @@ use crate::{WatchEvent, WatchEventKind};
 use lattice_model::{Hash, Op, Uuid};
 use lattice_store_base::{FieldFormat, Introspectable};
 use prost::Message;
-use prost_reflect::{DescriptorPool, ReflectMessage};
+use prost_reflect::DescriptorPool;
 use redb::Database;
 use regex::bytes::Regex;
 use tokio::sync::broadcast;
@@ -340,50 +340,6 @@ impl Introspectable for KvState {
         formats.insert("DeleteOp.key".to_string(), FieldFormat::Utf8);
 
         formats
-    }
-
-    fn matches_filter(&self, payload: &prost_reflect::DynamicMessage, filter: &str) -> bool {
-        // KV Logic: matches if payload is a KvPayload and any op key matches filter
-        if payload.descriptor().name() != "KvPayload" {
-            return false;
-        }
-
-        let Some(ops) = payload.get_field_by_name("ops") else {
-            return false;
-        };
-        let prost_reflect::Value::List(op_list) = ops.as_ref() else {
-            return false;
-        };
-
-        for op in op_list {
-            let prost_reflect::Value::Message(op_msg) = op else {
-                continue;
-            };
-
-            // Check "put" or "delete" fields directly (oneof variants are fields)
-            let inner_op = if let Some(put) = op_msg.get_field_by_name("put") {
-                put
-            } else if let Some(del) = op_msg.get_field_by_name("delete") {
-                del
-            } else {
-                continue;
-            };
-
-            let prost_reflect::Value::Message(inner) = inner_op.as_ref() else {
-                continue;
-            };
-
-            // Check for "key" field in PutOp or DeleteOp
-            if let Some(key_val) = inner.get_field_by_name("key") {
-                match key_val.as_ref() {
-                    prost_reflect::Value::Bytes(b) if b == filter.as_bytes() => return true,
-                    prost_reflect::Value::String(s) if s == filter => return true,
-                    _ => {}
-                }
-            }
-        }
-
-        false
     }
 
     fn summarize_payload(

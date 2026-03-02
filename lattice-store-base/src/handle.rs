@@ -55,10 +55,6 @@ where
         self.state().field_formats()
     }
 
-    fn matches_filter(&self, payload: &prost_reflect::DynamicMessage, filter: &str) -> bool {
-        self.state().matches_filter(payload, filter)
-    }
-
     fn summarize_payload(
         &self,
         payload: &prost_reflect::DynamicMessage,

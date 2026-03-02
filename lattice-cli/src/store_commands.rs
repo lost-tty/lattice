@@ -978,9 +978,8 @@ pub async fn cmd_history(
         return Ok(Continue);
     }
 
-    let target = "*".to_string();
-    let _ = writeln!(w, "History for: {}\n", target);
-    let output = graph_renderer::render_dag(&graph_entries, target.as_bytes());
+    let _ = writeln!(w, "History:\n");
+    let output = graph_renderer::render_dag(&graph_entries);
     let _ = write!(w, "{}", output);
 
     Ok(Continue)

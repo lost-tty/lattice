@@ -313,7 +313,7 @@ pub struct RenderEntry {
 }
 
 /// Render a DAG of entries to a grid-based graph
-pub fn render_dag(entries: &std::collections::HashMap<Hash, RenderEntry>, _key: &[u8]) -> String {
+pub fn render_dag(entries: &std::collections::HashMap<Hash, RenderEntry>) -> String {
     use std::collections::{HashMap, HashSet};
     use Hash;
 
@@ -808,7 +808,7 @@ mod tests {
             },
         );
 
-        let output = render_dag(&entries, b"*");
+        let output = render_dag(&entries);
 
         // Strip ANSI escape sequences for assertion
         let clean = strip_ansi(&output);
