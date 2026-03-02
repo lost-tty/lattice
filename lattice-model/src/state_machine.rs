@@ -26,11 +26,31 @@ impl<'a> Op<'a> {
 ///
 /// It is agnostic to the replication log format (Intention/IntentionStore) and
 /// only deals with opaque payload bytes.
+///
+/// # Error contract — stall on failure
+///
+/// If `apply` returns `Err`, the store **stalls**: the intention is not
+/// witnessed, the author's chain stops advancing, and no further intentions
+/// from that author can be applied. This is intentional.
+///
+/// A payload that cannot be decoded may indicate version skew (the peer is
+/// running newer code with a schema this node doesn't understand). Silently
+/// skipping it would cause **permanent silent state divergence** — this
+/// node's state would differ from every other node, with no way to detect
+/// or recover. Stalling is recoverable (upgrade, restart, replay).
+///
+/// Semantic validation (e.g. "key must not be empty") should happen at the
+/// API/CommandHandler layer *before* the payload is signed into an intention.
+/// The `apply` path should only fail for reasons the local node cannot handle:
+/// unknown payload format, I/O errors, or database corruption.
 pub trait StateMachine: Send + Sync {
     /// The specific error type returned by this state machine
     type Error: Error + Send + Sync + 'static;
 
-    /// Apply a validated operation to the state.
+    /// Apply an operation to the state.
+    ///
+    /// Returns `Err` if the payload cannot be decoded or applied. This stalls
+    /// the author's chain until the issue is resolved (e.g. code upgrade).
     fn apply(&self, op: &Op, dag: &dyn DagQueries) -> Result<(), Self::Error>;
 
     /// Create a point-in-time snapshot of the state.

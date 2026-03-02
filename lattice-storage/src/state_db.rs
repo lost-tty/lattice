@@ -580,6 +580,12 @@ pub trait StateLogic: Send + Sync {
 
     /// Decode payload and apply mutations to the table.
     /// Returns notification data for watchers.
+    ///
+    /// Returning `Err` stalls the author's chain — the intention will not be
+    /// witnessed and all subsequent intentions from that author are blocked.
+    /// This is correct for unrecognized payload formats (version skew) and
+    /// I/O failures. See [`StateMachine`](lattice_model::StateMachine) for
+    /// the full error contract.
     fn mutate(
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,

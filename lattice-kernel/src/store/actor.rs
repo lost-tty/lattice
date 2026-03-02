@@ -439,6 +439,9 @@ impl<S: StateMachine> ReplicationController<S> {
 
     /// Apply floating intentions that are ready (store_prev matches a tip and conditions met).
     /// Returns a MissingDep if the optionally provided candidate is still stuck on a missing parent.
+    ///
+    /// If a state machine rejects a payload (e.g. version skew), the intention stays
+    /// floating and that author's chain stalls — but other authors are unaffected.
     fn apply_ready_intentions(
         &mut self,
         store: &mut crate::weaver::IntentionStore,
@@ -481,8 +484,12 @@ impl<S: StateMachine> ReplicationController<S> {
                         continue;
                     }
 
-                    self.apply_intention_to_state(store, signed)?;
-                    applied_any = true;
+                    // If apply fails (e.g. version skew), the intention stays
+                    // floating and the author's chain stalls. Other authors
+                    // are unaffected.
+                    if self.apply_intention_to_state(store, signed).is_ok() {
+                        applied_any = true;
+                    }
                 }
             }
 
@@ -1288,6 +1295,174 @@ mod tests {
                 t2
             );
         }
+
+        handle.close().await;
+    }
+
+    // =========================================================================
+    // Stall-on-failure tests
+    // =========================================================================
+
+    /// A mock state machine that rejects payloads starting with b"INVALID".
+    /// Used to test that unrecognized payloads stall the author's chain.
+    #[derive(Clone)]
+    struct FailingMockStateMachine {
+        applied_ops: Arc<RwLock<HashSet<Hash>>>,
+        tips: Arc<RwLock<HashMap<PubKey, Hash>>>,
+    }
+
+    impl FailingMockStateMachine {
+        fn new() -> Self {
+            Self {
+                applied_ops: Arc::new(RwLock::new(HashSet::new())),
+                tips: Arc::new(RwLock::new(HashMap::new())),
+            }
+        }
+
+        fn has_applied(&self, hash: Hash) -> bool {
+            self.applied_ops.read().unwrap().contains(&hash)
+        }
+    }
+
+    impl lattice_model::StateMachine for FailingMockStateMachine {
+        type Error = std::io::Error;
+
+        fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> {
+            Ok(Box::new(std::io::Cursor::new(Vec::new())))
+        }
+
+        fn restore(&self, _snapshot: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
+            Ok(self.tips.read().unwrap().clone().into_iter().collect())
+        }
+
+        fn apply(
+            &self,
+            op: &lattice_model::Op,
+            _dag: &dyn lattice_model::DagQueries,
+        ) -> Result<(), std::io::Error> {
+            if op.info.payload.starts_with(b"INVALID") {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unrecognized payload format",
+                ));
+            }
+            self.tips.write().unwrap().insert(op.info.author, op.id());
+            self.applied_ops.write().unwrap().insert(op.id());
+            Ok(())
+        }
+    }
+
+    fn open_failing_test_store(
+        store_id: Uuid,
+        node: NodeIdentity,
+    ) -> Result<
+        (
+            crate::store::Store<FailingMockStateMachine>,
+            crate::store::StoreInfo,
+            tokio::task::JoinHandle<()>,
+        ),
+        crate::store::StateError,
+    > {
+        let state = Arc::new(FailingMockStateMachine::new());
+        let opened = crate::store::OpenedStore::new(
+            store_id,
+            &lattice_model::StorageConfig::InMemory,
+            state.clone(),
+            node.signing_key(),
+        )?;
+        let (handle, info, runner) = opened.into_handle(node)?;
+        let join_handle = tokio::spawn(async move { runner.run().await });
+        Ok((handle, info, join_handle))
+    }
+
+    /// Test that a malformed payload stalls the author's chain:
+    /// - The bad intention is stored but NOT witnessed/applied
+    /// - Subsequent intentions from the same author are blocked
+    /// - Other authors are unaffected
+    #[tokio::test]
+    async fn test_malformed_payload_stalls_author_chain() {
+        let node_a = NodeIdentity::generate(); // local node
+        let node_b = NodeIdentity::generate(); // peer with bad payload
+        let node_c = NodeIdentity::generate(); // unrelated peer
+
+        let (handle, _info, _join) =
+            open_failing_test_store(TEST_STORE, node_a.clone()).unwrap();
+
+        // 1. Ingest a valid intention from node_b (genesis)
+        let i1 = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"valid_op".to_vec(),
+        };
+        let s1 = SignedIntention::sign(i1, node_b.signing_key());
+        let h1 = s1.intention.hash();
+        handle.ingest_intention(s1).await.unwrap();
+        assert!(handle.state().has_applied(h1), "valid op should be applied");
+
+        // 2. Ingest a malformed intention from node_b (chain continues)
+        let i2 = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h1,
+            condition: Condition::v1(vec![]),
+            ops: b"INVALID_payload".to_vec(),
+        };
+        let s2 = SignedIntention::sign(i2, node_b.signing_key());
+        let h2 = s2.intention.hash();
+
+        // Ingest succeeds (intention is stored) but apply is skipped (stalled)
+        let _result = handle.ingest_intention(s2).await;
+        assert!(
+            !handle.state().has_applied(h2),
+            "malformed op must NOT be applied"
+        );
+
+        // 3. Ingest a valid follow-up from node_b — should also fail
+        //    because the bad intention stalled the chain at h1
+        let i3 = Intention {
+            author: node_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h2,
+            condition: Condition::v1(vec![]),
+            ops: b"valid_followup".to_vec(),
+        };
+        let s3 = SignedIntention::sign(i3, node_b.signing_key());
+        let h3 = s3.intention.hash();
+
+        // The follow-up floats (its store_prev h2 is not witnessed).
+        // ingest_intention returns Ok(MissingDeps) or Ok(Applied) but
+        // the intention should NOT be applied.
+        let _ = handle.ingest_intention(s3).await;
+        assert!(
+            !handle.state().has_applied(h3),
+            "follow-up after stalled chain must NOT be applied"
+        );
+
+        // 4. A different author (node_c) should be completely unaffected
+        let i4 = Intention {
+            author: node_c.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"other_author_op".to_vec(),
+        };
+        let s4 = SignedIntention::sign(i4, node_c.signing_key());
+        let h4 = s4.intention.hash();
+        handle.ingest_intention(s4).await.unwrap();
+        assert!(
+            handle.state().has_applied(h4),
+            "other author must not be affected by stalled chain"
+        );
 
         handle.close().await;
     }
