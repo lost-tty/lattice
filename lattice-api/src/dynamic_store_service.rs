@@ -8,6 +8,7 @@ use crate::proto::{
     ExecResponse, MethodInfo, MethodList, StoreEvent, StoreId, StreamDescriptor, StreamList,
     SubscribeRequest,
 };
+use crate::IntoStatus;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -91,7 +92,7 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
                     service_name,
                 })
             })
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn list_methods(
@@ -109,7 +110,7 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
                     .collect();
                 Response::new(MethodList { methods })
             })
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn list_streams(
@@ -132,7 +133,7 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
                     .collect();
                 Response::new(StreamList { streams })
             })
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     type SubscribeStream = ReceiverStream<Result<StoreEvent, Status>>;
@@ -148,7 +149,7 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
             .backend
             .store_subscribe(store_id, &req.stream_name, &req.params)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .into_status()?;
 
         // Convert BoxStream to ReceiverStream via channel
         let (tx, rx) = tokio::sync::mpsc::channel(128);

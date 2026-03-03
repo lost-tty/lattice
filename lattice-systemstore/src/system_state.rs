@@ -55,29 +55,22 @@ impl<S: StateLogic> SystemLayer<S> {
         sys_op: SystemOp,
         dag: &dyn lattice_model::DagQueries,
     ) -> Result<(), StateDbError> {
-        let mut write_txn = self
-            .inner
-            .backend()
-            .db()
-            .begin_write()
-            .map_err(StateDbError::Transaction)?;
+        let mut write_txn = self.inner.backend().db().begin_write()?;
 
         // 1. Verify Tip (using backend from inner)
         let should_apply = self
             .inner
             .backend()
-            .verify_and_update_tip(&write_txn, &op.info.author, op.id(), op.prev_hash)
-            .map_err(StateDbError::from)?;
+            .verify_and_update_tip(&write_txn, &op.info.author, op.id(), op.prev_hash)?;
 
         if !should_apply {
             return Ok(());
         }
 
         // 2. Apply System Op
-        self.apply_system_op(&mut write_txn, sys_op, op, dag)
-            .map_err(StateDbError::from)?;
+        self.apply_system_op(&mut write_txn, sys_op, op, dag)?;
 
-        write_txn.commit().map_err(StateDbError::Commit)?;
+        write_txn.commit()?;
         Ok(())
     }
 
@@ -241,8 +234,7 @@ where
         match universal.op {
             Some(universal_op::Op::System(sys_op)) => {
                 let sys_dag = ScopedDag { inner: dag, scope: DagScope::System };
-                self.apply_system_transaction(op, sys_op, &sys_dag)
-                    .map_err(SystemLayerError::Db)
+                Ok(self.apply_system_transaction(op, sys_op, &sys_dag)?)
             }
             Some(universal_op::Op::AppData(data)) => {
                 let new_op = Op {
@@ -411,122 +403,82 @@ use crate::SystemReader;
 use lattice_model::{PeerInfo, StoreLink};
 
 impl<S: StateLogic + Send + Sync> SystemReader for SystemLayer<S> {
-    fn get_peer(&self, pubkey: &PubKey) -> Result<Option<PeerInfo>, String> {
-        let read_txn = self
-            .inner
-            .backend()
-            .db()
-            .begin_read()
-            .map_err(|e| e.to_string())?;
+    fn get_peer(&self, pubkey: &PubKey) -> Result<Option<PeerInfo>, crate::SystemReadError> {
+        let read_txn = self.inner.backend().db().begin_read()?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.into()),
         };
         crate::tables::ReadOnlySystemTable::new(table).get_peer(pubkey)
     }
 
-    fn get_peers(&self) -> Result<Vec<PeerInfo>, String> {
-        let read_txn = self
-            .inner
-            .backend()
-            .db()
-            .begin_read()
-            .map_err(|e| e.to_string())?;
+    fn get_peers(&self) -> Result<Vec<PeerInfo>, crate::SystemReadError> {
+        let read_txn = self.inner.backend().db().begin_read()?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.into()),
         };
         crate::tables::ReadOnlySystemTable::new(table).get_peers()
     }
 
-    fn get_children(&self) -> Result<Vec<StoreLink>, String> {
-        let read_txn = self
-            .inner
-            .backend()
-            .db()
-            .begin_read()
-            .map_err(|e| e.to_string())?;
+    fn get_children(&self) -> Result<Vec<StoreLink>, crate::SystemReadError> {
+        let read_txn = self.inner.backend().db().begin_read()?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.into()),
         };
         crate::tables::ReadOnlySystemTable::new(table).get_children()
     }
 
-    fn get_peer_strategy(&self) -> Result<Option<PeerStrategy>, String> {
-        let read_txn = self
-            .inner
-            .backend()
-            .db()
-            .begin_read()
-            .map_err(|e| e.to_string())?;
+    fn get_peer_strategy(&self) -> Result<Option<PeerStrategy>, crate::SystemReadError> {
+        let read_txn = self.inner.backend().db().begin_read()?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.into()),
         };
         crate::tables::ReadOnlySystemTable::new(table).get_peer_strategy()
     }
 
-    fn get_invite(&self, token_hash: &[u8]) -> Result<Option<lattice_model::InviteInfo>, String> {
-        let read_txn = self
-            .inner
-            .backend()
-            .db()
-            .begin_read()
-            .map_err(|e| e.to_string())?;
+    fn get_invite(&self, token_hash: &[u8]) -> Result<Option<lattice_model::InviteInfo>, crate::SystemReadError> {
+        let read_txn = self.inner.backend().db().begin_read()?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.into()),
         };
         crate::tables::ReadOnlySystemTable::new(table).get_invite(token_hash)
     }
 
-    fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
-        let read_txn = self
-            .inner
-            .backend()
-            .db()
-            .begin_read()
-            .map_err(|e| e.to_string())?;
+    fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, crate::SystemReadError> {
+        let read_txn = self.inner.backend().db().begin_read()?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.into()),
         };
         crate::tables::ReadOnlySystemTable::new(table).list_all()
     }
 
-    fn get_name(&self) -> Result<Option<String>, String> {
-        let read_txn = self
-            .inner
-            .backend()
-            .db()
-            .begin_read()
-            .map_err(|e| e.to_string())?;
+    fn get_name(&self) -> Result<Option<String>, crate::SystemReadError> {
+        let read_txn = self.inner.backend().db().begin_read()?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.into()),
         };
         crate::tables::ReadOnlySystemTable::new(table).get_name()
     }
 
-    fn _get_deps(&self, key: &[u8]) -> Result<Vec<Hash>, String> {
-        let read_txn = self
-            .inner
-            .backend()
-            .db()
-            .begin_read()
-            .map_err(|e| e.to_string())?;
+    fn _get_deps(&self, key: &[u8]) -> Result<Vec<Hash>, crate::SystemReadError> {
+        let read_txn = self.inner.backend().db().begin_read()?;
         let table = match read_txn.open_table(lattice_storage::TABLE_SYSTEM) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.into()),
         };
         crate::tables::ReadOnlySystemTable::new(table).head_hashes(key)
     }

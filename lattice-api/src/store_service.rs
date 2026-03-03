@@ -8,6 +8,7 @@ use crate::proto::{
     SetStoreNameRequest, StoreDetails, StoreId, StoreList, StoreMeta, StoreNameResponse, StoreRef,
     SystemEntry, SystemListResponse, WitnessLogRequest, WitnessLogResponse,
 };
+use crate::IntoStatus;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -46,7 +47,7 @@ impl StoreService for StoreServiceImpl {
             .store_create(parent_id, name, &req.store_type)
             .await
             .map(Response::new)
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn list(
@@ -64,7 +65,7 @@ impl StoreService for StoreServiceImpl {
             .store_list(parent_id)
             .await
             .map(|stores| Response::new(StoreList { stores }))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn get_status(&self, request: Request<StoreId>) -> Result<Response<StoreMeta>, Status> {
@@ -73,7 +74,7 @@ impl StoreService for StoreServiceImpl {
             .store_status(store_id)
             .await
             .map(Response::new)
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn get_details(
@@ -85,7 +86,7 @@ impl StoreService for StoreServiceImpl {
             .store_details(store_id)
             .await
             .map(Response::new)
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn delete(
@@ -99,7 +100,7 @@ impl StoreService for StoreServiceImpl {
             .store_delete(store_id, child_id)
             .await
             .map(|_| Response::new(Empty {}))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn set_name(
@@ -112,7 +113,7 @@ impl StoreService for StoreServiceImpl {
             .store_set_name(store_id, &req.name)
             .await
             .map(|_| Response::new(Empty {}))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn get_name(
@@ -124,7 +125,7 @@ impl StoreService for StoreServiceImpl {
             .store_get_name(store_id)
             .await
             .map(|name| Response::new(StoreNameResponse { name }))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn sync(&self, request: Request<StoreId>) -> Result<Response<Empty>, Status> {
@@ -133,7 +134,7 @@ impl StoreService for StoreServiceImpl {
             .store_sync(store_id)
             .await
             .map(|_| Response::new(Empty {}))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn debug(&self, request: Request<StoreId>) -> Result<Response<DebugInfo>, Status> {
@@ -142,7 +143,7 @@ impl StoreService for StoreServiceImpl {
             .store_debug(store_id)
             .await
             .map(|authors| Response::new(DebugInfo { authors }))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn witness_log(
@@ -159,7 +160,7 @@ impl StoreService for StoreServiceImpl {
                     entries: entries.into_iter().map(Into::into).collect(),
                 })
             })
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn floating_intentions(
@@ -175,7 +176,7 @@ impl StoreService for StoreServiceImpl {
                     intentions: intentions.into_iter().map(Into::into).collect(),
                 })
             })
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn get_intention(
@@ -227,7 +228,7 @@ impl StoreService for StoreServiceImpl {
                         .collect(),
                 })
             })
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn list_peers(
@@ -239,7 +240,7 @@ impl StoreService for StoreServiceImpl {
             .store_peers(store_id)
             .await
             .map(|peers| Response::new(crate::proto::PeerList { peers }))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn revoke_peer(
@@ -252,7 +253,7 @@ impl StoreService for StoreServiceImpl {
             .store_peer_revoke(store_id, &req.peer_key)
             .await
             .map(|_| Response::new(Empty {}))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn get_peer_strategy(
@@ -264,7 +265,7 @@ impl StoreService for StoreServiceImpl {
             .store_peer_strategy(store_id)
             .await
             .map(|strategy| Response::new(PeerStrategyResponse { strategy }))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn join(
@@ -279,7 +280,7 @@ impl StoreService for StoreServiceImpl {
                     store_id: store_id.as_bytes().to_vec(),
                 })
             })
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn invite(
@@ -291,7 +292,7 @@ impl StoreService for StoreServiceImpl {
             .store_peer_invite(store_id)
             .await
             .map(|token| Response::new(crate::proto::InviteToken { token }))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn inspect_branch(
@@ -320,6 +321,6 @@ impl StoreService for StoreServiceImpl {
                         .collect(),
                 })
             })
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 }

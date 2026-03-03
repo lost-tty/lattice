@@ -390,7 +390,7 @@ impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
     }
 
     /// Commit all batched operations as a single intention.
-    pub async fn commit(self) -> Result<(), String> {
+    pub async fn commit(self) -> Result<(), crate::SystemWriteError> {
         if self.ops.is_empty() {
             return Ok(());
         }

@@ -307,8 +307,7 @@ impl Node {
             .ok_or_else(|| NodeError::StoreManager(crate::StoreManagerError::NotFound(store_id)))?;
         if let Some(name) = self.name() {
             pm.set_peer_name(self.node_identity.public_key(), &name)
-                .await
-                .map_err(NodeError::PeerManager)?;
+                .await?;
         }
         Ok(())
     }
@@ -464,8 +463,7 @@ impl Node {
         // Workaround: Use open() then configure.
         let handle = self
             .store_manager
-            .open(store_id, lattice_model::STORE_TYPE_KVSTORE)
-            .map_err(|e| NodeError::StoreManager(e))?;
+            .open(store_id, lattice_model::STORE_TYPE_KVSTORE)?;
 
         // 2. Configure System Table
         let system = handle
@@ -479,8 +477,7 @@ impl Node {
             // Persist peer as Active so it is available for sync/gossip
             peer_manager
                 .set_peer_status(*peer, PeerStatus::Active)
-                .await
-                .map_err(NodeError::PeerManager)?;
+                .await?;
             peer_manager.add_bootstrap_peer(*peer);
         }
 
@@ -492,9 +489,7 @@ impl Node {
         )?;
 
         // Start watching
-        self.store_manager
-            .start_watching(store_id)
-            .map_err(NodeError::StoreManager)?;
+        self.store_manager.start_watching(store_id)?;
 
         let _ = self.publish_name_to(store_id).await;
 
@@ -561,8 +556,7 @@ impl Node {
                     store_type,
                     Some(lattice_model::store_info::PeerStrategy::Independent),
                 )
-                .await
-                .map_err(NodeError::StoreManager)?;
+                .await?;
 
             // 2. Register with PeerManager (create new one)
             let system = handle.clone().as_system().ok_or_else(|| {
@@ -571,14 +565,11 @@ impl Node {
             let peer_manager = crate::PeerManager::new(system).await?;
 
             self.store_manager
-                .register(store_id, handle, store_type, peer_manager.clone())
-                .map_err(NodeError::StoreManager)?;
+                .register(store_id, handle, store_type, peer_manager.clone())?;
 
             // 3. Start Watcher
             // Note: start_watching requires Arc<StoreManager>. Node holds it.
-            self.store_manager
-                .start_watching(store_id)
-                .map_err(NodeError::StoreManager)?;
+            self.store_manager.start_watching(store_id)?;
 
             // 4. Record in meta.db and activate
             self.meta.add_rootstore(

@@ -279,10 +279,7 @@ impl<S: StateMachine> Store<S> {
             .send(ReplicationControllerCmd::AuthorTips { resp: resp_tx })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
+        Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
     }
 
     /// Ingest a signed intention from a peer
@@ -298,10 +295,7 @@ impl<S: StateMachine> Store<S> {
             })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
+        Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
     }
 
     /// Ingest a batch of signed intentions from a peer
@@ -317,10 +311,7 @@ impl<S: StateMachine> Store<S> {
             })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
+        Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
     }
 
     /// Ingest a batch of witness records and intentions (Bootstrap/Clone)
@@ -344,10 +335,7 @@ impl<S: StateMachine> Store<S> {
             })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
+        Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
     }
 
     /// Fetch intentions by content hash
@@ -363,10 +351,7 @@ impl<S: StateMachine> Store<S> {
             })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
-        resp_rx
-            .await
-            .map_err(|_| StoreError::ChannelClosed)?
-            .map_err(StoreError::Store)
+        Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
     }
 
     /// Get number of intentions
@@ -450,11 +435,12 @@ impl<S: StateMachine> StateWriter for Store<S> {
 
 use lattice_sync::sync_provider::{SyncError, SyncProvider};
 
-/// Map internal StoreError to the trait-level SyncError
-fn store_to_sync(e: StoreError) -> SyncError {
-    match e {
-        StoreError::ChannelClosed => SyncError::ChannelClosed,
-        StoreError::Store(se) => SyncError::Internal(se.to_string()),
+impl From<StoreError> for SyncError {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::ChannelClosed => SyncError::ChannelClosed,
+            StoreError::Store(se) => SyncError::Internal(se.to_string()),
+        }
     }
 }
 
@@ -470,29 +456,21 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
     fn author_tips(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, SyncError>> + Send + '_>> {
-        Box::pin(async move { Store::author_tips(self).await.map_err(store_to_sync) })
+        Box::pin(async move { Ok(Store::author_tips(self).await?) })
     }
 
     fn ingest_intention(
         &self,
         intention: SignedIntention,
     ) -> Pin<Box<dyn Future<Output = Result<IngestResult, SyncError>> + Send + '_>> {
-        Box::pin(async move {
-            Store::ingest_intention(self, intention)
-                .await
-                .map_err(store_to_sync)
-        })
+        Box::pin(async move { Ok(Store::ingest_intention(self, intention).await?) })
     }
 
     fn ingest_batch(
         &self,
         intentions: Vec<SignedIntention>,
     ) -> Pin<Box<dyn Future<Output = Result<IngestResult, SyncError>> + Send + '_>> {
-        Box::pin(async move {
-            Store::ingest_batch(self, intentions)
-                .await
-                .map_err(store_to_sync)
-        })
+        Box::pin(async move { Ok(Store::ingest_batch(self, intentions).await?) })
     }
 
     fn ingest_witness_batch(
@@ -502,9 +480,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         peer_id: PubKey,
     ) -> Pin<Box<dyn Future<Output = Result<(), SyncError>> + Send + '_>> {
         Box::pin(async move {
-            Store::ingest_witness_batch(self, witness_records, intentions, peer_id)
-                .await
-                .map_err(store_to_sync)
+            Ok(Store::ingest_witness_batch(self, witness_records, intentions, peer_id).await?)
         })
     }
 
@@ -512,11 +488,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         &self,
         hashes: Vec<Hash>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, SyncError>> + Send + '_>> {
-        Box::pin(async move {
-            Store::fetch_intentions(self, hashes)
-                .await
-                .map_err(store_to_sync)
-        })
+        Box::pin(async move { Ok(Store::fetch_intentions(self, hashes).await?) })
     }
 
     fn subscribe_intentions(&self) -> broadcast::Receiver<SignedIntention> {
@@ -532,9 +504,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         let start = *start;
         let end = *end;
         Box::pin(async move {
-            run_store_read(store, move |guard| guard.count_range(&start, &end))
-                .await
-                .map_err(store_to_sync)
+            Ok(run_store_read(store, move |guard| guard.count_range(&start, &end)).await?)
         })
     }
 
@@ -547,9 +517,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         let start = *start;
         let end = *end;
         Box::pin(async move {
-            run_store_read(store, move |guard| guard.fingerprint_range(&start, &end))
-                .await
-                .map_err(store_to_sync)
+            Ok(run_store_read(store, move |guard| guard.fingerprint_range(&start, &end)).await?)
         })
     }
 
@@ -577,7 +545,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
                 // Fetch a batch in a blocking task
                 let batch = run_store_read(store.clone(), move |guard| {
                     guard.scan_witness_log(current_start, fetch_limit)
-                }).await.map_err(store_to_sync)?;
+                }).await?;
 
                 if batch.is_empty() {
                     break;
@@ -618,9 +586,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         let start = *start;
         let end = *end;
         Box::pin(async move {
-            run_store_read(store, move |guard| guard.hashes_in_range(&start, &end))
-                .await
-                .map_err(store_to_sync)
+            Ok(run_store_read(store, move |guard| guard.hashes_in_range(&start, &end)).await?)
         })
     }
 
@@ -629,9 +595,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
     ) -> Pin<Box<dyn Future<Output = Result<Hash, SyncError>> + Send + '_>> {
         let store = self.intention_store.clone();
         Box::pin(async move {
-            run_store_read(store, move |guard| Ok(guard.table_fingerprint()))
-                .await
-                .map_err(store_to_sync)
+            Ok(run_store_read(store, move |guard| Ok(guard.table_fingerprint())).await?)
         })
     }
 
@@ -643,11 +607,10 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<SignedIntention>, SyncError>> + Send + '_>> {
         let store = self.intention_store.clone();
         Box::pin(async move {
-            run_store_read(store, move |guard| {
+            Ok(run_store_read(store, move |guard| {
                 guard.walk_back_until(&target, since.as_ref(), limit)
             })
-            .await
-            .map_err(store_to_sync)
+            .await?)
         })
     }
 
@@ -705,10 +668,7 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
                 })
                 .await
                 .map_err(|_| StoreError::ChannelClosed)?;
-            resp_rx
-                .await
-                .map_err(|_| StoreError::ChannelClosed)?
-                .map_err(StoreError::Store)
+            Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
         })
     }
 
@@ -729,10 +689,7 @@ impl<S: StateMachine + 'static> StoreInspector for Store<S> {
                 })
                 .await
                 .map_err(|_| StoreError::ChannelClosed)?;
-            resp_rx
-                .await
-                .map_err(|_| StoreError::ChannelClosed)?
-                .map_err(StoreError::Store)
+            Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
         })
     }
 }
@@ -797,9 +754,7 @@ fn replay_intentions<S: StateMachine>(
         let mut chain = Vec::new();
         let mut current = *store_tip;
         while current != applied_tip && current != Hash::ZERO {
-            if let Some(signed) = store
-                .get(&current)
-                .map_err(|e| super::StateError::Backend(e.to_string()))?
+            if let Some(signed) = store.get(&current)?
             {
                 let prev = signed.intention.store_prev;
                 chain.push(signed);

@@ -38,6 +38,8 @@ pub enum StateDbError {
     Transaction(#[from] redb::TransactionError),
     #[error("Storage error: {0}")]
     Storage(#[from] redb::StorageError),
+    #[error("Decode error: {0}")]
+    Decode(#[from] prost::DecodeError),
     #[error("Invalid Snapshot: {0}")]
     InvalidSnapshot(String),
 }

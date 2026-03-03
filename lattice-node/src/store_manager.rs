@@ -18,6 +18,10 @@ use tracing::info;
 pub enum StoreManagerError {
     #[error("Store error: {0}")]
     Store(String),
+    #[error("Store read error: {0}")]
+    StoreRead(#[from] lattice_systemstore::SystemReadError),
+    #[error("Store write error: {0}")]
+    StoreWrite(#[from] lattice_systemstore::SystemWriteError),
     #[error("Store not found: {0}")]
     NotFound(Uuid),
     #[error("Registry error: {0}")]
@@ -134,9 +138,7 @@ impl StoreManager {
                 batch = batch.set_strategy(strategy);
             }
 
-            batch.commit().await.map_err(|e| {
-                StoreManagerError::Store(format!("Failed to configure initial store state: {}", e))
-            })?;
+            batch.commit().await?;
         } else if (name.is_some() || peer_strategy.is_some()) && system.is_none() {
             return Err(StoreManagerError::Store(format!(
                 "Store type '{}' does not support SystemStore, cannot set configured properties",
@@ -384,9 +386,7 @@ impl StoreManager {
         }
         batch = batch.set_child_status(child_id, lattice_model::store_info::ChildStatus::Active);
 
-        batch.commit().await.map_err(|e| {
-            StoreManagerError::Store(format!("Failed to commit child declaration: {}", e))
-        })?;
+        batch.commit().await?;
 
         // 5. If we are watching the parent, the watcher will pick this up.
         // But since we just registered it, we are good.
@@ -427,8 +427,7 @@ impl StoreManager {
             .set_invite_status(hash.as_bytes(), InviteStatus::Valid)
             .set_invite_invited_by(hash.as_bytes(), inviter)
             .commit()
-            .await
-            .map_err(|e| StoreManagerError::Store(format!("Failed to commit invite: {}", e)))?;
+            .await?;
 
         let invite = Invite::new(inviter, store_id, secret.to_vec());
         Ok(invite.to_string())
@@ -471,9 +470,7 @@ impl StoreManager {
         })?;
 
         // Check if exists and is valid
-        let info = system
-            .get_invite(hash.as_bytes())
-            .map_err(|e| StoreManagerError::Store(e.to_string()))?;
+        let info = system.get_invite(hash.as_bytes())?;
 
         if let Some(invite) = info {
             if invite.status == InviteStatus::Valid {
@@ -482,10 +479,7 @@ impl StoreManager {
                     .set_invite_status(hash.as_bytes(), InviteStatus::Claimed)
                     .set_invite_claimed_by(hash.as_bytes(), claimer)
                     .commit()
-                    .await
-                    .map_err(|e| {
-                        StoreManagerError::Store(format!("Failed to claim invite: {}", e))
-                    })?;
+                    .await?;
                 Ok(true)
             } else {
                 tracing::warn!(
@@ -557,10 +551,7 @@ impl StoreManager {
 
         let mut batch = SystemBatch::new(system.as_ref());
         batch = batch.set_child_status(child_id, lattice_model::store_info::ChildStatus::Archived);
-        batch
-            .commit()
-            .await
-            .map_err(|e| StoreManagerError::Store(e.to_string()))?;
+        batch.commit().await?;
 
         info!(parent_id = %parent_id, child_id = %child_id, "Deleted (archived) child store");
         Ok(())

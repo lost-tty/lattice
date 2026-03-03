@@ -38,7 +38,7 @@ pub fn verify_witness(
     crypto::verify_hash(&pubkey, &hash, &sig)
         .map_err(|e| WitnessError::InvalidSignature(e.to_string()))?;
     WitnessContent::decode(record.content.as_slice())
-        .map_err(|e| WitnessError::InvalidContent(format!("{e}")))
+        .map_err(|e| WitnessError::InvalidContent(e.to_string()))
 }
 
 /// Errors from witness verification.

@@ -408,12 +408,11 @@ impl<T: CommandDispatcher + StreamReflectable + ?Sized> KvStoreExt for T {
             let byte_stream = self
                 .subscribe("watch", &params_bytes)
                 .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+                ?;
 
             // Map the byte stream to WatchEvent
             let typed_stream = byte_stream.map(|bytes| {
-                let proto = WatchEventProto::decode(&bytes[..])
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+                let proto = WatchEventProto::decode(&bytes[..])?;
 
                 let key = proto.key;
                 let kind = match proto.kind {

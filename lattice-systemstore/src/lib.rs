@@ -13,40 +13,80 @@ use lattice_store_base::StateProvider;
 use std::future::Future;
 use std::pin::Pin;
 
+// ==================== Error Type ====================
+
+/// Error type for `SystemReader` operations.
+#[derive(Debug, thiserror::Error)]
+pub enum SystemReadError {
+    #[error("Database error: {0}")]
+    Database(#[from] redb::DatabaseError),
+
+    #[error("Transaction error: {0}")]
+    Transaction(#[from] redb::TransactionError),
+
+    #[error("Table error: {0}")]
+    Table(#[from] redb::TableError),
+
+    #[error("Storage error: {0}")]
+    Storage(#[from] redb::StorageError),
+
+    #[error("KvTable error: {0}")]
+    KvTable(#[from] lattice_kvtable::KvTableError),
+
+    #[error("Data error: {0}")]
+    Data(String),
+}
+
+impl From<lattice_storage::StateDbError> for SystemReadError {
+    fn from(e: lattice_storage::StateDbError) -> Self {
+        SystemReadError::Data(e.to_string())
+    }
+}
+
+/// Error type for `SystemWriter` / `SystemBatch` operations.
+#[derive(Debug, thiserror::Error)]
+pub enum SystemWriteError {
+    #[error("Read error during write: {0}")]
+    Read(#[from] SystemReadError),
+
+    #[error("State writer error: {0}")]
+    StateWriter(#[from] lattice_model::StateWriterError),
+}
+
 // ==================== Trait Definitions (Local) ====================
 
 /// Trait for reading system-level data (peers, hierarchy).
 pub trait SystemReader: Send + Sync {
     // === GET operations ===
-    fn get_peer(&self, _pubkey: &lattice_model::PubKey) -> Result<Option<PeerInfo>, String> {
-        Err("Not implemented".to_string())
+    fn get_peer(&self, _pubkey: &lattice_model::PubKey) -> Result<Option<PeerInfo>, SystemReadError> {
+        Err(SystemReadError::Data("Not implemented".to_string()))
     }
-    fn get_peers(&self) -> Result<Vec<PeerInfo>, String> {
-        Err("Not implemented".to_string())
+    fn get_peers(&self) -> Result<Vec<PeerInfo>, SystemReadError> {
+        Err(SystemReadError::Data("Not implemented".to_string()))
     }
-    fn get_children(&self) -> Result<Vec<StoreLink>, String> {
-        Err("Not implemented".to_string())
+    fn get_children(&self) -> Result<Vec<StoreLink>, SystemReadError> {
+        Err(SystemReadError::Data("Not implemented".to_string()))
     }
-    fn get_peer_strategy(&self) -> Result<Option<PeerStrategy>, String> {
-        Err("Not implemented".to_string())
+    fn get_peer_strategy(&self) -> Result<Option<PeerStrategy>, SystemReadError> {
+        Err(SystemReadError::Data("Not implemented".to_string()))
     }
-    fn get_invite(&self, _token_hash: &[u8]) -> Result<Option<lattice_model::InviteInfo>, String> {
-        Err("Not implemented".to_string())
+    fn get_invite(&self, _token_hash: &[u8]) -> Result<Option<lattice_model::InviteInfo>, SystemReadError> {
+        Err(SystemReadError::Data("Not implemented".to_string()))
     }
 
     /// List all key-value entries in the system table (for debugging/CLI)
-    fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
-        Err("Not implemented".to_string())
+    fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, SystemReadError> {
+        Err(SystemReadError::Data("Not implemented".to_string()))
     }
 
     /// Get the store's display name
-    fn get_name(&self) -> Result<Option<String>, String> {
-        Err("Not implemented".to_string())
+    fn get_name(&self) -> Result<Option<String>, SystemReadError> {
+        Err(SystemReadError::Data("Not implemented".to_string()))
     }
 
     // === Internal (doc-hidden) ===
     #[doc(hidden)]
-    fn _get_deps(&self, _key: &[u8]) -> Result<Vec<Hash>, String> {
+    fn _get_deps(&self, _key: &[u8]) -> Result<Vec<Hash>, SystemReadError> {
         Ok(Vec::new())
     }
 }
@@ -58,8 +98,12 @@ pub trait SystemWriter: Send + Sync {
         &self,
         _payload: Vec<u8>,
         _deps: Vec<Hash>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
-        Box::pin(async { Err("Not implemented".to_string()) })
+    ) -> Pin<Box<dyn Future<Output = Result<(), SystemWriteError>> + Send + '_>> {
+        Box::pin(async {
+            Err(SystemWriteError::StateWriter(
+                lattice_model::StateWriterError::SubmitFailed("Not implemented".to_string()),
+            ))
+        })
     }
 }
 
@@ -93,35 +137,35 @@ where
     T: StateProvider + StateWriter + Send + Sync,
     T::State: SystemReader,
 {
-    fn get_peer(&self, pubkey: &lattice_model::PubKey) -> Result<Option<PeerInfo>, String> {
+    fn get_peer(&self, pubkey: &lattice_model::PubKey) -> Result<Option<PeerInfo>, SystemReadError> {
         self.state().get_peer(pubkey)
     }
 
-    fn get_peers(&self) -> Result<Vec<PeerInfo>, String> {
+    fn get_peers(&self) -> Result<Vec<PeerInfo>, SystemReadError> {
         self.state().get_peers()
     }
 
-    fn get_children(&self) -> Result<Vec<StoreLink>, String> {
+    fn get_children(&self) -> Result<Vec<StoreLink>, SystemReadError> {
         self.state().get_children()
     }
 
-    fn get_peer_strategy(&self) -> Result<Option<PeerStrategy>, String> {
+    fn get_peer_strategy(&self) -> Result<Option<PeerStrategy>, SystemReadError> {
         self.state().get_peer_strategy()
     }
 
-    fn get_invite(&self, token_hash: &[u8]) -> Result<Option<lattice_model::InviteInfo>, String> {
+    fn get_invite(&self, token_hash: &[u8]) -> Result<Option<lattice_model::InviteInfo>, SystemReadError> {
         self.state().get_invite(token_hash)
     }
 
-    fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+    fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, SystemReadError> {
         self.state().list_all()
     }
 
-    fn get_name(&self) -> Result<Option<String>, String> {
+    fn get_name(&self) -> Result<Option<String>, SystemReadError> {
         self.state().get_name()
     }
 
-    fn _get_deps(&self, key: &[u8]) -> Result<Vec<Hash>, String> {
+    fn _get_deps(&self, key: &[u8]) -> Result<Vec<Hash>, SystemReadError> {
         self.state()._get_deps(key)
     }
 }
@@ -136,14 +180,14 @@ where
         &self,
         payload: Vec<u8>,
         deps: Vec<Hash>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), SystemWriteError>> + Send + '_>> {
         let handle = self.clone();
         Box::pin(async move {
             handle
                 .submit(payload, deps)
                 .await
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+                .map(|_| ())?;
+            Ok(())
         })
     }
 }

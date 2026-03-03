@@ -14,6 +14,22 @@ use lattice_storage::{
 use std::future::Future;
 use std::pin::Pin;
 
+/// Extension trait to convert `Result<T, KvTableError>` into `Result<T, StateDbError>`.
+trait KvTableResultExt<T> {
+    fn into_state_err(self) -> Result<T, StateDbError>;
+}
+
+impl<T> KvTableResultExt<T> for Result<T, lattice_kvtable::KvTableError> {
+    fn into_state_err(self) -> Result<T, StateDbError> {
+        self.map_err(|e| match e {
+            lattice_kvtable::KvTableError::Storage(e) => StateDbError::Storage(e),
+            lattice_kvtable::KvTableError::Decode(e) => StateDbError::Decode(e),
+            lattice_kvtable::KvTableError::Conversion(s) => StateDbError::Conversion(s),
+            lattice_kvtable::KvTableError::Dag(e) => StateDbError::Conversion(e.to_string()),
+        })
+    }
+}
+
 use crate::proto::{operation, KvPayload};
 use crate::{WatchEvent, WatchEventKind};
 use lattice_model::{Hash, Op, Uuid};
@@ -80,8 +96,7 @@ impl KvState {
             Err(e) => return Err(e.into()),
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
-        ro.get(key)
-            .map_err(|e| StateDbError::Conversion(e.to_string()))
+        ro.get(key).into_state_err()
     }
 
     /// Get the materialized LWW value and conflict status for a key in a single read txn.
@@ -99,8 +114,7 @@ impl KvState {
             Err(e) => return Err(e.into()),
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
-        ro.get_with_conflict(key)
-            .map_err(|e| StateDbError::Conversion(e.to_string()))
+        ro.get_with_conflict(key).into_state_err()
     }
 
     /// Full inspection of a key: value, tombstone/conflict status, and all head hashes.
@@ -123,8 +137,7 @@ impl KvState {
             Err(e) => return Err(e.into()),
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
-        ro.inspect(key)
-            .map_err(|e| StateDbError::Conversion(e.to_string()))
+        ro.inspect(key).into_state_err()
     }
 
     /// Return the head hashes for a key (for causal deps and conflict counting).
@@ -136,8 +149,7 @@ impl KvState {
             Err(e) => return Err(e.into()),
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
-        ro.heads(key)
-            .map_err(|e| StateDbError::Conversion(e.to_string()))
+        ro.heads(key).into_state_err()
     }
 
     /// Scan keys with optional prefix and regex filter.
@@ -160,12 +172,8 @@ impl KvState {
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
 
-        for result in ro
-            .range(prefix..)
-            .map_err(|e| StateDbError::Conversion(e.to_string()))?
-        {
-            let (key, value, conflicted) =
-                result.map_err(|e| StateDbError::Conversion(e.to_string()))?;
+        for result in ro.range(prefix..).into_state_err()? {
+            let (key, value, conflicted) = result.into_state_err()?;
 
             if !key.starts_with(prefix) {
                 break;
@@ -202,8 +210,7 @@ impl StateLogic for KvState {
         dag: &dyn lattice_model::DagQueries,
     ) -> Result<Self::Updates, StateDbError> {
         // Decode payload
-        let kv_payload = KvPayload::decode(op.info.payload.as_ref())
-            .map_err(|e| StateDbError::Conversion(e.to_string()))?;
+        let kv_payload = KvPayload::decode(op.info.payload.as_ref())?;
 
         let mut kvt = lattice_kvtable::KVTable::new(table);
         let mut updates: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
@@ -220,7 +227,7 @@ impl StateLogic for KvState {
                         updates.push((key.clone(), winner));
                     }
                     Ok(None) => {} // idempotent skip
-                    Err(e) => return Err(StateDbError::Conversion(e.to_string())),
+                    Err(e) => return Err(e).into_state_err(),
                 }
             }
         }
@@ -455,7 +462,7 @@ impl KvState {
 
             // Compile regex for filtering
             let re = Regex::new(&pattern)
-                .map_err(|e| StreamError::InvalidParams(format!("Invalid regex: {}", e)))?;
+                .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
 
             // Subscribe to state's broadcast channel
             let mut state_rx = self.subscribe();
@@ -576,9 +583,7 @@ impl KvState {
     ) -> Result<PutResponse, Box<dyn std::error::Error + Send + Sync>> {
         validate_key(&req.key)?;
 
-        let causal_deps = self
-            .head_hashes(&req.key)
-            .map_err(|e| format!("State error: {}", e))?;
+        let causal_deps = self.head_hashes(&req.key)?;
 
         let op = Operation::put(req.key, req.value);
         let kv_payload = KvPayload { ops: vec![op] };
@@ -597,9 +602,7 @@ impl KvState {
     ) -> Result<DeleteResponse, Box<dyn std::error::Error + Send + Sync>> {
         validate_key(&req.key)?;
 
-        let causal_deps = self
-            .head_hashes(&req.key)
-            .map_err(|e| format!("State error: {}", e))?;
+        let causal_deps = self.head_hashes(&req.key)?;
 
         let op = Operation::delete(req.key);
         let kv_payload = KvPayload { ops: vec![op] };
@@ -615,9 +618,7 @@ impl KvState {
         &self,
         req: GetRequest,
     ) -> Result<GetResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let (value, conflicted) = self
-            .get_with_conflict(&req.key)
-            .map_err(|e| format!("State error: {}", e))?;
+        let (value, conflicted) = self.get_with_conflict(&req.key)?;
         Ok(GetResponse { value, conflicted })
     }
 
@@ -625,9 +626,7 @@ impl KvState {
         &self,
         req: InspectRequest,
     ) -> Result<InspectResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let result = self
-            .inspect(&req.key)
-            .map_err(|e| format!("State error: {}", e))?;
+        let result = self.inspect(&req.key)?;
         Ok(InspectResponse {
             key: req.key,
             exists: result.exists,
@@ -655,8 +654,7 @@ impl KvState {
                 });
             }
             Ok(true)
-        })
-        .map_err(|e| format!("State error: {}", e))?;
+        })?;
         Ok(ListResponse { items })
     }
 

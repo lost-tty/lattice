@@ -34,6 +34,9 @@ pub enum KvTableError {
     #[error("Storage error: {0}")]
     Storage(#[from] redb::StorageError),
 
+    #[error("Decode error: {0}")]
+    Decode(#[from] prost::DecodeError),
+
     #[error("Conversion error: {0}")]
     Conversion(String),
 
@@ -47,7 +50,7 @@ pub enum KvTableError {
 
 /// Decode bytes into a `proto::Value`.
 fn decode_value(raw: &[u8]) -> Result<proto::Value, KvTableError> {
-    proto::Value::decode(raw).map_err(|e| KvTableError::Conversion(e.to_string()))
+    Ok(proto::Value::decode(raw)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -363,15 +366,11 @@ impl Iterator for LwwRange<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let result = self.inner.next()?;
-        Some(
-            result
-                .map_err(|e| KvTableError::Storage(e.into()))
-                .and_then(|(k, v)| {
-                    let key = k.value().to_vec();
-                    let (value, conflicted) = decode_lww_with_conflict(v.value())?;
-                    Ok((key, value, conflicted))
-                }),
-        )
+        Some(result.map_err(KvTableError::Storage).and_then(|(k, v)| {
+            let key = k.value().to_vec();
+            let (value, conflicted) = decode_lww_with_conflict(v.value())?;
+            Ok((key, value, conflicted))
+        }))
     }
 }
 

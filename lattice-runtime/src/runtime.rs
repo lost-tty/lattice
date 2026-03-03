@@ -153,11 +153,7 @@ impl RuntimeBuilder {
             builder = builder.with_name(name);
         }
 
-        let node = Arc::new(
-            builder
-                .build()
-                .map_err(|e| RuntimeError::Node(e.to_string()))?,
-        );
+        let node = Arc::new(builder.build()?);
 
         // --- Create networking stack ---
 
@@ -208,7 +204,7 @@ impl Default for RuntimeBuilder {
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("Node error: {0}")]
-    Node(String),
+    Node(#[from] lattice_node::NodeError),
     #[error("Network error: {0}")]
     Network(String),
 }

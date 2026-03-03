@@ -199,10 +199,7 @@ pub async fn handle_fetch_intentions<W: tokio::io::AsyncWrite + Send + Unpin>(
         .filter_map(|h| Hash::try_from(h.as_slice()).ok())
         .collect();
 
-    let intentions = authorized_store
-        .fetch_intentions(hashes)
-        .await
-        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+    let intentions = authorized_store.fetch_intentions(hashes).await?;
 
     let proto_intentions: Vec<_> = intentions.iter().map(intention_to_proto).collect();
 
@@ -258,8 +255,7 @@ pub async fn handle_fetch_chain<W: tokio::io::AsyncWrite + Send + Unpin>(
     // Walk back the chain
     let chain = authorized_store
         .walk_back_until(target, since, super::MAX_FETCH_CHAIN_ITEMS)
-        .await
-        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+        .await?;
 
     let proto_intentions: Vec<_> = chain.iter().map(intention_to_proto).collect();
 
@@ -324,7 +320,7 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     const BATCH_SIZE: usize = 100;
 
     while let Some(result) = stream.next().await {
-        let entry = result.map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+        let entry = result?;
 
         witness_batch.push(WitnessRecord {
             content: entry.content.clone(),
@@ -390,10 +386,7 @@ async fn send_bootstrap_batch<W: tokio::io::AsyncWrite + Send + Unpin>(
         return Ok(());
     }
 
-    let intentions = store
-        .fetch_intentions(intention_hashes.to_vec())
-        .await
-        .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+    let intentions = store.fetch_intentions(intention_hashes.to_vec()).await?;
 
     let proto_intentions: Vec<_> = intentions.iter().map(intention_to_proto).collect();
 

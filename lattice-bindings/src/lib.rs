@@ -71,6 +71,14 @@ pub enum LatticeError {
     Internal { message: String },
 }
 
+impl From<uuid::Error> for LatticeError {
+    fn from(e: uuid::Error) -> Self {
+        LatticeError::InvalidUuid {
+            reason: e.to_string(),
+        }
+    }
+}
+
 impl LatticeError {
     /// Convert any error to a LatticeError, categorizing by message content
     fn from_backend<E: std::fmt::Display>(e: E) -> Self {
@@ -257,7 +265,7 @@ impl Lattice {
         let rt = self
             .rt
             .block_on(builder.build())
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
         *w = Some(rt);
         Ok(())
     }
@@ -277,7 +285,7 @@ impl Lattice {
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         self.rt
             .block_on(r.backend().node_status())
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     pub fn set_name(&self, name: String) -> Result<(), LatticeError> {
@@ -285,7 +293,7 @@ impl Lattice {
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         self.rt
             .block_on(r.backend().node_set_name(&name))
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     // Store
@@ -299,15 +307,13 @@ impl Lattice {
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
 
         let pid = match parent_id {
-            Some(s) => Some(Uuid::parse_str(&s).map_err(|e| LatticeError::InvalidUuid {
-                reason: e.to_string(),
-            })?),
+            Some(s) => Some(Uuid::parse_str(&s)?),
             None => None,
         };
 
         self.rt
             .block_on(r.backend().store_create(pid, name, &store_type))
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     pub fn store_list(&self, parent_id: Option<String>) -> Result<Vec<StoreRef>, LatticeError> {
@@ -315,26 +321,22 @@ impl Lattice {
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
 
         let pid = match parent_id {
-            Some(s) => Some(Uuid::parse_str(&s).map_err(|e| LatticeError::InvalidUuid {
-                reason: e.to_string(),
-            })?),
+            Some(s) => Some(Uuid::parse_str(&s)?),
             None => None,
         };
 
         self.rt
             .block_on(r.backend().store_list(pid))
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     pub fn store_peer_invite(&self, store_id: String) -> Result<String, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
         self.rt
             .block_on(r.backend().store_peer_invite(id))
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     pub fn store_join(&self, token: String) -> Result<JoinResponse, LatticeError> {
@@ -345,18 +347,16 @@ impl Lattice {
             .map(|id| JoinResponse {
                 store_id: id.as_bytes().to_vec(),
             })
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     pub fn store_status(&self, store_id: String) -> Result<StoreMeta, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
         self.rt
             .block_on(r.backend().store_status(id))
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     pub fn store_delete(
@@ -366,28 +366,21 @@ impl Lattice {
     ) -> Result<(), LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let parent_id =
-            Uuid::parse_str(&parent_store_id).map_err(|e| LatticeError::InvalidUuid {
-                reason: e.to_string(),
-            })?;
-        let child_id = Uuid::parse_str(&child_store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let parent_id = Uuid::parse_str(&parent_store_id)?;
+        let child_id = Uuid::parse_str(&child_store_id)?;
         self.rt
             .block_on(r.backend().store_delete(parent_id, child_id))
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     pub fn store_sync(&self, store_id: String) -> Result<(), LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
         self.rt
             .block_on(r.backend().store_sync(id))
             .map(|_| ())
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     pub fn store_witness_log(
@@ -396,24 +389,20 @@ impl Lattice {
     ) -> Result<Vec<WitnessLogEntry>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
         self.rt
             .block_on(r.backend().store_witness_log(id))
             .map(|entries| entries.into_iter().map(Into::into).collect())
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     pub fn store_peers(&self, store_id: String) -> Result<Vec<PeerInfo>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
         self.rt
             .block_on(r.backend().store_peers(id))
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     pub fn store_peer_revoke(
@@ -423,12 +412,10 @@ impl Lattice {
     ) -> Result<(), LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
         self.rt
             .block_on(r.backend().store_peer_revoke(id, &peer_key))
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     // Dynamic Reflection
@@ -436,14 +423,12 @@ impl Lattice {
     pub fn store_inspect(&self, store_id: String) -> Result<Vec<MethodInfo>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
 
         let (descriptor_bytes, service_name) = self
             .rt
             .block_on(r.backend().store_get_descriptor(id))
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
 
         let pool = DescriptorPool::decode(descriptor_bytes.as_slice()).map_err(|e| {
             LatticeError::Internal {
@@ -494,17 +479,15 @@ impl Lattice {
     ) -> Result<ReflectValue, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
 
         let (descriptor_bytes, service_name) = self
             .rt
             .block_on(r.backend().store_get_descriptor(id))
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
 
         let pool = DescriptorPool::decode(descriptor_bytes.as_slice())
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
 
         let service =
             pool.get_service_by_name(&service_name)
@@ -544,13 +527,13 @@ impl Lattice {
         let mut payload = Vec::new();
         dynamic_msg
             .encode(&mut payload)
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
 
         // Execute
         let result_bytes = self
             .rt
             .block_on(r.backend().store_exec(id, method.name(), &payload))
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
 
         // Decode result into ReflectValue
         let output_desc = method.output();
@@ -570,14 +553,12 @@ impl Lattice {
     ) -> Result<Vec<FieldInfo>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
 
         let (descriptor_bytes, _) = self
             .rt
             .block_on(r.backend().store_get_descriptor(id))
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
 
         let pool = DescriptorPool::decode(descriptor_bytes.as_slice()).map_err(|e| {
             LatticeError::Internal {
@@ -606,14 +587,12 @@ impl Lattice {
     pub fn get_store_descriptor(&self, store_id: String) -> Result<DescriptorInfo, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
 
         let (bytes, name) = self
             .rt
             .block_on(r.backend().store_get_descriptor(id))
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
 
         Ok(DescriptorInfo {
             descriptor_bytes: bytes,
@@ -627,14 +606,12 @@ impl Lattice {
     pub fn store_list_streams(&self, store_id: String) -> Result<Vec<StreamInfo>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
 
         self.rt
             .block_on(r.backend().store_list_streams(id))
             .map(|streams| streams.into_iter().map(Into::into).collect())
-            .map_err(|e| LatticeError::from_backend(e))
+            .map_err(LatticeError::from_backend)
     }
 
     /// Subscribe to a store stream (e.g., "Watch" with pattern param)
@@ -646,22 +623,20 @@ impl Lattice {
     ) -> Result<Arc<StoreStream>, LatticeError> {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
-        let id = Uuid::parse_str(&store_id).map_err(|e| LatticeError::InvalidUuid {
-            reason: e.to_string(),
-        })?;
+        let id = Uuid::parse_str(&store_id)?;
 
         // Get descriptor pool for decoding
         let (descriptor_bytes, _) = self
             .rt
             .block_on(r.backend().store_get_descriptor(id))
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
         let pool = DescriptorPool::decode(descriptor_bytes.as_slice()).ok();
 
         // Get stream info for schema and param building
         let streams = self
             .rt
             .block_on(r.backend().store_list_streams(id))
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
         let stream_desc = streams
             .iter()
             .find(|s| s.name.eq_ignore_ascii_case(&stream_name))
@@ -676,7 +651,7 @@ impl Lattice {
         let stream = self
             .rt
             .block_on(r.backend().store_subscribe(id, &stream_desc.name, &params))
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
 
         // Bridge stream to channel for blocking iteration
         let (tx, rx) = tokio::sync::mpsc::channel(128);
@@ -709,7 +684,7 @@ impl Lattice {
         let rx = r
             .backend()
             .subscribe()
-            .map_err(|e| LatticeError::from_backend(e))?;
+            .map_err(LatticeError::from_backend)?;
 
         Ok(Arc::new(LatticeEventStream {
             rx: Arc::new(tokio::sync::Mutex::new(rx)),

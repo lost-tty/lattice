@@ -57,7 +57,7 @@ where
         let (store, _) = self
             .registry
             .get_or_open(store_id, |config: &StorageConfig| {
-                S::open(store_id, config).map_err(|e| lattice_kernel::store::StateError::Backend(e))
+                S::open(store_id, config).map_err(lattice_kernel::store::StateError::Backend)
             })
             .map_err(|e| StoreManagerError::Registry(e.to_string()))?;
 

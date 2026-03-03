@@ -80,7 +80,7 @@ impl LatticeBackend for InProcessBackend {
 
     fn node_set_name(&self, name: &str) -> AsyncResult<'_, ()> {
         let name = name.to_string();
-        Box::pin(async move { self.node.set_name(&name).await.map_err(|e| e.into()) })
+        Box::pin(async move { Ok(self.node.set_name(&name).await?) })
     }
 
     fn node_id(&self) -> Vec<u8> {
@@ -142,13 +142,7 @@ impl LatticeBackend for InProcessBackend {
                     lattice_model::types::PubKey::try_from(node_id.as_slice())?,
                     store_id,
                 )
-                .await
-                .map_err(|e| {
-                    Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    )) as Box<dyn std::error::Error + Send + Sync>
-                })?;
+                .await?;
 
             Ok(token)
         })
@@ -180,11 +174,7 @@ impl LatticeBackend for InProcessBackend {
             SystemBatch::new(system.as_ref())
                 .set_status(pk, lattice_model::PeerStatus::Revoked)
                 .commit()
-                .await
-                .map_err(|e| {
-                    Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
-                        as Box<dyn std::error::Error + Send + Sync>
-                })?;
+                .await?;
 
             Ok(())
         })
@@ -201,8 +191,7 @@ impl LatticeBackend for InProcessBackend {
             let store_id = self
                 .node
                 .create_store(parent_id, name.clone(), &store_type_str)
-                .await
-                .map_err(|e| BackendError::from(e.to_string()))?;
+                .await?;
 
             Ok(StoreRef {
                 id: store_id.as_bytes().to_vec(),
@@ -256,7 +245,7 @@ impl LatticeBackend for InProcessBackend {
                     let system = handle
                         .as_system()
                         .ok_or_else(|| "Store does not support system table".to_string())?;
-                    let children = system.get_children().map_err(|e| e.to_string())?;
+                    let children = system.get_children()?;
                     Ok(children
                         .into_iter()
                         .map(|c| StoreRef {
@@ -293,10 +282,7 @@ impl LatticeBackend for InProcessBackend {
                 )) as Box<dyn std::error::Error + Send + Sync>
             })?;
 
-            let peers = system.get_peers().map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
-                    as Box<dyn std::error::Error + Send + Sync>
-            })?;
+            let peers = system.get_peers()?;
 
             // Get online status from network layer
             // Note: Currently online status is global (by PubKey), but we filter by peers known to this store
@@ -357,11 +343,10 @@ impl LatticeBackend for InProcessBackend {
                 .as_system()
                 .ok_or("Store does not support SystemStore trait")?;
 
-            SystemBatch::new(system.as_ref())
+            Ok(SystemBatch::new(system.as_ref())
                 .set_name(&name)
                 .commit()
-                .await
-                .map_err(|e| e.into())
+                .await?)
         })
     }
 
@@ -381,11 +366,11 @@ impl LatticeBackend for InProcessBackend {
 
     fn store_delete(&self, parent_id: Uuid, child_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
-            self.node
+            Ok(self
+                .node
                 .store_manager()
                 .delete_child_store(parent_id, child_id)
-                .await
-                .map_err(|e| e.to_string().into())
+                .await?)
         })
     }
 
@@ -478,10 +463,7 @@ impl LatticeBackend for InProcessBackend {
                     })
                 })
                 .collect::<Result<_, _>>()?;
-            inspector
-                .inspect_branch(hashes)
-                .await
-                .map_err(|e| Box::new(e) as BackendError)
+            Ok(inspector.inspect_branch(hashes).await?)
         })
     }
 
@@ -494,10 +476,7 @@ impl LatticeBackend for InProcessBackend {
                     "Store does not support system table",
                 )) as Box<dyn std::error::Error + Send + Sync>
             })?;
-            system.list_all().map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
-                    as Box<dyn std::error::Error + Send + Sync>
-            })
+            Ok(system.list_all()?)
         })
     }
 
@@ -511,10 +490,7 @@ impl LatticeBackend for InProcessBackend {
                 )) as Box<dyn std::error::Error + Send + Sync>
             })?;
 
-            let strategy = system.get_peer_strategy().map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
-                    as Box<dyn std::error::Error + Send + Sync>
-            })?;
+            let strategy = system.get_peer_strategy()?;
 
             Ok(strategy.map(|s| match s {
                 PeerStrategy::Independent => "Independent".to_string(),

@@ -208,6 +208,22 @@ impl From<proto::WitnessLogEntry> for lattice_model::weaver::WitnessEntry {
 
 pub mod backend;
 
+/// Extension trait to convert `Result<T, E: Display>` into `Result<T, tonic::Status>`.
+///
+/// Replaces the repetitive `.map_err(|e| Status::internal(e.to_string()))` pattern
+/// throughout the gRPC service implementations.
+#[cfg(feature = "server")]
+pub(crate) trait IntoStatus<T> {
+    fn into_status(self) -> Result<T, tonic::Status>;
+}
+
+#[cfg(feature = "server")]
+impl<T, E: std::fmt::Display> IntoStatus<T> for Result<T, E> {
+    fn into_status(self) -> Result<T, tonic::Status> {
+        self.map_err(|e| tonic::Status::internal(e.to_string()))
+    }
+}
+
 #[cfg(feature = "server")]
 mod node_service;
 

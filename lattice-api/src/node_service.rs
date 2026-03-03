@@ -4,6 +4,7 @@ use crate::backend::Backend;
 use crate::proto::node_service_server::NodeService;
 use crate::proto::NodeEvent as NodeEventMessage;
 use crate::proto::{Empty, NodeStatus, SetNameRequest};
+use crate::IntoStatus;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -24,7 +25,7 @@ impl NodeService for NodeServiceImpl {
             .node_status()
             .await
             .map(Response::new)
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     async fn set_name(&self, request: Request<SetNameRequest>) -> Result<Response<Empty>, Status> {
@@ -32,7 +33,7 @@ impl NodeService for NodeServiceImpl {
             .node_set_name(&request.into_inner().name)
             .await
             .map(|_| Response::new(Empty {}))
-            .map_err(|e| Status::internal(e.to_string()))
+            .into_status()
     }
 
     type SubscribeStream = ReceiverStream<Result<NodeEventMessage, Status>>;
@@ -44,7 +45,7 @@ impl NodeService for NodeServiceImpl {
         let mut rx = self
             .backend
             .subscribe()
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .into_status()?;
 
         let (tx, stream_rx) = tokio::sync::mpsc::channel(32);
 

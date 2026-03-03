@@ -19,18 +19,14 @@ use tracing::warn;
 /// Error type for PeerManager operations
 #[derive(Debug, thiserror::Error)]
 pub enum PeerManagerError {
+    #[error("Store read error: {0}")]
+    StoreRead(#[from] lattice_systemstore::SystemReadError),
+    #[error("Store write error: {0}")]
+    StoreWrite(#[from] lattice_systemstore::SystemWriteError),
     #[error("Store error: {0}")]
     Store(String),
-    #[error("State writer error: {0}")]
-    StateWriter(String),
     #[error("Lock poisoned")]
     LockPoisoned,
-}
-
-impl From<lattice_model::StateWriterError> for PeerManagerError {
-    fn from(e: lattice_model::StateWriterError) -> Self {
-        Self::StateWriter(e.to_string())
-    }
 }
 
 // ==================== Peer Struct ====================
@@ -96,11 +92,10 @@ impl Peer {
 
     /// Save the peer status via SystemStore (batch API)
     pub async fn save(&self, store: &dyn SystemStore) -> Result<(), PeerManagerError> {
-        SystemBatch::new(store)
+        Ok(SystemBatch::new(store)
             .set_status(self.pubkey, self.status.clone())
             .commit()
-            .await
-            .map_err(PeerManagerError::StateWriter)
+            .await?)
     }
 }
 
@@ -190,7 +185,7 @@ impl PeerManager {
 
     /// List all peers (async, names are now fetched directly from SystemStore)
     pub async fn list_peers(&self) -> Result<Vec<PeerInfo>, PeerManagerError> {
-        let peers = self.store.get_peers().map_err(PeerManagerError::Store)?;
+        let peers = self.store.get_peers()?;
         Ok(peers)
     }
 
@@ -240,20 +235,18 @@ impl PeerManager {
         pubkey: PubKey,
         status: PeerStatus,
     ) -> Result<(), PeerManagerError> {
-        SystemBatch::new(&*self.store)
+        Ok(SystemBatch::new(&*self.store)
             .set_status(pubkey, status)
             .commit()
-            .await
-            .map_err(PeerManagerError::StateWriter)
+            .await?)
     }
 
     /// Set a peer's display name (stored in SystemStore at peer/{pubkey}/name)
     pub async fn set_peer_name(&self, pubkey: PubKey, name: &str) -> Result<(), PeerManagerError> {
-        SystemBatch::new(&*self.store)
+        Ok(SystemBatch::new(&*self.store)
             .set_peer_name(pubkey, name.to_string())
             .commit()
-            .await
-            .map_err(PeerManagerError::StateWriter)
+            .await?)
     }
 
     /// Create a one-time join token.
@@ -269,8 +262,7 @@ impl PeerManager {
             .set_invite_status(hash.as_bytes(), InviteStatus::Valid)
             .set_invite_invited_by(hash.as_bytes(), inviter)
             .commit()
-            .await
-            .map_err(PeerManagerError::StateWriter)?;
+            .await?;
 
         let invite = crate::token::Invite::new(inviter, store_id, secret.to_vec());
         Ok(invite.to_string())

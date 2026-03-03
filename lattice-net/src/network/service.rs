@@ -434,15 +434,10 @@ impl<T: Transport> NetworkService<T> {
                     limit: 1000,
                 })),
             };
-            sink.send(&req)
-                .await
-                .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            sink.send(&req).await?;
 
             loop {
-                let msg_opt = stream
-                    .recv()
-                    .await
-                    .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+                let msg_opt = stream.recv().await?;
 
                 let msg = match msg_opt {
                     Some(m) => m,
@@ -660,16 +655,9 @@ impl<T: Transport> NetworkService<T> {
         secret: Vec<u8>,
     ) -> Result<(), LatticeNetError> {
         // 1. Connect and send JoinRequest
-        let conn = self
-            .transport
-            .connect(&peer_id)
-            .await
-            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
+        let conn = self.transport.connect(&peer_id).await?;
 
-        let bi = conn
-            .open_bi()
-            .await
-            .map_err(|e| LatticeNetError::Connection(e.to_string()))?;
+        let bi = conn.open_bi().await?;
         let (send, recv) = bi.into_split();
 
         let req = lattice_proto::network::JoinRequest {
@@ -943,7 +931,7 @@ impl<T: Transport> NetworkService<T> {
         let online_peers = self
             .sessions
             .online_peers()
-            .map_err(|e| LatticeNetError::Sync(e))?;
+            .map_err(LatticeNetError::Sync)?;
 
         let acceptable_authors = store.list_acceptable_authors();
 
@@ -964,7 +952,7 @@ impl<T: Transport> NetworkService<T> {
         let peers = self
             .sessions
             .online_peers()
-            .map_err(|e| LatticeNetError::Sync(e))?;
+            .map_err(LatticeNetError::Sync)?;
 
         Ok(peers
             .keys()
@@ -1163,17 +1151,14 @@ impl<T: Transport> NetworkService<T> {
             })),
         };
 
-        sink.send(&req)
-            .await
-            .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+        sink.send(&req).await?;
         // Note: finish() is iroh-specific; for generic transports, we just drop the sink
         drop(sink);
 
         // Expect IntentionResponse
         let msg = stream
             .recv()
-            .await
-            .map_err(|e| LatticeNetError::Sync(e.to_string()))?
+            .await?
             .ok_or_else(|| {
                 LatticeNetError::Sync("Peer closed stream without response".to_string())
             })?;

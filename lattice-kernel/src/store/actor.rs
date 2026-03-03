@@ -210,14 +210,14 @@ impl<S: StateMachine> ReplicationController<S> {
                     .map(|h| store.get(h))
                     .collect::<Result<Vec<Option<SignedIntention>>, _>>()
                     .map(|opts| opts.into_iter().flatten().collect())
-                    .map_err(|e| StateError::Backend(e.to_string()));
+                    .map_err(StateError::from);
                 let _ = resp.send(result);
             }
             ReplicationControllerCmd::FetchIntentionsByPrefix { prefix, resp } => {
                 let store = self.intention_store.read().expect("Lock poisoned");
                 let result = store
                     .get_by_prefix(&prefix)
-                    .map_err(|e| StateError::Backend(e.to_string()));
+                    .map_err(StateError::from);
                 let _ = resp.send(result);
             }
             ReplicationControllerCmd::Submit {
@@ -459,9 +459,7 @@ impl<S: StateMachine> ReplicationController<S> {
                 .collect();
 
             for prev in prevs {
-                let candidates = store
-                    .floating_by_prev(&prev)
-                    .map_err(ReplicationControllerError::IntentionStore)?;
+                let candidates = store.floating_by_prev(&prev)?;
 
                 for signed in &candidates {
                     // Check causal conditions — deps must be witnessed, not just stored
@@ -469,10 +467,7 @@ impl<S: StateMachine> ReplicationController<S> {
                         Condition::V1(deps) => {
                             let mut met = true;
                             for dep in deps {
-                                if !store
-                                    .is_witnessed(dep)
-                                    .map_err(ReplicationControllerError::IntentionStore)?
-                                {
+                                if !store.is_witnessed(dep)? {
                                     met = false;
                                     break;
                                 }

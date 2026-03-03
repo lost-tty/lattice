@@ -218,17 +218,20 @@ impl<'a> ReadOnlySystemTable<'a> {
     }
 
     /// Get the LWW-resolved value for a key. Returns `None` if missing or tombstone.
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        self.table.get(key).map_err(|e| e.to_string())
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, crate::SystemReadError> {
+        Ok(self.table.get(key)?)
     }
 
     /// Return head hashes for a key (for causal deps).
-    pub(crate) fn head_hashes(&self, key: &[u8]) -> Result<Vec<Hash>, String> {
-        self.table.heads(key).map_err(|e| e.to_string())
+    pub(crate) fn head_hashes(&self, key: &[u8]) -> Result<Vec<Hash>, crate::SystemReadError> {
+        Ok(self.table.heads(key)?)
     }
 
     /// Get a single peer by pubkey (O(1) lookup)
-    pub fn get_peer(&self, pubkey: &PubKey) -> Result<Option<lattice_model::PeerInfo>, String> {
+    pub fn get_peer(
+        &self,
+        pubkey: &PubKey,
+    ) -> Result<Option<lattice_model::PeerInfo>, crate::SystemReadError> {
         let key = format!("peer/{}/status", hex::encode(pubkey.as_slice())).into_bytes();
 
         if let Some(value) = self.get(&key)? {
@@ -258,16 +261,13 @@ impl<'a> ReadOnlySystemTable<'a> {
         }
     }
 
-    pub fn get_peers(&self) -> Result<Vec<lattice_model::PeerInfo>, String> {
+    pub fn get_peers(&self) -> Result<Vec<lattice_model::PeerInfo>, crate::SystemReadError> {
         let mut peers = Vec::new();
         // Keys are now peer/{pk_hex}/status
-        for result in self
-            .table
-            .range(b"peer/".as_slice()..b"peer0".as_slice())
-            .map_err(|e| e.to_string())?
-        {
-            let (key_bytes, value, _conflicted) = result.map_err(|e| e.to_string())?;
-            let key_str = std::str::from_utf8(&key_bytes).map_err(|_| "Invalid key")?;
+        for result in self.table.range(b"peer/".as_slice()..b"peer0".as_slice())? {
+            let (key_bytes, value, _conflicted) = result?;
+            let key_str = std::str::from_utf8(&key_bytes)
+                .map_err(|_| crate::SystemReadError::Data("Invalid key".into()))?;
 
             // Parse peer/{pk_hex}/status
             let parts: Vec<&str> = key_str.split('/').collect();
@@ -276,8 +276,10 @@ impl<'a> ReadOnlySystemTable<'a> {
             }
 
             let pk_hex = parts[1];
-            let pk_bytes = hex::decode(pk_hex).map_err(|_| "Invalid hex pubkey")?;
-            let pubkey = PubKey::try_from(pk_bytes.as_slice()).map_err(|_| "Invalid pubkey")?;
+            let pk_bytes = hex::decode(pk_hex)
+                .map_err(|_| crate::SystemReadError::Data("Invalid hex pubkey".into()))?;
+            let pubkey = PubKey::try_from(pk_bytes.as_slice())
+                .map_err(|_| crate::SystemReadError::Data("Invalid pubkey".into()))?;
 
             if let Some(value) = value {
                 let mut info = lattice_model::PeerInfo {
@@ -310,7 +312,7 @@ impl<'a> ReadOnlySystemTable<'a> {
         Ok(peers)
     }
 
-    pub fn get_children(&self) -> Result<Vec<lattice_model::StoreLink>, String> {
+    pub fn get_children(&self) -> Result<Vec<lattice_model::StoreLink>, crate::SystemReadError> {
         let mut links = Vec::new();
         let prefix = b"child/";
         let mut prefix_end = prefix.to_vec();
@@ -318,12 +320,8 @@ impl<'a> ReadOnlySystemTable<'a> {
             *last += 1;
         }
 
-        for result in self
-            .table
-            .range(prefix.as_slice()..prefix_end.as_slice())
-            .map_err(|e| e.to_string())?
-        {
-            let (key_bytes, value, _conflicted) = result.map_err(|e| e.to_string())?;
+        for result in self.table.range(prefix.as_slice()..prefix_end.as_slice())? {
+            let (key_bytes, value, _conflicted) = result?;
 
             // Expected format: "child/" + uuid-string(36) + "/name"
             if !key_bytes.ends_with(b"/name") {
@@ -370,7 +368,7 @@ impl<'a> ReadOnlySystemTable<'a> {
                         Ok(i32::from_le_bytes(bytes[0..4].try_into().unwrap_or([0; 4])))
                     }
 
-                    let s_int = get_status_int(&v_bytes).map_err(|e| e.to_string())?;
+                    let s_int = get_status_int(&v_bytes)?;
                     let proto = lattice_proto::storage::ChildStatus::try_from(s_int)
                         .unwrap_or(lattice_proto::storage::ChildStatus::CsUnknown);
                     status = crate::helpers::map_to_model_status(proto);
@@ -398,7 +396,7 @@ impl<'a> ReadOnlySystemTable<'a> {
 
     pub fn get_peer_strategy(
         &self,
-    ) -> Result<Option<lattice_model::store_info::PeerStrategy>, String> {
+    ) -> Result<Option<lattice_model::store_info::PeerStrategy>, crate::SystemReadError> {
         if let Some(value) = self.get(b"strategy")? {
             if let Ok(proto_strat) = PeerStrategy::decode(value.as_slice()) {
                 return map_peer_strategy(proto_strat).map(Some);
@@ -407,7 +405,7 @@ impl<'a> ReadOnlySystemTable<'a> {
         Ok(None)
     }
 
-    pub fn get_name(&self) -> Result<Option<String>, String> {
+    pub fn get_name(&self) -> Result<Option<String>, crate::SystemReadError> {
         if let Some(value) = self.get(b"name")? {
             if let Ok(set_name) = SetStoreName::decode(value.as_slice()) {
                 return Ok(Some(set_name.name));
@@ -416,7 +414,10 @@ impl<'a> ReadOnlySystemTable<'a> {
         Ok(None)
     }
 
-    pub fn get_invite(&self, token_hash: &[u8]) -> Result<Option<InviteInfo>, String> {
+    pub fn get_invite(
+        &self,
+        token_hash: &[u8],
+    ) -> Result<Option<InviteInfo>, crate::SystemReadError> {
         let key = format!("invite/{}/status", hex::encode(token_hash)).into_bytes();
 
         if let Some(value) = self.get(&key)? {
@@ -462,12 +463,12 @@ impl<'a> ReadOnlySystemTable<'a> {
     }
 
     /// List all entries in the system table as key-value pairs (for debugging)
-    pub fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+    pub fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, crate::SystemReadError> {
         let mut entries = Vec::new();
 
         // Iterate over all keys in the table
-        for result in self.table.iter().map_err(|e| e.to_string())? {
-            let (key_bytes, value, _conflicted) = result.map_err(|e| e.to_string())?;
+        for result in self.table.iter()? {
+            let (key_bytes, value, _conflicted) = result?;
             let key_str = String::from_utf8_lossy(&key_bytes).to_string();
 
             if let Some(value) = value {
@@ -492,14 +493,17 @@ fn map_peer_status(s: lattice_proto::storage::PeerStatus) -> lattice_model::Peer
     }
 }
 
-fn map_peer_strategy(s: PeerStrategy) -> Result<lattice_model::store_info::PeerStrategy, String> {
+fn map_peer_strategy(
+    s: PeerStrategy,
+) -> Result<lattice_model::store_info::PeerStrategy, crate::SystemReadError> {
     use lattice_model::store_info::PeerStrategy as ModelStrategy;
     use lattice_proto::storage::peer_strategy::Type;
     match s.r#type {
         Some(Type::Independent(true)) => Ok(ModelStrategy::Independent),
         Some(Type::Inherited(true)) => Ok(ModelStrategy::Inherited),
         Some(Type::Snapshot(bytes)) => {
-            let id = uuid::Uuid::from_slice(&bytes).map_err(|_| "Invalid UUID".to_string())?;
+            let id = uuid::Uuid::from_slice(&bytes)
+                .map_err(|_| crate::SystemReadError::Data("Invalid UUID".into()))?;
             Ok(ModelStrategy::Snapshot(id))
         }
         _ => Ok(ModelStrategy::Independent),

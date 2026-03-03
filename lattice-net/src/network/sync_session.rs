@@ -115,10 +115,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
 
         // Initiator sends the opening fingerprint.
         if initial_message.is_none() {
-            let init_msg = reconciler
-                .initiate()
-                .await
-                .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            let init_msg = reconciler.initiate().await?;
             self.send_reconcile_batch(&[init_msg]).await?;
             state.pending_ranges += 1;
         }
@@ -186,9 +183,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
             return Ok(Some(PeerMessage { message: Some(m) }));
         }
         match tokio::time::timeout(PROTOCOL_TIMEOUT, self.stream.recv()).await {
-            Ok(Ok(Some(m))) => Ok(Some(m)),
-            Ok(Ok(None)) => Ok(None),
-            Ok(Err(e)) => Err(LatticeNetError::Sync(e.to_string())),
+            Ok(result) => result,
             Err(_) => Err(LatticeNetError::Sync("Timeout during sync".into())),
         }
     }
@@ -215,10 +210,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
         let mut all_needs: Vec<Hash> = Vec::new();
 
         for r_msg in &payload.messages {
-            let result = reconciler
-                .process(r_msg)
-                .await
-                .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            let result = reconciler.process(r_msg).await?;
             all_sends.extend(result.send);
             all_needs.extend(result.need);
         }
@@ -278,10 +270,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                 messages: msgs.to_vec(),
             })),
         };
-        self.sink
-            .send(&wrapper)
-            .await
-            .map_err(|e| LatticeNetError::Sync(e.to_string()))
+        self.sink.send(&wrapper).await
     }
 
     async fn send_sync_done(&mut self) -> Result<(), LatticeNetError> {
@@ -290,10 +279,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                 store_id: self.store.id().as_bytes().to_vec(),
             })),
         };
-        self.sink
-            .send(&msg)
-            .await
-            .map_err(|e| LatticeNetError::Sync(e.to_string()))
+        self.sink.send(&msg).await
     }
 
     async fn send_fetch_intentions(&mut self, hashes: &[Hash]) -> Result<(), LatticeNetError> {
@@ -303,10 +289,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                 hashes: hashes.iter().map(|h| h.as_bytes().to_vec()).collect(),
             })),
         };
-        self.sink
-            .send(&msg)
-            .await
-            .map_err(|e| LatticeNetError::Sync(e.to_string()))
+        self.sink.send(&msg).await
     }
 
     /// Serve a `FetchIntentions` request by streaming intention batches.
@@ -333,11 +316,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
         let mut total_sent: u64 = 0;
 
         for (i, chunk) in chunks.iter().enumerate() {
-            let intentions = self
-                .store
-                .fetch_intentions(chunk.to_vec())
-                .await
-                .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            let intentions = self.store.fetch_intentions(chunk.to_vec()).await?;
 
             total_sent += intentions.len() as u64;
             let proto_intentions: Vec<_> = intentions.iter().map(intention_to_proto).collect();
@@ -365,9 +344,6 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                 },
             )),
         };
-        self.sink
-            .send(&msg)
-            .await
-            .map_err(|e| LatticeNetError::Sync(e.to_string()))
+        self.sink.send(&msg).await
     }
 }

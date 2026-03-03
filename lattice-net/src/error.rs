@@ -11,6 +11,9 @@ pub enum LatticeNetError {
     #[error("Protobuf decode error: {0}")]
     Decode(#[from] prost::DecodeError),
 
+    #[error("Transport error: {0}")]
+    Transport(#[from] lattice_net_types::TransportError),
+
     #[error("Node ID parse error: {0}")]
     ParseNodeId(String),
 
@@ -31,4 +34,16 @@ pub enum LatticeNetError {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
+}
+
+impl From<lattice_sync::SyncError> for LatticeNetError {
+    fn from(e: lattice_sync::SyncError) -> Self {
+        LatticeNetError::Sync(e.to_string())
+    }
+}
+
+impl From<lattice_sync::ReconcileError<lattice_sync::SyncError>> for LatticeNetError {
+    fn from(e: lattice_sync::ReconcileError<lattice_sync::SyncError>) -> Self {
+        LatticeNetError::Sync(e.to_string())
+    }
 }

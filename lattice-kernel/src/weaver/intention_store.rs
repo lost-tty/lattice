@@ -184,8 +184,7 @@ impl IntentionStore {
             buf.copy_from_slice(k.value());
             self.witness_seq = u64::from_be_bytes(buf);
 
-            let record = WitnessRecord::decode(v.value())
-                .map_err(|e| IntentionStoreError::InvalidData(format!("witness proto: {e}")))?;
+            let record = WitnessRecord::decode(v.value())?;
             self.last_witness_hash = lattice_model::crypto::content_hash(&record.content);
         }
 
@@ -228,11 +227,8 @@ impl IntentionStore {
                     max_seq = seq;
                 }
 
-                let record = WitnessRecord::decode(v.value())
-                    .map_err(|e| IntentionStoreError::InvalidData(format!("witness proto: {e}")))?;
-                let content = WitnessContent::decode(record.content.as_slice()).map_err(|e| {
-                    IntentionStoreError::InvalidData(format!("witness content: {e}"))
-                })?;
+                let record = WitnessRecord::decode(v.value())?;
+                let content = WitnessContent::decode(record.content.as_slice())?;
 
                 // Verify hash chain
                 let actual_prev = Hash::try_from(content.prev_hash.as_slice()).map_err(|_| {
@@ -618,8 +614,7 @@ impl IntentionStore {
                     .try_into()
                     .map_err(|_| IntentionStoreError::InvalidData("bad witness key".into()))?,
             );
-            let record = WitnessRecord::decode(value.value())
-                .map_err(|e| IntentionStoreError::InvalidData(format!("proto: {e}")))?;
+            let record = WitnessRecord::decode(value.value())?;
             let content_hash = lattice_model::crypto::content_hash(&record.content);
             results.push(WitnessEntry {
                 seq,
@@ -1684,7 +1679,7 @@ mod tests {
             Err(e) => {
                 let err = e.to_string();
                 assert!(
-                    err.contains("CORRUPTION") || err.contains("witness"),
+                    err.contains("CORRUPTION") || err.contains("witness") || err.contains("decode"),
                     "Error should mention corruption: {err}"
                 );
             }
