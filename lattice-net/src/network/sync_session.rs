@@ -154,7 +154,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                     state.intentions_sent += self.handle_fetch_intentions(&req).await?;
                 }
                 Some(peer_message::Message::IntentionResponse(resp)) => {
-                    self.handle_intention_response(&mut state, &resp).await;
+                    self.handle_intention_response(&mut state, &resp).await?;
                 }
                 Some(peer_message::Message::SyncDone(_)) => {
                     state.received_done = true;
@@ -242,17 +242,31 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
         &mut self,
         state: &mut SessionState,
         resp: &IntentionResponse,
-    ) {
+    ) -> Result<(), LatticeNetError> {
         for proto_intention in &resp.intentions {
-            if let Ok(signed) = intention_from_proto(proto_intention) {
-                if self.store.ingest_intention(signed).await.is_ok() {
+            let signed = match intention_from_proto(proto_intention) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to decode intention from peer");
+                    continue;
+                }
+            };
+            match self.store.ingest_intention(signed).await {
+                Ok(_) => {
                     state.intentions_received += 1;
+                }
+                Err(lattice_sync::SyncError::ChannelClosed) => {
+                    return Err(LatticeNetError::Sync("Store actor closed during sync".into()));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to ingest intention during sync");
                 }
             }
         }
         if resp.done && state.active_fetches > 0 {
             state.active_fetches -= 1;
         }
+        Ok(())
     }
 
     // ------------------------------------------------------------------

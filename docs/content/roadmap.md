@@ -26,7 +26,7 @@ title: "Roadmap"
 
 - [x] ~~**Refactor `SyncSession::run` termination**~~: Fixed via two-phase `SyncDone` handshake with batched `ReconcilePayload` (fan-out messages sent atomically). Replaced broken `reconcile_load` counter with 1:1 payload-level balance, explicit `SyncDone` message, and strict disconnect handling (`Stream closed before SyncDone handshake completed`). See `sync_termination_test.rs`.
 - [x] ~~**Fix flaky `test_interleaved_modifications`**~~: Root cause was premature session termination from fan-out counter desync. Fixed by batched `ReconcilePayload` + two-phase `SyncDone`.
-- [ ] **Fix `SyncSession` silent ingest error swallowing**: `IntentionResponse` handler (line ~155) silently ignores `ingest_intention` failures via `.is_ok()`. Broken chain errors (`store_prev` pointing to unapplied intention) produce `FATAL: State divergence` log but the error is dropped. Needs: (a) propagate or log the error, (b) investigate out-of-order intention delivery causing chain breaks.
+- [x] ~~**Fix `SyncSession` silent ingest error swallowing**~~: `handle_intention_response` now returns `Result`, distinguishes fatal errors (`ChannelClosed` → terminates session) from non-fatal (decode failures, auth errors → logged via `tracing::warn!`, skipped). `MissingDeps` are now logged instead of silently discarded. Proto decode failures also logged instead of silently ignored.
 - [ ] Review docs/
 
 ### 15A: Error Handling Cleanup
