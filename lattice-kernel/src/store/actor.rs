@@ -551,7 +551,11 @@ impl<S: StateMachine> ReplicationController<S> {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let _ = store.witness(&intention, wall_time, &self.node_identity);
+        match store.witness(&intention, wall_time, &self.node_identity) {
+            Ok(_) => {}
+            Err(IntentionStoreError::AlreadyWitnessed(_)) => {} // idempotent
+            Err(e) => return Err(e.into()),
+        }
 
         Ok(())
     }
