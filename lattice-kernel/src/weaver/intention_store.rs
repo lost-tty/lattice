@@ -1744,10 +1744,12 @@ mod tests {
         match result {
             Ok(_) => panic!("Store should reject corrupted witness chain"),
             Err(e) => {
-                let err = e.to_string();
                 assert!(
-                    err.contains("corruption") || err.contains("witness") || err.contains("decode"),
-                    "Error should mention corruption: {err}"
+                    matches!(
+                        e,
+                        IntentionStoreError::Corruption(_) | IntentionStoreError::Proto(_)
+                    ),
+                    "Expected Corruption or Proto variant, got: {e:?}"
                 );
             }
         }
@@ -1798,8 +1800,8 @@ mod tests {
         // Second witness of same intention should fail
         let err = store.witness(&i1, 200, &test_signing_key()).unwrap_err();
         assert!(
-            err.to_string().contains("already witnessed"),
-            "Expected AlreadyWitnessed, got: {err}"
+            matches!(err, IntentionStoreError::AlreadyWitnessed(_)),
+            "Expected AlreadyWitnessed, got: {err:?}"
         );
 
         // Log should have exactly one entry

@@ -194,9 +194,7 @@ impl StateLogic for LogState {
 
         // Check for duplicate key (timestamp collision for same author is fatal)
         if table.get(key.as_slice())?.is_some() {
-            return Err(StateDbError::InvalidChain(
-                "Duplicate timestamp for author".into(),
-            ));
+            return Err(lattice_storage::ChainError::DuplicateTimestamp.into());
         }
         table.insert(key.as_slice(), value.as_slice())?;
 

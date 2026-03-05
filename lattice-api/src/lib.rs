@@ -8,6 +8,8 @@
 #[cfg(feature = "ffi")]
 uniffi::setup_scaffolding!();
 
+use lattice_store_base::StreamError;
+
 pub mod proto {
     tonic::include_proto!("lattice.daemon.v1");
 }
@@ -208,20 +210,67 @@ impl From<proto::WitnessLogEntry> for lattice_model::weaver::WitnessEntry {
 
 pub mod backend;
 
-/// Extension trait to convert `Result<T, E: Display>` into `Result<T, tonic::Status>`.
+/// Extension trait to convert `Result<T, BackendError>` into `Result<T, tonic::Status>`.
 ///
-/// Replaces the repetitive `.map_err(|e| Status::internal(e.to_string()))` pattern
-/// throughout the gRPC service implementations.
+/// Downcasts the boxed error to known typed errors and maps them to the
+/// appropriate gRPC status code. Falls back to `Status::internal` for
+/// unrecognized error types.
 #[cfg(feature = "server")]
 pub(crate) trait IntoStatus<T> {
     fn into_status(self) -> Result<T, tonic::Status>;
 }
 
 #[cfg(feature = "server")]
-impl<T, E: std::fmt::Display> IntoStatus<T> for Result<T, E> {
+impl<T> IntoStatus<T> for Result<T, backend::BackendError> {
     fn into_status(self) -> Result<T, tonic::Status> {
-        self.map_err(|e| tonic::Status::internal(e.to_string()))
+        self.map_err(backend_error_to_status)
     }
+}
+
+#[cfg(feature = "server")]
+fn backend_error_to_status(e: backend::BackendError) -> tonic::Status {
+    // Try BackendApiError first (most common from InProcessBackend)
+    if let Some(api_err) = e.downcast_ref::<BackendApiError>() {
+        return match api_err {
+            BackendApiError::StoreNotFound(_) => tonic::Status::not_found(api_err.to_string()),
+            BackendApiError::NotSupported(_) => tonic::Status::unimplemented(api_err.to_string()),
+            BackendApiError::InvalidArgument(_) => {
+                tonic::Status::invalid_argument(api_err.to_string())
+            }
+            BackendApiError::Validation(_) => {
+                tonic::Status::failed_precondition(api_err.to_string())
+            }
+            BackendApiError::PermissionDenied(_) => {
+                tonic::Status::permission_denied(api_err.to_string())
+            }
+        };
+    }
+
+    // Try ExecError (from store_exec — though exec() has its own handler,
+    // this catches any code path that boxes an ExecError generically)
+    if let Some(exec_err) = e.downcast_ref::<ExecError>() {
+        return match exec_err {
+            ExecError::StoreNotFound => tonic::Status::not_found(exec_err.to_string()),
+            ExecError::MethodNotFound(_) | ExecError::InvalidArgument(_) => {
+                tonic::Status::invalid_argument(exec_err.to_string())
+            }
+            ExecError::ExecutionFailed(_) => tonic::Status::internal(exec_err.to_string()),
+        };
+    }
+
+    // Try StreamError (from store_subscribe)
+    if let Some(stream_err) = e.downcast_ref::<StreamError>() {
+        return match stream_err {
+            StreamError::NotFound(_) => tonic::Status::not_found(stream_err.to_string()),
+            StreamError::InvalidParams(_) => {
+                tonic::Status::invalid_argument(stream_err.to_string())
+            }
+            StreamError::Other(_) => tonic::Status::internal(stream_err.to_string()),
+        };
+    }
+
+    // Fallback: everything else is internal
+    tonic::Status::internal(e.to_string())
 }
 
 #[cfg(feature = "server")]
@@ -245,7 +294,8 @@ pub use client::RpcClient;
 
 // Re-export backend types for consumers
 pub use backend::{
-    AsyncResult, Backend, BackendError, BackendResult, EventReceiver, LatticeBackend, NodeEvent,
+    AsyncResult, Backend, BackendApiError, BackendError, BackendResult, EventReceiver, ExecError,
+    LatticeBackend, NodeEvent,
 };
 
 #[cfg(test)]

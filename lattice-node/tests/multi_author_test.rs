@@ -79,17 +79,7 @@ async fn sync_stores(src: &Arc<dyn StoreHandle>, dst: &Arc<dyn StoreHandle>, _de
             .await
             .expect("fetch intention");
         for intent in intents {
-            // Ingest into destination
-            // ingest_intention is idempotent (checks if already exists)
-            match dst_sync.ingest_intention(intent).await {
-                Ok(_) => {}
-                Err(e) => {
-                    // Ignore "AlreadyExists" or similar errors for simple convergence test
-                    if !e.to_string().contains("already exists") {
-                        // eprintln!("Ingest error: {}", e);
-                    }
-                }
-            }
+            let _ = dst_sync.ingest_intention(intent).await;
         }
     }
 }

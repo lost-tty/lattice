@@ -2,6 +2,7 @@ uniffi::setup_scaffolding!();
 
 use prost_reflect::prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage, Kind, ReflectMessage, Value};
+use lattice_runtime::{BackendApiError, ExecError};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -61,6 +62,8 @@ pub enum LatticeError {
     InvalidUuid { reason: String },
     #[error("Type not found: {name}")]
     TypeNotFound { name: String },
+    #[error("Invalid argument: {message}")]
+    InvalidArgument { message: String },
     #[error("Network error: {message}")]
     Network { message: String },
     #[error("Store error: {message}")]
@@ -80,19 +83,56 @@ impl From<uuid::Error> for LatticeError {
 }
 
 impl LatticeError {
-    /// Convert any error to a LatticeError, categorizing by message content
-    fn from_backend<E: std::fmt::Display>(e: E) -> Self {
-        let msg = e.to_string();
-        // Categorize based on error message content
-        if msg.contains("timeout") || msg.contains("connection") || msg.contains("network") {
-            LatticeError::Network { message: msg }
-        } else if msg.contains("store") {
-            LatticeError::Store { message: msg }
-        } else if msg.contains("mesh") {
-            LatticeError::Mesh { message: msg }
-        } else {
-            LatticeError::Internal { message: msg }
+    /// Convert a backend error box to a LatticeError, using typed downcasting
+    /// to determine the correct FFI error category.
+    fn from_backend_box(e: lattice_runtime::BackendError) -> Self {
+        // Try BackendApiError first (most common from InProcessBackend)
+        if let Some(api_err) = e.downcast_ref::<BackendApiError>() {
+            return match api_err {
+                BackendApiError::StoreNotFound(_) => LatticeError::Store {
+                    message: api_err.to_string(),
+                },
+                BackendApiError::NotSupported(_) => LatticeError::Store {
+                    message: api_err.to_string(),
+                },
+                BackendApiError::InvalidArgument(_) => LatticeError::InvalidArgument {
+                    message: api_err.to_string(),
+                },
+                BackendApiError::Validation(_) => LatticeError::InvalidArgument {
+                    message: api_err.to_string(),
+                },
+                BackendApiError::PermissionDenied(_) => LatticeError::Network {
+                    message: api_err.to_string(),
+                },
+            };
         }
+
+        // Try ExecError (from store_exec)
+        if let Some(exec_err) = e.downcast_ref::<ExecError>() {
+            return match exec_err {
+                ExecError::StoreNotFound => LatticeError::Store {
+                    message: exec_err.to_string(),
+                },
+                ExecError::MethodNotFound(_) | ExecError::InvalidArgument(_) => {
+                    LatticeError::InvalidArgument {
+                        message: exec_err.to_string(),
+                    }
+                }
+                ExecError::ExecutionFailed(_) => LatticeError::Internal {
+                    message: exec_err.to_string(),
+                },
+            };
+        }
+
+        // Default: treat as internal error with the original message
+        LatticeError::Internal {
+            message: e.to_string(),
+        }
+    }
+
+    /// Convert any displayable error to a LatticeError.
+    fn from_backend<E: Into<lattice_runtime::BackendError>>(e: E) -> Self {
+        Self::from_backend_box(e.into())
     }
 }
 

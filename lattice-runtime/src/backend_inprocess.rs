@@ -11,6 +11,7 @@ use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, WitnessEntry};
 use lattice_node::Node;
 use lattice_systemstore::SystemBatch;
+use prost_reflect::prost::Message;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -57,7 +58,7 @@ impl InProcessBackend {
         self.node
             .store_manager()
             .get_handle(&store_id)
-            .ok_or_else(|| "Store not found".into())
+            .ok_or_else(|| BackendApiError::StoreNotFound(store_id).into())
     }
 }
 
@@ -106,20 +107,17 @@ impl LatticeBackend for InProcessBackend {
         let node_id = self.node.node_id().to_vec();
         Box::pin(async move {
             let store = self.get_store(store_id)?;
-            let system = store.as_system().ok_or_else(|| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Store does not support system table",
-                )) as Box<dyn std::error::Error + Send + Sync>
-            })?;
+            let system = store
+                .as_system()
+                .ok_or(BackendApiError::NotSupported("Store does not support system table"))?;
 
             // Validation: Must be Independent
             match system.get_peer_strategy()? {
                 Some(PeerStrategy::Inherited) => {
-                    return Err("Cannot create invite for Inherited store. Invite to the parent Independent store instead.".into());
+                    return Err(BackendApiError::Validation("Cannot create invite for Inherited store. Invite to the parent Independent store instead.".into()).into());
                 }
                 Some(PeerStrategy::Snapshot(_)) => {
-                    return Err("Cannot create invite for Snapshot strategy.".into());
+                    return Err(BackendApiError::Validation("Cannot create invite for Snapshot strategy.".into()).into());
                 }
                 _ => {} // Independent or Unknown (default to allowed if we have PeerHandler)
             }
@@ -129,12 +127,7 @@ impl LatticeBackend for InProcessBackend {
                 .node
                 .store_manager()
                 .get_peer_manager(&store_id)
-                .ok_or_else(|| {
-                    Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Peer manager not found for store",
-                    )) as Box<dyn std::error::Error + Send + Sync>
-                })?;
+                .ok_or(BackendApiError::NotSupported("Peer manager not found for store"))?;
 
             // Create invite
             let token = peer_manager
@@ -152,21 +145,18 @@ impl LatticeBackend for InProcessBackend {
         let peer_key = peer_key.to_vec();
         Box::pin(async move {
             let store = self.get_store(store_id)?;
-            let system = store.as_system().ok_or_else(|| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "Store does not support system operations",
-                )) as Box<dyn std::error::Error + Send + Sync>
-            })?;
+            let system = store
+                .as_system()
+                .ok_or(BackendApiError::NotSupported("Store does not support system operations"))?;
 
             let pk = PubKey::try_from(peer_key.as_slice())?;
 
             match system.get_peer_strategy()? {
                 Some(PeerStrategy::Inherited) => {
-                    return Err("Cannot revoke peer from Inherited store. Revoke from the parent Independent store instead.".into());
+                    return Err(BackendApiError::Validation("Cannot revoke peer from Inherited store. Revoke from the parent Independent store instead.".into()).into());
                 }
                 Some(PeerStrategy::Snapshot(_)) => {
-                    return Err("Cannot revoke peer from Snapshot strategy.".into());
+                    return Err(BackendApiError::Validation("Cannot revoke peer from Snapshot strategy.".into()).into());
                 }
                 _ => {}
             }
@@ -244,7 +234,7 @@ impl LatticeBackend for InProcessBackend {
                     let handle = self.get_store(id)?;
                     let system = handle
                         .as_system()
-                        .ok_or_else(|| "Store does not support system table".to_string())?;
+                        .ok_or(BackendApiError::NotSupported("Store does not support system table"))?;
                     let children = system.get_children()?;
                     Ok(children
                         .into_iter()
@@ -275,12 +265,10 @@ impl LatticeBackend for InProcessBackend {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
 
-            let system = store.clone().as_system().ok_or_else(|| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Store does not support system table",
-                )) as Box<dyn std::error::Error + Send + Sync>
-            })?;
+            let system = store
+                .clone()
+                .as_system()
+                .ok_or(BackendApiError::NotSupported("Store does not support system table"))?;
 
             let peers = system.get_peers()?;
 
@@ -336,12 +324,10 @@ impl LatticeBackend for InProcessBackend {
         let name = name.to_string();
         Box::pin(async move {
             let store = self.get_store(store_id)?;
-            use lattice_systemstore::SystemBatch;
-
             let system = store
                 .clone()
                 .as_system()
-                .ok_or("Store does not support SystemStore trait")?;
+                .ok_or(BackendApiError::NotSupported("Store does not support SystemStore trait"))?;
 
             Ok(SystemBatch::new(system.as_ref())
                 .set_name(&name)
@@ -456,9 +442,8 @@ impl LatticeBackend for InProcessBackend {
                 .into_iter()
                 .map(|h| {
                     Hash::try_from(h.as_slice()).map_err(|_| {
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "invalid hash length",
+                        Box::new(BackendApiError::InvalidArgument(
+                            "invalid hash length".into(),
                         )) as BackendError
                     })
                 })
@@ -470,12 +455,10 @@ impl LatticeBackend for InProcessBackend {
     fn store_system_list(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, Vec<u8>)>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
-            let system = store.clone().as_system().ok_or_else(|| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Store does not support system table",
-                )) as Box<dyn std::error::Error + Send + Sync>
-            })?;
+            let system = store
+                .clone()
+                .as_system()
+                .ok_or(BackendApiError::NotSupported("Store does not support system table"))?;
             Ok(system.list_all()?)
         })
     }
@@ -483,12 +466,9 @@ impl LatticeBackend for InProcessBackend {
     fn store_peer_strategy(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
-            let system = store.as_system().ok_or_else(|| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Store does not support system table",
-                )) as Box<dyn std::error::Error + Send + Sync>
-            })?;
+            let system = store
+                .as_system()
+                .ok_or(BackendApiError::NotSupported("Store does not support system table"))?;
 
             let strategy = system.get_peer_strategy()?;
 
@@ -504,22 +484,30 @@ impl LatticeBackend for InProcessBackend {
         let method = method.to_string();
         let payload = payload.to_vec();
         Box::pin(async move {
-            let store = self.get_store(store_id)?;
+            let store = self
+                .node
+                .store_manager()
+                .get_handle(&store_id)
+                .ok_or(ExecError::StoreNotFound)?;
             let dispatcher = store.as_dispatcher();
 
             let service = dispatcher.service_descriptor();
             let method_desc = service
                 .methods()
                 .find(|m| m.name().eq_ignore_ascii_case(&method))
-                .ok_or_else(|| format!("Method '{}' not found", method))?;
+                .ok_or_else(|| ExecError::MethodNotFound(method.clone()))?;
 
-            let input =
-                prost_reflect::DynamicMessage::decode(method_desc.input(), payload.as_slice())?;
-            let result = dispatcher.dispatch(&method, input).await?;
+            let input = prost_reflect::DynamicMessage::decode(method_desc.input(), payload.as_slice())
+                .map_err(|e| ExecError::InvalidArgument(e.to_string()))?;
+            let result = dispatcher
+                .dispatch(&method, input)
+                .await
+                .map_err(|e| ExecError::ExecutionFailed(e))?;
 
-            use prost_reflect::prost::Message;
             let mut buf = Vec::new();
-            result.encode(&mut buf)?;
+            result
+                .encode(&mut buf)
+                .map_err(|e| ExecError::ExecutionFailed(e.into()))?;
             Ok(buf)
         })
     }

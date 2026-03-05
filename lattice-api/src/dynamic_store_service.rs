@@ -2,7 +2,7 @@
 //!
 //! Thin wrapper - parses bytes to Uuid at the boundary, then delegates to backend.
 
-use crate::backend::Backend;
+use crate::backend::{Backend, ExecError};
 use crate::proto::{
     dynamic_store_service_server::DynamicStoreService, DescriptorResponse, ErrorCode, ExecRequest,
     ExecResponse, MethodInfo, MethodList, StoreEvent, StoreId, StreamDescriptor, StreamList,
@@ -54,19 +54,17 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
                 error_code: ErrorCode::Unknown as i32,
             })),
             Err(e) => {
-                let error = e.to_string();
-                let error_code = if error.contains("not found") {
-                    if error.contains("Store") {
-                        ErrorCode::StoreNotFound
-                    } else if error.contains("Method") {
-                        ErrorCode::MethodNotFound
-                    } else {
-                        ErrorCode::ExecutionFailed
+                let (error_code, error) = match e.downcast::<ExecError>() {
+                    Ok(exec_err) => {
+                        let code = match exec_err.as_ref() {
+                            ExecError::StoreNotFound => ErrorCode::StoreNotFound,
+                            ExecError::MethodNotFound(_) => ErrorCode::MethodNotFound,
+                            ExecError::InvalidArgument(_) => ErrorCode::InvalidArgument,
+                            ExecError::ExecutionFailed(_) => ErrorCode::ExecutionFailed,
+                        };
+                        (code, exec_err.to_string())
                     }
-                } else if error.contains("decode") || error.contains("Invalid") {
-                    ErrorCode::InvalidArgument
-                } else {
-                    ErrorCode::ExecutionFailed
+                    Err(other) => (ErrorCode::ExecutionFailed, other.to_string()),
                 };
 
                 Ok(Response::new(ExecResponse {

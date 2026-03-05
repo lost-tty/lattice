@@ -4,9 +4,9 @@
 
 use crate::backend::*;
 use lattice_api::proto::{
-    CreateStoreRequest, DeleteStoreRequest, Empty, ExecRequest, GetIntentionRequest,
+    CreateStoreRequest, DeleteStoreRequest, Empty, ErrorCode, ExecRequest, GetIntentionRequest,
     InspectBranchRequest, JoinRequest, RevokePeerRequest, SetNameRequest, SetStoreNameRequest,
-    StoreId, WitnessLogRequest,
+    StoreId, SubscribeRequest, WitnessLogRequest,
 };
 use lattice_model::types::Hash;
 use lattice_api::RpcClient;
@@ -408,7 +408,13 @@ impl LatticeBackend for RpcBackend {
             let result = resp.into_inner();
 
             if !result.error.is_empty() {
-                return Err(result.error.into());
+                let exec_err = match ErrorCode::try_from(result.error_code) {
+                    Ok(ErrorCode::StoreNotFound) => ExecError::StoreNotFound,
+                    Ok(ErrorCode::MethodNotFound) => ExecError::MethodNotFound(result.error),
+                    Ok(ErrorCode::InvalidArgument) => ExecError::InvalidArgument(result.error),
+                    _ => ExecError::ExecutionFailed(result.error.into()),
+                };
+                return Err(exec_err.into());
             }
             Ok(result.result)
         })
@@ -499,8 +505,6 @@ impl LatticeBackend for RpcBackend {
         stream_name: &'a str,
         params: &'a [u8],
     ) -> AsyncResult<'a, BoxByteStream> {
-        use lattice_api::proto::SubscribeRequest;
-
         let client = self.client.clone();
         let stream_name = stream_name.to_string();
         let params = params.to_vec();

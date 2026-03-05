@@ -1,4 +1,4 @@
-use lattice_storage::{StateBackend, StateDbError, StorageConfig, TABLE_DATA};
+use lattice_storage::{SnapshotError, StateBackend, StateDbError, StorageConfig, TABLE_DATA};
 use redb::ReadableTableMetadata;
 use std::io::Cursor;
 use uuid::Uuid;
@@ -72,11 +72,14 @@ fn test_snapshot_checksum_failure_last_byte() {
 
     let err = backend2.restore(&mut Cursor::new(buffer)).unwrap_err();
 
-    // We expect InvalidSnapshot with "Checksum mismatch"
-    match err {
-        StateDbError::InvalidSnapshot(msg) if msg.contains("Checksum mismatch") => {}
-        _ => panic!("Expected ChecksumMismatch, got: {:?}", err),
-    }
+    assert!(
+        matches!(
+            err,
+            StateDbError::InvalidSnapshot(SnapshotError::ChecksumMismatch)
+        ),
+        "Expected ChecksumMismatch, got: {:?}",
+        err,
+    );
 }
 
 #[test]
@@ -100,10 +103,14 @@ fn test_restore_transaction_atomicity() {
     // 2. Try restore with corruption
     let err = backend2.restore(&mut Cursor::new(buffer)).unwrap_err();
 
-    match err {
-        StateDbError::InvalidSnapshot(msg) if msg.contains("Checksum mismatch") => {}
-        _ => panic!("Expected ChecksumMismatch, got: {:?}", err),
-    }
+    assert!(
+        matches!(
+            err,
+            StateDbError::InvalidSnapshot(SnapshotError::ChecksumMismatch)
+        ),
+        "Expected ChecksumMismatch, got: {:?}",
+        err,
+    );
 
     // 3. Verify Transaction Rollback
     let read_txn = backend2.db().begin_read().unwrap();

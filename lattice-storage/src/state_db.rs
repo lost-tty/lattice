@@ -29,7 +29,7 @@ pub enum StateDbError {
     #[error("Store Type mismatch: expected {expected}, got {got}")]
     StoreTypeMismatch { expected: String, got: String },
     #[error("Invalid chain: {0}")]
-    InvalidChain(String),
+    InvalidChain(#[from] ChainError),
     #[error("Conversion error: {0}")]
     Conversion(String),
     #[error("Commit error: {0}")]
@@ -40,8 +40,36 @@ pub enum StateDbError {
     Storage(#[from] redb::StorageError),
     #[error("Decode error: {0}")]
     Decode(#[from] prost::DecodeError),
-    #[error("Invalid Snapshot: {0}")]
-    InvalidSnapshot(String),
+    #[error("Invalid snapshot: {0}")]
+    InvalidSnapshot(#[from] SnapshotError),
+}
+
+/// Chain integrity errors detected during apply.
+#[derive(Debug, Error)]
+pub enum ChainError {
+    #[error("Broken chain for {author}: expected prev {expected}, got {got}")]
+    BrokenChain {
+        author: PubKey,
+        expected: Hash,
+        got: Hash,
+    },
+    #[error("Invalid genesis for {author}: expected ZERO prev, got {prev}")]
+    InvalidGenesis { author: PubKey, prev: Hash },
+    #[error("Duplicate timestamp for author")]
+    DuplicateTimestamp,
+}
+
+/// Snapshot format errors detected during restore.
+#[derive(Debug, Error)]
+pub enum SnapshotError {
+    #[error("Invalid magic bytes")]
+    InvalidMagic,
+    #[error("Unsupported version: {0}")]
+    UnsupportedVersion(u32),
+    #[error("Unknown record type: {0}")]
+    UnknownRecordType(u8),
+    #[error("Checksum mismatch")]
+    ChecksumMismatch,
 }
 
 /// A composite backend that handles standard storage boilerplate for Lattice state machines.
@@ -254,19 +282,22 @@ impl StateBackend {
 
                 // Link Check
                 if prev_hash != current_tip {
-                    return Err(StateDbError::InvalidChain(format!(
-                        "Broken chain for {:?}: expected prev {}, got {}",
-                        author, current_tip, prev_hash
-                    )));
+                    return Err(ChainError::BrokenChain {
+                        author: *author,
+                        expected: current_tip,
+                        got: prev_hash,
+                    }
+                    .into());
                 }
             }
             None => {
                 // Genesis Check
                 if prev_hash != Hash::ZERO {
-                    return Err(StateDbError::InvalidChain(format!(
-                        "Invalid genesis for {:?}: expected ZERO prev, got {}",
-                        author, prev_hash
-                    )));
+                    return Err(ChainError::InvalidGenesis {
+                        author: *author,
+                        prev: prev_hash,
+                    }
+                    .into());
                 }
             }
         }
@@ -403,15 +434,12 @@ impl StateBackend {
         hashing_reader.read_exact(&mut header_buf)?;
 
         if &header_buf[0..4] != SNAPSHOT_MAGIC {
-            return Err(StateDbError::InvalidSnapshot("Invalid magic bytes".into()));
+            return Err(SnapshotError::InvalidMagic.into());
         }
 
         let version = u32::from_le_bytes(header_buf[4..8].try_into().unwrap());
         if version != SNAPSHOT_VERSION {
-            return Err(StateDbError::InvalidSnapshot(format!(
-                "Unsupported version: {}",
-                version
-            )));
+            return Err(SnapshotError::UnsupportedVersion(version).into());
         }
 
         let store_id = Uuid::from_bytes(header_buf[8..24].try_into().unwrap());
@@ -451,10 +479,7 @@ impl StateBackend {
                     .iter()
                     .find(|(t, _)| *t == record_type)
                     .map(|(_, name)| *name)
-                    .ok_or(StateDbError::InvalidSnapshot(format!(
-                        "Unknown record type: {}",
-                        record_type
-                    )))?;
+                    .ok_or(SnapshotError::UnknownRecordType(record_type))?;
 
                 let def = TableDefinition::<&[u8], &[u8]>::new(table_name);
                 current_table = Some(write_txn.open_table(def)?);
@@ -490,7 +515,7 @@ impl StateBackend {
         reader.read_exact(&mut expected_checksum)?; // Read from inner reader
 
         if computed_checksum.as_bytes() != &expected_checksum {
-            return Err(StateDbError::InvalidSnapshot("Checksum mismatch".into()));
+            return Err(SnapshotError::ChecksumMismatch.into());
         }
 
         write_txn.commit()?;

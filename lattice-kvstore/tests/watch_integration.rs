@@ -79,13 +79,12 @@ async fn test_watch_invalid_regex() {
         Ok(_) => panic!("Expected error for invalid regex"),
         Err(e) => e,
     };
-    let msg = err.to_string();
+    // Invalid regex should produce InvalidParams
     assert!(
-        msg.to_lowercase().contains("regex")
-            || msg.contains("parse error")
-            || msg.contains("invalid"),
-        "Error should mention regex matching failure, got: {}",
-        msg
+        err.downcast_ref::<lattice_store_base::StreamError>()
+            .is_some_and(|e| matches!(e, lattice_store_base::StreamError::InvalidParams(_))),
+        "Expected StreamError::InvalidParams, got: {}",
+        err
     );
 }
 

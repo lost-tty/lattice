@@ -3,6 +3,7 @@ mod common;
 use common::TestPair;
 use lattice_kvstore_api::KvStoreExt;
 use lattice_model::types::Hash;
+use lattice_net::LatticeNetError;
 
 #[tokio::test]
 async fn test_chain_fetch_linear_gap() {
@@ -101,11 +102,10 @@ async fn test_chain_fetch_invalid_since() {
     match result {
         Ok(_) => panic!("fetch_chain should fail when since is None"),
         Err(e) => {
-            // Client might see "Peer closed stream" if server drops connection on error
+            // Server rejects the request; client sees Protocol or Sync error
             assert!(
-                e.to_string().contains("requires a non-zero")
-                    || e.to_string().contains("Peer closed stream"),
-                "Unexpected error: {}",
+                matches!(e, LatticeNetError::Protocol(_) | LatticeNetError::Sync(_) | LatticeNetError::Io(_)),
+                "Expected Protocol/Sync/Io error, got: {:?}",
                 e
             );
         }
@@ -149,14 +149,13 @@ async fn test_chain_fetch_fork_detect() {
         .await;
 
     // Expectation: walk_back_until should fail because it never finds `fake_since` before hitting Genesis.
-    // The server should return an error, which `fetch_chain` translates to `LatticeNetError::Sync`.
+    // The server should return an error, and the client sees Protocol or Sync error.
     match result {
         Ok(_) => panic!("Should have failed because since was not found"),
         Err(e) => {
-            // Verify error message or just that it failed sync
             assert!(
-                e.to_string().contains("Failed to find ancestor") || e.to_string().contains("Sync"),
-                "Unexpected error: {}",
+                matches!(e, LatticeNetError::Protocol(_) | LatticeNetError::Sync(_) | LatticeNetError::Io(_)),
+                "Expected Protocol/Sync/Io error, got: {:?}",
                 e
             );
         }
@@ -201,8 +200,8 @@ async fn test_chain_fetch_limit_exceeded() {
         Ok(_) => panic!("Should have failed because gap (39) > limit (32)"),
         Err(e) => {
             assert!(
-                e.to_string().contains("within limit") || e.to_string().contains("Sync"),
-                "Unexpected error: {}",
+                matches!(e, LatticeNetError::Protocol(_) | LatticeNetError::Sync(_) | LatticeNetError::Io(_) | LatticeNetError::Ingest(_)),
+                "Expected Protocol/Sync/Io/Ingest error, got: {:?}",
                 e
             );
         }
@@ -245,8 +244,8 @@ async fn test_chain_fetch_future_since() {
         Ok(_) => panic!("Should have failed because since is ahead of target"),
         Err(e) => {
             assert!(
-                e.to_string().contains("Hit Genesis") || e.to_string().contains("Sync"),
-                "Unexpected error: {}",
+                matches!(e, LatticeNetError::Protocol(_) | LatticeNetError::Sync(_) | LatticeNetError::Io(_)),
+                "Expected Protocol/Sync/Io error, got: {:?}",
                 e
             );
         }

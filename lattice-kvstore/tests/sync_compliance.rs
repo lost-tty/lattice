@@ -5,7 +5,7 @@ use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::Uuid;
 use lattice_model::{Op, StateMachine};
-use lattice_storage::StorageConfig;
+use lattice_storage::{ChainError, SnapshotError, StateDbError, StorageConfig};
 use prost::Message;
 use std::io::Read;
 static NULL_DAG: NullDag = NullDag;
@@ -231,9 +231,12 @@ fn test_chain_rules_compliance() {
     let bad_genesis = create_test_op(b"k", b"v", author, hash1, hlc, Hash::from([0x01; 32]));
     let err = state.apply(&bad_genesis, &dag).unwrap_err();
     assert!(
-        format!("{}", err).contains("Invalid genesis"),
-        "Error: {}",
-        err
+        matches!(
+            err,
+            StateDbError::InvalidChain(ChainError::InvalidGenesis { .. })
+        ),
+        "Expected InvalidGenesis, got: {:?}",
+        err,
     );
 
     // 2. Valid Genesis
@@ -250,9 +253,12 @@ fn test_chain_rules_compliance() {
     let bad_link = create_test_op(b"k", b"v2", author, hash2, hlc, Hash::ZERO); // Prev should be hash1
     let err = state.apply(&bad_link, &dag).unwrap_err();
     assert!(
-        format!("{}", err).contains("Broken chain"),
-        "Error: {}",
-        err
+        matches!(
+            err,
+            StateDbError::InvalidChain(ChainError::BrokenChain { .. })
+        ),
+        "Expected BrokenChain, got: {:?}",
+        err,
     );
 
     // 5. Valid Link
@@ -284,7 +290,14 @@ fn test_snapshot_checksum_failure() {
     let err = state2
         .restore(Box::new(std::io::Cursor::new(corrupt_checksum)))
         .unwrap_err();
-    assert!(format!("{}", err).contains("Checksum mismatch"));
+    assert!(
+        matches!(
+            err,
+            StateDbError::InvalidSnapshot(SnapshotError::ChecksumMismatch)
+        ),
+        "Expected ChecksumMismatch, got: {:?}",
+        err,
+    );
 
     // Corrupt a data byte (somewhere in the middle)
     let mut corrupt_data = snap_bytes.clone();
@@ -294,8 +307,12 @@ fn test_snapshot_checksum_failure() {
         .restore(Box::new(std::io::Cursor::new(corrupt_data)))
         .unwrap_err();
     assert!(
-        format!("{}", err_data).contains("Checksum mismatch")
-            || format!("{}", err_data).contains("IO error")
+        matches!(
+            err_data,
+            StateDbError::InvalidSnapshot(SnapshotError::ChecksumMismatch) | StateDbError::Io(_)
+        ),
+        "Expected ChecksumMismatch or IO error, got: {:?}",
+        err_data,
     );
 }
 
@@ -310,8 +327,8 @@ fn test_snapshot_uuid_mismatch() {
 
     let err = state2.restore(snapshot).unwrap_err();
     assert!(
-        format!("{}", err).contains("Store ID mismatch"),
-        "Error was: {}",
-        err
+        matches!(err, StateDbError::StoreIdMismatch { .. }),
+        "Expected StoreIdMismatch, got: {:?}",
+        err,
     );
 }
