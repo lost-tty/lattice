@@ -6,7 +6,6 @@
 use crate::framing;
 use crate::LatticeNetError;
 
-use super::service::PeerStoreRegistry;
 use futures_util::StreamExt;
 use lattice_model::{
     types::{Hash, PubKey},
@@ -42,7 +41,6 @@ pub fn lookup_store(
 /// (e.g. QUIC `finish()` to avoid abrupt stream resets).
 pub async fn dispatch_stream<W, R>(
     provider: Arc<dyn NodeProviderExt>,
-    peer_stores: PeerStoreRegistry,
     remote_pubkey: PubKey,
     send: W,
     recv: R,
@@ -78,7 +76,6 @@ where
             Some(peer_message::Message::Reconcile(req)) => {
                 handle_reconcile_start(
                     provider.as_ref(),
-                    peer_stores.clone(),
                     &remote_pubkey,
                     req,
                     &mut sink,
@@ -138,7 +135,6 @@ pub async fn handle_join_request<W: tokio::io::AsyncWrite + Send + Unpin>(
 /// Handle an incoming reconcile start message
 pub async fn handle_reconcile_start<W, R>(
     provider: &dyn NodeProviderExt,
-    _peer_stores: PeerStoreRegistry,
     remote_pubkey: &PubKey,
     req: lattice_proto::network::ReconcilePayload,
     sink: &mut framing::MessageSink<W>,

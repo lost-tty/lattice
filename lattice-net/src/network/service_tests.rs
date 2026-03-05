@@ -174,7 +174,7 @@ mod tests {
             gossip: None,
             router: None,
             peer_stores: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             )),
         };
         let (_, event_rx) = tokio::sync::broadcast::channel(1);

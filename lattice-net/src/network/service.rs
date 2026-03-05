@@ -16,6 +16,7 @@ use lattice_net_types::transport::{BiStream, Connection as TransportConnection, 
 use lattice_net_types::{GossipLayer, NetworkStore, NodeProviderExt};
 use lattice_proto::convert::intention_from_proto;
 use lattice_proto::network::{peer_message, BootstrapRequest, FetchChain, PeerMessage};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -68,10 +69,10 @@ impl GossipLagStats {
 }
 
 /// Per-store gossip stats registry
-pub type GossipStatsRegistry = Arc<RwLock<std::collections::HashMap<Uuid, GossipLagStats>>>;
+pub type GossipStatsRegistry = Arc<RwLock<HashMap<Uuid, GossipLagStats>>>;
 
-/// Peer store registry - now just tracks which stores have been registered for networking
-pub type PeerStoreRegistry = Arc<RwLock<std::collections::HashSet<Uuid>>>;
+/// Peer store registry — caches `NetworkStore` handles for stores registered for networking.
+pub type PeerStoreRegistry = Arc<RwLock<HashMap<Uuid, NetworkStore>>>;
 
 /// Central service for mesh networking.
 /// Generic over `T: Transport` for the sync/connect path.
@@ -134,7 +135,7 @@ impl<T: Transport> NetworkService<T> {
             router: backend.router,
             global_gossip_enabled: Arc::new(AtomicBool::new(true)),
             auto_sync_enabled: Arc::new(AtomicBool::new(true)),
-            gossip_stats: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            gossip_stats: Arc::new(RwLock::new(HashMap::new())),
         });
 
         // Subscribe to network events (NetEvent channel)
@@ -162,7 +163,7 @@ impl<T: Transport> NetworkService<T> {
         pm: std::sync::Arc<dyn lattice_model::PeerProvider>,
     ) {
         // Check if already registered for network
-        if self.peer_stores.read().await.contains(&store_id) {
+        if self.peer_stores.read().await.contains_key(&store_id) {
             tracing::debug!(store_id = %store_id, "Store already registered for network");
             return;
         }
@@ -176,8 +177,12 @@ impl<T: Transport> NetworkService<T> {
 
         tracing::info!(store_id = %store_id, "Registering store for network");
 
-        // Mark as registered
-        self.peer_stores.write().await.insert(store_id);
+        // Cache the NetworkStore handle so callers can look it up without
+        // racing against StoreRegistry population.
+        self.peer_stores
+            .write()
+            .await
+            .insert(store_id, network_store.clone());
 
         // Check global flag
         let global_enabled = self.global_gossip_enabled.load(Ordering::SeqCst);
@@ -390,18 +395,7 @@ impl<T: Transport> NetworkService<T> {
         store_id: Uuid,
         peer_id: PubKey,
     ) -> Result<u64, LatticeNetError> {
-        // TODO(15D): Replace polling with Notify-based signaling
-        let store = {
-            let mut s = self.get_store(store_id);
-            for _ in 0..10 {
-                if s.is_some() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                s = self.get_store(store_id);
-            }
-            s.ok_or(LatticeNetError::StoreNotRegistered(store_id))?
-        };
+        let store = self.registered_store(store_id).await?;
 
         tracing::info!("Bootstrap: connecting to peer {}", peer_id);
 
@@ -746,7 +740,7 @@ impl<T: Transport> NetworkService<T> {
     /// Get currently connected peers with last-seen timestamp.
     pub fn connected_peers(
         &self,
-    ) -> Result<std::collections::HashMap<PubKey, std::time::Instant>, String> {
+    ) -> Result<HashMap<PubKey, std::time::Instant>, String> {
         self.sessions.online_peers()
     }
 
@@ -825,7 +819,6 @@ impl<T: Transport> NetworkService<T> {
                 Some(peer_message::Message::Reconcile(req)) => {
                     super::handlers::handle_reconcile_start(
                         self.provider.as_ref(),
-                        self.peer_stores.clone(),
                         &remote_pubkey,
                         req,
                         &mut sink,
@@ -896,6 +889,20 @@ impl<T: Transport> NetworkService<T> {
     /// Get a registered store by ID
     pub fn get_store(&self, store_id: Uuid) -> Option<NetworkStore> {
         self.provider.store_registry().get_network_store(&store_id)
+    }
+
+    /// Look up a `NetworkStore` by ID.
+    ///
+    /// Checks the `peer_stores` cache first (populated by `register_store_by_id`),
+    /// then falls back to the provider's `NetworkStoreRegistry`. This means
+    /// callers never race against registration — if the store exists anywhere,
+    /// it will be found.
+    async fn registered_store(&self, store_id: Uuid) -> Result<NetworkStore, LatticeNetError> {
+        if let Some(store) = self.peer_stores.read().await.get(&store_id).cloned() {
+            return Ok(store);
+        }
+        self.get_store(store_id)
+            .ok_or(LatticeNetError::StoreNotRegistered(store_id))
     }
 
     /// Get the gossip lag stats registry (for sync scheduling decisions)
@@ -1046,18 +1053,7 @@ impl<T: Transport> NetworkService<T> {
 
     /// Sync with all active peers for a store (by ID).
     pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, LatticeNetError> {
-        // TODO(15D): Replace polling with Notify-based signaling
-        let store = {
-            let mut s = self.get_store(store_id);
-            for _ in 0..10 {
-                if s.is_some() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                s = self.get_store(store_id);
-            }
-            s.ok_or(LatticeNetError::StoreNotRegistered(store_id))?
-        };
+        let store = self.registered_store(store_id).await?;
         self.sync_all(&store).await
     }
 
@@ -1068,18 +1064,7 @@ impl<T: Transport> NetworkService<T> {
         peer_id: PubKey,
         authors: &[PubKey],
     ) -> Result<SyncResult, LatticeNetError> {
-        // TODO(15D): Replace polling with Notify-based signaling
-        let store = {
-            let mut s = self.get_store(store_id);
-            for _ in 0..10 {
-                if s.is_some() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                s = self.get_store(store_id);
-            }
-            s.ok_or(LatticeNetError::StoreNotRegistered(store_id))?
-        };
+        let store = self.registered_store(store_id).await?;
         self.sync_with_peer(&store, peer_id, authors).await
     }
 
@@ -1093,18 +1078,7 @@ impl<T: Transport> NetworkService<T> {
         target_hash: Hash,
         since_hash: Option<Hash>,
     ) -> Result<usize, LatticeNetError> {
-        // TODO(15D): Replace polling with Notify-based signaling
-        let store = {
-            let mut s = self.get_store(store_id);
-            for _ in 0..10 {
-                if s.is_some() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                s = self.get_store(store_id);
-            }
-            s.ok_or(LatticeNetError::StoreNotRegistered(store_id))?
-        };
+        let store = self.registered_store(store_id).await?;
 
         tracing::debug!("FetchChain: connecting to peer");
         let conn = self

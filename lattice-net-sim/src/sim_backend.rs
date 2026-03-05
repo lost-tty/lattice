@@ -7,7 +7,7 @@ use crate::ChannelTransport;
 use lattice_net::network::{NetworkBackend, PeerStoreRegistry, ShutdownHandle};
 use lattice_net_types::transport::{BiStream, Connection as TransportConnection, Transport};
 use lattice_net_types::{GossipLayer, NodeProviderExt};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -40,20 +40,18 @@ impl SimBackend {
         provider: Arc<dyn NodeProviderExt>,
         gossip: Option<Arc<dyn GossipLayer>>,
     ) -> NetworkBackend<ChannelTransport> {
-        let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashSet::new()));
+        let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashMap::new()));
 
         // Spawn the accept loop — sim equivalent of iroh Router
         let accept_handle = {
             let transport_clone = transport.clone();
             let provider = provider.clone();
-            let peer_stores = peer_stores.clone();
             tokio::spawn(async move {
                 loop {
                     let Some(conn) = transport_clone.accept().await else {
                         break;
                     };
                     let provider = provider.clone();
-                    let peer_stores = peer_stores.clone();
                     let remote = conn.remote_public_key();
                     tokio::spawn(async move {
                         let bi = match conn.open_bi().await {
@@ -63,7 +61,6 @@ impl SimBackend {
                         let (send, recv) = bi.into_split();
                         match lattice_net::network::handlers::dispatch_stream(
                             provider,
-                            peer_stores,
                             remote,
                             send,
                             recv,

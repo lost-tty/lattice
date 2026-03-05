@@ -23,7 +23,7 @@ impl SyncProtocol {
     pub fn new(provider: Arc<dyn NodeProviderExt>) -> Self {
         Self {
             provider,
-            peer_stores: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+            peer_stores: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -45,9 +45,8 @@ impl ProtocolHandler for SyncProtocol {
         conn: Connection,
     ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
         let provider = self.provider.clone();
-        let peer_stores = self.peer_stores.clone();
         Box::pin(async move {
-            if let Err(e) = handle_connection(provider, peer_stores, conn).await {
+            if let Err(e) = handle_connection(provider, conn).await {
                 tracing::error!(error = %e, "Connection handler error");
             }
             Ok(())
@@ -59,7 +58,6 @@ impl ProtocolHandler for SyncProtocol {
 /// Each bidirectional stream is dispatched to the generic handler in lattice-net.
 pub async fn handle_connection(
     provider: Arc<dyn NodeProviderExt>,
-    peer_stores: PeerStoreRegistry,
     conn: Connection,
 ) -> Result<(), LatticeNetError> {
     let remote_id = conn.remote_id();
@@ -75,13 +73,11 @@ pub async fn handle_connection(
         match conn.accept_bi().await {
             Ok((send, recv)) => {
                 let provider = provider.clone();
-                let peer_stores = peer_stores.clone();
                 let remote_pubkey = remote_pubkey;
                 tokio::spawn(async move {
                     // Delegate to generic dispatch in lattice-net
                     match lattice_net::network::handlers::dispatch_stream(
                         provider,
-                        peer_stores,
                         remote_pubkey,
                         send,
                         recv,
