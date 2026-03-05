@@ -5,7 +5,7 @@ pub mod tables;
 pub use helpers::SystemBatch;
 pub use system_state::SystemLayer;
 
-use futures_util::{Stream, StreamExt};
+use futures_util::Stream;
 use lattice_model::replication::StoreEventSource;
 use lattice_model::store_info::PeerStrategy;
 use lattice_model::{Hash, PeerInfo, StateWriter, StoreLink, SystemEvent};
@@ -110,10 +110,8 @@ pub trait SystemWriter: Send + Sync {
 /// Trait for subscribing to system-level events (requires event bus integration).
 pub trait SystemWatcher: Send + Sync {
     /// Subscribe to high-level system events.
-    fn subscribe_events(
-        &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<SystemEvent, String>> + Send>>, String> {
-        Ok(Box::pin(futures_util::stream::empty()))
+    fn subscribe_events(&self) -> Pin<Box<dyn Stream<Item = SystemEvent> + Send>> {
+        Box::pin(futures_util::stream::empty())
     }
 }
 
@@ -198,15 +196,13 @@ impl<T> SystemWatcher for T
 where
     T: StoreEventSource + Send + Sync,
 {
-    fn subscribe_events(
-        &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<SystemEvent, String>> + Send>>, String> {
+    fn subscribe_events(&self) -> Pin<Box<dyn Stream<Item = SystemEvent> + Send>> {
         let log_stream = crate::helpers::subscribe_system_events(self);
-        let local_stream = self.subscribe_local_events().map(Ok);
-        Ok(Box::pin(futures_util::stream::select(
+        let local_stream = self.subscribe_local_events();
+        Box::pin(futures_util::stream::select(
             log_stream,
             Box::pin(local_stream),
-        )))
+        ))
     }
 }
 

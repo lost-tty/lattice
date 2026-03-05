@@ -1,6 +1,7 @@
 use futures_util::{Stream, StreamExt};
 use lattice_model::replication::StoreEventSource;
 use lattice_model::store_info::PeerStrategy;
+use lattice_model::weaver::Intention;
 use lattice_model::InviteStatus;
 use lattice_model::{PeerStatus as ModelStatus, StoreLink, SystemEvent};
 use lattice_proto::storage::{
@@ -13,7 +14,7 @@ use lattice_proto::storage::{
 use prost::Message;
 use std::pin::Pin;
 
-pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, String>> {
+pub fn decode_system_event(sys_op: SystemOp) -> Option<SystemEvent> {
     match sys_op.kind {
         Some(system_op::Kind::Peer(peer)) => {
             let pubkey = match lattice_model::types::PubKey::try_from(peer.pubkey.as_slice()) {
@@ -38,10 +39,10 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
                         added_at: None,
                         added_by: None,
                     };
-                    Some(Ok(SystemEvent::PeerUpdated(info)))
+                    Some(SystemEvent::PeerUpdated(info))
                 }
                 Some(peer_op::Op::SetName(n)) => {
-                    Some(Ok(SystemEvent::PeerNameUpdated(pubkey, n.name)))
+                    Some(SystemEvent::PeerNameUpdated(pubkey, n.name))
                 }
                 // These are metadata operations - no separate events for now
                 Some(peer_op::Op::SetAddedAt(_)) | Some(peer_op::Op::SetAddedBy(_)) => None,
@@ -52,7 +53,7 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
             match h.op {
                 Some(hierarchy_op::Op::AddChild(a)) => {
                     let id = lattice_model::Uuid::from_slice(&a.target_id).ok()?;
-                    Some(Ok(SystemEvent::ChildLinkUpdated(StoreLink {
+                    Some(SystemEvent::ChildLinkUpdated(StoreLink {
                         id,
                         alias: if a.alias.is_empty() {
                             None
@@ -65,18 +66,18 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
                             Some(a.store_type)
                         },
                         status: lattice_model::store_info::ChildStatus::Active, // Default for add
-                    })))
+                    }))
                 }
                 Some(hierarchy_op::Op::SetStatus(s)) => {
                     let id = lattice_model::Uuid::from_slice(&s.target_id).ok()?;
                     let status = map_to_model_status(
                         ProtoChildStatus::try_from(s.status).unwrap_or(ProtoChildStatus::CsUnknown),
                     );
-                    Some(Ok(SystemEvent::ChildStatusUpdated(id, status)))
+                    Some(SystemEvent::ChildStatusUpdated(id, status))
                 }
                 Some(hierarchy_op::Op::RemoveChild(r)) => {
                     let id = lattice_model::Uuid::from_slice(&r.target_id).ok()?;
-                    Some(Ok(SystemEvent::ChildLinkRemoved(id)))
+                    Some(SystemEvent::ChildLinkRemoved(id))
                 }
                 None => None,
             }
@@ -93,7 +94,7 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
                         }
                         None => return None,
                     };
-                    Some(Ok(SystemEvent::StrategyUpdated(model_strat)))
+                    Some(SystemEvent::StrategyUpdated(model_strat))
                 } else {
                     None
                 }
@@ -101,7 +102,7 @@ pub fn decode_system_event(sys_op: SystemOp) -> Option<Result<SystemEvent, Strin
             None => None,
         },
         Some(system_op::Kind::Store(s)) => match s.op {
-            Some(store_op::Op::SetName(sn)) => Some(Ok(SystemEvent::StoreNameUpdated(sn.name))),
+            Some(store_op::Op::SetName(sn)) => Some(SystemEvent::StoreNameUpdated(sn.name)),
             None => None,
         },
         Some(system_op::Kind::Invite(_)) => None,
@@ -429,12 +430,10 @@ impl<'a, T: crate::SystemStore + ?Sized> SystemBatch<'a, T> {
 
 pub fn subscribe_system_events<P>(
     provider: &P,
-) -> Pin<Box<dyn Stream<Item = Result<SystemEvent, String>> + Send>>
+) -> Pin<Box<dyn Stream<Item = SystemEvent> + Send>>
 where
     P: StoreEventSource + ?Sized,
 {
-    use lattice_model::weaver::Intention;
-
     let stream = provider.subscribe_entries();
 
     Box::pin(stream.filter_map(|payload_bytes| async move {

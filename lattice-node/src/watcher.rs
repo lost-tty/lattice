@@ -54,13 +54,7 @@ impl RecursiveWatcher {
             };
 
             // 1. Subscribe to system events (Log-based + Local Ephemeral)
-            let mut stream = match system.subscribe_events() {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(error = %e, "Failed to subscribe to system events");
-                    return;
-                }
-            };
+            let mut stream = system.subscribe_events();
 
             // 2. Initial reconcile (manual list)
             if let Err(e) = Self::reconcile_stores(
@@ -77,7 +71,7 @@ impl RecursiveWatcher {
 
             debug!("Store watcher started for root {}", root_store_id);
 
-            // 5. Process unified stream
+            // 3. Process unified stream
             loop {
                 tokio::select! {
                     _ = shutdown_rx.recv() => {
@@ -86,24 +80,20 @@ impl RecursiveWatcher {
                     }
                     next = stream.next() => {
                         match next {
-                            Some(Ok(evt)) => {
-                                // Reconcile on child/hierarchy changes or BootstrapComplete
-                                let should_reconcile = match evt {
-                                    SystemEvent::ChildLinkUpdated(_) |
-                                    SystemEvent::ChildStatusUpdated(_, _) |
-                                    SystemEvent::ChildLinkRemoved(_) |
-                                    SystemEvent::BootstrapComplete => true,
-                                    _ => false,
-                                };
+                            Some(evt) => {
+                                let should_reconcile = matches!(
+                                    evt,
+                                    SystemEvent::ChildLinkUpdated(_)
+                                        | SystemEvent::ChildStatusUpdated(_, _)
+                                        | SystemEvent::ChildLinkRemoved(_)
+                                        | SystemEvent::BootstrapComplete
+                                );
 
                                 if should_reconcile {
                                     if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores).await {
                                         warn!(error = %e, "Reconcile failed");
                                     }
                                 }
-                            }
-                            Some(Err(e)) => {
-                                warn!(error = %e, "Watch stream error");
                             }
                             None => break,
                         }

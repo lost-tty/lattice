@@ -14,7 +14,6 @@ use lattice_systemstore::{SystemBatch, SystemStore};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
-use tracing::warn;
 
 /// Error type for PeerManager operations
 #[derive(Debug, thiserror::Error)]
@@ -23,8 +22,6 @@ pub enum PeerManagerError {
     StoreRead(#[from] lattice_systemstore::SystemReadError),
     #[error("Store write error: {0}")]
     StoreWrite(#[from] lattice_systemstore::SystemWriteError),
-    #[error("Store error: {0}")]
-    Store(String),
     #[error("Lock poisoned")]
     LockPoisoned,
 }
@@ -131,45 +128,35 @@ impl PeerManager {
             bootstrap_peers: Mutex::new(HashSet::new()),
         });
 
-        manager.start_watching().await?;
+        manager.start_watching().await;
 
         Ok(manager)
     }
 
     /// Start watching the system event stream for peer changes
-    async fn start_watching(self: &Arc<Self>) -> Result<(), PeerManagerError> {
-        let mut event_stream = self
-            .store
-            .subscribe_events()
-            .map_err(PeerManagerError::Store)?;
+    async fn start_watching(self: &Arc<Self>) {
+        let mut event_stream = self.store.subscribe_events();
         let notify = self.peer_event_tx.clone();
 
         let task = tokio::spawn(async move {
-            while let Some(result) = event_stream.next().await {
-                match result {
-                    Ok(event) => {
-                        let peer_event = match event {
-                            SystemEvent::PeerUpdated(info) => Some(PeerEvent::Added {
-                                pubkey: info.pubkey,
-                                status: info.status,
-                            }),
-                            SystemEvent::PeerRemoved(pubkey) => Some(PeerEvent::StatusChanged {
-                                pubkey,
-                                old: PeerStatus::Active,
-                                new: PeerStatus::Revoked,
-                            }),
-                            SystemEvent::PeerNameUpdated(pubkey, name) => {
-                                Some(PeerEvent::NameUpdated { pubkey, name })
-                            }
-                            _ => None,
-                        };
-                        if let Some(ev) = peer_event {
-                            let _ = notify.send(ev);
-                        }
+            while let Some(event) = event_stream.next().await {
+                let peer_event = match event {
+                    SystemEvent::PeerUpdated(info) => Some(PeerEvent::Added {
+                        pubkey: info.pubkey,
+                        status: info.status,
+                    }),
+                    SystemEvent::PeerRemoved(pubkey) => Some(PeerEvent::StatusChanged {
+                        pubkey,
+                        old: PeerStatus::Active,
+                        new: PeerStatus::Revoked,
+                    }),
+                    SystemEvent::PeerNameUpdated(pubkey, name) => {
+                        Some(PeerEvent::NameUpdated { pubkey, name })
                     }
-                    Err(e) => {
-                        warn!("PeerManager watcher error: {}", e);
-                    }
+                    _ => None,
+                };
+                if let Some(ev) = peer_event {
+                    let _ = notify.send(ev);
                 }
             }
         });
@@ -177,8 +164,6 @@ impl PeerManager {
         if let Ok(mut guard) = self.watcher_task.lock() {
             *guard = Some(task);
         }
-
-        Ok(())
     }
 
     // ==================== Read Operations (from SystemStore) ====================
