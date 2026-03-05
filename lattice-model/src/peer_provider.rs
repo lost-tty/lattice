@@ -49,6 +49,10 @@ pub trait PeerProvider: Send + Sync {
     fn can_accept_entry(&self, author: &PubKey) -> bool;
 
     /// List all authors whose entries we can accept.
+    ///
+    /// Intentionally infallible: this is a hot-path auth check called on every
+    /// incoming intention during sync. If the peer store can't be read,
+    /// implementations should `warn!` and return an empty list (reject all).
     fn list_acceptable_authors(&self) -> Vec<PubKey>;
 
     /// Reset ephemeral bootstrap peers (optional).

@@ -11,7 +11,7 @@ use lattice_systemstore::SystemBatch;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Error type for StoreManager operations
 #[derive(Debug, thiserror::Error)]
@@ -232,7 +232,10 @@ impl StoreManager {
         self.stores
             .read()
             .map(|s| s.keys().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_else(|_| {
+                warn!("Stores lock poisoned in store_ids(), returning empty list");
+                Vec::new()
+            })
     }
 
     /// List all stores with their types.
@@ -244,7 +247,10 @@ impl StoreManager {
                     .map(|(id, entry)| (*id, entry.store_type.clone()))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_else(|_| {
+                warn!("Stores lock poisoned in list(), returning empty list");
+                Vec::new()
+            })
     }
 
     pub fn close(&self, store_id: &Uuid) -> Result<(), StoreManagerError> {
@@ -561,18 +567,17 @@ impl StoreManager {
     /// Does NOT write to any SystemTable — purely local cleanup.
     fn close_descendants(&self, store_id: Uuid) {
         // Read children from the store's SystemTable before closing it
-        let child_ids: Vec<Uuid> = self
-            .get_handle(&store_id)
-            .and_then(|h| h.as_system())
-            .and_then(|sys| sys.get_children().ok())
-            .map(|children| {
-                children
-                    .into_iter()
-                    .filter(|c| c.status != lattice_model::store_info::ChildStatus::Archived)
-                    .map(|c| c.id)
-                    .collect()
+        let child_ids: Vec<Uuid> = match self.get_handle(&store_id).and_then(|h| h.as_system()) {
+            Some(sys) => sys.get_children().unwrap_or_else(|e| {
+                warn!(store_id = %store_id, error = %e, "Failed to read children during cascade close");
+                Vec::new()
             })
-            .unwrap_or_default();
+            .into_iter()
+            .filter(|c| c.status != lattice_model::store_info::ChildStatus::Archived)
+            .map(|c| c.id)
+            .collect(),
+            None => Vec::new(),
+        };
 
         // Recurse into each child first (depth-first)
         for child_id in child_ids {

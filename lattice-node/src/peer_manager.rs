@@ -14,6 +14,7 @@ use lattice_systemstore::{SystemBatch, SystemStore};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+use tracing::warn;
 
 /// Error type for PeerManager operations
 #[derive(Debug, thiserror::Error)]
@@ -303,7 +304,10 @@ impl PeerProvider for PeerManager {
         let mut authors: Vec<PubKey> = self
             .store
             .get_peers()
-            .unwrap_or_default()
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "Failed to read peers for auth check, defaulting to empty list");
+                Vec::new()
+            })
             .into_iter()
             .filter(|p| {
                 matches!(

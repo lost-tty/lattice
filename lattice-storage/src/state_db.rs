@@ -4,6 +4,7 @@ use redb::{Database, ReadableTable, TableDefinition, TableHandle};
 use std::io::{Read, Write};
 use std::path::Path;
 use thiserror::Error;
+use tracing::warn;
 use uuid::Uuid;
 
 // Standard Table Definitions
@@ -121,20 +122,22 @@ impl StateBackend {
     pub fn get_meta(&self) -> StoreMeta {
         let read_txn = match self.db.begin_read() {
             Ok(txn) => txn,
-            Err(_) => {
+            Err(e) => {
+                warn!(store_id = %self.id, error = %e, "Failed to begin read transaction for store meta");
                 return StoreMeta {
                     store_id: self.id,
                     ..Default::default()
-                }
+                };
             }
         };
         let table = match read_txn.open_table(TABLE_META) {
             Ok(t) => t,
-            Err(_) => {
+            Err(e) => {
+                warn!(store_id = %self.id, error = %e, "Failed to open meta table for store meta");
                 return StoreMeta {
                     store_id: self.id,
                     ..Default::default()
-                }
+                };
             }
         };
 

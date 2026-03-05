@@ -63,7 +63,10 @@ pub trait StateMachine: Send + Sync {
     fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error>;
 
     /// Returns store metadata (id, type, name, schema_version).
-    /// Default implementation returns default/empty values.
+    ///
+    /// Intentionally infallible: metadata is used for display (CLI, gRPC listings).
+    /// If the DB is too broken to read the meta table, the state machine can't
+    /// apply ops either — implementations should `warn!` and return defaults.
     fn store_meta(&self) -> crate::StoreMeta {
         crate::StoreMeta::default()
     }
