@@ -58,8 +58,7 @@ where
             .registry
             .get_or_open(store_id, |config: &StorageConfig| {
                 S::open(store_id, config).map_err(lattice_kernel::store::StateError::Backend)
-            })
-            .map_err(|e| StoreManagerError::Registry(e.to_string()))?;
+            })?;
 
         Ok(Arc::new(store))
     }

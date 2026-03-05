@@ -17,12 +17,30 @@ pub const KEY_STORE_TYPE: &[u8] = b"store_type";
 pub const KEY_SCHEMA_VERSION: &[u8] = b"schema_version";
 pub const PREFIX_TIP: &[u8] = b"tip/";
 
+/// Wrapper for the 5 distinct redb error types.
+///
+/// Redb doesn't provide a unified error enum. Callers never need to distinguish
+/// between database, table, transaction, storage, or commit errors — they're all
+/// "the embedded DB failed." This wrapper collapses them into a single variant
+/// for use in higher-level error enums.
+#[derive(Debug, Error)]
+pub enum RedbError {
+    #[error("{0}")]
+    Database(#[from] redb::DatabaseError),
+    #[error("{0}")]
+    Table(#[from] redb::TableError),
+    #[error("{0}")]
+    Transaction(#[from] redb::TransactionError),
+    #[error("{0}")]
+    Storage(#[from] redb::StorageError),
+    #[error("{0}")]
+    Commit(#[from] redb::CommitError),
+}
+
 #[derive(Debug, Error)]
 pub enum StateDbError {
-    #[error("Database error: {0}")]
-    Database(#[from] redb::DatabaseError),
-    #[error("Table error: {0}")]
-    Table(#[from] redb::TableError),
+    #[error("Redb error: {0}")]
+    Redb(#[from] RedbError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Store ID mismatch: expected {expected}, got {got}")]
@@ -33,16 +51,37 @@ pub enum StateDbError {
     InvalidChain(#[from] ChainError),
     #[error("Conversion error: {0}")]
     Conversion(String),
-    #[error("Commit error: {0}")]
-    Commit(#[from] redb::CommitError),
-    #[error("Transaction error: {0}")]
-    Transaction(#[from] redb::TransactionError),
-    #[error("Storage error: {0}")]
-    Storage(#[from] redb::StorageError),
     #[error("Decode error: {0}")]
     Decode(#[from] prost::DecodeError),
     #[error("Invalid snapshot: {0}")]
     InvalidSnapshot(#[from] SnapshotError),
+}
+
+// Allow `?` on individual redb error types to convert through RedbError → StateDbError.
+impl From<redb::DatabaseError> for StateDbError {
+    fn from(e: redb::DatabaseError) -> Self {
+        StateDbError::Redb(e.into())
+    }
+}
+impl From<redb::TableError> for StateDbError {
+    fn from(e: redb::TableError) -> Self {
+        StateDbError::Redb(e.into())
+    }
+}
+impl From<redb::TransactionError> for StateDbError {
+    fn from(e: redb::TransactionError) -> Self {
+        StateDbError::Redb(e.into())
+    }
+}
+impl From<redb::StorageError> for StateDbError {
+    fn from(e: redb::StorageError) -> Self {
+        StateDbError::Redb(e.into())
+    }
+}
+impl From<redb::CommitError> for StateDbError {
+    fn from(e: redb::CommitError) -> Self {
+        StateDbError::Redb(e.into())
+    }
 }
 
 /// Chain integrity errors detected during apply.

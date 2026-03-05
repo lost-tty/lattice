@@ -5,7 +5,7 @@
 
 use crate::StoreHandle;
 use crate::{peer_manager::PeerManager, NodeEvent, StoreRegistry};
-use lattice_model::{NetEvent, PeerProvider, Uuid};
+use lattice_model::{InviteStatus, NetEvent, PeerProvider, Uuid};
 use lattice_net_types::{NetworkStore, NetworkStoreRegistry};
 use lattice_systemstore::SystemBatch;
 use std::collections::HashMap;
@@ -16,18 +16,22 @@ use tracing::{info, warn};
 /// Error type for StoreManager operations
 #[derive(Debug, thiserror::Error)]
 pub enum StoreManagerError {
-    #[error("Store error: {0}")]
-    Store(String),
     #[error("Store read error: {0}")]
     StoreRead(#[from] lattice_systemstore::SystemReadError),
     #[error("Store write error: {0}")]
     StoreWrite(#[from] lattice_systemstore::SystemWriteError),
     #[error("Store not found: {0}")]
     NotFound(Uuid),
-    #[error("Registry error: {0}")]
-    Registry(String),
-    #[error("Lock error: {0}")]
-    Lock(String),
+    #[error("Store does not support SystemStore")]
+    NotSystemStore,
+    #[error("Peer management error: {0}")]
+    PeerManager(#[from] crate::peer_manager::PeerManagerError),
+    #[error("Storage error: {0}")]
+    Storage(#[from] lattice_kernel::store::StateError),
+    #[error("Unauthorized peer {peer}: {reason}")]
+    Unauthorized { peer: String, reason: &'static str },
+    #[error("Lock poisoned")]
+    LockPoisoned,
     #[error("No opener registered for type: {0}")]
     NoOpener(String),
 }
@@ -103,7 +107,7 @@ impl StoreManager {
         let openers = self
             .openers
             .read()
-            .map_err(|_| StoreManagerError::Lock("openers lock poisoned".into()))?;
+            .map_err(|_| StoreManagerError::LockPoisoned)?;
 
         let opener = openers
             .get(store_type)
@@ -140,10 +144,7 @@ impl StoreManager {
 
             batch.commit().await?;
         } else if (name.is_some() || peer_strategy.is_some()) && system.is_none() {
-            return Err(StoreManagerError::Store(format!(
-                "Store type '{}' does not support SystemStore, cannot set configured properties",
-                store_type
-            )));
+            return Err(StoreManagerError::NotSystemStore);
         }
 
         Ok((store_id, opened))
@@ -156,10 +157,7 @@ impl StoreManager {
         store_id: Uuid,
     ) -> Result<(Arc<dyn StoreHandle>, String), StoreManagerError> {
         // Peek metadata from disk
-        let (_, store_type, _version) = self
-            .registry
-            .peek_store_info(store_id)
-            .map_err(|e| StoreManagerError::Store(e.to_string()))?;
+        let (_, store_type, _version) = self.registry.peek_store_info(store_id)?;
 
         // Open using the resolved type string directly
         let handle = self.open(store_id, &store_type)?;
@@ -179,7 +177,7 @@ impl StoreManager {
             let mut stores = self
                 .stores
                 .write()
-                .map_err(|_| StoreManagerError::Lock("stores lock poisoned".into()))?;
+                .map_err(|_| StoreManagerError::LockPoisoned)?;
 
             if stores.contains_key(&store_id) {
                 return Ok(()); // Already registered
@@ -260,7 +258,7 @@ impl StoreManager {
         let mut stores = self
             .stores
             .write()
-            .map_err(|_| StoreManagerError::Lock("stores lock poisoned".into()))?;
+            .map_err(|_| StoreManagerError::LockPoisoned)?;
 
         stores.remove(store_id);
         self.registry.close(store_id);
@@ -275,7 +273,7 @@ impl StoreManager {
             let stores = self
                 .stores
                 .read()
-                .map_err(|_| StoreManagerError::Lock("stores lock poisoned".into()))?;
+                .map_err(|_| StoreManagerError::LockPoisoned)?;
             let entry = stores
                 .get(&store_id)
                 .ok_or(StoreManagerError::NotFound(store_id))?;
@@ -294,7 +292,7 @@ impl StoreManager {
         let mut watchers = self
             .watchers
             .write()
-            .map_err(|_| StoreManagerError::Lock("watchers lock poisoned".into()))?;
+            .map_err(|_| StoreManagerError::LockPoisoned)?;
         watchers.insert(store_id, watcher);
 
         Ok(())
@@ -372,17 +370,16 @@ impl StoreManager {
             handle.clone(),
             store_type.to_string(),
             peer_manager,
-        )
-        .map_err(|e| StoreManagerError::Registry(e.to_string()))?;
+        )?;
 
         // 4. Write declaration to parent's SystemTable
         let parent_handle = self
             .get_handle(&parent_id)
             .ok_or(StoreManagerError::NotFound(parent_id))?;
 
-        let system = parent_handle.as_system().ok_or_else(|| {
-            StoreManagerError::Store("Parent store must support SystemStore".to_string())
-        })?;
+        let system = parent_handle
+            .as_system()
+            .ok_or(StoreManagerError::NotSystemStore)?;
 
         let mut batch = SystemBatch::new(system.as_ref());
         if let Some(n) = name {
@@ -416,15 +413,13 @@ impl StoreManager {
         inviter: lattice_model::types::PubKey,
     ) -> Result<String, StoreManagerError> {
         use crate::Invite;
-        use lattice_model::InviteStatus;
-
         let handle = self
             .get_handle(&store_id)
             .ok_or(StoreManagerError::NotFound(store_id))?;
 
-        let system = handle.as_system().ok_or_else(|| {
-            StoreManagerError::Store("Store must support SystemStore".to_string())
-        })?;
+        let system = handle
+            .as_system()
+            .ok_or(StoreManagerError::NotSystemStore)?;
 
         let secret = lattice_model::crypto::generate_secret();
         let hash = lattice_model::crypto::content_hash(&secret);
@@ -449,10 +444,7 @@ impl StoreManager {
             .get_peer_manager(&store_id)
             .ok_or(StoreManagerError::NotFound(store_id))?;
 
-        peer_manager
-            .revoke_peer(pubkey)
-            .await
-            .map_err(|e| StoreManagerError::Store(format!("PeerManager error: {}", e)))
+        Ok(peer_manager.revoke_peer(pubkey).await?)
     }
 
     /// Validate and consume an invite secret.
@@ -462,8 +454,6 @@ impl StoreManager {
         secret: &[u8],
         claimer: lattice_model::types::PubKey,
     ) -> Result<bool, StoreManagerError> {
-        use lattice_model::InviteStatus;
-
         // Hash secret first
         let hash = lattice_model::crypto::content_hash(secret);
 
@@ -471,9 +461,9 @@ impl StoreManager {
             .get_handle(&store_id)
             .ok_or(StoreManagerError::NotFound(store_id))?;
 
-        let system = handle.as_system().ok_or_else(|| {
-            StoreManagerError::Store("Store must support SystemStore".to_string())
-        })?;
+        let system = handle
+            .as_system()
+            .ok_or(StoreManagerError::NotSystemStore)?;
 
         // Check if exists and is valid
         let info = system.get_invite(hash.as_bytes())?;
@@ -518,17 +508,14 @@ impl StoreManager {
         let is_already_authorized = !valid_token && peer_manager.can_join(&pubkey);
 
         if !valid_token && !is_already_authorized {
-            return Err(StoreManagerError::Store(format!(
-                "Peer {} provided invalid token and is not already authorized",
-                hex::encode(pubkey)
-            )));
+            return Err(StoreManagerError::Unauthorized {
+                peer: hex::encode(pubkey),
+                reason: "invalid token and not already authorized",
+            });
         }
 
         // Activate peer (idempotent)
-        peer_manager
-            .activate_peer(pubkey)
-            .await
-            .map_err(|e| StoreManagerError::Registry(e.to_string()))?;
+        peer_manager.activate_peer(pubkey).await?;
 
         // Return authorized authors
         Ok(peer_manager.list_acceptable_authors())
@@ -551,9 +538,9 @@ impl StoreManager {
             .get_handle(&parent_id)
             .ok_or(StoreManagerError::NotFound(parent_id))?;
 
-        let system = parent_handle.as_system().ok_or_else(|| {
-            StoreManagerError::Store("Parent store must support SystemStore".to_string())
-        })?;
+        let system = parent_handle
+            .as_system()
+            .ok_or(StoreManagerError::NotSystemStore)?;
 
         let mut batch = SystemBatch::new(system.as_ref());
         batch = batch.set_child_status(child_id, lattice_model::store_info::ChildStatus::Archived);

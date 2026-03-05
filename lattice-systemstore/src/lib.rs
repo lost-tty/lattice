@@ -18,23 +18,36 @@ use std::pin::Pin;
 /// Error type for `SystemReader` operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SystemReadError {
-    #[error("Database error: {0}")]
-    Database(#[from] redb::DatabaseError),
-
-    #[error("Transaction error: {0}")]
-    Transaction(#[from] redb::TransactionError),
-
-    #[error("Table error: {0}")]
-    Table(#[from] redb::TableError),
-
-    #[error("Storage error: {0}")]
-    Storage(#[from] redb::StorageError),
+    #[error("Redb error: {0}")]
+    Redb(#[from] lattice_storage::RedbError),
 
     #[error("KvTable error: {0}")]
     KvTable(#[from] lattice_kvtable::KvTableError),
 
     #[error("Data error: {0}")]
     Data(String),
+}
+
+// Allow `?` on individual redb error types to convert through RedbError → SystemReadError.
+impl From<redb::DatabaseError> for SystemReadError {
+    fn from(e: redb::DatabaseError) -> Self {
+        SystemReadError::Redb(e.into())
+    }
+}
+impl From<redb::TableError> for SystemReadError {
+    fn from(e: redb::TableError) -> Self {
+        SystemReadError::Redb(e.into())
+    }
+}
+impl From<redb::TransactionError> for SystemReadError {
+    fn from(e: redb::TransactionError) -> Self {
+        SystemReadError::Redb(e.into())
+    }
+}
+impl From<redb::StorageError> for SystemReadError {
+    fn from(e: redb::StorageError) -> Self {
+        SystemReadError::Redb(e.into())
+    }
 }
 
 impl From<lattice_storage::StateDbError> for SystemReadError {

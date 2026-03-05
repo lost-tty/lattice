@@ -22,7 +22,7 @@ trait KvTableResultExt<T> {
 impl<T> KvTableResultExt<T> for Result<T, lattice_kvtable::KvTableError> {
     fn into_state_err(self) -> Result<T, StateDbError> {
         self.map_err(|e| match e {
-            lattice_kvtable::KvTableError::Storage(e) => StateDbError::Storage(e),
+            lattice_kvtable::KvTableError::Storage(e) => StateDbError::Redb(e.into()),
             lattice_kvtable::KvTableError::Decode(e) => StateDbError::Decode(e),
             lattice_kvtable::KvTableError::Conversion(s) => StateDbError::Conversion(s),
             lattice_kvtable::KvTableError::Dag(e) => StateDbError::Conversion(e.to_string()),
