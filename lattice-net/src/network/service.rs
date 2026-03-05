@@ -400,9 +400,7 @@ impl<T: Transport> NetworkService<T> {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 s = self.get_store(store_id);
             }
-            s.ok_or_else(|| {
-                LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id))
-            })?
+            s.ok_or(LatticeNetError::StoreNotRegistered(store_id))?
         };
 
         tracing::info!("Bootstrap: connecting to peer {}", peer_id);
@@ -411,17 +409,10 @@ impl<T: Transport> NetworkService<T> {
         let mut start_hash = Hash::ZERO.to_vec();
         let mut fully_done = false;
 
-        let conn = self
-            .transport
-            .connect(&peer_id)
-            .await
-            .map_err(|e| LatticeNetError::Sync(format!("Failed to connect: {}", e)))?;
+        let conn = self.transport.connect(&peer_id).await?;
 
         while !fully_done {
-            let bi = conn
-                .open_bi()
-                .await
-                .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
+            let bi = conn.open_bi().await?;
             let (send, recv) = bi.into_split();
 
             let mut sink = crate::MessageSink::new(send);
@@ -452,13 +443,7 @@ impl<T: Transport> NetworkService<T> {
                             use prost::Message;
                             let content = lattice_proto::weaver::WitnessContent::decode(
                                 last_record.content.as_slice(),
-                            )
-                            .map_err(|e| {
-                                LatticeNetError::Sync(format!(
-                                    "Failed to decode witness content: {}",
-                                    e
-                                ))
-                            })?;
+                            )?;
                             start_hash = content.intention_hash;
                         }
 
@@ -472,8 +457,8 @@ impl<T: Transport> NetworkService<T> {
                             .ingest_witness_batch(resp.witness_records, intentions, peer_id)
                             .await
                             .map_err(|e| {
-                                LatticeNetError::Sync(format!(
-                                    "Failed to ingest bootstrap batch: {}",
+                                LatticeNetError::Bootstrap(format!(
+                                    "Failed to ingest batch: {}",
                                     e
                                 ))
                             })?;
@@ -486,8 +471,8 @@ impl<T: Transport> NetworkService<T> {
                         break;
                     }
                 } else {
-                    return Err(LatticeNetError::Sync(
-                        "Unexpected response during bootstrap".to_string(),
+                    return Err(LatticeNetError::Protocol(
+                        "unexpected response during bootstrap",
                     ));
                 }
             }
@@ -513,7 +498,7 @@ impl<T: Transport> NetworkService<T> {
 
         let Some(peer) = peer_id else {
             tracing::warn!("Cannot handle missing dep without peer ID");
-            return Err(LatticeNetError::Sync("No peer ID provided".into()));
+            return Err(LatticeNetError::Protocol("no peer ID provided"));
         };
 
         let missing_hash = missing.prev;
@@ -531,7 +516,7 @@ impl<T: Transport> NetworkService<T> {
             Ok(count) => {
                 tracing::info!(store_id = %store_id, count = %count, "Smart fetch filled gap");
                 if count == 0 {
-                    return Err(LatticeNetError::Sync("Smart fetch returned 0 items".into()));
+                    return Err(LatticeNetError::Ingest("smart fetch returned 0 items".into()));
                 }
                 Ok(())
             }
@@ -678,13 +663,13 @@ impl<T: Transport> NetworkService<T> {
                 Some(peer_message::Message::JoinResponse(_)) => {}
                 _ => {
                     return Err(LatticeNetError::Protocol(
-                        "Unexpected response to JoinRequest".into(),
+                        "unexpected response to JoinRequest",
                     ))
                 }
             },
             None => {
-                return Err(LatticeNetError::Connection(
-                    "Connection closed during join".into(),
+                return Err(LatticeNetError::Protocol(
+                    "connection closed during join",
                 ))
             }
         }
@@ -694,7 +679,7 @@ impl<T: Transport> NetworkService<T> {
         self.provider
             .process_join_response(store_id, peer_id)
             .await
-            .map_err(|e| LatticeNetError::Sync(e.to_string()))?;
+            .map_err(|e| LatticeNetError::Ingest(e.to_string()))?;
 
         // 3. Bootstrap from peer
         if self.auto_sync_enabled.load(Ordering::SeqCst) {
@@ -931,7 +916,7 @@ impl<T: Transport> NetworkService<T> {
         let online_peers = self
             .sessions
             .online_peers()
-            .map_err(LatticeNetError::Sync)?;
+            .map_err(|_| LatticeNetError::LockPoisoned)?;
 
         let acceptable_authors = store.list_acceptable_authors();
 
@@ -952,7 +937,7 @@ impl<T: Transport> NetworkService<T> {
         let peers = self
             .sessions
             .online_peers()
-            .map_err(LatticeNetError::Sync)?;
+            .map_err(|_| LatticeNetError::LockPoisoned)?;
 
         Ok(peers
             .keys()
@@ -975,13 +960,13 @@ impl<T: Transport> NetworkService<T> {
         tracing::debug!("Sync: connecting to peer");
         let conn = self.transport.connect(&peer_id).await.map_err(|e| {
             tracing::warn!(error = %e, "Sync: connection failed");
-            LatticeNetError::Sync(format!("Connection failed: {}", e))
+            LatticeNetError::Transport(e)
         })?;
 
         let bi = conn
             .open_bi()
             .await
-            .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
+            .map_err(LatticeNetError::Transport)?;
         let (send, recv) = bi.into_split();
 
         let mut sink = MessageSink::new(send);
@@ -1071,9 +1056,7 @@ impl<T: Transport> NetworkService<T> {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 s = self.get_store(store_id);
             }
-            s.ok_or_else(|| {
-                LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id))
-            })?
+            s.ok_or(LatticeNetError::StoreNotRegistered(store_id))?
         };
         self.sync_all(&store).await
     }
@@ -1095,9 +1078,7 @@ impl<T: Transport> NetworkService<T> {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 s = self.get_store(store_id);
             }
-            s.ok_or_else(|| {
-                LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id))
-            })?
+            s.ok_or(LatticeNetError::StoreNotRegistered(store_id))?
         };
         self.sync_with_peer(&store, peer_id, authors).await
     }
@@ -1122,9 +1103,7 @@ impl<T: Transport> NetworkService<T> {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 s = self.get_store(store_id);
             }
-            s.ok_or_else(|| {
-                LatticeNetError::Sync(format!("Store {} not registered after timeout", store_id))
-            })?
+            s.ok_or(LatticeNetError::StoreNotRegistered(store_id))?
         };
 
         tracing::debug!("FetchChain: connecting to peer");
@@ -1132,12 +1111,12 @@ impl<T: Transport> NetworkService<T> {
             .transport
             .connect(&peer_id)
             .await
-            .map_err(|e| LatticeNetError::Sync(format!("Connection failed: {}", e)))?;
+            .map_err(LatticeNetError::Transport)?;
 
         let bi = conn
             .open_bi()
             .await
-            .map_err(|e| LatticeNetError::Sync(format!("Failed to open stream: {}", e)))?;
+            .map_err(LatticeNetError::Transport)?;
         let (send, recv) = bi.into_split();
 
         let mut sink = MessageSink::new(send);
@@ -1159,9 +1138,7 @@ impl<T: Transport> NetworkService<T> {
         let msg = stream
             .recv()
             .await?
-            .ok_or_else(|| {
-                LatticeNetError::Sync("Peer closed stream without response".to_string())
-            })?;
+            .ok_or(LatticeNetError::Protocol("peer closed stream without response"))?;
 
         match msg.message {
             Some(peer_message::Message::IntentionResponse(resp)) => {
@@ -1185,22 +1162,22 @@ impl<T: Transport> NetworkService<T> {
                         if let Some(first) = missing.first() {
                             tracing::warn!(first_missing = %first.prev, "First missing dep");
                         }
-                        Err(LatticeNetError::Sync(format!(
-                            "Fetch chain incomplete, missing {} dependencies",
+                        Err(LatticeNetError::Ingest(format!(
+                            "fetch chain incomplete, missing {} dependencies",
                             missing.len()
                         )))
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "Failed to ingest fetched batch");
-                        Err(LatticeNetError::Sync(format!(
-                            "Ingest failing during fetch_chain: {}",
+                        Err(LatticeNetError::Ingest(format!(
+                            "ingest failed during fetch_chain: {}",
                             e
                         )))
                     }
                 }
             }
-            _ => Err(LatticeNetError::Sync(
-                "Unexpected response to FetchChain".to_string(),
+            _ => Err(LatticeNetError::Protocol(
+                "unexpected response to FetchChain",
             )),
         }
     }

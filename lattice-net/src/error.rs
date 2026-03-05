@@ -1,5 +1,7 @@
 //! Error types for lattice-net crate
 
+use lattice_model::types::PubKey;
+use lattice_model::Uuid;
 use thiserror::Error;
 
 /// Network layer errors for lattice-net operations
@@ -14,36 +16,33 @@ pub enum LatticeNetError {
     #[error("Transport error: {0}")]
     Transport(#[from] lattice_net_types::TransportError),
 
-    #[error("Node ID parse error: {0}")]
-    ParseNodeId(String),
-
-    #[error("State error: {0}")]
-    State(String),
-
-    #[error("Connection error: {0}")]
-    Connection(String),
-
-    #[error("Validation error: {0}")]
-    Validation(String),
-
     #[error("Sync error: {0}")]
-    Sync(String),
+    Sync(#[from] lattice_sync::SyncError),
 
-    #[error("Authentication error: {0}")]
-    Auth(String),
+    #[error("Reconcile error: {0}")]
+    Reconcile(#[from] lattice_sync::ReconcileError<lattice_sync::SyncError>),
+
+    #[error("Store {0} not registered")]
+    StoreNotRegistered(Uuid),
+
+    #[error("Peer {} not authorized for store {store_id}", hex::encode(peer.0))]
+    PeerNotAuthorized { peer: PubKey, store_id: Uuid },
+
+    #[error("Invalid field: {0}")]
+    InvalidField(&'static str),
+
+    #[error("Lock poisoned")]
+    LockPoisoned,
+
+    #[error("Timeout: {0}")]
+    Timeout(&'static str),
 
     #[error("Protocol error: {0}")]
-    Protocol(String),
-}
+    Protocol(&'static str),
 
-impl From<lattice_sync::SyncError> for LatticeNetError {
-    fn from(e: lattice_sync::SyncError) -> Self {
-        LatticeNetError::Sync(e.to_string())
-    }
-}
+    #[error("Ingest error: {0}")]
+    Ingest(String),
 
-impl From<lattice_sync::ReconcileError<lattice_sync::SyncError>> for LatticeNetError {
-    fn from(e: lattice_sync::ReconcileError<lattice_sync::SyncError>) -> Self {
-        LatticeNetError::Sync(e.to_string())
-    }
+    #[error("Bootstrap error: {0}")]
+    Bootstrap(String),
 }

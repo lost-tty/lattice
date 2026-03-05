@@ -28,7 +28,7 @@ pub fn lookup_store(
 ) -> Result<NetworkStore, LatticeNetError> {
     registry
         .get_network_store(&store_id)
-        .ok_or_else(|| LatticeNetError::Connection(format!("Store {} not registered", store_id)))
+        .ok_or(LatticeNetError::StoreNotRegistered(store_id))
 }
 
 // ==================== Inbound Handlers (Server Logic) ====================
@@ -116,12 +116,12 @@ pub async fn handle_join_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     );
 
     let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::Connection("Invalid store_id in JoinRequest".into()))?;
+        .map_err(|_| LatticeNetError::InvalidField("store_id in JoinRequest"))?;
 
     let acceptance = provider
         .accept_join(*remote_pubkey, store_id, &req.invite_secret)
         .await
-        .map_err(|e| LatticeNetError::Sync(format!("Join failed: {}", e)))?;
+        .map_err(|e| LatticeNetError::Ingest(format!("Join failed: {}", e)))?;
 
     let resp = PeerMessage {
         message: Some(peer_message::Message::JoinResponse(JoinResponse {
@@ -149,17 +149,17 @@ where
     R: tokio::io::AsyncRead + Send + Unpin,
 {
     let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
+        .map_err(|_| LatticeNetError::InvalidField("store_id"))?;
 
     tracing::debug!("[Sync] Received reconcile start for store {}", store_id);
 
     let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
 
     if !authorized_store.can_connect(remote_pubkey) {
-        return Err(LatticeNetError::Connection(format!(
-            "Peer {} not authorized",
-            hex::encode(remote_pubkey)
-        )));
+        return Err(LatticeNetError::PeerNotAuthorized {
+            peer: *remote_pubkey,
+            store_id,
+        });
     };
 
     let mut session = crate::network::sync_session::SyncSession::new(
@@ -181,15 +181,15 @@ pub async fn handle_fetch_intentions<W: tokio::io::AsyncWrite + Send + Unpin>(
     sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
     let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
+        .map_err(|_| LatticeNetError::InvalidField("store_id"))?;
 
     let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
 
     if !authorized_store.can_connect(remote_pubkey) {
-        return Err(LatticeNetError::Connection(format!(
-            "Peer {} not authorized",
-            hex::encode(remote_pubkey)
-        )));
+        return Err(LatticeNetError::PeerNotAuthorized {
+            peer: *remote_pubkey,
+            store_id,
+        });
     };
 
     // Parse requested hashes
@@ -225,26 +225,26 @@ pub async fn handle_fetch_chain<W: tokio::io::AsyncWrite + Send + Unpin>(
     sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
     let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
+        .map_err(|_| LatticeNetError::InvalidField("store_id"))?;
 
     let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
 
     if !authorized_store.can_connect(remote_pubkey) {
-        return Err(LatticeNetError::Connection(format!(
-            "Peer {} not authorized",
-            hex::encode(remote_pubkey)
-        )));
+        return Err(LatticeNetError::PeerNotAuthorized {
+            peer: *remote_pubkey,
+            store_id,
+        });
     };
 
     let target = Hash::try_from(req.target_hash.as_slice())
-        .map_err(|_| LatticeNetError::Connection("Invalid target_hash".into()))?;
+        .map_err(|_| LatticeNetError::InvalidField("target_hash"))?;
 
     // Parse 'since' hash (optional). Empty bytes or Zero hash means fetch from Genesis (None).
     let since = if req.since_hash.is_empty() {
         None
     } else {
         let h = Hash::try_from(req.since_hash.as_slice())
-            .map_err(|_| LatticeNetError::Connection("Invalid since_hash".into()))?;
+            .map_err(|_| LatticeNetError::InvalidField("since_hash"))?;
         if h == Hash::ZERO {
             None
         } else {
@@ -282,22 +282,22 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
     let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::Connection("Invalid store_id".into()))?;
+        .map_err(|_| LatticeNetError::InvalidField("store_id"))?;
 
     let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
 
     if !authorized_store.can_connect(remote_pubkey) {
-        return Err(LatticeNetError::Connection(format!(
-            "Peer {} not authorized",
-            hex::encode(remote_pubkey)
-        )));
+        return Err(LatticeNetError::PeerNotAuthorized {
+            peer: *remote_pubkey,
+            store_id,
+        });
     };
 
     let start_hash = if req.start_hash.is_empty() {
         None
     } else {
         let h = Hash::try_from(req.start_hash.as_slice())
-            .map_err(|_| LatticeNetError::Connection("Invalid start_hash".into()))?;
+            .map_err(|_| LatticeNetError::InvalidField("start_hash"))?;
         if h == Hash::ZERO {
             None
         } else {
@@ -328,14 +328,11 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
         });
 
         use prost::Message;
-        let witness_content = WitnessContent::decode(entry.content.as_slice()).map_err(|e| {
-            LatticeNetError::Sync(format!("Failed to decode witness content: {}", e))
-        })?;
+        let witness_content = WitnessContent::decode(entry.content.as_slice())?;
 
         let intention_hash =
-            Hash::try_from(witness_content.intention_hash.as_slice()).map_err(|_| {
-                LatticeNetError::Sync("Invalid intention hash in witness record".into())
-            })?;
+            Hash::try_from(witness_content.intention_hash.as_slice())
+                .map_err(|_| LatticeNetError::InvalidField("intention_hash in witness record"))?;
 
         intention_hashes.push(intention_hash);
         total_processed += 1;

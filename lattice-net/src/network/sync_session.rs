@@ -139,8 +139,8 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                     if state.handshake_complete() {
                         break;
                     }
-                    return Err(LatticeNetError::Sync(
-                        "Stream closed before SyncDone handshake completed".into(),
+                    return Err(LatticeNetError::Protocol(
+                        "Stream closed before SyncDone handshake completed",
                     ));
                 }
             };
@@ -184,7 +184,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
         }
         match tokio::time::timeout(PROTOCOL_TIMEOUT, self.stream.recv()).await {
             Ok(result) => result,
-            Err(_) => Err(LatticeNetError::Sync("Timeout during sync".into())),
+            Err(_) => Err(LatticeNetError::Timeout("sync protocol")),
         }
     }
 
@@ -256,7 +256,7 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
                     state.intentions_received += 1;
                 }
                 Err(lattice_sync::SyncError::ChannelClosed) => {
-                    return Err(LatticeNetError::Sync("Store actor closed during sync".into()));
+                    return Err(lattice_sync::SyncError::ChannelClosed.into());
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to ingest intention during sync");

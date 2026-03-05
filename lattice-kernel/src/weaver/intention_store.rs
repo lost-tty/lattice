@@ -62,10 +62,44 @@ pub enum IntentionStoreError {
     Borsh(#[from] borsh::io::Error),
     #[error("protobuf decode error: {0}")]
     Proto(#[from] prost::DecodeError),
-    #[error("invalid intention data: {0}")]
-    InvalidData(String),
+    #[error("IO error: {0}")]
+    Io(std::io::Error),
+    #[error("corruption: {0}")]
+    Corruption(#[from] Corruption),
+    #[error("missing intention: {0}")]
+    MissingIntention(Hash),
+    #[error("chain walk from {from} did not reach ancestor {ancestor}: {reason}")]
+    ChainWalkFailed {
+        from: Hash,
+        ancestor: Hash,
+        reason: &'static str,
+    },
+    #[error("malformed input: {field}")]
+    MalformedInput { field: &'static str },
+    #[error("range too large: exceeds {0} items")]
+    RangeTooLarge(usize),
     #[error("intention already witnessed: {0}")]
     AlreadyWitnessed(Hash),
+}
+
+/// Structured corruption errors — the on-disk data is internally inconsistent.
+#[derive(Debug, Error)]
+pub enum Corruption {
+    #[error("invalid byte length in {table}.{field}: expected {expected}, got {actual}")]
+    FieldLength {
+        table: &'static str,
+        field: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("witness chain broken at seq {seq}: prev_hash {actual} != expected {expected}")]
+    WitnessChainBroken {
+        seq: u64,
+        actual: Hash,
+        expected: Hash,
+    },
+    #[error("witness seq {seq} references missing intention {hash}")]
+    WitnessDanglingRef { seq: u64, hash: Hash },
 }
 
 pub struct IntentionStore {
@@ -100,9 +134,7 @@ impl IntentionStore {
     pub fn open(store_id: Uuid, config: &StorageConfig) -> Result<Self, IntentionStoreError> {
         let db = match config {
             StorageConfig::File(dir) => {
-                std::fs::create_dir_all(dir).map_err(|e| {
-                    IntentionStoreError::InvalidData(format!("cannot create dir: {e}"))
-                })?;
+                std::fs::create_dir_all(dir).map_err(IntentionStoreError::Io)?;
                 let db_path = dir.join("log.db");
                 Database::builder().create(&db_path)?
             }
@@ -160,10 +192,16 @@ impl IntentionStore {
     fn decode_signed(bytes: &[u8]) -> Result<SignedIntention, IntentionStoreError> {
         let proto = lattice_proto::weaver::SignedIntention::decode(bytes)?;
         let intention = Intention::from_borsh(&proto.intention_borsh)?;
-        let sig_bytes: [u8; 64] = proto
-            .signature
-            .try_into()
-            .map_err(|_| IntentionStoreError::InvalidData("bad signature length".into()))?;
+        let sig_bytes: [u8; 64] =
+            proto
+                .signature
+                .try_into()
+                .map_err(|v: Vec<u8>| Corruption::FieldLength {
+                    table: "signed_intention",
+                    field: "signature",
+                    expected: 64,
+                    actual: v.len(),
+                })?;
         Ok(SignedIntention {
             intention,
             signature: lattice_model::types::Signature(sig_bytes),
@@ -191,11 +229,20 @@ impl IntentionStore {
         let tips = read_txn.open_table(TABLE_AUTHOR_TIPS)?;
         for entry in tips.iter()? {
             let (k, v) = entry?;
-            let pk = PubKey(k.value().try_into().map_err(|_| {
-                IntentionStoreError::InvalidData("bad pubkey in author_tips".into())
+            let key_bytes = k.value();
+            let pk = PubKey(key_bytes.try_into().map_err(|_| Corruption::FieldLength {
+                table: "author_tips",
+                field: "pubkey",
+                expected: 32,
+                actual: key_bytes.len(),
             })?);
-            let hash = Hash::try_from(v.value())
-                .map_err(|_| IntentionStoreError::InvalidData("bad hash in author_tips".into()))?;
+            let val_bytes = v.value();
+            let hash = Hash::try_from(val_bytes).map_err(|_| Corruption::FieldLength {
+                table: "author_tips",
+                field: "hash",
+                expected: 32,
+                actual: val_bytes.len(),
+            })?;
             self.author_tips.insert(pk, hash);
         }
 
@@ -232,32 +279,38 @@ impl IntentionStore {
 
                 // Verify hash chain
                 let actual_prev = Hash::try_from(content.prev_hash.as_slice()).map_err(|_| {
-                    IntentionStoreError::InvalidData(format!(
-                        "CORRUPTION: Witness seq {} has invalid prev_hash length ({})",
-                        seq,
-                        content.prev_hash.len()
-                    ))
+                    Corruption::FieldLength {
+                        table: "witness",
+                        field: "prev_hash",
+                        expected: 32,
+                        actual: content.prev_hash.len(),
+                    }
                 })?;
                 if actual_prev != expected_prev {
-                    return Err(IntentionStoreError::InvalidData(format!(
-                        "CORRUPTION: Witness chain broken at seq {}: prev_hash {} != expected {}",
-                        seq, actual_prev, expected_prev,
-                    )));
+                    return Err(Corruption::WitnessChainBroken {
+                        seq,
+                        actual: actual_prev,
+                        expected: expected_prev,
+                    }
+                    .into());
                 }
                 expected_prev = lattice_model::crypto::content_hash(&record.content);
 
                 let intention_hash =
                     Hash::try_from(content.intention_hash.as_slice()).map_err(|_| {
-                        IntentionStoreError::InvalidData("bad intention_hash in witness".into())
+                        Corruption::FieldLength {
+                            table: "witness",
+                            field: "intention_hash",
+                            expected: 32,
+                            actual: content.intention_hash.len(),
+                        }
                     })?;
 
                 let intent_val = intention_table
                     .get(intention_hash.as_bytes().as_slice())?
-                    .ok_or_else(|| {
-                        IntentionStoreError::InvalidData(format!(
-                        "CORRUPTION: Witness seq {} references intention {} which does not exist",
-                        seq, intention_hash,
-                    ))
+                    .ok_or_else(|| Corruption::WitnessDanglingRef {
+                        seq,
+                        hash: intention_hash,
                     })?;
                 let signed = Self::decode_signed(intent_val.value())?;
                 self.author_tips
@@ -539,15 +592,18 @@ impl IntentionStore {
         let mut results = Vec::new();
         for (i, entry) in range.enumerate() {
             if i >= MAX_RANGE_HASHES {
-                return Err(IntentionStoreError::InvalidData(format!(
-                    "Range too large: >{} items. Use fingerprint_range/count_range first.",
-                    MAX_RANGE_HASHES
-                )));
+                return Err(IntentionStoreError::RangeTooLarge(MAX_RANGE_HASHES));
             }
             let (k, _) = entry?;
-            results.push(Hash::try_from(k.value()).map_err(|_| {
-                IntentionStoreError::InvalidData("bad hash key in intentions table".into())
-            })?);
+            let key_bytes = k.value();
+            results.push(
+                Hash::try_from(key_bytes).map_err(|_| Corruption::FieldLength {
+                    table: "intentions",
+                    field: "hash_key",
+                    expected: 32,
+                    actual: key_bytes.len(),
+                })?,
+            );
         }
         Ok(results)
     }
@@ -572,7 +628,12 @@ impl IntentionStore {
         let index = read_txn.open_table(TABLE_WITNESS_INDEX)?;
         match index.get(hash.as_bytes().as_slice())? {
             Some(v) => Ok(Some(u64::from_be_bytes(v.value().try_into().map_err(
-                |_| IntentionStoreError::InvalidData("invalid witness seq length".into()),
+                |_| Corruption::FieldLength {
+                    table: "witness_index",
+                    field: "seq",
+                    expected: 8,
+                    actual: v.value().len(),
+                },
             )?))),
             None => Ok(None),
         }
@@ -593,9 +654,9 @@ impl IntentionStore {
     ) -> Result<Vec<WitnessEntry>, IntentionStoreError> {
         let start_seq = match start_hash {
             Some(h) if h != Hash::ZERO => {
-                self.get_witness_seq(&h)?.ok_or_else(|| {
-                    IntentionStoreError::InvalidData(format!("witness hash {} not found", h))
-                })? + 1 // Start scanning AFTER the known hash (inclusive start = seq + 1)
+                self.get_witness_seq(&h)?
+                    .ok_or_else(|| IntentionStoreError::MissingIntention(h))?
+                    + 1 // Start scanning AFTER the known hash (inclusive start = seq + 1)
             }
             _ => 1, // Genesis starts at 1
         };
@@ -609,11 +670,14 @@ impl IntentionStore {
         // Use range iterator: start_seq..
         for res in table.range(start_bytes.as_slice()..)? {
             let (key, value) = res?;
-            let seq = u64::from_be_bytes(
-                key.value()
-                    .try_into()
-                    .map_err(|_| IntentionStoreError::InvalidData("bad witness key".into()))?,
-            );
+            let seq = u64::from_be_bytes(key.value().try_into().map_err(|_| {
+                Corruption::FieldLength {
+                    table: "witness",
+                    field: "seq_key",
+                    expected: 8,
+                    actual: key.value().len(),
+                }
+            })?);
             let record = WitnessRecord::decode(value.value())?;
             let content_hash = lattice_model::crypto::content_hash(&record.content);
             results.push(WitnessEntry {
@@ -657,8 +721,9 @@ impl IntentionStore {
     ) -> Result<Vec<SignedIntention>, IntentionStoreError> {
         // If prefix is exactly 32 bytes, do direct lookup
         if prefix.len() == 32 {
-            let hash = Hash::try_from(prefix)
-                .map_err(|_| IntentionStoreError::InvalidData("bad hash".into()))?;
+            let hash = Hash::try_from(prefix).map_err(|_| IntentionStoreError::MalformedInput {
+                field: "hash prefix",
+            })?;
             return Ok(self.get(&hash)?.into_iter().collect());
         }
 
@@ -710,8 +775,8 @@ impl IntentionStore {
         let mut current_hash = *target;
 
         // since is strictly required for gap filling
-        let since_hash = since.ok_or_else(|| {
-            IntentionStoreError::InvalidData("walk_back_until requires a 'since' hash".into())
+        let since_hash = since.ok_or_else(|| IntentionStoreError::MalformedInput {
+            field: "since (required for walk_back_until)",
         })?;
 
         for _ in 0..limit {
@@ -721,17 +786,18 @@ impl IntentionStore {
 
                 // Failure: Hit Genesis without finding ancestor
                 Hash::ZERO => {
-                    return Err(IntentionStoreError::InvalidData(format!(
-                        "Hit Genesis without finding ancestor {}",
-                        since_hash
-                    )))
+                    return Err(IntentionStoreError::ChainWalkFailed {
+                        from: *target,
+                        ancestor: *since_hash,
+                        reason: "hit genesis",
+                    })
                 }
 
                 // Continue: Fetch and advance
                 hash => {
-                    let val = table.get(hash.as_bytes().as_slice())?.ok_or_else(|| {
-                        IntentionStoreError::InvalidData(format!("Missing link in chain: {}", hash))
-                    })?;
+                    let val = table
+                        .get(hash.as_bytes().as_slice())?
+                        .ok_or_else(|| IntentionStoreError::MissingIntention(hash))?;
 
                     let signed = Self::decode_signed(val.value())?;
 
@@ -743,10 +809,11 @@ impl IntentionStore {
         }
 
         // Failure: Hit limit without finding ancestor
-        Err(IntentionStoreError::InvalidData(format!(
-            "Failed to find ancestor {} from target {} within limit {}",
-            since_hash, target, limit
-        )))
+        Err(IntentionStoreError::ChainWalkFailed {
+            from: *target,
+            ancestor: *since_hash,
+            reason: "exceeded iteration limit",
+        })
     }
 }
 
@@ -759,9 +826,9 @@ impl IntentionStore {
         if *hash == Hash::ZERO {
             return Ok(vec![]);
         }
-        let val = table.get(hash.as_bytes().as_slice())?.ok_or_else(|| {
-            IntentionStoreError::InvalidData(format!("dag: missing intention {}", hash))
-        })?;
+        let val = table
+            .get(hash.as_bytes().as_slice())?
+            .ok_or_else(|| IntentionStoreError::MissingIntention(*hash))?;
         let signed = Self::decode_signed(val.value())?;
         let lattice_model::weaver::Condition::V1(parents) = signed.intention.condition;
         Ok(parents)
@@ -854,9 +921,9 @@ fn prune_and_topo_sort(
 
 impl lattice_model::DagQueries for IntentionStore {
     fn get_intention(&self, hash: &Hash) -> anyhow::Result<lattice_model::IntentionInfo<'static>> {
-        let signed = self.get(hash)?.ok_or_else(|| {
-            IntentionStoreError::InvalidData(format!("intention not found: {}", hash))
-        })?;
+        let signed = self
+            .get(hash)?
+            .ok_or_else(|| IntentionStoreError::MissingIntention(*hash))?;
         let intention = signed.intention;
         Ok(lattice_model::IntentionInfo {
             hash: intention.hash(),
@@ -1679,7 +1746,7 @@ mod tests {
             Err(e) => {
                 let err = e.to_string();
                 assert!(
-                    err.contains("CORRUPTION") || err.contains("witness") || err.contains("decode"),
+                    err.contains("corruption") || err.contains("witness") || err.contains("decode"),
                     "Error should mention corruption: {err}"
                 );
             }

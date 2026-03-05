@@ -32,8 +32,8 @@ pub trait ToLattice {
 
 impl ToIroh for PubKey {
     fn to_iroh(&self) -> Result<PublicKey, lattice_net::LatticeNetError> {
-        PublicKey::from_bytes(&**self).map_err(|e| {
-            lattice_net::LatticeNetError::Validation(format!("Invalid Iroh key: {}", e))
+        PublicKey::from_bytes(&**self).map_err(|_| {
+            lattice_net::LatticeNetError::InvalidField("iroh public key")
         })
     }
 }
