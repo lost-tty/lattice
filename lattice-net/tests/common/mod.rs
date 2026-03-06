@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::time::Duration;
 
 type PersistentNullState =
-    lattice_systemstore::system_state::SystemLayer<lattice_mockkernel::PersistentNullState>;
+    lattice_systemstore::SystemLayer<lattice_mockkernel::PersistentNullState>;
 
 /// Create a temp data directory, cleaning up any existing one.
 pub fn temp_data_dir(name: &str) -> lattice_node::DataDir {
@@ -28,7 +28,7 @@ pub fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
         .in_memory()
         .with_opener(STORE_TYPE_KVSTORE, |registry| {
             direct_opener::<
-                lattice_systemstore::system_state::SystemLayer<lattice_kvstore::PersistentKvState>,
+                lattice_systemstore::SystemLayer<lattice_kvstore::PersistentKvState>,
             >(registry)
         })
         .with_opener(STORE_TYPE_NULLSTORE, |registry| {

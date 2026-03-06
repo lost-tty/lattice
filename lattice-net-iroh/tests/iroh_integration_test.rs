@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
 type PersistentNullState =
-    lattice_systemstore::system_state::SystemLayer<lattice_mockkernel::PersistentNullState>;
+    lattice_systemstore::SystemLayer<lattice_mockkernel::PersistentNullState>;
 
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()

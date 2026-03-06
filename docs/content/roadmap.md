@@ -23,53 +23,158 @@ title: "Roadmap"
 
 ---
 
-## Milestone 16: Witness-First Architecture
+## Milestone 16: Uniform Store Traits + Witness-First Architecture
 
-Invert the apply/witness order so the witness log becomes a true write-ahead log (WAL). State machines become derived projections of the witness log rather than a prerequisite for witnessing.
+Unify how all stores (KvStore, LogStore, SystemStore) interact with storage, then invert apply/witness order so the witness log becomes a true WAL.
 
-> **Current flow:** `insert() → floating → deps ready? → state.apply() → store.witness()`
-> **New flow:** `insert() → floating → deps ready? → store.witness() → state.apply() (from witness log)`
+> **Concrete type stack today:** `Store< SystemLayer< PersistentState< KvState > > >`
+> **After M16:** `Store< SystemLayer< KvState > >` — `PersistentState` absorbed, `SystemLayer` is a thin Y-gate.
 
 ### Motivation
 
-The system already treats the witness log as the source of truth — `replay_intentions()` on restart derives state from witness-log tips, `is_witnessed()` gates causal deps, and bootstrap replays the peer's witness order. But the code applies state *before* witnessing, creating problems:
+1. **Duplicated transaction ceremony.** `SystemLayer::apply_system_transaction()` is a hand-written copy of `StateLogic::apply()`. Both do `begin_write → verify_and_update_tip → open table → mutate → commit` on the same `state.db`. The only difference is which table (`TABLE_SYSTEM` vs `TABLE_DATA`). This means system ops and app-data ops can never be atomic, the chain-tip verification logic is duplicated, and the code is harder to reason about.
 
-- **Discarded witness result** (`actor.rs:554`): `let _ = store.witness(...)` means apply can succeed while witnessing fails (disk full, redb error), silently diverging state from log.
-- **Version-skew cascade**: If one author sends a v2 payload that v1 nodes can't decode, the intention stays floating (never witnessed), which blocks all downstream causal deps — potentially freezing the entire store. With witness-first, the intention is witnessed (structurally valid, signature verified) and only the state projection stalls, while sync and other authors continue unaffected.
-- **Complex restart path**: `replay_intentions()` compares two independent tip sets (`IntentionStore` author tips vs `StateMachine::applied_chaintips()`) and walks chains to find the gap. With witness-first, replay is trivial: read witness log from `last_applied_seq + 1`.
+2. **System store logic embedded in `SystemLayer`.** `SystemLayer` is 669 lines mixing two concerns: Y-gate routing (decode `UniversalOp`, route system vs app-data) and system store implementation (all the typed peer/hierarchy/invite/strategy match arms in `apply_system_op`). The system store should be a standalone state machine like `KvState` and `LogState`.
 
-### Redefined semantics
+3. **Three different patterns for three stores.** `KvState` and `LogState` implement `StateLogic` (mutate/notify/backend), while the system store logic lives inside `SystemLayer` with its own transaction management. All three should implement the same trait.
 
-**Witness** = "I verified this intention's structural integrity (valid signature, correct chain, matching store_id) and committed it to my local ordering." Does NOT imply payload comprehension.
+4. **State machines coupled to redb.** `StateLogic::mutate()` takes `&mut redb::Table` directly. Can't test state machines without a full redb database. With `TableStorage` traits, state machines become pure functions testable with `HashMapStorage`.
 
-**State projection** = derived view of the witness log. May lag behind the log if the state machine can't decode a payload (version skew). Catches up on upgrade.
+5. **Discarded witness result.** `let _ = store.witness(...)` means apply can succeed while witnessing fails. With witness-first, the witness log is the commit point.
 
-### 16A: Core Refactor
-- [ ] **Split `apply_ready_intentions` into two phases.** Phase 1: witness all structurally ready intentions (signature valid, chain valid, causal deps witnessed). Phase 2: feed newly witnessed intentions to state machine in witness-log order.
-- [ ] **`witness()` becomes the commit point.** Move `witness()` call before `state.apply()` in `apply_intention_to_state`. The witness write must succeed (not `let _ =`); if it fails, the intention stays floating.
-- [ ] **State machine tracks `last_applied_seq: u64`** instead of per-author chaintips. After witnessing, the actor reads the witness log from `last_applied_seq + 1` and applies each intention's payload. If `apply()` fails (version skew), the projection stalls at that seq — the witness log keeps advancing.
-- [ ] **Drop `StateMachine::applied_chaintips()`** from the trait. State machines no longer track their own tip set. The single `last_applied_seq` stored in a redb meta table is sufficient.
-- [ ] **Simplify `replay_intentions()`**: On restart, read witness log entries from `last_applied_seq + 1`, look up each intention by hash, call `state.apply()`. No tip-comparison dance, no chain-walking. If apply stalls (version skew from before restart), report `stalled_at_seq` and stop.
+6. **Complex restart path.** `replay_intentions()` compares two independent tip sets and walks chains to find gaps. With witness-first, replay is trivial: read witness log from `last_applied_witness` forward.
 
-### 16B: Stall Reporting
-- [ ] **`StateMachine` exposes stall state.** New method `fn projection_status(&self) -> ProjectionStatus` returning `{ last_applied_seq, witness_head_seq, stalled_at: Option<(u64, String)> }`. Surfaced via `store status` CLI and `StoreMeta` gRPC.
+### 16A: Uniform Store Pattern
+
+Extract system store logic out of `SystemLayer`. Make `KvState`, `LogState`, and a new `SystemState` all implement the same `mutate`-style interface. `SystemLayer` becomes a thin Y-gate that owns the transaction and routes ops to the right store+table. Pure refactor — no new abstractions, still on `redb::Table`.
+
+**Step 1 — Extract `SystemState`** (`lattice-systemstore`):
+
+Move `apply_system_op()` and its match arms from `SystemLayer` into a new `SystemState` struct that implements the same `mutate`-style interface as `KvState` and `LogState`. `SystemState` is a plain state machine: given an op and a table handle, apply mutations.
+
+- [ ] Create `SystemState` struct in `lattice-systemstore`
+- [ ] Move `apply_system_op` logic into `SystemState::mutate()`
+- [ ] `SystemLayer::apply_system_transaction()` delegates to `SystemState::mutate()` instead of inlining the logic
+- [ ] Run full test suite — pure mechanical move, behavior unchanged
+
+**Step 2 — Unify transaction ownership in `SystemLayer`**:
+
+`SystemLayer` owns the single write transaction for both paths. Bypasses `StateLogic::apply()` — calls `mutate()` directly on the inner state machine. One `begin_write → verify_and_update_tip → open tables → mutate → commit → notify` for both system and app-data ops.
+
+- [ ] `SystemLayer::apply()` opens one write transaction
+- [ ] Routes `SystemOp` → `SystemState::mutate()` on `TABLE_SYSTEM`
+- [ ] Routes `AppData` → inner `S::mutate()` on `TABLE_DATA`
+- [ ] Single `verify_and_update_tip` + single `commit`
+- [ ] Remove `apply_system_transaction()` (absorbed into unified `apply`)
+- [ ] Run full test suite
+
+**Step 3 — Simplify `PersistentState`**:
+
+`PersistentState<T>` no longer needs to implement `StateMachine::apply()` with its own transaction ceremony — `SystemLayer` does that. `PersistentState` becomes a thinner wrapper: DB owner + `Deref` to inner for reads + `snapshot`/`restore`/`applied_chaintips`. Tests that use `PersistentState` standalone (without `SystemLayer`) keep working via a simpler self-contained `apply()`.
+
+- [ ] Remove the default `StateLogic::apply()` transaction ceremony
+- [ ] `PersistentState::apply()` becomes a thin wrapper for standalone use (tests)
+- [ ] Evaluate whether `StateLogic` trait can be simplified or removed
+- [ ] Run full test suite
+
+### 16B: Storage Abstraction
+
+Introduce `TableRead`/`TableWrite` traits to decouple state machines from redb. Move duplicated logic (transaction ceremony, chain-tip verification, snapshot/restore) into shared framework code that operates on the trait surface. Goal: state machines become pure functions testable with `HashMapStorage`, and duplicated boilerplate across KvState/LogState/SystemState collapses.
+
+**Step 1 — Define traits** (`lattice-model`):
+
+Two traits. `TableRead` for read operations, `TableWrite` extends it with mutations. `HashMapStorage` (BTreeMap-backed) implements both for zero-dep testing.
+
+```
+trait TableRead {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    fn range(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    fn iter(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+}
+trait TableWrite: TableRead {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
+    fn delete(&mut self, key: &[u8]) -> Result<()>;
+}
+```
+
+Operations derived from actual usage: `KVTable` uses `get`+`insert`; `ReadOnlyKVTable` uses `get`+`range`+`iter`; `LogState` uses `get`+`insert`+`iter`+`iter().rev()`. `delete` included for future state machines (current ones model deletion as tombstones via `put`). Read path (queries served to clients) stays on the concrete `Database` reference — `TableRead`/`TableWrite` are for the apply path and for decoupling `lattice-kvtable` from redb.
+
+- [ ] Define `TableRead` and `TableWrite` traits in `lattice-model/src/storage.rs`
+- [ ] Implement `HashMapStorage` (BTreeMap-backed, implements both traits)
+- [ ] Wire into `lattice-model/src/lib.rs`, `cargo check`
+
+**Step 2 — Adapt `KVTable` and `SystemTable`** (`lattice-kvtable`, `lattice-systemstore`):
+
+`KVTable::new()` takes `&mut dyn TableWrite` instead of `&mut redb::Table`. `ReadOnlyKVTable::new()` takes `&dyn TableRead` instead of generic `T: ReadableTable`. `SystemTable` follows (it delegates to `KVTable` internally).
+
+- [ ] Adapt `KVTable` to `&mut dyn TableWrite`
+- [ ] Adapt `ReadOnlyKVTable` to `&dyn TableRead`
+- [ ] Adapt `SystemTable` (delegates to `KVTable`, should follow automatically)
+- [ ] Run full test suite
+
+**Step 3 — Concrete redb impls** (`lattice-storage`):
+
+Bridge the new traits to redb so existing production code keeps working.
+
+- [ ] `RedbTableStorage`: implements `TableRead`+`TableWrite` backed by `&mut redb::Table`
+- [ ] `RedbReadOnlyTableStorage`: implements `TableRead` backed by redb read table
+- [ ] Wire into `SystemLayer`, `KvState`, `LogState` — replace direct `redb::Table` usage with trait-wrapped calls
+- [ ] Run full test suite
+
+**Step 4 — Pure-logic tests**:
+
+Validate state machines are fully decoupled from redb.
+
+- [ ] Rewrite KVTable unit tests to use `HashMapStorage`
+- [ ] Pure-logic test: feed `KvState` a sequence of `Op`s with `HashMapStorage` + `HashMapDag`
+- [ ] Pure-logic test: feed `SystemState` ops with `HashMapStorage`
+
+### 16C: Witness-First Core
+
+Decide `TABLE_META` ownership and convert to witness-first. `TABLE_META` currently holds per-author chain tips (`verify_and_update_tip`) and store metadata. After 16A, `SystemLayer` owns the write transaction and already calls `verify_and_update_tip`. For witness-first, `TABLE_META` also needs `last_applied_witness` — the cursor into the witness log, driven by the framework.
+
+**Step 1 — Clarify `TABLE_META` ownership:**
+
+- [ ] **Chain tips** (per-author `prev_hash` tracking): stays with `SystemLayer` / whoever owns the write transaction. Part of the apply ceremony.
+- [ ] **`last_applied_witness: Hash`**: framework-owned. Written by `project_new_entries()` after each successful state projection. Read on restart to resume.
+- [ ] **`stalled_at: Option<(Hash, String)>`**: framework-owned. Records where projection stopped (version skew).
+- [ ] **Store metadata** (id, type, name, schema_version): stays in `TABLE_META`, read-only after creation.
+- [ ] Decide if these should remain in one table or split into `TABLE_META` (store-level) + `TABLE_CHAIN_TIPS` (per-author).
+
+**Step 2 — Witness-first conversion:**
+
+The witness log becomes the sole interface between the DAG layer and the state machine. The two halves are fully decoupled:
+
+```
+Intention DAG ──► witness_ready() ──► Witness Log ──► project_new_entries() ──► State Machine
+(floating pool)   (witness-only,       (append-only,   (reads log forward,      (pure apply)
+                   no state touch)      sequential)     calls state.apply())
+```
+
+`project_new_entries()` is the single path into the state machine — called after witnessing, on restart (replay), and after bootstrap (no separate `apply_witnessed_batch`).
+
+**Redefined semantics:**
+- **Witness** = "I verified this intention's structural integrity (valid signature, correct chain, matching store_id) and committed it to my local ordering." Does NOT imply payload comprehension.
+- **State projection** = derived view of the witness log. May lag behind the log if the state machine can't decode a payload (version skew). Catches up on upgrade.
+
+- [ ] **`witness_ready()`**: Loop through floating intentions whose deps are witnessed. Witness each one. Do not touch state. Returns count of newly witnessed entries.
+- [ ] **`project_new_entries()`**: Read witness log from `last_applied_witness` forward. For each entry, build `Op`, call `state.apply()` via the unified transaction path. Update `last_applied_witness` after each successful projection. If projection fails (version skew), record `stalled_at` and stop — the witness log keeps advancing independently.
+- [ ] **`witness()` becomes the commit point.** Must succeed (not `let _ =`); if it fails, the intention stays floating.
+- [ ] **Drop `StateMachine::applied_chaintips()`**. Per-author chain tips remain framework-internal (needed for `verify_and_update_tip`), but not exposed to state machines.
+- [ ] **`replay_intentions()` becomes `project_new_entries()`** — same code path for restart, post-witness, and post-bootstrap. No tip-comparison, no chain-walking.
+
+### 16D: Stall Reporting
+- [ ] **Framework exposes projection status** via `StoreMeta`: `{ last_applied_witness: Hash, witness_head: Hash, stalled_at: Option<(Hash, String)> }`. Surfaced via `store status` CLI.
 - [ ] **Non-blocking stall.** A stalled projection does NOT block: witnessing continues, sync continues, other stores are unaffected. Only reads against the stalled store's state return stale data (with a warning flag).
 
-### 16C: Bootstrap Alignment
-- [ ] **`apply_witnessed_batch` becomes the normal path.** Currently bootstrap is special-cased to iterate witness records. After this refactor, all ingestion follows the same two-phase pattern: witness first, then project. The separate `apply_witnessed_batch` code path can be unified with regular ingest.
+### 16E: Bootstrap Alignment
+- [ ] **Delete `apply_witnessed_batch`.** Bootstrap now uses the same two-step path: insert + witness the peer's entries into the log, then `project_new_entries()`. No special code path.
 
-### 16D: Payload Validation Strategy Update
+### 16F: Payload Validation Strategy Update
 - [ ] **Update "stall on failure" contract** in `StateMachine` trait docs. Stall still applies — but the stall point moves from "intention stays floating, never witnessed" to "intention is witnessed, state projection pauses." The effect on the local user is the same (stale state until upgrade). The effect on the network is better (sync and other authors are unblocked).
-- [ ] **Update `Payload Validation Strategy` in Technical Debt** to reflect the new semantics.
 
-### 16E: Simplify StateMachine Interface
-Collapse the `StateLogic`/`PersistentState` composition into a single `StateMachine` trait. Best done alongside the witness-first refactor since both touch the apply path, trait surface, and restart logic.
-
-- [ ] **Framework-owned backend.** The framework (kernel) owns the redb `Database` and transaction lifecycle. State machines receive a `Storage` trait (`get`/`put`/`delete`/`scan`) scoped to a write transaction — they no longer call `backend().db().begin_write()` themselves.
-- [ ] **Single `apply(&self, op: &Op, storage: &mut dyn Storage, dag: &dyn DagQueries)`** replaces the current dual indirection (`StateMachine::apply` → `StateLogic::apply` → `self.mutate()`). State machines are pure functions over `(Op, Storage) → Result`.
-- [ ] **`emit()` for watcher notifications (WriterMonad pattern).** State machines call `storage.emit(event)` during `apply()`. Events are buffered and only flushed to watcher channels after the framework commits the transaction. Eliminates `type Updates`, the `notify()` method, and the risk of notifying before commit.
-- [ ] **Framework handles chain-tip tracking.** `verify_and_update_tip()` moves from `StateBackend` into the framework's transaction wrapper. State machines no longer see author tips. Combined with 16A, the framework tracks both `last_applied_seq` and per-author tips internally.
-- [ ] **Eliminate `PersistentState<T>`, `StateFactory`, `backend()` method.** `KvState` and `SystemLayer` implement `StateMachine` directly. `PersistentState` wrapper and `StateLogic` trait are deleted. `snapshot()`/`restore()` move to a framework-level operation over the owned database.
+### Future: System Store Separation
+Deferred to a later milestone: make the system table a sibling store with its own DAG instead of a `SystemLayer` wrapper. This eliminates the `UniversalOp` envelope and dual-table pattern entirely, but changes the replication model (two DAGs per logical store) and touches join protocol, sync, gossip, and `RecursiveWatcher`.
 
 ---
 

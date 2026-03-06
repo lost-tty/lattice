@@ -371,7 +371,7 @@ impl<'a> ReadOnlySystemTable<'a> {
                     let s_int = get_status_int(&v_bytes)?;
                     let proto = lattice_proto::storage::ChildStatus::try_from(s_int)
                         .unwrap_or(lattice_proto::storage::ChildStatus::CsUnknown);
-                    status = crate::helpers::map_to_model_status(proto);
+                    status = super::events::map_to_model_status(proto);
                 }
 
                 // Fetch type

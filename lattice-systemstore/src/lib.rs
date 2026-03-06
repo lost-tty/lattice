@@ -1,9 +1,9 @@
-pub mod helpers;
-pub mod system_state;
-pub mod tables;
+pub mod layer;
+pub mod store;
 
-pub use helpers::SystemBatch;
-pub use system_state::SystemLayer;
+pub use layer::{SystemLayer, SystemLayerError};
+pub use store::batch::SystemBatch;
+pub use store::SystemState;
 
 use futures_util::Stream;
 use lattice_model::replication::StoreEventSource;
@@ -210,7 +210,7 @@ where
     T: StoreEventSource + Send + Sync,
 {
     fn subscribe_events(&self) -> Pin<Box<dyn Stream<Item = SystemEvent> + Send>> {
-        let log_stream = crate::helpers::subscribe_system_events(self);
+        let log_stream = crate::store::events::subscribe_system_events(self);
         let local_stream = self.subscribe_local_events();
         Box::pin(futures_util::stream::select(
             log_stream,

@@ -1,0 +1,398 @@
+mod dag;
+
+use crate::store::SystemState;
+use dag::{DagScope, ScopedDag};
+use lattice_model::{Hash, IntentionInfo, Op, PubKey, StateMachine, StateWriter, StoreMeta};
+use lattice_model::{Openable, StoreTypeProvider};
+use lattice_proto::storage::{universal_op, SystemOp, UniversalOp};
+use lattice_storage::{StateDbError, StateLogic};
+use lattice_store_base::{BoxByteStream, CommandHandler, StreamError, StreamHandler, StreamProvider, Subscriber};
+use prost::Message;
+use std::borrow::Cow;
+use std::future::Future;
+use std::io::Read;
+use std::pin::Pin;
+use thiserror::Error;
+use uuid::Uuid;
+
+#[derive(Debug, Error)]
+pub enum SystemLayerError {
+    #[error(transparent)]
+    Inner(Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("Database error: {0}")]
+    Db(#[from] StateDbError),
+}
+
+/// A wrapper layer that adds SystemStore capabilities to any StateMachine.
+///
+/// This implements the "Y-Adapter" pattern:
+/// - Intercepts `SystemOp`s and applies them to the local System Table.
+/// - Delegates `AppData` ops to the inner state machine.
+/// - Implements `SystemReader` locally, avoiding orphan rules.
+#[derive(Clone)]
+pub struct SystemLayer<S> {
+    inner: S,
+}
+
+impl<S> SystemLayer<S> {
+    pub fn new(inner: S) -> Self {
+        Self { inner }
+    }
+
+    /// Access the inner app-data state machine.
+    pub fn app_state(&self) -> &S {
+        &self.inner
+    }
+}
+
+impl<S: StateLogic> SystemLayer<S> {
+    /// Access the system store (reads from `TABLE_SYSTEM` in the shared database).
+    pub fn system_state(&self) -> SystemState<'_> {
+        SystemState::new(self.inner.backend().db())
+    }
+}
+
+// ==================== Transaction Orchestration ====================
+
+impl<S: StateLogic> SystemLayer<S> {
+    /// Orchestrate the transaction for a SystemOp
+    fn apply_system_transaction(
+        &self,
+        op: &Op,
+        sys_op: SystemOp,
+        dag: &dyn lattice_model::DagQueries,
+    ) -> Result<(), StateDbError> {
+        let mut write_txn = self.inner.backend().db().begin_write()?;
+
+        // 1. Verify Tip (using backend from inner)
+        let should_apply = self
+            .inner
+            .backend()
+            .verify_and_update_tip(&write_txn, &op.info.author, op.id(), op.prev_hash)?;
+
+        if !should_apply {
+            return Ok(());
+        }
+
+        // 2. Apply System Op
+        SystemState::mutate(&mut write_txn, sys_op, op, dag)?;
+
+        write_txn.commit()?;
+        Ok(())
+    }
+}
+
+// ==================== StateMachine Implementation ====================
+
+impl<S> StateMachine for SystemLayer<S>
+where
+    S: StateMachine + StateLogic,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    type Error = SystemLayerError;
+
+    fn apply(&self, op: &Op, dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
+        let universal = UniversalOp::decode(op.info.payload.as_ref()).map_err(|e| {
+            SystemLayerError::Inner(format!("invalid UniversalOp envelope: {e}").into())
+        })?;
+
+        match universal.op {
+            Some(universal_op::Op::System(sys_op)) => {
+                let sys_dag = ScopedDag { inner: dag, scope: DagScope::System };
+                Ok(self.apply_system_transaction(op, sys_op, &sys_dag)?)
+            }
+            Some(universal_op::Op::AppData(data)) => {
+                let new_op = Op {
+                    info: IntentionInfo {
+                        hash: op.info.hash,
+                        payload: Cow::Borrowed(&data),
+                        timestamp: op.info.timestamp,
+                        author: op.info.author,
+                    },
+                    causal_deps: op.causal_deps,
+                    prev_hash: op.prev_hash,
+                };
+                let app_dag = ScopedDag { inner: dag, scope: DagScope::AppData };
+                StateMachine::apply(&self.inner, &new_op, &app_dag)
+                    .map_err(|e| SystemLayerError::Inner(Box::new(e)))
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn snapshot(&self) -> Result<Box<dyn Read + Send>, Self::Error> {
+        self.inner
+            .snapshot()
+            .map_err(|e| SystemLayerError::Inner(Box::new(e)))
+    }
+
+    fn restore(&self, snapshot: Box<dyn Read + Send>) -> Result<(), Self::Error> {
+        self.inner
+            .restore(snapshot)
+            .map_err(|e| SystemLayerError::Inner(Box::new(e)))
+    }
+
+    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
+        self.inner
+            .applied_chaintips()
+            .map_err(|e| SystemLayerError::Inner(Box::new(e)))
+    }
+
+    fn store_meta(&self) -> StoreMeta {
+        self.inner.store_meta()
+    }
+}
+
+// ==================== Trait Delegations ====================
+
+impl<S: StoreTypeProvider> StoreTypeProvider for SystemLayer<S> {
+    fn store_type() -> &'static str {
+        S::store_type()
+    }
+}
+
+impl<S: Openable + StateLogic> Openable for SystemLayer<S> {
+    fn open(id: Uuid, config: &lattice_model::StorageConfig) -> Result<Self, String> {
+        let inner = S::open(id, config)?;
+        Ok(Self::new(inner))
+    }
+}
+
+// NOTE: Introspectable is still via blanket (Deref + StateProvider).
+// CommandHandler is explicit so we can wrap app-data writes in UniversalOp(AppData).
+
+/// A StateWriter wrapper that wraps every submit in UniversalOp(AppData(...)).
+struct WrappingWriter<'a> {
+    inner: &'a dyn StateWriter,
+}
+
+impl StateWriter for WrappingWriter<'_> {
+    fn submit(
+        &self,
+        payload: Vec<u8>,
+        causal_deps: Vec<Hash>,
+    ) -> Pin<Box<dyn Future<Output = Result<Hash, lattice_model::StateWriterError>> + Send + '_>>
+    {
+        let envelope = UniversalOp {
+            op: Some(universal_op::Op::AppData(payload)),
+        };
+        let wrapped = envelope.encode_to_vec();
+        self.inner.submit(wrapped, causal_deps)
+    }
+}
+
+impl<S: CommandHandler + Send + Sync> CommandHandler for SystemLayer<S> {
+    fn handle_command<'a>(
+        &'a self,
+        writer: &'a dyn StateWriter,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let wrapping = WrappingWriter { inner: writer };
+        Box::pin(async move {
+            self.inner
+                .handle_command(&wrapping, method_name, request)
+                .await
+        })
+    }
+}
+
+impl<S: StreamProvider + 'static + Sync> StreamProvider for SystemLayer<S> {
+    fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
+        self.inner
+            .stream_handlers()
+            .into_iter()
+            .map(|h| StreamHandler {
+                descriptor: h.descriptor.clone(),
+                subscriber: Box::new(SystemLayerSubscriber {
+                    inner_descriptor_name: h.descriptor.name,
+                }),
+            })
+            .collect()
+    }
+}
+
+struct SystemLayerSubscriber {
+    inner_descriptor_name: String,
+}
+
+impl<S: StreamProvider + 'static + Sync> Subscriber<SystemLayer<S>> for SystemLayerSubscriber {
+    fn subscribe<'a>(
+        &'a self,
+        state: &'a SystemLayer<S>,
+        params: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
+        let name = self.inner_descriptor_name.clone();
+
+        Box::pin(async move {
+            let handler = state
+                .inner
+                .stream_handlers()
+                .into_iter()
+                .find(|h| h.descriptor.name == name)
+                .ok_or_else(|| StreamError::NotFound(name))?;
+
+            handler.subscriber.subscribe(&state.inner, params).await
+        })
+    }
+}
+
+// StateProvider enables blanket Introspectable, CommandDispatcher, and StreamReflectable.
+// This does NOT conflict with SystemLayer's own SystemReader impl because the SystemReader
+// blanket in lib.rs additionally requires StateWriter, which SystemLayer does not implement.
+impl<S: StateLogic> lattice_store_base::StateProvider for SystemLayer<S> {
+    type State = S;
+
+    fn state(&self) -> &Self::State {
+        &self.inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_model::dag_queries::HashMapDag;
+    use lattice_model::{DagQueries, HLC};
+    use lattice_proto::storage::SystemOp as ProtoSystemOp;
+
+    /// Build a UniversalOp::AppData envelope around `inner` bytes.
+    fn wrap_app_data(inner: &[u8]) -> Vec<u8> {
+        UniversalOp {
+            op: Some(universal_op::Op::AppData(inner.to_vec())),
+        }
+        .encode_to_vec()
+    }
+
+    /// Build a UniversalOp::System envelope around a no-op SystemOp.
+    fn wrap_system_op() -> Vec<u8> {
+        UniversalOp {
+            op: Some(universal_op::Op::System(ProtoSystemOp { kind: None })),
+        }
+        .encode_to_vec()
+    }
+
+    /// Record an intention in a HashMapDag with the given payload bytes.
+    fn record_intention(dag: &HashMapDag, payload: &[u8]) -> Hash {
+        let op = Op {
+            info: IntentionInfo {
+                hash: Hash::from([1u8; 32]),
+                payload: Cow::Borrowed(payload),
+                timestamp: HLC::default(),
+                author: lattice_model::PubKey::from([2u8; 32]),
+            },
+            causal_deps: &[],
+            prev_hash: Hash::from([0u8; 32]),
+        };
+        dag.record(&op);
+        op.info.hash
+    }
+
+    #[test]
+    fn scoped_dag_app_data_unwraps_payload() {
+        let inner_bytes = b"hello world";
+        let dag = HashMapDag::new();
+        let hash = record_intention(&dag, &wrap_app_data(inner_bytes));
+
+        let scoped = ScopedDag { inner: &dag, scope: DagScope::AppData };
+        let info = scoped.get_intention(&hash).unwrap();
+        assert_eq!(info.payload.as_ref(), inner_bytes);
+    }
+
+    #[test]
+    fn scoped_dag_system_unwraps_payload() {
+        let dag = HashMapDag::new();
+        let hash = record_intention(&dag, &wrap_system_op());
+
+        let scoped = ScopedDag { inner: &dag, scope: DagScope::System };
+        let info = scoped.get_intention(&hash).unwrap();
+        let decoded = ProtoSystemOp::decode(info.payload.as_ref()).unwrap();
+        assert_eq!(decoded.kind, None);
+    }
+
+    #[test]
+    fn scoped_dag_wrong_scope_returns_empty_payload() {
+        let dag = HashMapDag::new();
+        let hash = record_intention(&dag, &wrap_system_op());
+
+        let scoped = ScopedDag { inner: &dag, scope: DagScope::AppData };
+        let info = scoped.get_intention(&hash).unwrap();
+        assert!(info.payload.is_empty());
+    }
+
+    #[test]
+    fn scoped_dag_preserves_metadata() {
+        let dag = HashMapDag::new();
+        let hash = record_intention(&dag, &wrap_app_data(b"data"));
+
+        let scoped = ScopedDag { inner: &dag, scope: DagScope::AppData };
+        let info = scoped.get_intention(&hash).unwrap();
+        assert_eq!(info.hash, hash);
+        assert_eq!(info.author, lattice_model::PubKey::from([2u8; 32]));
+    }
+
+    /// Helper: record an intention with a specific hash, author, payload, and causal deps.
+    fn record_with(
+        dag: &HashMapDag,
+        hash_byte: u8,
+        author_byte: u8,
+        payload: &[u8],
+        causal_deps: &[Hash],
+    ) -> Hash {
+        let hash = Hash::from([hash_byte; 32]);
+        let op = Op {
+            info: IntentionInfo {
+                hash,
+                payload: Cow::Borrowed(payload),
+                timestamp: HLC::default(),
+                author: lattice_model::PubKey::from([author_byte; 32]),
+            },
+            causal_deps,
+            prev_hash: Hash::from([0u8; 32]),
+        };
+        dag.record(&op);
+        hash
+    }
+
+    #[test]
+    fn scoped_dag_counter_crdt_concurrent_merge() {
+        let dag = HashMapDag::new();
+
+        let hash_a = record_with(&dag, 0xAA, 1, &wrap_app_data(&10u32.to_le_bytes()), &[]);
+        let hash_b = record_with(
+            &dag, 0xBB, 1, &wrap_app_data(&5u32.to_le_bytes()), &[hash_a],
+        );
+        let hash_c = record_with(
+            &dag, 0xCC, 2, &wrap_app_data(&3u32.to_le_bytes()), &[hash_a],
+        );
+        let hash_d = record_with(&dag, 0xDD, 1, &wrap_system_op(), &[hash_a]);
+
+        let scoped = ScopedDag { inner: &dag, scope: DagScope::AppData };
+
+        let base_info = scoped.get_intention(&hash_a).unwrap();
+        let base_value = u32::from_le_bytes(base_info.payload.as_ref().try_into().unwrap());
+        assert_eq!(base_value, 10);
+
+        let concurrent_heads = [hash_b, hash_c];
+        let merged = concurrent_heads.iter().fold(base_value, |acc, head_hash| {
+            let info = scoped.get_intention(head_hash).unwrap();
+            let delta = u32::from_le_bytes(info.payload.as_ref().try_into().unwrap());
+            acc + delta
+        });
+
+        assert_eq!(merged, 18);
+
+        let sys_info = scoped.get_intention(&hash_d).unwrap();
+        assert!(sys_info.payload.is_empty());
+    }
+}
