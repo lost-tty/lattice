@@ -4,8 +4,8 @@ use crate::store::SystemState;
 use dag::{DagScope, ScopedDag};
 use lattice_model::{Hash, IntentionInfo, Op, PubKey, StateMachine, StateWriter, StoreMeta};
 use lattice_model::{Openable, StoreTypeProvider};
-use lattice_proto::storage::{universal_op, SystemOp, UniversalOp};
-use lattice_storage::{StateDbError, StateLogic};
+use lattice_proto::storage::{universal_op, UniversalOp};
+use lattice_storage::{StateDbError, StateLogic, TABLE_DATA};
 use lattice_store_base::{BoxByteStream, CommandHandler, StreamError, StreamHandler, StreamProvider, Subscriber};
 use prost::Message;
 use std::borrow::Cow;
@@ -54,32 +54,72 @@ impl<S: StateLogic> SystemLayer<S> {
 }
 
 // ==================== Transaction Orchestration ====================
+//
+// SystemLayer owns the single write transaction for both system and app-data ops.
+// This eliminates the duplicated transaction ceremony: one `begin_write →
+// verify_and_update_tip → mutate → commit → notify` for everything.
+
+/// Result of a unified apply: the optional app-data updates to notify after commit.
+enum ApplyResult<U> {
+    /// Op was a no-op (idempotent duplicate or empty envelope).
+    Skipped,
+    /// SystemOp applied — no app-data notifications needed.
+    System,
+    /// AppData applied — carry the updates for post-commit notification.
+    AppData(U),
+}
 
 impl<S: StateLogic> SystemLayer<S> {
-    /// Orchestrate the transaction for a SystemOp
-    fn apply_system_transaction(
+    /// Unified transaction: decode envelope, verify chain, route to correct table,
+    /// mutate, and commit. Returns the app-data updates (if any) for post-commit
+    /// notification.
+    fn apply_unified(
         &self,
         op: &Op,
-        sys_op: SystemOp,
         dag: &dyn lattice_model::DagQueries,
-    ) -> Result<(), StateDbError> {
+        universal: UniversalOp,
+    ) -> Result<ApplyResult<S::Updates>, StateDbError> {
         let mut write_txn = self.inner.backend().db().begin_write()?;
 
-        // 1. Verify Tip (using backend from inner)
+        // Verify chain integrity (idempotence check)
         let should_apply = self
             .inner
             .backend()
             .verify_and_update_tip(&write_txn, &op.info.author, op.id(), op.prev_hash)?;
 
         if !should_apply {
-            return Ok(());
+            return Ok(ApplyResult::Skipped);
         }
 
-        // 2. Apply System Op
-        SystemState::mutate(&mut write_txn, sys_op, op, dag)?;
+        // Route to the correct table + mutate
+        let result = match universal.op {
+            Some(universal_op::Op::System(sys_op)) => {
+                let sys_dag = ScopedDag { inner: dag, scope: DagScope::System };
+                SystemState::mutate(&mut write_txn, sys_op, op, &sys_dag)?;
+                ApplyResult::System
+            }
+            Some(universal_op::Op::AppData(data)) => {
+                let new_op = Op {
+                    info: IntentionInfo {
+                        hash: op.info.hash,
+                        payload: Cow::Borrowed(&data),
+                        timestamp: op.info.timestamp,
+                        author: op.info.author,
+                    },
+                    causal_deps: op.causal_deps,
+                    prev_hash: op.prev_hash,
+                };
+                let app_dag = ScopedDag { inner: dag, scope: DagScope::AppData };
+                let mut table = write_txn.open_table(TABLE_DATA)?;
+                let updates = self.inner.mutate(&mut table, &new_op, &app_dag)?;
+                drop(table); // Release borrow before commit
+                ApplyResult::AppData(updates)
+            }
+            None => ApplyResult::Skipped,
+        };
 
         write_txn.commit()?;
-        Ok(())
+        Ok(result)
     }
 }
 
@@ -97,28 +137,14 @@ where
             SystemLayerError::Inner(format!("invalid UniversalOp envelope: {e}").into())
         })?;
 
-        match universal.op {
-            Some(universal_op::Op::System(sys_op)) => {
-                let sys_dag = ScopedDag { inner: dag, scope: DagScope::System };
-                Ok(self.apply_system_transaction(op, sys_op, &sys_dag)?)
-            }
-            Some(universal_op::Op::AppData(data)) => {
-                let new_op = Op {
-                    info: IntentionInfo {
-                        hash: op.info.hash,
-                        payload: Cow::Borrowed(&data),
-                        timestamp: op.info.timestamp,
-                        author: op.info.author,
-                    },
-                    causal_deps: op.causal_deps,
-                    prev_hash: op.prev_hash,
-                };
-                let app_dag = ScopedDag { inner: dag, scope: DagScope::AppData };
-                StateMachine::apply(&self.inner, &new_op, &app_dag)
-                    .map_err(|e| SystemLayerError::Inner(Box::new(e)))
-            }
-            None => Ok(()),
+        let result = self.apply_unified(op, dag, universal)?;
+
+        // Notify watchers after commit
+        if let ApplyResult::AppData(updates) = result {
+            self.inner.notify(updates);
         }
+
+        Ok(())
     }
 
     fn snapshot(&self) -> Result<Box<dyn Read + Send>, Self::Error> {

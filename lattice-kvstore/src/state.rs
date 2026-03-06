@@ -38,6 +38,7 @@ use prost::Message;
 use prost_reflect::DescriptorPool;
 use redb::Database;
 use regex::bytes::Regex;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// Persistent state for KV with DAG conflict resolution.
@@ -48,6 +49,7 @@ use tokio::sync::broadcast;
 /// KvState is the logic component. Consumers interact with `PersistentState<KvState>`.
 pub struct KvState {
     backend: StateBackend,
+    db: Arc<Database>,
     watcher_tx: broadcast::Sender<WatchEvent>,
 }
 
@@ -68,8 +70,10 @@ impl KvState {
     ) -> Result<PersistentState<Self>, StateDbError> {
         setup_persistent_state(id, config, |backend| {
             let (watcher_tx, _) = broadcast::channel(1024);
+            let db = backend.db_shared();
             Self {
                 backend,
+                db,
                 watcher_tx,
             }
         })
@@ -78,7 +82,7 @@ impl KvState {
     /// Get a reference to the underlying database.
     /// Used by extension traits for additional operations.
     pub fn db(&self) -> &Database {
-        self.backend.db()
+        &self.db
     }
 
     /// Subscribe to state changes.
@@ -89,7 +93,7 @@ impl KvState {
     /// Get the materialized LWW value for a key.
     /// Returns `None` for missing keys or tombstone-only.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateDbError> {
-        let txn = self.backend.db().begin_read()?;
+        let txn = self.db.begin_read()?;
         let table = match txn.open_table(TABLE_DATA) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
@@ -107,7 +111,7 @@ impl KvState {
         &self,
         key: &[u8],
     ) -> Result<(Option<Vec<u8>>, bool), StateDbError> {
-        let txn = self.backend.db().begin_read()?;
+        let txn = self.db.begin_read()?;
         let table = match txn.open_table(TABLE_DATA) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok((None, false)),
@@ -122,7 +126,7 @@ impl KvState {
         &self,
         key: &[u8],
     ) -> Result<lattice_kvtable::InspectResult, StateDbError> {
-        let txn = self.backend.db().begin_read()?;
+        let txn = self.db.begin_read()?;
         let table = match txn.open_table(TABLE_DATA) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => {
@@ -142,7 +146,7 @@ impl KvState {
 
     /// Return the head hashes for a key (for causal deps and conflict counting).
     pub fn head_hashes(&self, key: &[u8]) -> Result<Vec<Hash>, StateDbError> {
-        let txn = self.backend.db().begin_read()?;
+        let txn = self.db.begin_read()?;
         let table = match txn.open_table(TABLE_DATA) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -164,7 +168,7 @@ impl KvState {
     where
         F: FnMut(Vec<u8>, Option<Vec<u8>>, bool) -> Result<bool, StateDbError>,
     {
-        let txn = self.backend.db().begin_read()?;
+        let txn = self.db.begin_read()?;
         let table = match txn.open_table(TABLE_DATA) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
@@ -250,8 +254,10 @@ impl StateLogic for KvState {
 impl StateFactory for KvState {
     fn create(backend: StateBackend) -> Self {
         let (watcher_tx, _) = broadcast::channel(1024);
+        let db = backend.db_shared();
         Self {
             backend,
+            db,
             watcher_tx,
         }
     }

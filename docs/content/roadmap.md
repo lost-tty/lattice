@@ -28,7 +28,7 @@ title: "Roadmap"
 Unify how all stores (KvStore, LogStore, SystemStore) interact with storage, then invert apply/witness order so the witness log becomes a true WAL.
 
 > **Concrete type stack today:** `Store< SystemLayer< PersistentState< KvState > > >`
-> **After M16:** `Store< SystemLayer< KvState > >` — `PersistentState` absorbed, `SystemLayer` is a thin Y-gate.
+> **After M16:** `Store< SystemLayer< KvState > >` — `PersistentState` removed, `SystemLayer` is a thin Y-gate that owns the transaction and provides `store_meta()`.
 
 ### Motivation
 
@@ -48,38 +48,46 @@ Unify how all stores (KvStore, LogStore, SystemStore) interact with storage, the
 
 Extract system store logic out of `SystemLayer`. Make `KvState`, `LogState`, and a new `SystemState` all implement the same `mutate`-style interface. `SystemLayer` becomes a thin Y-gate that owns the transaction and routes ops to the right store+table. Pure refactor — no new abstractions, still on `redb::Table`.
 
-**Step 1 — Extract `SystemState`** (`lattice-systemstore`):
+**Step 1 — Extract `SystemState`** (`lattice-systemstore`): ✅
 
-Move `apply_system_op()` and its match arms from `SystemLayer` into a new `SystemState` struct that implements the same `mutate`-style interface as `KvState` and `LogState`. `SystemState` is a plain state machine: given an op and a table handle, apply mutations.
+Moved `apply_system_op()` match arms from `SystemLayer` into `SystemState::mutate()`. Restructured `lattice-systemstore` into `layer/` (orchestration) and `store/` (data logic). Moved `SystemReader` reads into `SystemState<'a> { db: &Database }`. All 250 tests pass.
 
-- [ ] Create `SystemState` struct in `lattice-systemstore`
-- [ ] Move `apply_system_op` logic into `SystemState::mutate()`
-- [ ] `SystemLayer::apply_system_transaction()` delegates to `SystemState::mutate()` instead of inlining the logic
-- [ ] Run full test suite — pure mechanical move, behavior unchanged
+**Step 2 — Unify transaction ownership in `SystemLayer`**: ✅
 
-**Step 2 — Unify transaction ownership in `SystemLayer`**:
+`SystemLayer` now owns the single write transaction for both paths via `apply_unified()`. Decodes `UniversalOp` envelope, then: `begin_write → verify_and_update_tip → route to SystemState::mutate(TABLE_SYSTEM) or S::mutate(TABLE_DATA) → commit → notify`. Removed `apply_system_transaction()`. `StateLogic::apply()` default is no longer called in production. All 250 tests pass.
 
-`SystemLayer` owns the single write transaction for both paths. Bypasses `StateLogic::apply()` — calls `mutate()` directly on the inner state machine. One `begin_write → verify_and_update_tip → open tables → mutate → commit → notify` for both system and app-data ops.
+**Step 3 — Remove `PersistentState<T>` and slim `StateMachine`**:
 
-- [ ] `SystemLayer::apply()` opens one write transaction
-- [ ] Routes `SystemOp` → `SystemState::mutate()` on `TABLE_SYSTEM`
-- [ ] Routes `AppData` → inner `S::mutate()` on `TABLE_DATA`
-- [ ] Single `verify_and_update_tip` + single `commit`
-- [ ] Remove `apply_system_transaction()` (absorbed into unified `apply`)
-- [ ] Run full test suite
+`PersistentState<T>` is now dead weight — `SystemLayer` bypasses it for `apply` (Step 2), and domain crates hold `Arc<Database>` for reads (Step 1). Remove it entirely. Also remove `snapshot`/`restore` from `StateMachine` — they are unused in production (replication is witness-log-based, bootstrap uses `scan_witness_log` → `fetch_intentions` → `ingest_witness_batch`). M17 will redesign snapshots for pruning when requirements are clear.
 
-**Step 3 — Simplify `PersistentState`**:
+`StateMachine` slims from 5 methods to 2:
+```
+trait StateMachine {
+    type Error;
+    fn apply(&self, op: &Op, dag: &dyn DagQueries) -> Result<(), Self::Error>;
+    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error>;
+}
+```
 
-`PersistentState<T>` no longer needs to implement `StateMachine::apply()` with its own transaction ceremony — `SystemLayer` does that. `PersistentState` becomes a thinner wrapper: DB owner + `Deref` to inner for reads + `snapshot`/`restore`/`applied_chaintips`. Tests that use `PersistentState` standalone (without `SystemLayer`) keep working via a simpler self-contained `apply()`.
+`store_meta()` moves from `StateMachine` to `SystemLayer` — it reads `TABLE_META` which is framework metadata (store_id, store_type, schema_version), not app-data state. Domain crates (`KvState`, `LogState`) should not need to know about store metadata. `SystemLayer` already has access to the DB via `self.inner.backend()`. The three production callers (`StoreInspector` impl on `Store<S>`, `InProcessBackend::store_status()`, and the gRPC `GetStatus` handler) all go through the `Store` handle which wraps `SystemLayer`.
 
-- [ ] Remove the default `StateLogic::apply()` transaction ceremony
-- [ ] `PersistentState::apply()` becomes a thin wrapper for standalone use (tests)
-- [ ] Evaluate whether `StateLogic` trait can be simplified or removed
+Changes:
+- [ ] Remove `snapshot()` / `restore()` from `StateMachine` trait
+- [ ] Remove `store_meta()` from `StateMachine` trait; `SystemLayer` provides it directly
+- [ ] Delete `StateBackend::snapshot()` / `restore()` / `snapshot_internal()` / `restore_internal()` (~130 lines)
+- [ ] Delete `PersistentState<T>` struct and all 9 impl blocks (~210 lines)
+- [ ] Delete `setup_persistent_state()`, `ForwardSubscriber`, snapshot-related error variants
+- [ ] Implement `StateMachine` directly on `KvState` / `LogState` / `NullState` (just `apply` + `applied_chaintips`)
+- [ ] `SystemLayer` drops `S: StateMachine` bound, implements `applied_chaintips` + `store_meta` via `self.inner.backend()` directly
+- [ ] Update `MockWriter<S>` to use `Arc<S>` instead of `Arc<PersistentState<S>>`
+- [ ] Update type aliases (`PersistentKvState` → `KvState`, etc.) and all assembly sites
+- [ ] Delete snapshot tests (4 in `lattice-storage`, 3 in `lattice-kvstore`, 1 in `lattice-logstore`)
+- [ ] Update mock `StateMachine` impls in test files (remove snapshot/restore stubs)
 - [ ] Run full test suite
 
 ### 16B: Storage Abstraction
 
-Introduce `TableRead`/`TableWrite` traits to decouple state machines from redb. Move duplicated logic (transaction ceremony, chain-tip verification, snapshot/restore) into shared framework code that operates on the trait surface. Goal: state machines become pure functions testable with `HashMapStorage`, and duplicated boilerplate across KvState/LogState/SystemState collapses.
+Introduce `TableRead`/`TableWrite` traits to decouple state machines from redb. Goal: state machines become pure functions testable with `HashMapStorage`, and duplicated boilerplate across KvState/LogState/SystemState collapses.
 
 **Step 1 — Define traits** (`lattice-model`):
 
@@ -135,10 +143,12 @@ Decide `TABLE_META` ownership and convert to witness-first. `TABLE_META` current
 
 **Step 1 — Clarify `TABLE_META` ownership:**
 
+`TABLE_META` currently holds two unrelated concerns: store identity (store_id, store_type, schema_version — written once at creation) and per-author chain tips (tip/<pubkey> → hash — written on every apply). After 16A Step 3, `store_meta()` moves to `SystemLayer` which reads `TABLE_META` directly via `StateBackend::get_meta()`. The three production callers are: `SystemLayer` (trait impl), `Store<S>` (via `StoreInspector`), and `InProcessBackend::store_status()` (gRPC).
+
 - [ ] **Chain tips** (per-author `prev_hash` tracking): stays with `SystemLayer` / whoever owns the write transaction. Part of the apply ceremony.
 - [ ] **`last_applied_witness: Hash`**: framework-owned. Written by `project_new_entries()` after each successful state projection. Read on restart to resume.
 - [ ] **`stalled_at: Option<(Hash, String)>`**: framework-owned. Records where projection stopped (version skew).
-- [ ] **Store metadata** (id, type, name, schema_version): stays in `TABLE_META`, read-only after creation.
+- [ ] **Store metadata** (id, type, schema_version): stays in `TABLE_META`, read-only after creation. `store_meta()` is a `SystemLayer` method, not a `StateMachine` method.
 - [ ] Decide if these should remain in one table or split into `TABLE_META` (store-level) + `TABLE_CHAIN_TIPS` (per-author).
 
 **Step 2 — Witness-first conversion:**
@@ -192,7 +202,7 @@ Manage log growth on long-running nodes via stability frontier, snapshots, pruni
 - [ ] **Lag metric:** Per-peer divergence from local tips, surfaced via `NodeEvent::PeerLagWarning` and `store status`
 
 ### 17B: Snapshotting
-- [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Options: tempfile-based replay (works today, heavy on I/O) or in-memory `StateBackend` variant (cleaner, requires refactoring `StateLogic`/`PersistentState`).
+- [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Options: tempfile-based replay (works today, heavy on I/O) or in-memory `StateBackend` variant (cleaner). **Note:** `StateMachine::snapshot()`/`restore()` were removed in M16A Step 3 — the old `StateBackend::snapshot_internal()` serialization format is deleted. M17 will design a new snapshot mechanism tailored to pruning requirements (frontier-aware, incremental, possibly stored in a separate `snapshot.db`).
 - [ ] Store snapshots in `snapshot.db` (per-store, includes `TABLE_SYSTEM` attestation state)
 - [ ] Bootstrap new peers from snapshot + tail sync instead of full log replay
 - [ ] **Future optimization:** Inverse operations stored in `WitnessRecord` could allow rolling back from current state to frontier in O(head − frontier), avoiding replay. Deferred until profiling shows replay is a bottleneck.
@@ -331,7 +341,7 @@ Run the kernel on the RP2350.
 
 ## Discussion
 
-- [ ] Does StateMachines need snapshot/restore once we have IntentionStore pruning/snapshots?
+- [x] ~~Does StateMachine need snapshot/restore once we have IntentionStore pruning/snapshots?~~ **Resolved (M16A Step 3):** Removed from `StateMachine`. Not used in production — replication is witness-log-based. M17 will redesign snapshot mechanism for pruning when requirements are clear.
 - [ ] Revoking a Peer is untested. How do we ensure removed peers will not receive future Intentions?
 
 ---

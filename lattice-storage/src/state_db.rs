@@ -3,6 +3,7 @@ use lattice_model::{DagQueries, Hash, Op, PubKey, StateMachine, StorageConfig, S
 use redb::{Database, ReadableTable, TableDefinition, TableHandle};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 use tracing::warn;
 use uuid::Uuid;
@@ -119,7 +120,7 @@ pub enum SnapshotError {
 /// - Validating chain integrity (tips).
 /// - Managing state identity (rolling hash).
 pub struct StateBackend {
-    db: Database,
+    db: Arc<Database>,
     id: Uuid,
 }
 
@@ -284,12 +285,20 @@ impl StateBackend {
         }
         write_txn.commit()?;
 
-        Ok(Self { db, id })
+        Ok(Self { db: Arc::new(db), id })
     }
 
     /// Access the underlying Redb database.
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// Get a shared handle to the underlying database.
+    ///
+    /// Domain crates use this to hold a reference for their own read
+    /// transactions without depending on `StateBackend` ownership.
+    pub fn db_shared(&self) -> Arc<Database> {
+        Arc::clone(&self.db)
     }
 
     /// Access the Store ID.

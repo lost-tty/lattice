@@ -5,10 +5,11 @@
 
 use lattice_model::{Op, PubKey, SExpr, Uuid};
 
-use redb::{ReadableTable, ReadableTableMetadata};
+use redb::{Database, ReadableTable, ReadableTableMetadata};
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// Event emitted when a new log entry is appended
@@ -36,6 +37,7 @@ use lattice_storage::{
 /// LogState - append-only log with redb persistence
 pub struct LogState {
     backend: StateBackend,
+    db: Arc<Database>,
     /// Broadcast channel for log entry events
     event_tx: broadcast::Sender<LogEvent>,
 }
@@ -53,13 +55,14 @@ impl LogState {
     pub fn open(id: Uuid, config: &StorageConfig) -> Result<PersistentState<Self>, StateDbError> {
         setup_persistent_state(id, config, |backend| {
             let (event_tx, _) = broadcast::channel(256);
-            Self { backend, event_tx }
+            let db = backend.db_shared();
+            Self { backend, db, event_tx }
         })
     }
 
     /// Get access to the database
     pub fn db(&self) -> &redb::Database {
-        self.backend.db()
+        &self.db
     }
 
     /// Subscribe to log entry events
@@ -116,7 +119,7 @@ impl LogState {
 
     /// Read entries (all or last N, always chronological)
     pub fn read(&self, tail: Option<usize>) -> Vec<LogEntry> {
-        let txn = match self.backend.db().begin_read() {
+        let txn = match self.db.begin_read() {
             Ok(t) => t,
             Err(_) => return Vec::new(),
         };
@@ -148,7 +151,7 @@ impl LogState {
 
     /// Get entry count
     pub fn len(&self) -> usize {
-        let txn = match self.backend.db().begin_read() {
+        let txn = match self.db.begin_read() {
             Ok(t) => t,
             Err(_) => return 0,
         };
@@ -210,7 +213,8 @@ impl StateLogic for LogState {
 impl StateFactory for LogState {
     fn create(backend: StateBackend) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
-        Self { backend, event_tx }
+        let db = backend.db_shared();
+        Self { backend, db, event_tx }
     }
 }
 
