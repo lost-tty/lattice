@@ -780,10 +780,6 @@ impl<T: StateLogic> StateMachine for PersistentState<T> {
     fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
         self.inner.backend().get_applied_chaintips()
     }
-
-    fn store_meta(&self) -> StoreMeta {
-        self.inner.backend().get_meta()
-    }
 }
 
 // Delegate Introspectable if valid

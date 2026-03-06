@@ -2,7 +2,7 @@ mod dag;
 
 use crate::store::SystemState;
 use dag::{DagScope, ScopedDag};
-use lattice_model::{Hash, IntentionInfo, Op, PubKey, StateMachine, StateWriter, StoreMeta};
+use lattice_model::{Hash, IntentionInfo, Op, PubKey, StateMachine, StateWriter};
 use lattice_model::{Openable, StoreTypeProvider};
 use lattice_proto::storage::{universal_op, UniversalOp};
 use lattice_storage::{StateDbError, StateLogic, TABLE_DATA};
@@ -164,13 +164,15 @@ where
             .applied_chaintips()
             .map_err(|e| SystemLayerError::Inner(Box::new(e)))
     }
-
-    fn store_meta(&self) -> StoreMeta {
-        self.inner.store_meta()
-    }
 }
 
 // ==================== Trait Delegations ====================
+
+impl<S: StateLogic> lattice_model::StoreIdentity for SystemLayer<S> {
+    fn store_meta(&self) -> lattice_model::StoreMeta {
+        self.inner.backend().get_meta()
+    }
+}
 
 impl<S: StoreTypeProvider> StoreTypeProvider for SystemLayer<S> {
     fn store_type() -> &'static str {

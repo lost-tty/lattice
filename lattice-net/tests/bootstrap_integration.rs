@@ -1,7 +1,7 @@
 use lattice_kernel::store::{OpenedStore, Store};
 use lattice_kernel::SyncProvider;
 use lattice_model::StateWriter;
-use lattice_model::{NodeIdentity, StateMachine, StoreMeta};
+use lattice_model::{NodeIdentity, StateMachine};
 
 use futures_util::StreamExt;
 use lattice_kernel::proto::weaver::WitnessContent;
@@ -21,9 +21,6 @@ impl StateMachine for MockState {
         _dag: &dyn lattice_model::DagQueries,
     ) -> Result<(), Self::Error> {
         Ok(())
-    }
-    fn store_meta(&self) -> StoreMeta {
-        StoreMeta::default()
     }
     fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send + 'static>, Self::Error> {
         Ok(Box::new(std::io::empty()))

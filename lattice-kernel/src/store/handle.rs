@@ -12,7 +12,7 @@ use prost::Message;
 
 use lattice_model::NodeIdentity;
 use lattice_model::StoreMeta;
-use lattice_model::{Op, StateMachine, SystemEvent};
+use lattice_model::{Op, StateMachine, StoreIdentity, SystemEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -622,7 +622,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
 
 use crate::store_inspector::StoreInspector;
 
-impl<S: StateMachine + 'static> StoreInspector for Store<S> {
+impl<S: StateMachine + StoreIdentity + 'static> StoreInspector for Store<S> {
     fn id(&self) -> Uuid {
         self.store_id
     }

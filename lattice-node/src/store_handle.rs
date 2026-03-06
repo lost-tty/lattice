@@ -52,7 +52,7 @@ pub trait StoreHandle: Send + Sync {
 // Specialized Implementation for Store<S>
 use lattice_kernel::Store;
 use lattice_model::StateMachine;
-use lattice_model::StoreTypeProvider;
+use lattice_model::{StoreIdentity, StoreTypeProvider};
 use lattice_store_base::{CommandHandler, Introspectable, StreamProvider};
 
 impl<S> StoreHandle for Store<S>
@@ -62,6 +62,7 @@ where
         + CommandHandler
         + StreamProvider
         + StoreTypeProvider
+        + StoreIdentity
         + lattice_systemstore::SystemReader
         + Send
         + Sync

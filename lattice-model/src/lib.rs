@@ -44,7 +44,7 @@ pub use replication::{
 pub use sexpr::{dynamic_message_to_sexpr, dynamic_value_to_sexpr, SExpr};
 pub use state_machine::{Op, StateMachine, StateWriter, StateWriterError};
 pub use storage_config::StorageConfig;
-pub use store_info::{StoreLink, StoreMeta, SystemEvent};
+pub use store_info::{StoreIdentity, StoreLink, StoreMeta, SystemEvent};
 pub use store_type::{
     StoreTypeProvider, CORE_STORE_TYPES, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE,
 };

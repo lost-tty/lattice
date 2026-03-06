@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 // ==== Direct opener (handle-less pattern) ====
 
-use lattice_model::StoreTypeProvider;
+use lattice_model::{StoreIdentity, StoreTypeProvider};
 use lattice_store_base::{CommandHandler, Introspectable, StreamProvider};
 
 /// Create a store opener that returns `Store<S>` directly without a wrapper handle.
@@ -25,6 +25,7 @@ where
         + CommandHandler
         + StreamProvider
         + StoreTypeProvider
+        + StoreIdentity
         + Send
         + Sync
         + 'static
@@ -48,6 +49,7 @@ where
         + CommandHandler
         + StreamProvider
         + StoreTypeProvider
+        + StoreIdentity
         + Send
         + Sync
         + 'static

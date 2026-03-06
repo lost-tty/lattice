@@ -51,6 +51,11 @@ pub struct StoreMeta {
     pub schema_version: u64,
 }
 
+/// Read-only access to store identity metadata.
+pub trait StoreIdentity: Send + Sync {
+    fn store_meta(&self) -> StoreMeta;
+}
+
 /// High-level system update events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SystemEvent {

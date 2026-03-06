@@ -243,9 +243,6 @@ mod tests {
         fn applied_chaintips(&self) -> Result<Vec<(lattice_model::PubKey, Hash)>, Self::Error> {
             Ok(Vec::new())
         }
-        fn store_meta(&self) -> lattice_model::StoreMeta {
-            self.backend.get_meta()
-        }
     }
 
     impl StateLogic for MockLogic {

@@ -3,7 +3,7 @@ use lattice_model::{
     hlc::HLC,
     types::{Hash, PubKey},
     weaver::{Condition, Intention, SignedIntention},
-    NodeIdentity, Op, StateMachine, StoreMeta,
+    NodeIdentity, Op, StateMachine,
 };
 use prost::Message;
 use std::sync::Arc;
@@ -26,10 +26,6 @@ impl StateMachine for MockStateMachine {
 
     fn apply(&self, _op: &Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
         Ok(())
-    }
-
-    fn store_meta(&self) -> StoreMeta {
-        StoreMeta::default()
     }
 
     fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
