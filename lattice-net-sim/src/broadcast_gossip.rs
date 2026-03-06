@@ -74,6 +74,12 @@ impl BroadcastGossip {
     pub fn drop_next_incoming_message(&self) {
         self.drop_next_message.store(true, Ordering::SeqCst);
     }
+
+    /// Returns `true` if a drop is still pending (set but not yet consumed).
+    /// Returns `false` once the message has been received and dropped.
+    pub fn has_pending_drop(&self) -> bool {
+        self.drop_next_message.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait::async_trait]

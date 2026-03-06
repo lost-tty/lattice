@@ -54,26 +54,32 @@ impl TestCtx {
     }
 }
 
-/// Poll until a store appears in the manager (max ~1s).
+/// Poll until a store appears in the manager.
 async fn wait_for_open(sm: &lattice_node::StoreManager, id: lattice_model::Uuid) {
-    for _ in 0..20 {
-        if sm.store_ids().contains(&id) {
-            return;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if sm.store_ids().contains(&id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("Timed out waiting for store {} to open", id);
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timed out waiting for store {} to open", id));
 }
 
-/// Poll until a store disappears from the manager (max ~1s).
+/// Poll until a store disappears from the manager.
 async fn wait_for_close(sm: &lattice_node::StoreManager, id: lattice_model::Uuid) {
-    for _ in 0..20 {
-        if !sm.store_ids().contains(&id) {
-            return;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !sm.store_ids().contains(&id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("Timed out waiting for store {} to close", id);
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timed out waiting for store {} to close", id));
 }
 
 // ==================== Store Lifecycle ====================
@@ -125,7 +131,7 @@ async fn test_watcher_reacts_to_changes() {
         .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_open(ctx.sm(), root_id).await;
 
     // Create child -> Watcher should pick it up
     let child_id = ctx
@@ -262,16 +268,7 @@ async fn test_synced_store_declaration_auto_opened() {
     data_dir.ensure_store_dirs(foreign_store_id).unwrap();
 
     // Watcher should auto-open it
-    for _ in 0..30 {
-        if sm.store_ids().contains(&foreign_store_id) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
-        sm.store_ids().contains(&foreign_store_id),
-        "Synced store should be auto-opened"
-    );
+    wait_for_open(&sm, foreign_store_id).await;
     assert!(
         sm.get_network_store(&foreign_store_id).is_some(),
         "Should be visible to network"
@@ -309,35 +306,19 @@ async fn test_stores_opened_on_startup() {
 
     // Phase 2: Restart — stores should reappear
     // Retry build in case redb lock is slow to release
-    let node = {
-        let mut last_err = None;
-        let mut node_opt = None;
-        for _ in 0..5 {
+    let node = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
             match file_node_builder(DataDir::new(data_dir.base())).build() {
-                Ok(n) => {
-                    node_opt = Some(n);
-                    break;
-                }
-                Err(e) => {
-                    last_err = Some(e);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
+                Ok(n) => return n,
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
-        node_opt.unwrap_or_else(|| panic!("Failed to rebuild node: {:?}", last_err))
-    };
+    })
+    .await
+    .expect("Failed to rebuild node: redb lock not released within timeout");
     node.start().await.expect("node start");
 
-    for _ in 0..30 {
-        if node.store_manager().store_ids().contains(&child_id) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
-        node.store_manager().store_ids().contains(&child_id),
-        "Child should auto-open on startup"
-    );
+    wait_for_open(node.store_manager(), child_id).await;
     assert!(
         node.store_manager().get_network_store(&child_id).is_some(),
         "Should be visible to network"
@@ -688,7 +669,7 @@ async fn test_system_batch_produces_single_intention() {
         .create_store(None, Some("batch-root".to_string()), STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_open(ctx.sm(), root_id).await;
 
     // Snapshot intention count before batch
     let handle = ctx.sm().get_handle(&root_id).expect("root handle");
@@ -704,11 +685,18 @@ async fn test_system_batch_produces_single_intention() {
         .await
         .expect("batch commit");
 
-    // Wait for processing
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Intention count should have increased by exactly 1 (not 2)
-    let after = handle.as_inspector().intention_count().await;
+    // Wait for batch processing to complete
+    let after = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let count = handle.as_inspector().intention_count().await;
+            if count > before {
+                return count;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("batch commit did not produce an intention within timeout");
     assert_eq!(
         after - before,
         1,

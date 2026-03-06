@@ -46,7 +46,39 @@ All 5 production sleeps are in `lattice-net/src/network/service.rs`. Zero produc
 
 - [x] **Extract `wait_for_store` helper with `Notify`**: 4 identical copy-pasted polling loops (tagged `TODO(15D)`) each poll `get_store(id)` every 5ms up to 10 retries. Replace with a shared `DashMap<Uuid, Arc<tokio::sync::Notify>>` (or similar). `NetworkStoreRegistry::register_store()` signals the `Notify`; callers `await` it with a timeout. Eliminates sleeps at lines ~400, ~1071, ~1095, ~1122.
 - [x] ~~**Replace boot-sync peer-discovery polling with event-driven wake**~~: Replaced with `broadcast::Sender<PubKey>` in `SessionTracker` and `run_auto_sync` per-store loop. Startup uses `has_peers()` for immediate catch-up; new peer connections deliver identity via `broadcast::Receiver<PubKey>`. No polling, no sleep. `run_auto_sync` handles three cases: startup catch-up (`sync_all_by_id`), per-peer targeted sync, and lagged fallback.
-- [ ] **Audit test sleeps (28 sites)**: Most test sleeps (polling for convergence, waiting for background tasks) are acceptable. Review the longer ones: `iroh_integration_test.rs:205` (500ms for store registration — should use `StoreReady` event), `iroh_backend_test.rs:150` (500ms for mDNS — inherent, keep). No action needed for race-condition test sleeps (`watch_integration.rs`) or redb lock retry sleeps (`store_manager_test.rs`).
+- [x] **Audit test sleeps (26 sites)**: Audited and classified. 14 keep, 5 could improve, 7 should fix. The 7 "should fix" sites share a pattern: bare settling sleeps masking missing readiness signals (gossip subscription, store registration, boot sync). Fixing requires exposing subscription-ready events or converting to polling loops.
+
+  **Keep (14)** — ✅ reviewed and standardized to `tokio::time::timeout` pattern where applicable:
+  - [x] `kvstore/tests/watch_integration.rs:35` — 1ms, race guard (pace concurrent writes) — kept as-is
+  - [x] `kvstore/tests/watch_integration.rs:39` — 10ms, race guard (mid-stream subscribe timing) — kept as-is
+  - [x] `net-iroh/tests/iroh_backend_test.rs:150` — 500ms, infra wait (mDNS discovery, inherent) — kept as-is
+  - [x] `net/src/network/service_tests.rs:407` — already uses `tokio::time::timeout`
+  - [x] `net/tests/gossip_join_test.rs:29` — converted `Instant`-based loop → `tokio::time::timeout`
+  - [x] `net/tests/gossip_lag_tracking_test.rs:172` — already uses `tokio::time::timeout`
+  - [x] `net/tests/gossip_lag_tracking_test.rs:242` — already uses `tokio::time::timeout`
+  - [x] `net/tests/native_gossip_gap_test.rs:44` — converted `for 0..10` → `tokio::time::timeout`
+  - [x] `node/tests/multi_author_test.rs:201` — converted `for 0..20` → `tokio::time::timeout`
+  - [x] `node/tests/store_manager_test.rs:63` — `wait_for_open`: converted `for 0..20` → `tokio::time::timeout`
+  - [x] `node/tests/store_manager_test.rs:74` — `wait_for_close`: converted `for 0..20` → `tokio::time::timeout`
+  - [x] `node/tests/store_manager_test.rs:269` — replaced inline loop with `wait_for_open()` call
+  - [x] `node/tests/store_manager_test.rs:308` — 200ms, infra wait (OS releases redb file locks) — kept as-is
+  - [x] `node/tests/store_manager_test.rs:323` — converted `for 0..5` retry → `tokio::time::timeout`
+  - [x] `node/tests/store_manager_test.rs:335` — replaced inline loop with `wait_for_open()` call
+
+  **Could improve (5)** — 4 fixed, 1 kept (intentional negative assertion):
+  - [x] `kvstore/tests/watch_integration.rs:141` — was 50ms settling → removed entirely (stream.next() 1s timeout is the real gate)
+  - [ ] `net/src/network/service_tests.rs:463` — 50ms, kept (intentional negative assertion: "no spurious connects arrived")
+  - [x] `net/tests/native_gossip_gap_test.rs:131` — was 50ms settling → polls `gossip_b.has_pending_drop()` (added accessor)
+  - [x] `node/tests/store_manager_test.rs:128` — was 50ms settling → uses existing `wait_for_open()` helper
+  - [x] `node/tests/store_manager_test.rs:691` — was 50ms settling → uses existing `wait_for_open()` helper
+
+  **Should fix (7)** — ✅ ALL DONE — converted to polling loops with timeouts:
+  - [x] `net-iroh/tests/iroh_integration_test.rs:203` — was 500ms settling → polls `gossip_stats().contains_key()`
+  - [x] `net/tests/gossip_join_test.rs:209` — was 200ms settling → polls `gossip_stats()` on both nodes
+  - [x] `net/tests/gossip_lag_tracking_test.rs:148` — was 200ms settling → polls `gossip_stats().contains_key()`
+  - [x] `net/tests/gossip_lag_tracking_test.rs:221` — was 200ms settling → polls `gossip_stats().contains_key()`
+  - [x] `net/tests/native_gossip_gap_test.rs:117` — was 100ms settling → polls `gossip_stats()` on both nodes
+  - [x] `node/tests/store_manager_test.rs:708` — was 100ms settling → polls `intention_count() > before`
 
 ### 15C: Fix `complete_join` Store Type Hardcode
 

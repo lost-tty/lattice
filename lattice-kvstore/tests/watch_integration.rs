@@ -137,9 +137,6 @@ async fn test_malformed_replication_entry() {
         .send(garbage)
         .expect("failed to inject garbage");
 
-    // Give it a moment to potentially crash the watcher
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     // 4. Put another valid value
     store.put(key.to_vec(), b"v2".to_vec()).await.unwrap();
 

@@ -28,25 +28,29 @@ async fn put_kv(handle: &Arc<dyn lattice_node::StoreHandle>, key: Vec<u8>, value
 
 // Helper to assert key exists
 async fn assert_key_exists(handle: &Arc<dyn lattice_node::StoreHandle>, key: &[u8]) {
-    // Retry slightly in case of async delivery Delay
-    for _ in 0..10 {
-        let dispatcher = handle.as_dispatcher();
-        let req = GetRequest {
-            key: key.to_vec(),
-            verbose: false,
-        };
-        let resp: GetResponse = invoke_command::<_, GetResponse>(&*dispatcher, "Get", req)
-            .await
-            .expect("Get failed");
-        if resp.value.is_some() {
-            return;
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        loop {
+            let dispatcher = handle.as_dispatcher();
+            let req = GetRequest {
+                key: key.to_vec(),
+                verbose: false,
+            };
+            let resp: GetResponse = invoke_command::<_, GetResponse>(&*dispatcher, "Get", req)
+                .await
+                .expect("Get failed");
+            if resp.value.is_some() {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    }
-    panic!(
-        "Key {:?} missing in store after timeout",
-        String::from_utf8_lossy(key)
-    );
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "Key {:?} missing in store after timeout",
+            String::from_utf8_lossy(key)
+        )
+    });
 }
 
 #[tokio::test]
@@ -68,7 +72,7 @@ async fn test_native_gossip_gap_recovery() {
     let gossip_a = Arc::new(BroadcastGossip::new(node_a.node_id(), &gossip_net));
     let gossip_b = Arc::new(BroadcastGossip::new(node_b.node_id(), &gossip_net));
 
-    let _server_a = network::NetworkService::new(
+    let server_a = network::NetworkService::new(
         node_a.clone(),
         lattice_net_sim::SimBackend::new(
             transport_a,
@@ -77,7 +81,7 @@ async fn test_native_gossip_gap_recovery() {
         ),
         event_rx_a,
     );
-    let _server_b = network::NetworkService::new(
+    let server_b = network::NetworkService::new(
         node_b.clone(),
         lattice_net_sim::SimBackend::new(
             transport_b,
@@ -89,8 +93,8 @@ async fn test_native_gossip_gap_recovery() {
 
     // Disable background auto-sync to ensure ONLY gossip propagates H0 and H2,
     // and ONLY gap recovery fetches H1.
-    _server_a.set_auto_sync_enabled(false);
-    _server_b.set_auto_sync_enabled(false);
+    server_a.set_auto_sync_enabled(false);
+    server_b.set_auto_sync_enabled(false);
 
     // 2. Node A creates the store
     let store_id = node_a
@@ -113,8 +117,19 @@ async fn test_native_gossip_gap_recovery() {
         .await
         .expect("B join A");
 
-    // Wait for boot sync and initial connection
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // Wait for gossip subscriptions to establish on both nodes
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        loop {
+            let has_a = server_a.gossip_stats().read().await.contains_key(&store_id);
+            let has_b = server_b.gossip_stats().read().await.contains_key(&store_id);
+            if has_a && has_b {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("gossip subscription did not establish on both nodes");
 
     // 4. Initial write: H0
     put_kv(&handle_a, b"key0".to_vec(), vec![]).await;
@@ -127,8 +142,14 @@ async fn test_native_gossip_gap_recovery() {
     // 6. Write H1 - B will receive this but drop it
     let _h1 = put_kv(&handle_a, b"key1".to_vec(), vec![]).await;
 
-    // Give time for gossip to propagate and drop
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    // Wait for gossip_b to receive and drop the message
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        while gossip_b.has_pending_drop() {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("gossip_b did not consume the pending drop");
 
     // VERIFY GAP: B should NOT have H1
     let dispatcher = handle_b.as_dispatcher();

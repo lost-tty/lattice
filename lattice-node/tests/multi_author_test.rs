@@ -189,17 +189,26 @@ async fn test_multi_author_convergence() {
 
     for (idx, handle) in handles.iter().enumerate() {
         // Poll for async processing completion
-        for _ in 0..20 {
-            let sys = handle.clone().as_system().unwrap();
-            let children = sys.get_children().unwrap();
-            if expected_children
-                .iter()
-                .all(|id| children.iter().any(|c| c.id == *id))
-            {
-                break;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let sys = handle.clone().as_system().unwrap();
+                let children = sys.get_children().unwrap();
+                if expected_children
+                    .iter()
+                    .all(|id| children.iter().any(|c| c.id == *id))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "Node {} did not converge to expected children within timeout",
+                idx + 1,
+            )
+        });
 
         let sys = handle.clone().as_system().unwrap();
         let children = sys.get_children().unwrap();

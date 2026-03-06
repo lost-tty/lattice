@@ -199,8 +199,17 @@ async fn test_two_iroh_nodes_store_sync() {
         .expect("create store on A");
     tracing::info!(%store_id, "Store created on A");
 
-    // Give store registration time to propagate via NetEvent
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for store registration to propagate via NetEvent
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if service_a.gossip_stats().read().await.contains_key(&store_id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("store registration did not complete on service_a");
 
     // === Node A creates an invite ===
     let token = node_a

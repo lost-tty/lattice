@@ -144,8 +144,17 @@ async fn test_gossip_stats_tracked_on_successful_broadcast() {
     .await
     .expect("timeout waiting for StoreReady");
 
-    // Let peer watcher detect B and gossip subscription establish
-    sleep(Duration::from_millis(200)).await;
+    // Wait for gossip subscription to establish on A
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if server_a.gossip_stats().read().await.contains_key(&store_id) {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("gossip subscription did not establish on server_a");
 
     // Write items via A — they should be gossiped successfully
     for i in 0..5 {
@@ -217,8 +226,17 @@ async fn test_gossip_stats_consistent_under_burst_writes() {
         .get_handle(&store_id)
         .expect("get store a");
 
-    // Wait for gossip subscription to establish
-    sleep(Duration::from_millis(200)).await;
+    // Wait for gossip subscription to establish on A
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if server_a.gossip_stats().read().await.contains_key(&store_id) {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("gossip subscription did not establish on server_a");
 
     // Blast writes (channel capacity is 64)
     for i in 0..200u8 {
