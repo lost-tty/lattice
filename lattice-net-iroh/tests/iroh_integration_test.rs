@@ -116,7 +116,6 @@ async fn test_gossip_actor_survives_backend_creation() {
 
     // Step 3: Create Router (this is what IrohBackend::new does)
     let sync_protocol = lattice_net_iroh::protocol::SyncProtocol::new(node.clone());
-    let peer_stores = sync_protocol.peer_stores();
     let router = iroh::protocol::Router::builder(transport.endpoint().clone())
         .accept(lattice_net_iroh::LATTICE_ALPN, sync_protocol)
         .accept(iroh_gossip::ALPN, gossip.gossip().clone())
@@ -145,7 +144,6 @@ async fn test_gossip_actor_survives_backend_creation() {
         transport,
         gossip: Some(gossip.clone() as std::sync::Arc<dyn lattice_net_types::GossipLayer>),
         router: Some(Box::new(FakeShutdown) as Box<dyn ShutdownHandle>),
-        peer_stores,
     };
     let _service = lattice_net::network::NetworkService::new(node.clone(), backend, net_rx);
     tracing::info!("NetworkService created");

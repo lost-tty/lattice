@@ -4,12 +4,10 @@
 //! with an internal accept loop (the sim equivalent of iroh's Router).
 
 use crate::ChannelTransport;
-use lattice_net::network::{NetworkBackend, PeerStoreRegistry, ShutdownHandle};
+use lattice_net::network::{NetworkBackend, ShutdownHandle};
 use lattice_net_types::transport::{BiStream, Connection as TransportConnection, Transport};
 use lattice_net_types::{GossipLayer, NodeProviderExt};
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// ShutdownHandle for the simulated accept loop.
 struct AcceptLoopHandle(tokio::task::JoinHandle<()>);
@@ -40,8 +38,6 @@ impl SimBackend {
         provider: Arc<dyn NodeProviderExt>,
         gossip: Option<Arc<dyn GossipLayer>>,
     ) -> NetworkBackend<ChannelTransport> {
-        let peer_stores: PeerStoreRegistry = Arc::new(RwLock::new(HashMap::new()));
-
         // Spawn the accept loop — sim equivalent of iroh Router
         let accept_handle = {
             let transport_clone = transport.clone();
@@ -81,7 +77,6 @@ impl SimBackend {
             transport,
             gossip: gossip_layer,
             router: Some(Box::new(AcceptLoopHandle(accept_handle))),
-            peer_stores,
         }
     }
 }

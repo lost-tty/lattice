@@ -3,6 +3,7 @@
 //! Extracted from NetworkService to keep concerns separated.
 //! These handlers receive only the context they need (provider trait), not the entire service.
 
+use super::protocol_helpers::{get_authorized_store, parse_optional_hash};
 use crate::framing;
 use crate::LatticeNetError;
 
@@ -11,24 +12,15 @@ use lattice_model::{
     types::{Hash, PubKey},
     Uuid,
 };
-use lattice_net_types::{NetworkStore, NetworkStoreRegistry, NodeProviderExt};
-use lattice_proto::convert::intention_to_proto;
+use lattice_net_types::{NetworkStore, NodeProviderExt};
+use lattice_proto::convert::intentions_to_proto;
 use lattice_proto::network::{
     peer_message, BootstrapRequest, BootstrapResponse, FetchIntentions, IntentionResponse,
     JoinResponse, PeerMessage,
 };
 use lattice_proto::weaver::{WitnessContent, WitnessRecord};
+use prost::Message;
 use std::sync::Arc;
-
-/// Helper to lookup store from registry
-pub fn lookup_store(
-    registry: &dyn NetworkStoreRegistry,
-    store_id: Uuid,
-) -> Result<NetworkStore, LatticeNetError> {
-    registry
-        .get_network_store(&store_id)
-        .ok_or(LatticeNetError::StoreNotRegistered(store_id))
-}
 
 // ==================== Inbound Handlers (Server Logic) ====================
 
@@ -144,19 +136,10 @@ where
     W: tokio::io::AsyncWrite + Send + Unpin,
     R: tokio::io::AsyncRead + Send + Unpin,
 {
-    let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::InvalidField("store_id"))?;
+    let (store_id, authorized_store) =
+        get_authorized_store(provider, &req.store_id, remote_pubkey)?;
 
     tracing::debug!("[Sync] Received reconcile start for store {}", store_id);
-
-    let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
-
-    if !authorized_store.can_connect(remote_pubkey) {
-        return Err(LatticeNetError::PeerNotAuthorized {
-            peer: *remote_pubkey,
-            store_id,
-        });
-    };
 
     let mut session = crate::network::sync_session::SyncSession::new(
         &authorized_store,
@@ -176,17 +159,8 @@ pub async fn handle_fetch_intentions<W: tokio::io::AsyncWrite + Send + Unpin>(
     req: FetchIntentions,
     sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
-    let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::InvalidField("store_id"))?;
-
-    let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
-
-    if !authorized_store.can_connect(remote_pubkey) {
-        return Err(LatticeNetError::PeerNotAuthorized {
-            peer: *remote_pubkey,
-            store_id,
-        });
-    };
+    let (_store_id, authorized_store) =
+        get_authorized_store(provider, &req.store_id, remote_pubkey)?;
 
     // Parse requested hashes
     let hashes: Vec<Hash> = req
@@ -197,14 +171,12 @@ pub async fn handle_fetch_intentions<W: tokio::io::AsyncWrite + Send + Unpin>(
 
     let intentions = authorized_store.fetch_intentions(hashes).await?;
 
-    let proto_intentions: Vec<_> = intentions.iter().map(intention_to_proto).collect();
-
     let msg = PeerMessage {
         message: Some(peer_message::Message::IntentionResponse(
             IntentionResponse {
                 store_id: req.store_id,
                 done: true,
-                intentions: proto_intentions,
+                intentions: intentions_to_proto(&intentions),
             },
         )),
     };
@@ -220,40 +192,18 @@ pub async fn handle_fetch_chain<W: tokio::io::AsyncWrite + Send + Unpin>(
     req: lattice_proto::network::FetchChain,
     sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
-    let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::InvalidField("store_id"))?;
-
-    let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
-
-    if !authorized_store.can_connect(remote_pubkey) {
-        return Err(LatticeNetError::PeerNotAuthorized {
-            peer: *remote_pubkey,
-            store_id,
-        });
-    };
+    let (_store_id, authorized_store) =
+        get_authorized_store(provider, &req.store_id, remote_pubkey)?;
 
     let target = Hash::try_from(req.target_hash.as_slice())
         .map_err(|_| LatticeNetError::InvalidField("target_hash"))?;
 
-    // Parse 'since' hash (optional). Empty bytes or Zero hash means fetch from Genesis (None).
-    let since = if req.since_hash.is_empty() {
-        None
-    } else {
-        let h = Hash::try_from(req.since_hash.as_slice())
-            .map_err(|_| LatticeNetError::InvalidField("since_hash"))?;
-        if h == Hash::ZERO {
-            None
-        } else {
-            Some(h)
-        }
-    };
+    let since = parse_optional_hash(&req.since_hash, "since_hash")?;
 
     // Walk back the chain
     let chain = authorized_store
         .walk_back_until(target, since, super::MAX_FETCH_CHAIN_ITEMS)
         .await?;
-
-    let proto_intentions: Vec<_> = chain.iter().map(intention_to_proto).collect();
 
     // Reply with IntentionResponse (reused)
     let msg = PeerMessage {
@@ -261,7 +211,7 @@ pub async fn handle_fetch_chain<W: tokio::io::AsyncWrite + Send + Unpin>(
             IntentionResponse {
                 store_id: req.store_id,
                 done: true,
-                intentions: proto_intentions,
+                intentions: intentions_to_proto(&chain),
             },
         )),
     };
@@ -277,29 +227,10 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     req: BootstrapRequest,
     sink: &mut framing::MessageSink<W>,
 ) -> Result<(), LatticeNetError> {
-    let store_id = Uuid::from_slice(&req.store_id)
-        .map_err(|_| LatticeNetError::InvalidField("store_id"))?;
+    let (_store_id, authorized_store) =
+        get_authorized_store(provider, &req.store_id, remote_pubkey)?;
 
-    let authorized_store = lookup_store(provider.store_registry().as_ref(), store_id)?;
-
-    if !authorized_store.can_connect(remote_pubkey) {
-        return Err(LatticeNetError::PeerNotAuthorized {
-            peer: *remote_pubkey,
-            store_id,
-        });
-    };
-
-    let start_hash = if req.start_hash.is_empty() {
-        None
-    } else {
-        let h = Hash::try_from(req.start_hash.as_slice())
-            .map_err(|_| LatticeNetError::InvalidField("start_hash"))?;
-        if h == Hash::ZERO {
-            None
-        } else {
-            Some(h)
-        }
-    };
+    let start_hash = parse_optional_hash(&req.start_hash, "start_hash")?;
 
     let max_limit = if req.limit == 0 {
         1000
@@ -323,7 +254,6 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
             signature: entry.signature,
         });
 
-        use prost::Message;
         let witness_content = WitnessContent::decode(entry.content.as_slice())?;
 
         let intention_hash =
@@ -350,7 +280,7 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
 
     let is_done = total_processed < max_limit;
 
-    if !witness_batch.is_empty() {
+    if !witness_batch.is_empty() || is_done {
         send_bootstrap_batch(
             &authorized_store,
             sink,
@@ -360,8 +290,6 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
             is_done,
         )
         .await?;
-    } else if is_done {
-        send_bootstrap_batch(&authorized_store, sink, &req.store_id, &[], &[], true).await?;
     }
 
     Ok(())
@@ -381,14 +309,12 @@ async fn send_bootstrap_batch<W: tokio::io::AsyncWrite + Send + Unpin>(
 
     let intentions = store.fetch_intentions(intention_hashes.to_vec()).await?;
 
-    let proto_intentions: Vec<_> = intentions.iter().map(intention_to_proto).collect();
-
     let resp = PeerMessage {
         message: Some(peer_message::Message::BootstrapResponse(
             BootstrapResponse {
                 store_id: store_id_bytes.to_vec(),
                 witness_records: witness_records.to_vec(),
-                intentions: proto_intentions,
+                intentions: intentions_to_proto(&intentions),
                 done,
             },
         )),

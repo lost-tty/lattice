@@ -9,16 +9,19 @@
 
 use crate::{LatticeNetError, MessageSink, MessageStream};
 use futures_util::future::join_all;
+use futures_util::StreamExt;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::ingest::MissingDep;
-use lattice_model::{NetEvent, UserEvent, Uuid};
+use lattice_model::weaver::SignedIntention;
+use lattice_model::{NetEvent, PeerEvent, PeerProvider, PeerStatus, UserEvent, Uuid};
 use lattice_net_types::transport::{BiStream, Connection as TransportConnection, Transport};
 use lattice_net_types::{GossipLayer, NetworkStore, NodeProviderExt};
 use lattice_proto::convert::intention_from_proto;
 use lattice_proto::network::{peer_message, BootstrapRequest, FetchChain, PeerMessage};
+use prost::Message;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 
@@ -68,11 +71,12 @@ impl GossipLagStats {
     }
 }
 
-/// Per-store gossip stats registry
-pub type GossipStatsRegistry = Arc<RwLock<HashMap<Uuid, GossipLagStats>>>;
-
-/// Peer store registry — caches `NetworkStore` handles for stores registered for networking.
-pub type PeerStoreRegistry = Arc<RwLock<HashMap<Uuid, NetworkStore>>>;
+/// Per-store gossip lag statistics, individually locked.
+///
+/// The outer `RwLock` protects the map structure (store registration).
+/// Each store's stats are behind a `std::sync::Mutex` so concurrent
+/// forwarders never contend on the global lock — they only lock their own entry.
+pub type GossipStatsRegistry = Arc<RwLock<HashMap<Uuid, Arc<std::sync::Mutex<GossipLagStats>>>>>;
 
 /// Central service for mesh networking.
 /// Generic over `T: Transport` for the sync/connect path.
@@ -80,11 +84,14 @@ pub struct NetworkService<T: Transport> {
     provider: Arc<dyn NodeProviderExt>,
     transport: T,
     gossip: Option<Arc<dyn lattice_net_types::GossipLayer>>,
-    pub(crate) peer_stores: PeerStoreRegistry,
+    /// Tracks which stores have been registered for networking (dedup guard).
+    /// The actual `NetworkStore` handles are always fetched from the provider's
+    /// `NetworkStoreRegistry` — no caching, no stale state.
+    registered_stores: RwLock<std::collections::HashSet<Uuid>>,
     sessions: Arc<super::session::SessionTracker>,
     router: Option<Box<dyn ShutdownHandle>>,
-    global_gossip_enabled: Arc<AtomicBool>,
-    auto_sync_enabled: Arc<AtomicBool>,
+    global_gossip_enabled: AtomicBool,
+    auto_sync_enabled: AtomicBool,
     /// Per-store gossip lag statistics
     gossip_stats: GossipStatsRegistry,
 }
@@ -104,7 +111,192 @@ pub struct NetworkBackend<T: Transport> {
     pub transport: T,
     pub gossip: Option<Arc<dyn GossipLayer>>,
     pub router: Option<Box<dyn ShutdownHandle>>,
-    pub peer_stores: PeerStoreRegistry,
+}
+
+// ====================================================================================
+// Extracted gossip tasks — spawned by `register_store_by_id`.
+//
+// Each is a free-standing async fn taking only the handles it needs,
+// rather than capturing `Arc<NetworkService>` and closures.
+// ====================================================================================
+
+/// Ingest raw gossip bytes → decode → ingest intention.
+///
+/// Runs until the gossip receiver closes or the `NetworkService` is dropped
+/// (detected via `Weak` upgrade failure).
+async fn run_gossip_ingester<T: Transport>(
+    weak_service: Weak<NetworkService<T>>,
+    store_id: Uuid,
+    store: NetworkStore,
+    pm: Arc<dyn PeerProvider>,
+    mut receiver: broadcast::Receiver<(PubKey, Vec<u8>)>,
+) {
+    while let Ok((sender_pubkey, raw_bytes)) = receiver.recv().await {
+        let Some(service) = weak_service.upgrade() else {
+            break;
+        };
+
+        if !pm.can_connect(&sender_pubkey) {
+            tracing::warn!(store_id = %store_id, sender = %sender_pubkey, "Rejected gossip from unauthorized peer");
+            continue;
+        }
+
+        let gossip_msg = match lattice_proto::network::GossipMessage::decode(raw_bytes.as_slice()) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to decode gossip message");
+                continue;
+            }
+        };
+
+        let intention = match gossip_msg.content {
+            Some(lattice_proto::network::gossip_message::Content::Intention(proto_intention)) => {
+                match lattice_proto::convert::intention_from_proto(&proto_intention) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to convert proto intention");
+                        continue;
+                    }
+                }
+            }
+            _ => continue,
+        };
+
+        match store.ingest_intention(intention).await {
+            Ok(lattice_model::weaver::ingest::IngestResult::Applied) => {}
+            Ok(lattice_model::weaver::ingest::IngestResult::MissingDeps(missing_deps)) => {
+                for missing in missing_deps {
+                    tracing::info!(store_id = %store_id, missing = %missing.prev, "Gossip ingestion gap detected, triggering fetch");
+                    let _ = service
+                        .handle_missing_dep(store_id, missing, Some(sender_pubkey))
+                        .await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(store_id = %store_id, error = %e, "Failed to ingest gossip intention")
+            }
+        }
+    }
+}
+
+/// Forward locally-committed intentions to gossip broadcast.
+///
+/// Runs until the broadcast channel closes (store dropped).
+/// Takes a per-store `Mutex<GossipLagStats>` so it never contends on a global lock.
+async fn run_intention_forwarder(
+    store_id: Uuid,
+    gossip: Arc<dyn GossipLayer>,
+    mut intention_rx: broadcast::Receiver<SignedIntention>,
+    stats: Arc<std::sync::Mutex<GossipLagStats>>,
+) {
+    loop {
+        match intention_rx.recv().await {
+            Ok(intention) => {
+                let proto = lattice_proto::convert::intention_to_proto(&intention);
+                let gossip_msg = lattice_proto::network::GossipMessage {
+                    store_id: store_id.as_bytes().to_vec(),
+                    content: Some(
+                        lattice_proto::network::gossip_message::Content::Intention(proto),
+                    ),
+                };
+                let encoded = gossip_msg.encode_to_vec();
+                if let Err(e) = gossip.broadcast(store_id, encoded).await {
+                    tracing::warn!(error = %e, "Failed to broadcast intention via gossip");
+                    if let Ok(mut s) = stats.lock() {
+                        s.record_drop(1);
+                    }
+                } else if let Ok(mut s) = stats.lock() {
+                    s.record_broadcast();
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(lagged = n, "Intention forwarder lagged, {} messages dropped", n);
+                if let Ok(mut s) = stats.lock() {
+                    s.record_drop(n);
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// Auto-sync loop for a single store.
+///
+/// Two triggers:
+/// - **Startup**: if peers are already connected when this store is registered,
+///   sync with all of them immediately (catch-up).
+/// - **New peer**: when a genuinely new peer connects, sync only with that peer.
+///
+/// Terminates when the `SessionTracker` drops (broadcast closed) or
+/// the `NetworkService` is dropped (Weak upgrade fails).
+async fn run_auto_sync<T: Transport>(
+    weak_service: Weak<NetworkService<T>>,
+    store_id: Uuid,
+    has_peers: bool,
+    mut rx: broadcast::Receiver<PubKey>,
+) {
+    // Sync with all connected peers if the store was registered after
+    // peers were already established (e.g. child stores discovered via sync).
+    if has_peers {
+        if let Some(service) = weak_service.upgrade() {
+            tracing::info!(store_id = %store_id, "Peers already connected, triggering sync");
+            let _ = service.sync_all_by_id(store_id).await;
+        }
+    }
+
+    loop {
+        match rx.recv().await {
+            Ok(peer) => {
+                let Some(service) = weak_service.upgrade() else {
+                    break;
+                };
+                // Only sync if this peer is an acceptable author for this store.
+                let dominated = match service.registered_store(store_id) {
+                    Ok(store) => store.list_acceptable_authors().contains(&peer),
+                    Err(_) => false,
+                };
+                if !dominated {
+                    tracing::debug!(store_id = %store_id, peer = %peer, "Skipping sync — peer not in acceptable authors");
+                    continue;
+                }
+                tracing::info!(store_id = %store_id, peer = %peer, "New peer connected, syncing");
+                let _ = service.sync_with_peer_by_id(store_id, peer, &[]).await;
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                // Missed some peer-connected events — sync with everyone to catch up.
+                tracing::warn!(store_id = %store_id, lagged = n, "Auto-sync lagged, syncing all peers");
+                if let Some(service) = weak_service.upgrade() {
+                    let _ = service.sync_all_by_id(store_id).await;
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// Watch for newly-active peers and add them to the gossip topic.
+///
+/// Runs until the peer event stream ends.
+async fn run_peer_watcher(
+    store_id: Uuid,
+    gossip: Arc<dyn GossipLayer>,
+    mut peer_events: lattice_model::PeerEventStream,
+) {
+    while let Some(event) = peer_events.next().await {
+        let pubkey = match &event {
+            PeerEvent::Added { pubkey, status } if *status == PeerStatus::Active => Some(*pubkey),
+            PeerEvent::StatusChanged { pubkey, new, .. } if *new == PeerStatus::Active => {
+                Some(*pubkey)
+            }
+            _ => None,
+        };
+        if let Some(pk) = pubkey {
+            tracing::debug!(store_id = %store_id, peer = %pk, "Adding newly-active peer to gossip");
+            if let Err(e) = gossip.join_peers(store_id, vec![pk]).await {
+                tracing::warn!(error = %e, "Failed to add peer to gossip topic");
+            }
+        }
+    }
 }
 
 // ====================================================================================
@@ -130,11 +322,11 @@ impl<T: Transport> NetworkService<T> {
             provider,
             transport: backend.transport,
             gossip: backend.gossip,
-            peer_stores: backend.peer_stores,
+            registered_stores: RwLock::new(std::collections::HashSet::new()),
             sessions,
             router: backend.router,
-            global_gossip_enabled: Arc::new(AtomicBool::new(true)),
-            auto_sync_enabled: Arc::new(AtomicBool::new(true)),
+            global_gossip_enabled: AtomicBool::new(true),
+            auto_sync_enabled: AtomicBool::new(true),
             gossip_stats: Arc::new(RwLock::new(HashMap::new())),
         });
 
@@ -163,7 +355,7 @@ impl<T: Transport> NetworkService<T> {
         pm: std::sync::Arc<dyn lattice_model::PeerProvider>,
     ) {
         // Check if already registered for network
-        if self.peer_stores.read().await.contains_key(&store_id) {
+        if self.registered_stores.read().await.contains(&store_id) {
             tracing::debug!(store_id = %store_id, "Store already registered for network");
             return;
         }
@@ -177,177 +369,42 @@ impl<T: Transport> NetworkService<T> {
 
         tracing::info!(store_id = %store_id, "Registering store for network");
 
-        // Cache the NetworkStore handle so callers can look it up without
-        // racing against StoreRegistry population.
-        self.peer_stores
-            .write()
-            .await
-            .insert(store_id, network_store.clone());
+        // Mark as registered to prevent double-registration.
+        self.registered_stores.write().await.insert(store_id);
 
-        // Check global flag
-        let global_enabled = self.global_gossip_enabled.load(Ordering::SeqCst);
-
-        if global_enabled {
+        // Gossip setup: subscribe to the topic, then spawn ingester / forwarder / watcher.
+        if self.global_gossip_enabled.load(Ordering::SeqCst) {
             if let Some(gossip) = &self.gossip {
-                // Gather initial peers
                 let peers = pm.list_peers().iter().map(|p| p.pubkey).collect::<Vec<_>>();
 
                 match gossip.subscribe(store_id, peers).await {
-                    Ok(mut receiver) => {
-                        let weak_self = Arc::downgrade(self);
-                        let store_id_captured = store_id;
-                        let store_clone = network_store.clone();
-                        let pm_clone = pm.clone();
-                        let pm_for_watcher = pm.clone();
+                    Ok(receiver) => {
+                        tokio::spawn(run_gossip_ingester(
+                            Arc::downgrade(self),
+                            store_id,
+                            network_store.clone(),
+                            pm.clone(),
+                            receiver,
+                        ));
 
-                        // Task 1: Ingest raw gossip bytes → decode → ingest intention
-                        tokio::spawn(async move {
-                            while let Ok((sender_pubkey, raw_bytes)) = receiver.recv().await {
-                                let Some(service) = weak_self.upgrade() else {
-                                    break;
-                                };
+                        let store_stats = Arc::new(std::sync::Mutex::new(GossipLagStats::new()));
+                        self.gossip_stats
+                            .write()
+                            .await
+                            .insert(store_id, store_stats.clone());
 
-                                // Auth check
-                                if !pm_clone.can_connect(&sender_pubkey) {
-                                    tracing::warn!(store_id = %store_id_captured, sender = %sender_pubkey, "Rejected gossip from unauthorized peer");
-                                    continue;
-                                }
+                        tokio::spawn(run_intention_forwarder(
+                            store_id,
+                            gossip.clone(),
+                            network_store.subscribe_intentions(),
+                            store_stats,
+                        ));
 
-                                // Decode: raw bytes → GossipMessage → SignedIntention
-                                use prost::Message;
-                                let gossip_msg = match lattice_proto::network::GossipMessage::decode(
-                                    raw_bytes.as_slice(),
-                                ) {
-                                    Ok(m) => m,
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "Failed to decode gossip message");
-                                        continue;
-                                    }
-                                };
-
-                                let intention = match gossip_msg.content {
-                                    Some(
-                                        lattice_proto::network::gossip_message::Content::Intention(
-                                            proto_intention,
-                                        ),
-                                    ) => {
-                                        match lattice_proto::convert::intention_from_proto(
-                                            &proto_intention,
-                                        ) {
-                                            Ok(i) => i,
-                                            Err(e) => {
-                                                tracing::warn!(error = %e, "Failed to convert proto intention");
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                    _ => continue,
-                                };
-
-                                // Ingest
-                                match store_clone.ingest_intention(intention).await {
-                                    Ok(lattice_model::weaver::ingest::IngestResult::Applied) => {}
-                                    Ok(
-                                        lattice_model::weaver::ingest::IngestResult::MissingDeps(
-                                            missing_deps,
-                                        ),
-                                    ) => {
-                                        for missing in missing_deps {
-                                            tracing::info!(store_id = %store_id_captured, missing = %missing.prev, "Gossip ingestion gap detected, triggering fetch");
-                                            let _ = service
-                                                .handle_missing_dep(
-                                                    store_id_captured,
-                                                    missing,
-                                                    Some(sender_pubkey),
-                                                )
-                                                .await;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(store_id = %store_id_captured, error = %e, "Failed to ingest gossip intention")
-                                    }
-                                }
-                            }
-                        });
-
-                        // Task 2: Forward local intentions → encode → gossip.broadcast
-                        let gossip_clone = gossip.clone();
-                        let mut intention_rx = network_store.subscribe_intentions();
-                        let gossip_stats = self.gossip_stats.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                match intention_rx.recv().await {
-                                    Ok(intention) => {
-                                        use prost::Message;
-                                        let proto =
-                                            lattice_proto::convert::intention_to_proto(&intention);
-                                        let gossip_msg = lattice_proto::network::GossipMessage {
-                                            store_id: store_id_captured.as_bytes().to_vec(),
-                                            content: Some(lattice_proto::network::gossip_message::Content::Intention(proto)),
-                                        };
-                                        let encoded = gossip_msg.encode_to_vec();
-                                        if let Err(e) =
-                                            gossip_clone.broadcast(store_id_captured, encoded).await
-                                        {
-                                            tracing::warn!(error = %e, "Failed to broadcast intention via gossip");
-                                            gossip_stats
-                                                .write()
-                                                .await
-                                                .entry(store_id_captured)
-                                                .or_insert_with(GossipLagStats::new)
-                                                .record_drop(1);
-                                        } else {
-                                            gossip_stats
-                                                .write()
-                                                .await
-                                                .entry(store_id_captured)
-                                                .or_insert_with(GossipLagStats::new)
-                                                .record_broadcast();
-                                        }
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                        tracing::warn!(lagged = n, store_id = %store_id_captured, "Intention forwarder lagged, {} messages dropped", n);
-                                        gossip_stats
-                                            .write()
-                                            .await
-                                            .entry(store_id_captured)
-                                            .or_insert_with(GossipLagStats::new)
-                                            .record_drop(n);
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                                }
-                            }
-                        });
-
-                        // Task 3: Watch for new active peers → gossip.join_peers
-                        let gossip_for_watcher = gossip.clone();
-                        let mut peer_events = pm_for_watcher.subscribe_peer_events();
-                        let store_id_for_watcher = store_id;
-                        tokio::spawn(async move {
-                            use futures_util::StreamExt;
-                            while let Some(event) = peer_events.next().await {
-                                let pubkey = match &event {
-                                    lattice_model::PeerEvent::Added { pubkey, status }
-                                        if *status == lattice_model::PeerStatus::Active =>
-                                    {
-                                        Some(*pubkey)
-                                    }
-                                    lattice_model::PeerEvent::StatusChanged {
-                                        pubkey, new, ..
-                                    } if *new == lattice_model::PeerStatus::Active => Some(*pubkey),
-                                    _ => None,
-                                };
-                                if let Some(pk) = pubkey {
-                                    tracing::debug!(store_id = %store_id_for_watcher, peer = %pk, "Adding newly-active peer to gossip");
-                                    if let Err(e) = gossip_for_watcher
-                                        .join_peers(store_id_for_watcher, vec![pk])
-                                        .await
-                                    {
-                                        tracing::warn!(error = %e, "Failed to add peer to gossip topic");
-                                    }
-                                }
-                            }
-                        });
+                        tokio::spawn(run_peer_watcher(
+                            store_id,
+                            gossip.clone(),
+                            pm.subscribe_peer_events(),
+                        ));
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "Gossip setup failed");
@@ -358,32 +415,32 @@ impl<T: Transport> NetworkService<T> {
             tracing::info!(store_id = %store_id, "Gossip disabled globally");
         }
 
-        // Boot Sync: Spawn a task to wait for active peers and trigger initial sync
+        // Auto-sync: sync all connected peers now (catch-up), then sync
+        // with each new peer individually as they connect.
         if self.auto_sync_enabled.load(Ordering::SeqCst) {
-            let service = self.clone();
-            tokio::spawn(async move {
-                tracing::info!(store_id = %store_id, "Boot Sync: Waiting for peers...");
-                let start = std::time::Instant::now();
-                loop {
-                    if start.elapsed().as_secs() > 60 {
-                        tracing::debug!(store_id = %store_id, "Boot Sync: Timed out/Done waiting for peers");
-                        break;
-                    }
-
-                    // Active peer check
-                    match service.active_peer_ids().await {
-                        Ok(peers) if !peers.is_empty() => {
-                            tracing::info!(store_id = %store_id, peers = peers.len(), "Boot Sync: Triggering initial sync");
-                            let _ = service.sync_all_by_id(store_id).await;
-                            break;
-                        }
-                        _ => {}
-                    }
-
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-            });
+            tokio::spawn(run_auto_sync(
+                Arc::downgrade(self),
+                store_id,
+                self.sessions.has_peers(),
+                self.sessions.subscribe_new_peers(),
+            ));
         }
+    }
+
+    /// Open a bidirectional stream on an existing connection and wrap it in framed
+    /// `MessageSink`/`MessageStream` for protocol message exchange.
+    async fn open_framed_bi(
+        conn: &T::Connection,
+    ) -> Result<
+        (
+            MessageSink<<<T::Connection as TransportConnection>::Stream as BiStream>::SendStream>,
+            MessageStream<<<T::Connection as TransportConnection>::Stream as BiStream>::RecvStream>,
+        ),
+        LatticeNetError,
+    > {
+        let bi = conn.open_bi().await?;
+        let (send, recv) = bi.into_split();
+        Ok((MessageSink::new(send), MessageStream::new(recv)))
     }
 
     /// Bootstrap from a peer (Clone protocol).
@@ -395,7 +452,7 @@ impl<T: Transport> NetworkService<T> {
         store_id: Uuid,
         peer_id: PubKey,
     ) -> Result<u64, LatticeNetError> {
-        let store = self.registered_store(store_id).await?;
+        let store = self.registered_store(store_id)?;
 
         tracing::info!("Bootstrap: connecting to peer {}", peer_id);
 
@@ -406,11 +463,7 @@ impl<T: Transport> NetworkService<T> {
         let conn = self.transport.connect(&peer_id).await?;
 
         while !fully_done {
-            let bi = conn.open_bi().await?;
-            let (send, recv) = bi.into_split();
-
-            let mut sink = crate::MessageSink::new(send);
-            let mut stream = crate::MessageStream::new(recv);
+            let (mut sink, mut stream) = Self::open_framed_bi(&conn).await?;
 
             let req = PeerMessage {
                 message: Some(peer_message::Message::BootstrapRequest(BootstrapRequest {
@@ -434,7 +487,6 @@ impl<T: Transport> NetworkService<T> {
                         let count = resp.witness_records.len() as u64;
 
                         if let Some(last_record) = resp.witness_records.last() {
-                            use prost::Message;
                             let content = lattice_proto::weaver::WitnessContent::decode(
                                 last_record.content.as_slice(),
                             )?;
@@ -535,39 +587,39 @@ impl<T: Transport> NetworkService<T> {
         mut transport_events: broadcast::Receiver<lattice_net_types::NetworkEvent>,
         gossip_events: Option<broadcast::Receiver<lattice_net_types::NetworkEvent>>,
     ) {
+        fn apply_event(
+            sessions: &super::session::SessionTracker,
+            event: lattice_net_types::NetworkEvent,
+        ) {
+            match event {
+                lattice_net_types::NetworkEvent::PeerConnected(p) => {
+                    let _ = sessions.mark_online(p);
+                }
+                lattice_net_types::NetworkEvent::PeerDisconnected(p) => {
+                    let _ = sessions.mark_offline(p);
+                }
+            }
+        }
+
         if let Some(mut gossip_rx) = gossip_events {
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
-                        result = transport_events.recv() => {
-                            match result {
-                                Ok(lattice_net_types::NetworkEvent::PeerConnected(p)) => { let _ = sessions.mark_online(p); }
-                                Ok(lattice_net_types::NetworkEvent::PeerDisconnected(p)) => { let _ = sessions.mark_offline(p); }
-                                Err(_) => break, // Channel closed
-                            }
-                        }
-                        result = gossip_rx.recv() => {
-                            match result {
-                                Ok(lattice_net_types::NetworkEvent::PeerConnected(p)) => { let _ = sessions.mark_online(p); }
-                                Ok(lattice_net_types::NetworkEvent::PeerDisconnected(p)) => { let _ = sessions.mark_offline(p); }
-                                Err(_) => break, // Channel closed
-                            }
-                        }
+                        result = transport_events.recv() => match result {
+                            Ok(event) => apply_event(&sessions, event),
+                            Err(_) => break,
+                        },
+                        result = gossip_rx.recv() => match result {
+                            Ok(event) => apply_event(&sessions, event),
+                            Err(_) => break,
+                        },
                     }
                 }
             });
         } else {
             tokio::spawn(async move {
-                loop {
-                    match transport_events.recv().await {
-                        Ok(lattice_net_types::NetworkEvent::PeerConnected(p)) => {
-                            let _ = sessions.mark_online(p);
-                        }
-                        Ok(lattice_net_types::NetworkEvent::PeerDisconnected(p)) => {
-                            let _ = sessions.mark_offline(p);
-                        }
-                        Err(_) => break, // Channel closed
-                    }
+                while let Ok(event) = transport_events.recv().await {
+                    apply_event(&sessions, event);
                 }
             });
         }
@@ -635,9 +687,7 @@ impl<T: Transport> NetworkService<T> {
     ) -> Result<(), LatticeNetError> {
         // 1. Connect and send JoinRequest
         let conn = self.transport.connect(&peer_id).await?;
-
-        let bi = conn.open_bi().await?;
-        let (send, recv) = bi.into_split();
+        let (mut sink, mut stream) = Self::open_framed_bi(&conn).await?;
 
         let req = lattice_proto::network::JoinRequest {
             node_pubkey: self.provider.node_id().as_bytes().to_vec(),
@@ -645,13 +695,11 @@ impl<T: Transport> NetworkService<T> {
             invite_secret: secret,
         };
 
-        let mut sink = MessageSink::new(send);
         sink.send(&PeerMessage {
             message: Some(peer_message::Message::JoinRequest(req)),
         })
         .await?;
 
-        let mut stream = MessageStream::new(recv);
         match stream.recv().await? {
             Some(msg) => match msg.message {
                 Some(peer_message::Message::JoinResponse(_)) => {}
@@ -732,15 +780,10 @@ impl<T: Transport> NetworkService<T> {
         &self.sessions
     }
 
-    /// Access the peer store registry
-    pub fn peer_stores(&self) -> &PeerStoreRegistry {
-        &self.peer_stores
-    }
-
     /// Get currently connected peers with last-seen timestamp.
     pub fn connected_peers(
         &self,
-    ) -> Result<HashMap<PubKey, std::time::Instant>, String> {
+    ) -> Result<HashMap<PubKey, std::time::Instant>, LatticeNetError> {
         self.sessions.online_peers()
     }
 
@@ -773,9 +816,19 @@ impl<T: Transport> NetworkService<T> {
                     match conn.open_bi().await {
                         Ok(bi) => {
                             let (send, recv) = bi.into_split();
-                            if let Err(e) = service.handle_incoming_stream(remote, send, recv).await
+                            // Reuse the shared dispatch_stream handler from handlers.rs
+                            match super::handlers::dispatch_stream(
+                                service.provider.clone(),
+                                remote,
+                                send,
+                                recv,
+                            )
+                            .await
                             {
-                                tracing::debug!(error = %e, "Incoming stream handler error");
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "Incoming stream handler error");
+                                }
                             }
                         }
                         Err(_) => break,
@@ -783,92 +836,6 @@ impl<T: Transport> NetworkService<T> {
                 }
             });
         }
-    }
-
-    /// Handle an incoming stream generically (any Transport).
-    /// Dispatches Reconcile, FetchIntentions, FetchChain messages.
-    async fn handle_incoming_stream<W, R>(
-        &self,
-        remote_pubkey: PubKey,
-        send: W,
-        recv: R,
-    ) -> Result<(), LatticeNetError>
-    where
-        W: tokio::io::AsyncWrite + Send + Unpin,
-        R: tokio::io::AsyncRead + Send + Unpin,
-    {
-        let mut sink = crate::MessageSink::new(send);
-        let mut stream = crate::MessageStream::new(recv);
-        let timeout = Duration::from_secs(15);
-
-        loop {
-            let msg = match tokio::time::timeout(timeout, stream.recv()).await {
-                Ok(Ok(Some(m))) => m,
-                Ok(Ok(None)) => break,
-                Ok(Err(e)) => {
-                    tracing::debug!("stream error: {}", e);
-                    break;
-                }
-                Err(_) => {
-                    tracing::debug!("stream timeout");
-                    break;
-                }
-            };
-
-            match msg.message {
-                Some(peer_message::Message::Reconcile(req)) => {
-                    super::handlers::handle_reconcile_start(
-                        self.provider.as_ref(),
-                        &remote_pubkey,
-                        req,
-                        &mut sink,
-                        &mut stream,
-                    )
-                    .await?;
-                }
-                Some(peer_message::Message::FetchIntentions(req)) => {
-                    super::handlers::handle_fetch_intentions(
-                        self.provider.as_ref(),
-                        &remote_pubkey,
-                        req,
-                        &mut sink,
-                    )
-                    .await?;
-                }
-                Some(peer_message::Message::FetchChain(req)) => {
-                    super::handlers::handle_fetch_chain(
-                        self.provider.as_ref(),
-                        &remote_pubkey,
-                        req,
-                        &mut sink,
-                    )
-                    .await?;
-                }
-                Some(peer_message::Message::BootstrapRequest(req)) => {
-                    super::handlers::handle_bootstrap_request(
-                        self.provider.as_ref(),
-                        &remote_pubkey,
-                        req,
-                        &mut sink,
-                    )
-                    .await?;
-                }
-                Some(peer_message::Message::JoinRequest(req)) => {
-                    super::handlers::handle_join_request(
-                        self.provider.as_ref(),
-                        &remote_pubkey,
-                        req,
-                        &mut sink,
-                    )
-                    .await?;
-                    break; // Join is a terminal message, close the stream after response
-                }
-                _ => {
-                    tracing::debug!("Unexpected message type in generic handler");
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Set global gossip enabled flag.
@@ -891,16 +858,8 @@ impl<T: Transport> NetworkService<T> {
         self.provider.store_registry().get_network_store(&store_id)
     }
 
-    /// Look up a `NetworkStore` by ID.
-    ///
-    /// Checks the `peer_stores` cache first (populated by `register_store_by_id`),
-    /// then falls back to the provider's `NetworkStoreRegistry`. This means
-    /// callers never race against registration — if the store exists anywhere,
-    /// it will be found.
-    async fn registered_store(&self, store_id: Uuid) -> Result<NetworkStore, LatticeNetError> {
-        if let Some(store) = self.peer_stores.read().await.get(&store_id).cloned() {
-            return Ok(store);
-        }
+    /// Look up a `NetworkStore` by ID from the provider's registry.
+    fn registered_store(&self, store_id: Uuid) -> Result<NetworkStore, LatticeNetError> {
         self.get_store(store_id)
             .ok_or(LatticeNetError::StoreNotRegistered(store_id))
     }
@@ -920,10 +879,7 @@ impl<T: Transport> NetworkService<T> {
     ) -> Result<Vec<PubKey>, LatticeNetError> {
         let my_pubkey = self.transport.public_key();
 
-        let online_peers = self
-            .sessions
-            .online_peers()
-            .map_err(|_| LatticeNetError::LockPoisoned)?;
+        let online_peers = self.sessions.online_peers()?;
 
         let acceptable_authors = store.list_acceptable_authors();
 
@@ -941,10 +897,7 @@ impl<T: Transport> NetworkService<T> {
     pub async fn active_peer_ids(&self) -> Result<Vec<PubKey>, LatticeNetError> {
         let my_pubkey = self.transport.public_key();
 
-        let peers = self
-            .sessions
-            .online_peers()
-            .map_err(|_| LatticeNetError::LockPoisoned)?;
+        let peers = self.sessions.online_peers()?;
 
         Ok(peers
             .keys()
@@ -970,14 +923,7 @@ impl<T: Transport> NetworkService<T> {
             LatticeNetError::Transport(e)
         })?;
 
-        let bi = conn
-            .open_bi()
-            .await
-            .map_err(LatticeNetError::Transport)?;
-        let (send, recv) = bi.into_split();
-
-        let mut sink = MessageSink::new(send);
-        let mut stream = MessageStream::new(recv);
+        let (mut sink, mut stream) = Self::open_framed_bi(&conn).await?;
 
         let mut session =
             super::sync_session::SyncSession::new(store, &mut sink, &mut stream, peer_id);
@@ -1053,7 +999,7 @@ impl<T: Transport> NetworkService<T> {
 
     /// Sync with all active peers for a store (by ID).
     pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, LatticeNetError> {
-        let store = self.registered_store(store_id).await?;
+        let store = self.registered_store(store_id)?;
         self.sync_all(&store).await
     }
 
@@ -1064,7 +1010,7 @@ impl<T: Transport> NetworkService<T> {
         peer_id: PubKey,
         authors: &[PubKey],
     ) -> Result<SyncResult, LatticeNetError> {
-        let store = self.registered_store(store_id).await?;
+        let store = self.registered_store(store_id)?;
         self.sync_with_peer(&store, peer_id, authors).await
     }
 
@@ -1078,23 +1024,11 @@ impl<T: Transport> NetworkService<T> {
         target_hash: Hash,
         since_hash: Option<Hash>,
     ) -> Result<usize, LatticeNetError> {
-        let store = self.registered_store(store_id).await?;
+        let store = self.registered_store(store_id)?;
 
         tracing::debug!("FetchChain: connecting to peer");
-        let conn = self
-            .transport
-            .connect(&peer_id)
-            .await
-            .map_err(LatticeNetError::Transport)?;
-
-        let bi = conn
-            .open_bi()
-            .await
-            .map_err(LatticeNetError::Transport)?;
-        let (send, recv) = bi.into_split();
-
-        let mut sink = MessageSink::new(send);
-        let mut stream = MessageStream::new(recv);
+        let conn = self.transport.connect(&peer_id).await?;
+        let (mut sink, mut stream) = Self::open_framed_bi(&conn).await?;
 
         let req = PeerMessage {
             message: Some(peer_message::Message::FetchChain(FetchChain {

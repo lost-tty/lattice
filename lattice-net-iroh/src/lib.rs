@@ -78,7 +78,6 @@ impl IrohBackend {
         let gossip = Arc::new(GossipManager::new(&transport).await?);
 
         let sync_protocol = protocol::SyncProtocol::new(provider);
-        let peer_stores = sync_protocol.peer_stores();
 
         let router = iroh::protocol::Router::builder(transport.endpoint().clone())
             .accept(LATTICE_ALPN, sync_protocol)
@@ -89,7 +88,6 @@ impl IrohBackend {
             transport,
             gossip: Some(gossip as Arc<dyn GossipLayer>),
             router: Some(Box::new(RouterShutdownHandle(router))),
-            peer_stores,
         })
     }
 }

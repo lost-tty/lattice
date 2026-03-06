@@ -16,6 +16,11 @@ pub fn intention_to_proto(signed: &SignedIntention) -> crate::weaver::SignedInte
     }
 }
 
+/// Batch Model → Proto (infallible)
+pub fn intentions_to_proto(signed: &[SignedIntention]) -> Vec<crate::weaver::SignedIntention> {
+    signed.iter().map(intention_to_proto).collect()
+}
+
 /// Proto → Model (fallible: borsh decode + signature length)
 pub fn intention_from_proto(
     proto: &crate::weaver::SignedIntention,

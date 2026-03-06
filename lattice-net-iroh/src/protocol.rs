@@ -4,7 +4,6 @@
 //! to the generic `dispatch_stream` function in `lattice-net::network::handlers`.
 
 use crate::ToLattice;
-use lattice_net::network::PeerStoreRegistry;
 use lattice_net::LatticeNetError;
 use lattice_net_types::NodeProviderExt;
 
@@ -16,20 +15,11 @@ use std::sync::Arc;
 /// This is used with iroh's Router for accepting incoming connections.
 pub struct SyncProtocol {
     provider: Arc<dyn NodeProviderExt>,
-    peer_stores: PeerStoreRegistry,
 }
 
 impl SyncProtocol {
     pub fn new(provider: Arc<dyn NodeProviderExt>) -> Self {
-        Self {
-            provider,
-            peer_stores: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        }
-    }
-
-    /// Get the shared peer_stores set (needed by NetworkService)
-    pub fn peer_stores(&self) -> PeerStoreRegistry {
-        self.peer_stores.clone()
+        Self { provider }
     }
 }
 

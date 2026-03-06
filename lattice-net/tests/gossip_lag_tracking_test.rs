@@ -162,7 +162,8 @@ async fn test_gossip_stats_tracked_on_successful_broadcast() {
     let (total_drops, needs_sync) = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let stats = server_a.gossip_stats().read().await;
-            if let Some(s) = stats.get(&store_id) {
+            if let Some(entry) = stats.get(&store_id) {
+                let s = entry.lock().unwrap();
                 if s.broadcast_since_last_drop {
                     return (s.total_drops, s.needs_sync());
                 }
@@ -232,7 +233,8 @@ async fn test_gossip_stats_consistent_under_burst_writes() {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let stats = server_a.gossip_stats().read().await;
-                if let Some(s) = stats.get(&store_id) {
+                if let Some(entry) = stats.get(&store_id) {
+                    let s = entry.lock().unwrap();
                     // Wait until the forwarder has finished draining
                     return (s.total_drops, s.broadcast_since_last_drop, s.needs_sync());
                 }

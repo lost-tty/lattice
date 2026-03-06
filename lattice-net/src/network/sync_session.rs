@@ -25,7 +25,7 @@ use crate::error::LatticeNetError;
 use crate::{MessageSink, MessageStream};
 use lattice_model::types::{Hash, PubKey};
 use lattice_net_types::NetworkStore;
-use lattice_proto::convert::{intention_from_proto, intention_to_proto};
+use lattice_proto::convert::{intention_from_proto, intentions_to_proto};
 use lattice_proto::network::{
     peer_message, reconcile_message::Content as ReconcileContent, FetchIntentions,
     IntentionResponse, PeerMessage, ReconcilePayload, SyncDone,
@@ -325,18 +325,16 @@ impl<'a, W: AsyncWrite + Send + Unpin, R: AsyncRead + Send + Unpin> SyncSession<
             return Ok(0);
         }
 
-        let chunks: Vec<_> = all_hashes.chunks(BATCH_SIZE).collect();
-        let num_chunks = chunks.len();
+        let num_chunks = all_hashes.chunks(BATCH_SIZE).len();
         let mut total_sent: u64 = 0;
 
-        for (i, chunk) in chunks.iter().enumerate() {
+        for (i, chunk) in all_hashes.chunks(BATCH_SIZE).enumerate() {
             let intentions = self.store.fetch_intentions(chunk.to_vec()).await?;
 
             total_sent += intentions.len() as u64;
-            let proto_intentions: Vec<_> = intentions.iter().map(intention_to_proto).collect();
             let is_last = i == num_chunks - 1;
 
-            self.send_intention_response(&req.store_id, &proto_intentions, is_last)
+            self.send_intention_response(&req.store_id, &intentions_to_proto(&intentions), is_last)
                 .await?;
         }
 
