@@ -71,7 +71,7 @@ pub use lattice_kernel::store::StoreInfo;
 /// Result of accepting a peer's join request
 pub struct JoinAcceptance {
     pub store_id: Uuid,
-    pub authorized_authors: Vec<PubKey>,
+    pub store_type: String,
 }
 
 pub use lattice_model::PeerInfo;
@@ -335,11 +335,6 @@ impl Node {
             let (handle, store_type) =
                 if let Ok((handle, store_type)) = self.store_manager.open_existing(store_id) {
                     (handle, store_type)
-                } else if let Ok(handle) = self
-                    .store_manager
-                    .open(store_id, lattice_model::STORE_TYPE_KVSTORE)
-                {
-                    (handle, lattice_model::STORE_TYPE_KVSTORE.to_string())
                 } else {
                     tracing::warn!("Failed to open root store {}", store_id);
                     continue;
@@ -428,10 +423,13 @@ impl Node {
     pub async fn process_join_response(
         &self,
         store_id: Uuid,
+        store_type: &str,
         via_peer: PubKey,
     ) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
         // 1. Initialize Mesh (must be done first)
-        let store = self.complete_join(store_id, vec![via_peer]).await?;
+        let store = self
+            .complete_join(store_id, store_type, vec![via_peer])
+            .await?;
 
         // 2. Clear pending joins
         if let Ok(mut pending) = self.pending_joins.lock() {
@@ -442,11 +440,12 @@ impl Node {
     }
 
     /// Complete joining a mesh - creates store with given UUID, caches handle.
-    /// Called after receiving store_id from peer's JoinResponse.
+    /// Called after receiving store_id and store_type from peer's JoinResponse.
     /// If `bootstrap_peers` is provided, server will sync with those peers after registration.
     pub async fn complete_join(
         &self,
         store_id: Uuid,
+        store_type: &str,
         bootstrap_peers: Vec<PubKey>,
     ) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
         // Record in meta.db (as member)
@@ -460,12 +459,9 @@ impl Node {
             },
         )?;
 
-        // Workaround: Use open() then configure.
-        let handle = self
-            .store_manager
-            .open(store_id, lattice_model::STORE_TYPE_KVSTORE)?;
+        let handle = self.store_manager.open(store_id, store_type)?;
 
-        // 2. Configure System Table
+        // Configure System Table
         let system = handle
             .clone()
             .as_system()
@@ -481,12 +477,8 @@ impl Node {
             peer_manager.add_bootstrap_peer(*peer);
         }
 
-        self.store_manager.register(
-            store_id,
-            handle.clone(),
-            lattice_model::STORE_TYPE_KVSTORE,
-            peer_manager,
-        )?;
+        self.store_manager
+            .register(store_id, handle.clone(), store_type, peer_manager)?;
 
         // Start watching
         self.store_manager.start_watching(store_id)?;
@@ -505,15 +497,20 @@ impl Node {
         store_id: Uuid,
         secret: &[u8],
     ) -> Result<JoinAcceptance, NodeError> {
-        let authorized_authors = self
-            .store_manager
+        self.store_manager
             .handle_peer_join(store_id, pubkey, secret)
             .await
             .map_err(|e| NodeError::Store(StateError::Unauthorized(e.to_string())))?;
 
+        let store_type = self
+            .store_manager
+            .get_info(&store_id)
+            .map(|info| info.store_type)
+            .unwrap_or_default();
+
         Ok(JoinAcceptance {
-            store_id: store_id,
-            authorized_authors,
+            store_id,
+            store_type,
         })
     }
 
@@ -640,9 +637,10 @@ impl NodeProviderAsync for Node {
     async fn process_join_response(
         &self,
         store_id: Uuid,
+        store_type: &str,
         via_peer: PubKey,
     ) -> Result<(), NodeProviderError> {
-        self.process_join_response(store_id, via_peer)
+        self.process_join_response(store_id, store_type, via_peer)
             .await
             .map(|_| ())
             .map_err(|e| NodeProviderError::Join(e.to_string()))
@@ -661,7 +659,7 @@ impl NodeProviderAsync for Node {
 
         Ok(JoinAcceptanceInfo {
             store_id: acceptance.store_id,
-            authorized_authors: acceptance.authorized_authors,
+            store_type: acceptance.store_type,
         })
     }
 }
@@ -1055,9 +1053,9 @@ mod tests {
             .expect("accept join");
         assert_eq!(acceptance.store_id, invite.store_id);
 
-        // Step 5: B completes join (simulates receiving JoinResponse)
+        // Step 5: B completes join (simulates receiving JoinResponse with store_type)
         let store_b = node_b
-            .complete_join(invite.store_id, vec![])
+            .complete_join(invite.store_id, &acceptance.store_type, vec![])
             .await
             .expect("B join");
 

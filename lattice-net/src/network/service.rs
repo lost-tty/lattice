@@ -141,6 +141,10 @@ async fn run_gossip_ingester<T: Transport>(
             continue;
         }
 
+        // A valid authorized gossip message proves this peer is reachable.
+        // Mark them online so handle_missing_dep can find alternative peers.
+        let _ = service.sessions.mark_online(sender_pubkey);
+
         let gossip_msg = match lattice_proto::network::GossipMessage::decode(raw_bytes.as_slice()) {
             Ok(m) => m,
             Err(e) => {
@@ -251,16 +255,16 @@ async fn run_auto_sync<T: Transport>(
                     break;
                 };
                 // Only sync if this peer is an acceptable author for this store.
-                let dominated = match service.registered_store(store_id) {
-                    Ok(store) => store.list_acceptable_authors().contains(&peer),
-                    Err(_) => false,
+                let store = match service.registered_store(store_id) {
+                    Ok(s) => s,
+                    Err(_) => continue,
                 };
-                if !dominated {
+                if !store.list_acceptable_authors().contains(&peer) {
                     tracing::debug!(store_id = %store_id, peer = %peer, "Skipping sync — peer not in acceptable authors");
                     continue;
                 }
                 tracing::info!(store_id = %store_id, peer = %peer, "New peer connected, syncing");
-                let _ = service.sync_with_peer_by_id(store_id, peer, &[]).await;
+                let _ = service.sync_with_peer(&store, peer, &[]).await;
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 // Missed some peer-connected events — sync with everyone to catch up.
@@ -568,12 +572,55 @@ impl<T: Transport> NetworkService<T> {
             }
             Err(e) => {
                 tracing::warn!(store_id = %store_id, error = %e, "Smart fetch failed or incomplete, triggering targeted sync fallback");
-                if let Err(e) = self.sync_with_peer_by_id(store_id, peer, &[]).await {
-                    tracing::warn!("Fallback targeted sync failed: {}, trying sync_all", e);
-                    if let Err(e) = self.sync_all_by_id(store_id).await {
-                        tracing::warn!("Fallback network sync failed: {}", e);
+                let store = self.registered_store(store_id)?;
+                if let Err(e) = self.sync_with_peer(&store, peer, &[]).await {
+                    tracing::warn!(peer = %peer, error = %e, "Fallback targeted sync also failed, trying other online peers");
+
+                    // Try other peers for this store sequentially.
+                    // First try online peers, then any known acceptable authors
+                    // that we haven't tried yet (transport.connect will reach
+                    // them if they're reachable).
+                    let my_pubkey = self.transport.public_key();
+
+                    let online_peers: Vec<PubKey> = self
+                        .active_peer_ids_for_store(&store)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|p| *p != peer)
+                        .collect();
+
+                    // Acceptable authors we're not yet connected to
+                    let offline_authors: Vec<PubKey> = store
+                        .list_acceptable_authors()
+                        .into_iter()
+                        .filter(|p| *p != peer && *p != my_pubkey)
+                        .filter(|p| !online_peers.contains(p))
+                        .collect();
+
+                    let candidates: Vec<PubKey> =
+                        online_peers.into_iter().chain(offline_authors).collect();
+
+                    if candidates.is_empty() {
+                        tracing::warn!("No alternative peers available for store {store_id}");
                         return Err(e);
                     }
+
+                    for alt_peer in &candidates {
+                        tracing::debug!(peer = %alt_peer, "Attempting sync with alternative peer");
+                        match self.sync_with_peer(&store, *alt_peer, &[]).await {
+                            Ok(_) => {
+                                tracing::info!(peer = %alt_peer, "Alternative peer sync succeeded");
+                                return Ok(());
+                            }
+                            Err(alt_err) => {
+                                tracing::warn!(peer = %alt_peer, error = %alt_err, "Alternative peer sync failed");
+                            }
+                        }
+                    }
+
+                    tracing::warn!("All alternative peers failed for store {store_id}");
+                    return Err(e);
                 }
                 Ok(())
             }
@@ -664,9 +711,7 @@ impl<T: Transport> NetworkService<T> {
                 }
                 NetEvent::SyncWithPeer { store_id, peer } => {
                     tokio::spawn(async move {
-                        let _ = service
-                            .sync_with_peer_by_id(store_id, PubKey::from(peer), &[])
-                            .await;
+                        let _ = service.sync_with_peer_by_id(store_id, peer, &[]).await;
                     });
                 }
                 NetEvent::SyncStore { store_id } => {
@@ -700,9 +745,9 @@ impl<T: Transport> NetworkService<T> {
         })
         .await?;
 
-        match stream.recv().await? {
+        let store_type = match stream.recv().await? {
             Some(msg) => match msg.message {
-                Some(peer_message::Message::JoinResponse(_)) => {}
+                Some(peer_message::Message::JoinResponse(resp)) => resp.store_type,
                 _ => {
                     return Err(LatticeNetError::Protocol(
                         "unexpected response to JoinRequest",
@@ -714,12 +759,18 @@ impl<T: Transport> NetworkService<T> {
                     "connection closed during join",
                 ))
             }
+        };
+
+        if store_type.is_empty() {
+            return Err(LatticeNetError::InvalidField(
+                "store_type in JoinResponse",
+            ));
         }
 
         // 2. Create store locally
         let _ = self.sessions.mark_online(peer_id);
         self.provider
-            .process_join_response(store_id, peer_id)
+            .process_join_response(store_id, &store_type, peer_id)
             .await
             .map_err(|e| LatticeNetError::Ingest(e.to_string()))?;
 

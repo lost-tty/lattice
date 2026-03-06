@@ -25,7 +25,6 @@ lattice-net = { workspace = true }
 lattice-net-types = { workspace = true }
 lattice-model = { workspace = true }
 lattice-node = { workspace = true }
-lattice-kvstore = { workspace = true }
 lattice-mockkernel = { workspace = true }
 lattice-storage = { workspace = true }
 lattice-systemstore = { workspace = true }

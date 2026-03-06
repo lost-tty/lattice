@@ -21,6 +21,7 @@ message InviteToken {
 message JoinResponse {
   bytes inviter_pubkey = 1;  // Inviter's public key for verification
   bytes store_id = 2;       // Root store UUID (16 bytes) for new node to create
+  string store_type = 3;    // Store type identifier (e.g. "core:kvstore")
 }
 
 // 2. Peer Message Wrapper (unicast RPC)

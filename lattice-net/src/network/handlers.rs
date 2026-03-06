@@ -116,6 +116,7 @@ pub async fn handle_join_request<W: tokio::io::AsyncWrite + Send + Unpin>(
         message: Some(peer_message::Message::JoinResponse(JoinResponse {
             store_id: acceptance.store_id.as_bytes().to_vec(),
             inviter_pubkey: provider.node_id().to_vec(),
+            store_type: acceptance.store_type,
         })),
     };
     sink.send(&resp).await?;

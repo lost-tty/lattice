@@ -41,7 +41,7 @@ pub enum UserEvent {
 #[derive(Clone, Debug)]
 pub struct JoinAcceptanceInfo {
     pub store_id: Uuid,
-    pub authorized_authors: Vec<PubKey>,
+    pub store_type: String,
 }
 
 /// Trait for network layer to interact with the node.
@@ -65,6 +65,7 @@ pub trait NodeProviderAsync: NodeProvider {
     async fn process_join_response(
         &self,
         store_id: Uuid,
+        store_type: &str,
         via_peer: PubKey,
     ) -> Result<(), NodeProviderError>;
 

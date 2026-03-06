@@ -70,7 +70,7 @@ async fn test_peer_persistence_after_bootstrap() {
 
     // 1. Process join response (creates store on B, adds 'via_peer' to bootstrap set)
     let _store_b = node_b
-        .process_join_response(store_id, a_pubkey)
+        .process_join_response(store_id, STORE_TYPE_NULLSTORE, a_pubkey)
         .await
         .expect("process join");
 

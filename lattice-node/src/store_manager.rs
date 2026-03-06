@@ -496,7 +496,7 @@ impl StoreManager {
         store_id: Uuid,
         pubkey: lattice_model::types::PubKey,
         secret: &[u8],
-    ) -> Result<Vec<lattice_model::types::PubKey>, StoreManagerError> {
+    ) -> Result<(), StoreManagerError> {
         // Check invite token (propagate infrastructure errors)
         let valid_token = self.consume_invite_secret(store_id, secret, pubkey).await?;
 
@@ -517,8 +517,7 @@ impl StoreManager {
         // Activate peer (idempotent)
         peer_manager.activate_peer(pubkey).await?;
 
-        // Return authorized authors
-        Ok(peer_manager.list_acceptable_authors())
+        Ok(())
     }
 
     pub async fn delete_child_store(

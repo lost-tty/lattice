@@ -57,6 +57,7 @@ mod tests {
         async fn process_join_response(
             &self,
             _store_id: Uuid,
+            _store_type: &str,
             _via_peer: PubKey,
         ) -> Result<(), NodeProviderError> {
             Ok(())

@@ -26,6 +26,15 @@ impl ChannelNetwork {
     async fn register(&self, pubkey: PubKey, accept_tx: mpsc::Sender<ChannelConnection>) {
         self.peers.lock().await.insert(pubkey, accept_tx);
     }
+
+    /// Remove a peer from the network, making it unreachable.
+    ///
+    /// Any subsequent `connect()` calls targeting this peer will fail with
+    /// `TransportError::Connect("Peer ... not found in network")`.
+    /// The peer can rejoin by creating a new `ChannelTransport` on this network.
+    pub async fn disconnect(&self, pubkey: &PubKey) {
+        self.peers.lock().await.remove(pubkey);
+    }
 }
 
 impl Default for ChannelNetwork {
