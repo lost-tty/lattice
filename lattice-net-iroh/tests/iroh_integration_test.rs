@@ -13,8 +13,7 @@ use lattice_node::{direct_opener, Invite, Node, NodeBuilder, NodeEvent};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
-type PersistentNullState =
-    lattice_systemstore::SystemLayer<lattice_mockkernel::PersistentNullState>;
+type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>;
 
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -32,7 +31,7 @@ fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
         .in_memory()
         .with_opener(STORE_TYPE_NULLSTORE, |registry| {
-            direct_opener::<PersistentNullState>(registry)
+            direct_opener::<TestNullState>(registry)
         })
 }
 

@@ -10,7 +10,7 @@ use lattice_kernel::{
     store::{OpenedStore, RegistryEntry, StateError, Store, StoreInfo},
     NodeIdentity,
 };
-use lattice_model::StateMachine;
+use lattice_model::{StateMachine, StoreIdentity};
 use lattice_model::StorageConfig;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -93,7 +93,7 @@ impl StoreRegistry {
     /// Does NOT open or spawn actor - use get_or_open() for that
     pub fn create<S, F>(&self, store_id: Uuid, open_fn: F) -> Result<Uuid, StateError>
     where
-        S: StateMachine + Send + Sync + 'static,
+        S: StateMachine + StoreIdentity + Send + Sync + 'static,
         F: FnOnce(&StorageConfig) -> Result<S, StateError>,
     {
         self.ensure_dirs(store_id)?;
@@ -122,7 +122,7 @@ impl StoreRegistry {
         open_fn: F,
     ) -> Result<(Store<S>, StoreInfo), StateError>
     where
-        S: StateMachine + Send + Sync + 'static + lattice_systemstore::SystemReader,
+        S: StateMachine + StoreIdentity + Send + Sync + 'static + lattice_systemstore::SystemReader,
         F: FnOnce(&StorageConfig) -> Result<S, StateError>,
     {
         {

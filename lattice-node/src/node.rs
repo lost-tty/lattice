@@ -4,7 +4,6 @@ use crate::{
     meta_store::MetaStoreError, peer_manager::PeerManagerError, store_registry::StoreRegistry,
     DataDir, MetaStore, StoreHandle, Uuid,
 };
-// Removed unused imports: PersistentState, KvState
 use lattice_kernel::{store::StateError, NodeError as IdentityError, NodeIdentity, PeerStatus};
 
 use lattice_model::types::PubKey;
@@ -688,28 +687,22 @@ mod tests {
     use lattice_model::types::PubKey;
     use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
 
-    // Use lattice-systemstore wrappers for system capabilities
-    type PersistentKvState = lattice_systemstore::SystemLayer<
-        lattice_storage::PersistentState<lattice_kvstore::KvState>,
-    >;
-    type PersistentLogState = lattice_systemstore::SystemLayer<
-        lattice_storage::PersistentState<lattice_logstore::LogState>,
-    >;
-    type PersistentNullState =
-        lattice_systemstore::SystemLayer<lattice_mockkernel::PersistentNullState>;
+    type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
+    type TestLogState = lattice_systemstore::SystemLayer<lattice_logstore::LogState>;
+    type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>;
 
     /// Helper to create node builder with openers registered (in-memory storage).
     fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
         NodeBuilder::new(data_dir)
             .in_memory()
             .with_opener(STORE_TYPE_KVSTORE, |registry| {
-                direct_opener::<PersistentKvState>(registry)
+                direct_opener::<TestKvState>(registry)
             })
             .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-                direct_opener::<PersistentLogState>(registry)
+                direct_opener::<TestLogState>(registry)
             })
             .with_opener(STORE_TYPE_NULLSTORE, |registry| {
-                direct_opener::<PersistentNullState>(registry)
+                direct_opener::<TestNullState>(registry)
             })
     }
 
@@ -717,10 +710,10 @@ mod tests {
     fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
         NodeBuilder::new(data_dir)
             .with_opener(STORE_TYPE_KVSTORE, |registry| {
-                direct_opener::<PersistentKvState>(registry)
+                direct_opener::<TestKvState>(registry)
             })
             .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-                direct_opener::<PersistentLogState>(registry)
+                direct_opener::<TestLogState>(registry)
             })
     }
 

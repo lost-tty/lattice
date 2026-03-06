@@ -95,7 +95,7 @@ impl RuntimeBuilder {
     /// ```ignore
     /// Runtime::builder()
     ///     .with_opener("custom:mystore", |registry| {
-    ///         direct_opener::<SystemLayer<PersistentState<MyState>>>(registry)
+    ///         direct_opener::<SystemLayer<MyState>>(registry)
     ///     })
     ///     .build().await
     /// ```
@@ -118,14 +118,13 @@ impl RuntimeBuilder {
         use lattice_logstore::LogState;
         use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
         use lattice_node::direct_opener;
-        use lattice_storage::PersistentState;
         use lattice_systemstore::SystemLayer;
 
         self.with_opener(STORE_TYPE_KVSTORE, |registry| {
-            direct_opener::<SystemLayer<PersistentState<KvState>>>(registry)
+            direct_opener::<SystemLayer<KvState>>(registry)
         })
         .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-            direct_opener::<SystemLayer<PersistentState<LogState>>>(registry)
+            direct_opener::<SystemLayer<LogState>>(registry)
         })
     }
 

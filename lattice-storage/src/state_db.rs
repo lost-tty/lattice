@@ -1,5 +1,5 @@
 use blake3::Hasher;
-use lattice_model::{DagQueries, Hash, Op, PubKey, StateMachine, StorageConfig, StoreMeta};
+use lattice_model::{DagQueries, Hash, Op, PubKey, StorageConfig, StoreMeta};
 use redb::{Database, ReadableTable, TableDefinition, TableHandle};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -218,8 +218,7 @@ impl StateBackend {
                 Database::builder().create(&state_db_path)?
             }
             StorageConfig::InMemory => {
-                Database::builder()
-                    .create_with_backend(redb::backends::InMemoryBackend::new())?
+                Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?
             }
         };
         Self::init(db, id, expected_type, expected_version)
@@ -285,7 +284,10 @@ impl StateBackend {
         }
         write_txn.commit()?;
 
-        Ok(Self { db: Arc::new(db), id })
+        Ok(Self {
+            db: Arc::new(db),
+            id,
+        })
     }
 
     /// Access the underlying Redb database.
@@ -637,10 +639,6 @@ impl<'a, R: Read> Read for HashingReader<'a, R> {
 
 // ==================== Composition Pattern ====================
 
-use lattice_store_base::{FieldFormat, Introspectable};
-use prost_reflect::DynamicMessage;
-use std::collections::HashMap;
-
 /// Core trait for Lattice state machines.
 ///
 /// Provides the unified apply pattern: txn → verify → mutate → update identity → commit → notify
@@ -706,212 +704,7 @@ pub trait StateLogic: Send + Sync {
     }
 }
 
-/// A composite StateMachine wrapper.
-///
-/// - Wraps T (e.g. KvState) which holds the Backend and implements Logic.
-/// - Implements `StateMachine` by delegating:
-///     - `apply` -> `logic.apply(op)`
-///     - `snapshot`, `restore`, etc. -> `logic.backend().snapshot()`
-/// - Derefs to T so consumers can call `store.get()` directly.
-#[derive(Clone)]
-pub struct PersistentState<T: StateLogic> {
-    inner: T,
-}
-
-impl<T: StateLogic> PersistentState<T> {
-    pub fn new(inner: T) -> Self {
-        Self { inner }
-    }
-
-    pub fn inner(&self) -> &T {
-        &self.inner
-    }
-}
-
-// Deref to inner logic to expose methods like `get`, `scan`
-impl<T: StateLogic> std::ops::Deref for PersistentState<T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-// PersistentState<T> must implement StateLogic for SystemLayer<PersistentState<T>> to work.
-// It simplifies delegates to the inner logic.
-impl<T: StateLogic> StateLogic for PersistentState<T> {
-    type Updates = T::Updates;
-
-    fn backend(&self) -> &StateBackend {
-        self.inner.backend()
-    }
-
-    fn mutate(
-        &self,
-        table: &mut redb::Table<&[u8], &[u8]>,
-        op: &Op,
-        dag: &dyn DagQueries,
-    ) -> Result<Self::Updates, StateDbError> {
-        self.inner.mutate(table, op, dag)
-    }
-
-    fn notify(&self, updates: Self::Updates) {
-        self.inner.notify(updates)
-    }
-}
-
-impl<T: StateLogic> StateMachine for PersistentState<T> {
-    type Error = StateDbError;
-
-    fn apply(&self, op: &Op, dag: &dyn DagQueries) -> Result<(), Self::Error> {
-        self.inner.apply(op, dag)
-    }
-
-    fn snapshot(&self) -> Result<Box<dyn Read + Send>, Self::Error> {
-        let mut buffer = Vec::new();
-        self.inner.backend().snapshot(&mut buffer)?;
-        Ok(Box::new(std::io::Cursor::new(buffer)))
-    }
-
-    fn restore(&self, snapshot: Box<dyn Read + Send>) -> Result<(), Self::Error> {
-        let mut reader = snapshot;
-        self.inner.backend().restore(&mut reader)
-    }
-
-    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
-        self.inner.backend().get_applied_chaintips()
-    }
-}
-
-// Delegate Introspectable if valid
-impl<T: StateLogic + Introspectable> Introspectable for PersistentState<T> {
-    fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
-        self.inner.service_descriptor()
-    }
-
-    fn decode_payload(
-        &self,
-        payload: &[u8],
-    ) -> Result<DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
-        self.inner.decode_payload(payload)
-    }
-
-    fn command_docs(&self) -> HashMap<String, String> {
-        self.inner.command_docs()
-    }
-
-    fn field_formats(&self) -> HashMap<String, FieldFormat> {
-        self.inner.field_formats()
-    }
-
-    fn summarize_payload(&self, payload: &DynamicMessage) -> Vec<lattice_model::SExpr> {
-        self.inner.summarize_payload(payload)
-    }
-}
-
-// NOTE: StreamReflectable delegation is now in the Handle-Less Pattern section below
-// using StreamProvider instead of requiring T: StreamReflectable directly.
-
-// =============================================================================
-// Additional Trait Delegations for Handle-Less Pattern
-// =============================================================================
-//
-// These delegations allow Store<PersistentState<S>> to satisfy StoreHandle
-// requirements by forwarding trait impls from the inner state type.
-//
-// NOTE: CommandHandler is NOT needed here - there's a blanket impl in lattice-store-base
-// for types that Deref to a CommandHandler. PersistentState<T>: Deref<Target = T> so
-// when T: CommandHandler, PersistentState<T> is automatically CommandHandler too.
-
-use lattice_model::StoreTypeProvider;
-use lattice_store_base::{BoxByteStream, StreamError, StreamHandler, StreamProvider, Subscriber};
-use std::future::Future;
-use std::pin::Pin;
-
-// PersistentState<T> implements StreamProvider by forwarding to inner type's handlers.
-// Each handler uses the same forwarding function that looks up the inner handler by name.
-impl<T: StateLogic + StreamProvider + Send + Sync + 'static> StreamProvider for PersistentState<T> {
-    fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
-        // Get descriptors from inner type and create handlers for each.
-        self.inner
-            .stream_handlers()
-            .into_iter()
-            .map(|h| StreamHandler {
-                descriptor: h.descriptor.clone(),
-                subscriber: Box::new(ForwardSubscriber {
-                    stream_name: h.descriptor.name,
-                }),
-            })
-            .collect()
-    }
-}
-
-/// Subscriber that forwards subscriptions to the inner state by name lookup.
-struct ForwardSubscriber {
-    stream_name: String,
-}
-
-impl<T: StateLogic + StreamProvider + Send + Sync> Subscriber<PersistentState<T>>
-    for ForwardSubscriber
-{
-    fn subscribe<'a>(
-        &'a self,
-        state: &'a PersistentState<T>,
-        params: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<BoxByteStream, StreamError>> + Send + 'a>> {
-        let stream_name = self.stream_name.clone();
-
-        Box::pin(async move {
-            // Find the inner handler by name
-            let handler = state
-                .inner
-                .stream_handlers()
-                .into_iter()
-                .find(|h| h.descriptor.name == stream_name)
-                .ok_or_else(|| {
-                    StreamError::NotFound(format!("Inner handler for {} not found", stream_name))
-                })?;
-
-            // Delegate subscription to the inner handler's subscriber
-            handler.subscriber.subscribe(&state.inner, params).await
-        })
-    }
-}
-
-// Delegate StoreTypeProvider for store type identification
-impl<T: StateLogic + StoreTypeProvider> StoreTypeProvider for PersistentState<T> {
-    fn store_type() -> &'static str {
-        T::store_type()
-    }
-}
-
-/// Helper to standardize the "Open" ceremony for PersistentState.
-///
-/// For `StorageConfig::File`, validates store type and schema version.
-/// For `StorageConfig::InMemory`, skips type/version validation.
-pub fn setup_persistent_state<L: StateLogic + StoreTypeProvider>(
-    id: Uuid,
-    config: &StorageConfig,
-    constructor: impl FnOnce(StateBackend) -> L,
-) -> Result<PersistentState<L>, StateDbError> {
-    let (expected_type, expected_version) = match config {
-        StorageConfig::File(_) => (Some(L::store_type()), 1),
-        StorageConfig::InMemory => (None, 0),
-    };
-    let backend = StateBackend::open(id, config, expected_type, expected_version)?;
-    Ok(PersistentState::new(constructor(backend)))
-}
-
 /// Trait for constructing state logic from a backend.
-/// Allows generic implementation of Openable for PersistentState<T>.
 pub trait StateFactory: StateLogic {
-    /// Create the state logic instance from an open backend.
     fn create(backend: StateBackend) -> Self;
-}
-
-// Generic implementation of Openable for any PersistentState<T> where T implements StateFactory + StoreTypeProvider.
-// This solves the Orphan Rule violation by implementing it in the crate where PersistentState is defined.
-impl<T: StateFactory + StoreTypeProvider + 'static> lattice_model::Openable for PersistentState<T> {
-    fn open(id: Uuid, config: &StorageConfig) -> Result<Self, String> {
-        setup_persistent_state(id, config, T::create).map_err(|e| e.to_string())
-    }
 }

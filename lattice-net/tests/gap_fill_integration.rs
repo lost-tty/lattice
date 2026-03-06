@@ -2,9 +2,9 @@
 
 mod common;
 
-use lattice_kvstore::PersistentKvState;
+use lattice_kvstore::KvState;
 use lattice_kvstore_api::KvStoreExt;
-use lattice_logstore::PersistentLogState;
+use lattice_logstore::LogState;
 use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
 use lattice_net::network;
 use lattice_net_sim::{ChannelNetwork, ChannelTransport};
@@ -17,10 +17,10 @@ fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
         .in_memory()
         .with_opener(STORE_TYPE_KVSTORE, |registry| {
-            direct_opener::<SystemLayer<PersistentKvState>>(registry)
+            direct_opener::<SystemLayer<KvState>>(registry)
         })
         .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-            direct_opener::<SystemLayer<PersistentLogState>>(registry)
+            direct_opener::<SystemLayer<LogState>>(registry)
         })
 }
 

@@ -3,7 +3,7 @@
 //! Uses redb for efficient embedded storage.
 //! Key: (HLC, Author) for globally consistent causal ordering.
 
-use lattice_model::{Op, PubKey, SExpr, Uuid};
+use lattice_model::{Op, PubKey, SExpr};
 
 use redb::{Database, ReadableTable, ReadableTableMetadata};
 
@@ -29,10 +29,7 @@ pub struct LogEntry {
     pub content: Vec<u8>,
 }
 
-use lattice_storage::{
-    setup_persistent_state, PersistentState, StateBackend, StateDbError, StateFactory, StateLogic,
-    StorageConfig, TABLE_DATA,
-};
+use lattice_storage::{StateBackend, StateDbError, StateFactory, StateLogic, TABLE_DATA};
 
 /// LogState - append-only log with redb persistence
 pub struct LogState {
@@ -51,15 +48,6 @@ impl std::fmt::Debug for LogState {
 // ==================== Openable Implementation ====================
 
 impl LogState {
-    /// Open or create a log state with the given storage configuration.
-    pub fn open(id: Uuid, config: &StorageConfig) -> Result<PersistentState<Self>, StateDbError> {
-        setup_persistent_state(id, config, |backend| {
-            let (event_tx, _) = broadcast::channel(256);
-            let db = backend.db_shared();
-            Self { backend, db, event_tx }
-        })
-    }
-
     /// Get access to the database
     pub fn db(&self) -> &redb::Database {
         &self.db
@@ -215,6 +203,18 @@ impl StateFactory for LogState {
         let (event_tx, _) = broadcast::channel(1024);
         let db = backend.db_shared();
         Self { backend, db, event_tx }
+    }
+}
+
+// ==================== StateMachine Implementation ====================
+//
+// Delegates to StateLogic::apply() for the transaction ceremony.
+
+impl lattice_model::StateMachine for LogState {
+    type Error = StateDbError;
+
+    fn apply(&self, op: &Op, dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
+        StateLogic::apply(self, op, dag)
     }
 }
 
@@ -433,9 +433,19 @@ mod tests {
     use super::*;
     use lattice_model::dag_queries::NullDag;
     use lattice_model::hlc::HLC;
-    use lattice_model::Uuid;
-    use lattice_model::{Hash, Op, PubKey, StateMachine};
+    use lattice_model::{Hash, Op, PubKey, StateMachine, Uuid};
+    use lattice_storage::StorageConfig;
     static NULL_DAG: NullDag = NullDag;
+
+    fn new_test_store() -> LogState {
+        let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
+        LogState::create(backend)
+    }
+
+    fn open_store(id: Uuid, config: &StorageConfig) -> LogState {
+        let backend = StateBackend::open(id, config, None, 0).unwrap();
+        LogState::create(backend)
+    }
 
     #[test]
     fn test_persistence_roundtrip() {
@@ -444,7 +454,7 @@ mod tests {
         let author = PubKey::from([1u8; 32]);
         let id = Uuid::new_v4();
         let config = StorageConfig::File(dir.path().to_path_buf());
-        let state = LogState::open(id, &config).unwrap();
+        let state = open_store(id, &config);
 
         let op = Op {
             info: lattice_model::IntentionInfo {
@@ -466,14 +476,14 @@ mod tests {
         drop(state);
 
         // Re-open with SAME ID
-        let state2 = LogState::open(id, &config).unwrap();
+        let state2 = open_store(id, &config);
         assert_eq!(state2.read(None).len(), 1);
         assert_eq!(state2.read(None)[0].content, b"hello world");
     }
 
     #[test]
     fn test_ordering() {
-        let state = LogState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+        let state = new_test_store();
 
         let author1 = PubKey::from([1u8; 32]);
         let author2 = PubKey::from([2u8; 32]);
@@ -544,7 +554,7 @@ mod tests {
     fn test_snapshot_restore() {
         let store_id = Uuid::new_v4();
 
-        let state1 = LogState::open(store_id, &StorageConfig::InMemory).unwrap();
+        let state1 = open_store(store_id, &StorageConfig::InMemory);
 
         let author = PubKey::from([1u8; 32]);
         let start_hlc = HLC::now();
@@ -561,11 +571,12 @@ mod tests {
         StateMachine::apply(&state1, &op, &NULL_DAG).unwrap();
 
         // Take snapshot
-        let snapshot = state1.snapshot().unwrap();
+        let mut snapshot_bytes = Vec::new();
+        state1.backend().snapshot(&mut snapshot_bytes).unwrap();
 
         // Restore to fresh state with SAME store ID (restore validates ID)
-        let state2 = LogState::open(store_id, &StorageConfig::InMemory).unwrap();
-        state2.restore(snapshot).unwrap();
+        let state2 = open_store(store_id, &StorageConfig::InMemory);
+        state2.backend().restore(&mut std::io::Cursor::new(snapshot_bytes)).unwrap();
 
         // Verify
         assert_eq!(state2.len(), 1);

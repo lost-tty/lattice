@@ -145,7 +145,7 @@ pub struct OpenedStore<S> {
     intention_store: Option<Arc<std::sync::RwLock<IntentionStore>>>,
 }
 
-impl<S: StateMachine + 'static> OpenedStore<S> {
+impl<S: StateMachine + StoreIdentity + 'static> OpenedStore<S> {
     /// Create from an already-opened state machine.
     /// Opens the IntentionStore and replays any unapplied intentions.
     pub fn new(
@@ -729,13 +729,13 @@ impl<S: StateMachine + Send + Sync + 'static> StoreEventSource for Store<S> {
 
 /// Replay intentions from the store into the state machine.
 /// Returns number of intentions replayed.
-fn replay_intentions<S: StateMachine>(
+fn replay_intentions<S: StateMachine + StoreIdentity>(
     store: &IntentionStore,
     state: &Arc<S>,
 ) -> Result<u64, super::StateError> {
     let applied_tips = state
         .applied_chaintips()
-        .map_err(|e| super::StateError::Backend(e.to_string()))?;
+        .map_err(super::StateError::Backend)?;
     let applied_map: HashMap<PubKey, Hash> = applied_tips.into_iter().collect();
 
     // Get all stored intentions and compare tips

@@ -3,12 +3,23 @@ use lattice_kvstore_api::Operation;
 use lattice_model::dag_queries::{HashMapDag, NullDag};
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
+use lattice_model::Op;
 use lattice_model::Uuid;
-use lattice_model::{Op, StateMachine};
-use lattice_storage::{ChainError, SnapshotError, StateDbError, StorageConfig};
+use lattice_storage::{
+    ChainError, SnapshotError, StateBackend, StateDbError, StateFactory, StateLogic, StorageConfig,
+};
 use prost::Message;
-use std::io::Read;
 static NULL_DAG: NullDag = NullDag;
+
+fn new_test_store() -> KvState {
+    let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
+    KvState::create(backend)
+}
+
+fn open_test_store(id: Uuid, config: &StorageConfig) -> KvState {
+    let backend = StateBackend::open(id, config, None, 0).unwrap();
+    KvState::create(backend)
+}
 
 fn create_test_op(
     key: &[u8],
@@ -34,17 +45,16 @@ fn create_test_op(
 }
 
 /// Helper: take snapshot and return bytes
-fn snapshot_bytes(state: &impl StateMachine) -> Vec<u8> {
+fn snapshot_bytes(state: &impl StateLogic) -> Vec<u8> {
     let mut buf = Vec::new();
-    let mut stream = state.snapshot().unwrap();
-    stream.read_to_end(&mut buf).unwrap();
+    state.backend().snapshot(&mut buf).unwrap();
     buf
 }
 
 #[test]
 fn test_snapshot_restore() {
     let store_id = Uuid::new_v4();
-    let state1 = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
+    let state1 = open_test_store(store_id, &StorageConfig::InMemory);
 
     let author = PubKey::from([1u8; 32]);
     let hash = Hash::from([0xCC; 32]);
@@ -63,11 +73,12 @@ fn test_snapshot_restore() {
     let snapshot1_bytes = snapshot_bytes(&state1);
 
     // Create fresh state
-    let state2 = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
+    let state2 = open_test_store(store_id, &StorageConfig::InMemory);
 
     // Restore
     state2
-        .restore(Box::new(std::io::Cursor::new(snapshot1_bytes.clone())))
+        .backend()
+        .restore(&mut std::io::Cursor::new(snapshot1_bytes.clone()))
         .unwrap();
 
     // Verify Data
@@ -81,15 +92,15 @@ fn test_snapshot_restore() {
     );
 
     // Verify Chaintips preserved
-    let tips = state2.applied_chaintips().unwrap();
+    let tips = state2.backend().get_applied_chaintips().unwrap();
     assert_eq!(tips.len(), 1);
     assert_eq!(tips[0].1, hash);
 }
 
 #[test]
 fn test_convergence_concurrent_operations() {
-    let state1 = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
-    let state2 = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+    let state1 = new_test_store();
+    let state2 = new_test_store();
 
     let dag = HashMapDag::new();
     let start_hlc = HLC::now();
@@ -129,7 +140,7 @@ fn test_convergence_concurrent_operations() {
 #[test]
 fn test_restore_overwrites_existing_data() {
     let store_id = Uuid::new_v4();
-    let state = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
+    let state = open_test_store(store_id, &StorageConfig::InMemory);
 
     let author = PubKey::from([1u8; 32]);
     let start_hlc = HLC::now();
@@ -143,7 +154,7 @@ fn test_restore_overwrites_existing_data() {
 
     // 2. Prepare a Snapshot that ONLY has "key_new"
     // MUST use same store_id for restore to work
-    let state_snap = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
+    let state_snap = open_test_store(store_id, &StorageConfig::InMemory);
     let hash2 = Hash::from([0xBB; 32]);
     let op2 = create_test_op(b"key_new", b"val_new", author, hash2, start_hlc, Hash::ZERO);
     state_snap.apply(&op2, &NULL_DAG).unwrap();
@@ -152,7 +163,8 @@ fn test_restore_overwrites_existing_data() {
 
     // 3. Restore snapshot onto the FIRST state (which has key_old)
     state
-        .restore(Box::new(std::io::Cursor::new(snapshot_bytes_orig.clone())))
+        .backend()
+        .restore(&mut std::io::Cursor::new(snapshot_bytes_orig.clone()))
         .unwrap();
 
     // 4. Verify:
@@ -176,7 +188,7 @@ fn test_restore_overwrites_existing_data() {
 
 #[test]
 fn test_delete_correctness() {
-    let state = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+    let state = new_test_store();
 
     let author = PubKey::from([1u8; 32]);
     let start_hlc = HLC::now();
@@ -220,7 +232,7 @@ fn test_delete_correctness() {
 
 #[test]
 fn test_chain_rules_compliance() {
-    let state = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+    let state = new_test_store();
     let dag = HashMapDag::new();
     let author = PubKey::from([0x99; 32]);
     let hlc = HLC::now();
@@ -270,7 +282,7 @@ fn test_chain_rules_compliance() {
 #[test]
 fn test_snapshot_checksum_failure() {
     let store_id = Uuid::new_v4();
-    let state1 = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
+    let state1 = open_test_store(store_id, &StorageConfig::InMemory);
 
     // Add some data
     let author = PubKey::from([1u8; 32]);
@@ -285,10 +297,11 @@ fn test_snapshot_checksum_failure() {
     let mut corrupt_checksum = snap_bytes.clone();
     corrupt_checksum[len - 1] ^= 0xFF;
 
-    let state2 = KvState::open(store_id, &StorageConfig::InMemory).unwrap();
+    let state2 = open_test_store(store_id, &StorageConfig::InMemory);
 
     let err = state2
-        .restore(Box::new(std::io::Cursor::new(corrupt_checksum)))
+        .backend()
+        .restore(&mut std::io::Cursor::new(corrupt_checksum))
         .unwrap_err();
     assert!(
         matches!(
@@ -304,7 +317,8 @@ fn test_snapshot_checksum_failure() {
     corrupt_data[50] ^= 0xFF;
 
     let err_data = state2
-        .restore(Box::new(std::io::Cursor::new(corrupt_data)))
+        .backend()
+        .restore(&mut std::io::Cursor::new(corrupt_data))
         .unwrap_err();
     assert!(
         matches!(
@@ -318,14 +332,18 @@ fn test_snapshot_checksum_failure() {
 
 #[test]
 fn test_snapshot_uuid_mismatch() {
-    let state1 = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+    let state1 = new_test_store();
 
-    let snapshot = state1.snapshot().unwrap();
+    let mut snapshot_bytes = Vec::new();
+    state1.backend().snapshot(&mut snapshot_bytes).unwrap();
 
     // Open with DIFFERENT UUID
-    let state2 = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+    let state2 = new_test_store();
 
-    let err = state2.restore(snapshot).unwrap_err();
+    let err = state2
+        .backend()
+        .restore(&mut std::io::Cursor::new(snapshot_bytes))
+        .unwrap_err();
     assert!(
         matches!(err, StateDbError::StoreIdMismatch { .. }),
         "Expected StoreIdMismatch, got: {:?}",

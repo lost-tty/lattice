@@ -7,10 +7,7 @@
 //! `proto::Value { oneof kind { value | tombstone }, heads[] }` via `KVTable`.
 
 // Internal table names
-use lattice_storage::{
-    setup_persistent_state, PersistentState, StateBackend, StateDbError, StateFactory, StateLogic,
-    StorageConfig, TABLE_DATA,
-};
+use lattice_storage::{StateBackend, StateDbError, StateFactory, StateLogic, TABLE_DATA};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -32,7 +29,7 @@ impl<T> KvTableResultExt<T> for Result<T, lattice_kvtable::KvTableError> {
 
 use crate::proto::{operation, KvPayload};
 use crate::{WatchEvent, WatchEventKind};
-use lattice_model::{Hash, Op, Uuid};
+use lattice_model::{Hash, Op};
 use lattice_store_base::{FieldFormat, Introspectable};
 use prost::Message;
 use prost_reflect::DescriptorPool;
@@ -45,8 +42,6 @@ use tokio::sync::broadcast;
 ///
 /// This is a derived materialized view - the actual source of truth is
 /// the intention log managed by the replication layer.
-///
-/// KvState is the logic component. Consumers interact with `PersistentState<KvState>`.
 pub struct KvState {
     backend: StateBackend,
     db: Arc<Database>,
@@ -59,26 +54,7 @@ impl std::fmt::Debug for KvState {
     }
 }
 
-// ==================== Openable Implementation ====================
-
-// KvState is the logic. PersistentState<KvState> is the StateMachine.
 impl KvState {
-    /// Open or create a KvState with the given storage configuration.
-    pub fn open(
-        id: Uuid,
-        config: &StorageConfig,
-    ) -> Result<PersistentState<Self>, StateDbError> {
-        setup_persistent_state(id, config, |backend| {
-            let (watcher_tx, _) = broadcast::channel(1024);
-            let db = backend.db_shared();
-            Self {
-                backend,
-                db,
-                watcher_tx,
-            }
-        })
-    }
-
     /// Get a reference to the underlying database.
     /// Used by extension traits for additional operations.
     pub fn db(&self) -> &Database {
@@ -194,6 +170,19 @@ impl KvState {
             }
         }
         Ok(())
+    }
+}
+
+// ==================== StateMachine Implementation ====================
+//
+// Delegates to StateLogic::apply() for the transaction ceremony.
+// Tests call StateMachine::apply() directly on KvState.
+
+impl lattice_model::StateMachine for KvState {
+    type Error = StateDbError;
+
+    fn apply(&self, op: &Op, dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
+        StateLogic::apply(self, op, dag)
     }
 }
 
@@ -508,7 +497,6 @@ impl KvState {
 
 // ==================== CommandHandler Implementation ====================
 //
-// Enables PersistentState<KvState> to handle commands directly without a wrapper handle.
 // Write operations use the injected StateWriter.
 
 use crate::proto::{
@@ -725,14 +713,20 @@ mod tests {
     use crate::proto::Operation;
     use lattice_model::dag_queries::{HashMapDag, NullDag};
     use lattice_model::hlc::HLC;
-    use lattice_model::PubKey;
+    use lattice_model::{PubKey, Uuid};
     use lattice_model::StateMachine;
+    use lattice_storage::StorageConfig;
     static NULL_DAG: NullDag = NullDag;
+
+    fn new_test_store() -> KvState {
+        let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
+        KvState::create(backend)
+    }
 
     /// Test that StateMachine::apply works correctly for put operations
     #[test]
     fn test_state_machine_apply_put() {
-        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+        let store = new_test_store();
 
         // Create an Op with a Put payload
         let key = b"test/key";
@@ -771,7 +765,7 @@ mod tests {
     /// Test that multiple puts to same key creates proper head list
     #[test]
     fn test_state_machine_concurrent_puts() {
-        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+        let store = new_test_store();
         let dag = HashMapDag::new();
 
         let key = b"shared/key";
@@ -813,7 +807,7 @@ mod tests {
     /// Test delete operation via StateMachine trait
     #[test]
     fn test_state_machine_apply_delete() {
-        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+        let store = new_test_store();
 
         let key = b"to/delete";
 
@@ -920,7 +914,7 @@ mod tests {
     /// Test that apply_op with duplicate keys in payload uses last-wins (reverse iteration)
     #[test]
     fn test_apply_op_duplicate_keys_last_wins() {
-        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+        let store = new_test_store();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -943,7 +937,7 @@ mod tests {
     /// Test that apply_op with put then delete on same key results in deletion
     #[test]
     fn test_apply_op_put_then_delete_same_key() {
-        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+        let store = new_test_store();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -965,7 +959,7 @@ mod tests {
     /// Test that apply_op with delete then put on same key results in value
     #[test]
     fn test_apply_op_delete_then_put_same_key() {
-        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+        let store = new_test_store();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -988,7 +982,7 @@ mod tests {
     /// This ensures deterministic replay - once signed, always apply.
     #[test]
     fn test_apply_op_empty_key_allowed() {
-        let store = KvState::open(Uuid::new_v4(), &StorageConfig::InMemory).unwrap();
+        let store = new_test_store();
 
         let author = PubKey::from([1u8; 32]);
         let hash = Hash::from([2u8; 32]);

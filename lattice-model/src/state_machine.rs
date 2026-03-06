@@ -1,4 +1,4 @@
-use crate::{DagQueries, Hash, IntentionInfo, PubKey};
+use crate::{DagQueries, Hash, IntentionInfo};
 use std::error::Error;
 
 /// An operation to be applied to a state machine.
@@ -52,15 +52,6 @@ pub trait StateMachine: Send + Sync {
     /// Returns `Err` if the payload cannot be decoded or applied. This stalls
     /// the author's chain until the issue is resolved (e.g. code upgrade).
     fn apply(&self, op: &Op, dag: &dyn DagQueries) -> Result<(), Self::Error>;
-
-    /// Create a point-in-time snapshot of the state.
-    fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error>;
-
-    /// Restore the state from a snapshot.
-    fn restore(&self, snapshot: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error>;
-
-    /// Returns all author public keys and their last applied operation hash.
-    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error>;
 }
 
 /// Submit operations to the log (client write path).

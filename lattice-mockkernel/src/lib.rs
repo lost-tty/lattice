@@ -10,31 +10,27 @@ mod null_state;
 
 pub use null_state::{NullState, STORE_TYPE_NULLSTORE};
 
-/// Type alias for NullState wrapped in PersistentState for use with direct_opener().
-pub type PersistentNullState = lattice_storage::PersistentState<NullState>;
-
 use futures_util::StreamExt;
 use lattice_model::dag_queries::NullDag;
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{Condition, Intention};
 use lattice_model::Op;
-use lattice_model::{StateMachine, StateWriter, StateWriterError};
+use lattice_model::{StateWriter, StateWriterError};
 use lattice_storage::state_db::StateLogic;
-use lattice_storage::PersistentState;
-
-static NULL_DAG: NullDag = NullDag;
 use prost::Message;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+static NULL_DAG: NullDag = NullDag;
+
 /// A mock StateWriter that applies operations directly to state.
 ///
-/// Generic over `S: StateLogic` - works with any store (KvState, LogState, etc).
-/// Useful for testing without the full replication stack.
+/// Generic over `S: StateLogic + StateMachine` - works with any store
+/// (KvState, LogState, etc). Useful for testing without the full replication stack.
 pub struct MockWriter<S: StateLogic> {
-    state: Arc<PersistentState<S>>,
+    state: Arc<S>,
     next_hash: Arc<AtomicU64>,
     /// Monotonic wall_time: max(system_ms, prev+1) to guarantee unique timestamps.
     next_wall_time: Arc<AtomicU64>,
@@ -44,7 +40,7 @@ pub struct MockWriter<S: StateLogic> {
 
 impl<S: StateLogic> MockWriter<S> {
     /// Create a new MockWriter wrapping the given state.
-    pub fn new(state: Arc<PersistentState<S>>) -> Self {
+    pub fn new(state: Arc<S>) -> Self {
         let (entry_tx, _) = broadcast::channel(128);
         Self {
             state,
@@ -56,7 +52,7 @@ impl<S: StateLogic> MockWriter<S> {
     }
 
     /// Get a reference to the underlying state.
-    pub fn state(&self) -> &Arc<PersistentState<S>> {
+    pub fn state(&self) -> &Arc<S> {
         &self.state
     }
 
@@ -66,8 +62,8 @@ impl<S: StateLogic> MockWriter<S> {
     }
 }
 
-impl<S: StateLogic> AsRef<PersistentState<S>> for MockWriter<S> {
-    fn as_ref(&self) -> &PersistentState<S> {
+impl<S: StateLogic> AsRef<S> for MockWriter<S> {
+    fn as_ref(&self) -> &S {
         &*self.state
     }
 }
@@ -127,7 +123,8 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
 
             // Find current chaintip for this author
             let prev_hash = state
-                .applied_chaintips()
+                .backend()
+                .get_applied_chaintips()
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?
                 .into_iter()
                 .find(|(a, _)| a == &author)
@@ -146,7 +143,7 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
                 prev_hash,
             };
 
-            StateMachine::apply(&*state, &op, &NULL_DAG)
+            StateLogic::apply(&*state, &op, &NULL_DAG)
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
 
             // Emit as SignedIntention format (matching real kernel)

@@ -1,7 +1,7 @@
 use lattice_kernel::store::{OpenedStore, Store};
 use lattice_kernel::SyncProvider;
 use lattice_model::StateWriter;
-use lattice_model::{NodeIdentity, StateMachine};
+use lattice_model::{NodeIdentity, StateMachine, StoreIdentity, StoreMeta};
 
 use futures_util::StreamExt;
 use lattice_kernel::proto::weaver::WitnessContent;
@@ -22,15 +22,14 @@ impl StateMachine for MockState {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
-    fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send + 'static>, Self::Error> {
-        Ok(Box::new(std::io::empty()))
-    }
-    fn restore(&self, _: Box<dyn std::io::Read + Send + 'static>) -> Result<(), Self::Error> {
-        Ok(())
+}
+impl StoreIdentity for MockState {
+    fn store_meta(&self) -> StoreMeta {
+        StoreMeta::default()
     }
     fn applied_chaintips(
         &self,
-    ) -> Result<Vec<(lattice_model::types::PubKey, lattice_model::types::Hash)>, Self::Error> {
+    ) -> Result<Vec<(lattice_model::types::PubKey, lattice_model::types::Hash)>, String> {
         Ok(Vec::new())
     }
 }

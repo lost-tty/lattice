@@ -1,7 +1,7 @@
 //! NullState — a minimal state machine for tests that only exercise the kernel.
 //!
 //! NullState implements `StateLogic` with a no-op `mutate`. It holds a
-//! `StateBackend` (in-memory redb) so that `SystemLayer<PersistentState<NullState>>`
+//! `StateBackend` (in-memory redb) so that `SystemLayer<NullState>`
 //! works — SystemLayer uses the backend for chain tip tracking and system tables.
 //! NullState itself never reads or writes application data to redb.
 //!
@@ -43,11 +43,11 @@ static NULL_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
 ///
 /// `mutate` is a no-op — it silently accepts every operation without touching
 /// the redb table. Chain tip tracking, snapshot/restore, and `applied_chaintips`
-/// are all handled by the `StateBackend` (via `PersistentState<NullState>`).
+/// are all handled by the `StateBackend` (via `SystemLayer<NullState>`).
 ///
-/// Intended for use as `SystemLayer<PersistentState<NullState>>` through the
-/// real kernel, where tests create intentions via `SystemBatch` and verify
-/// convergence via `table_fingerprint()` or `intention_count()`.
+/// Intended for use as `SystemLayer<NullState>` through the real kernel,
+/// where tests create intentions via `SystemBatch` and verify convergence
+/// via `table_fingerprint()` or `intention_count()`.
 pub struct NullState {
     backend: StateBackend,
 }
@@ -92,6 +92,18 @@ impl StateFactory for NullState {
 impl StoreTypeProvider for NullState {
     fn store_type() -> &'static str {
         STORE_TYPE_NULLSTORE
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StateMachine — delegates to StateLogic::apply() and StateBackend
+// ---------------------------------------------------------------------------
+
+impl lattice_model::StateMachine for NullState {
+    type Error = StateDbError;
+
+    fn apply(&self, op: &Op, dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
+        StateLogic::apply(self, op, dag)
     }
 }
 

@@ -3,14 +3,11 @@
 //! A minimal store type to validate multi-store infrastructure.
 //! Supports: append, cat, tail operations.
 //!
-//! Use `Store<PersistentLogState>` directly with the replication layer.
+//! Use `Store<SystemLayer<LogState>>` directly with the replication layer.
 
 mod state;
 
 pub use state::{LogEvent, LogState};
-
-/// Type alias for Log store state wrapped in PersistentState for use with direct_opener()
-pub type PersistentLogState = lattice_storage::PersistentState<LogState>;
 
 // Include the generated FileDescriptorSet
 pub const LOG_DESCRIPTOR_BYTES: &[u8] =

@@ -117,7 +117,6 @@ pub trait CommandHandler: Send + Sync {
 }
 
 /// Blanket impl: Any type that derefs to a CommandHandler is also a CommandHandler.
-/// This allows `PersistentState<KvState>` to implement CommandHandler when `KvState` does.
 impl<T> CommandHandler for T
 where
     T: std::ops::Deref + Send + Sync,

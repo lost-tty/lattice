@@ -51,9 +51,15 @@ pub struct StoreMeta {
     pub schema_version: u64,
 }
 
-/// Read-only access to store identity metadata.
+/// Read-only access to store identity and backend metadata.
+///
+/// Implemented by `SystemLayer` — the outermost wrapper that owns the
+/// `StateBackend`. Domain crates and test mocks do not implement this.
 pub trait StoreIdentity: Send + Sync {
     fn store_meta(&self) -> StoreMeta;
+
+    /// Returns all author public keys and their last applied operation hash.
+    fn applied_chaintips(&self) -> Result<Vec<(crate::PubKey, crate::Hash)>, String>;
 }
 
 /// High-level system update events.

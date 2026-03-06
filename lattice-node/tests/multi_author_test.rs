@@ -8,14 +8,13 @@ use std::time::Duration; // For decode
 
 // ==================== Test Helpers ====================
 
-type PersistentNullState =
-    lattice_systemstore::SystemLayer<lattice_mockkernel::PersistentNullState>;
+type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>;
 
 fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
         .in_memory()
         .with_opener(STORE_TYPE_NULLSTORE, |registry| {
-            direct_opener::<PersistentNullState>(registry)
+            direct_opener::<TestNullState>(registry)
         })
 }
 

@@ -3,7 +3,7 @@ use lattice_model::{
     hlc::HLC,
     types::{Hash, PubKey},
     weaver::{Condition, Intention, SignedIntention},
-    NodeIdentity, Op, StateMachine,
+    NodeIdentity, Op, StateMachine, StoreIdentity, StoreMeta,
 };
 use prost::Message;
 use std::sync::Arc;
@@ -16,19 +16,16 @@ struct MockStateMachine;
 impl StateMachine for MockStateMachine {
     type Error = std::io::Error;
 
-    fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> {
-        Ok(Box::new(std::io::Cursor::new(Vec::new())))
-    }
-
-    fn restore(&self, _snapshot: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
     fn apply(&self, _op: &Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
         Ok(())
     }
+}
 
-    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
+impl StoreIdentity for MockStateMachine {
+    fn store_meta(&self) -> StoreMeta {
+        StoreMeta::default()
+    }
+    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
         Ok(vec![])
     }
 }

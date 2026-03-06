@@ -56,34 +56,25 @@ Moved `apply_system_op()` match arms from `SystemLayer` into `SystemState::mutat
 
 `SystemLayer` now owns the single write transaction for both paths via `apply_unified()`. Decodes `UniversalOp` envelope, then: `begin_write → verify_and_update_tip → route to SystemState::mutate(TABLE_SYSTEM) or S::mutate(TABLE_DATA) → commit → notify`. Removed `apply_system_transaction()`. `StateLogic::apply()` default is no longer called in production. All 250 tests pass.
 
-**Step 3 — Remove `PersistentState<T>` and slim `StateMachine`**:
+**Step 3 — Remove `PersistentState<T>` and slim `StateMachine`**: ✅
 
-`PersistentState<T>` is now dead weight — `SystemLayer` bypasses it for `apply` (Step 2), and domain crates hold `Arc<Database>` for reads (Step 1). Remove it entirely. Also remove `snapshot`/`restore` from `StateMachine` — they are unused in production (replication is witness-log-based, bootstrap uses `scan_witness_log` → `fetch_intentions` → `ingest_witness_batch`). M17 will redesign snapshots for pruning when requirements are clear.
+Removed `PersistentState<T>` wrapper entirely — domain crates now implement `StateMachine` directly (just `apply()`). `snapshot`/`restore`/`applied_chaintips` removed from `StateMachine` trait. `applied_chaintips` moved to `StoreIdentity` trait (implemented by `SystemLayer`). `store_meta()` also on `StoreIdentity`. `MockWriter<S>` updated to `Arc<S>`. Type aliases (`PersistentKvState` etc.) removed. All assembly sites updated to `SystemLayer<KvState>` etc. `PersistentState<T>`, `setup_persistent_state()`, `ForwardSubscriber` deleted from `lattice-storage`. All ~250 tests pass.
 
-`StateMachine` slims from 5 methods to 2:
+`StateMachine` slimmed to 1 method:
 ```
 trait StateMachine {
     type Error;
     fn apply(&self, op: &Op, dag: &dyn DagQueries) -> Result<(), Self::Error>;
-    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error>;
 }
 ```
 
-`store_meta()` moves from `StateMachine` to `SystemLayer` — it reads `TABLE_META` which is framework metadata (store_id, store_type, schema_version), not app-data state. Domain crates (`KvState`, `LogState`) should not need to know about store metadata. `SystemLayer` already has access to the DB via `self.inner.backend()`. The three production callers (`StoreInspector` impl on `Store<S>`, `InProcessBackend::store_status()`, and the gRPC `GetStatus` handler) all go through the `Store` handle which wraps `SystemLayer`.
-
-Changes:
-- [ ] Remove `snapshot()` / `restore()` from `StateMachine` trait
-- [ ] Remove `store_meta()` from `StateMachine` trait; `SystemLayer` provides it directly
-- [ ] Delete `StateBackend::snapshot()` / `restore()` / `snapshot_internal()` / `restore_internal()` (~130 lines)
-- [ ] Delete `PersistentState<T>` struct and all 9 impl blocks (~210 lines)
-- [ ] Delete `setup_persistent_state()`, `ForwardSubscriber`, snapshot-related error variants
-- [ ] Implement `StateMachine` directly on `KvState` / `LogState` / `NullState` (just `apply` + `applied_chaintips`)
-- [ ] `SystemLayer` drops `S: StateMachine` bound, implements `applied_chaintips` + `store_meta` via `self.inner.backend()` directly
-- [ ] Update `MockWriter<S>` to use `Arc<S>` instead of `Arc<PersistentState<S>>`
-- [ ] Update type aliases (`PersistentKvState` → `KvState`, etc.) and all assembly sites
-- [ ] Delete snapshot tests (4 in `lattice-storage`, 3 in `lattice-kvstore`, 1 in `lattice-logstore`)
-- [ ] Update mock `StateMachine` impls in test files (remove snapshot/restore stubs)
-- [ ] Run full test suite
+`StoreIdentity` trait (in `lattice-model`):
+```
+trait StoreIdentity: Send + Sync {
+    fn store_meta(&self) -> StoreMeta;
+    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String>;
+}
+```
 
 ### 16B: Storage Abstraction
 

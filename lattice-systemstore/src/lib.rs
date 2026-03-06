@@ -234,15 +234,6 @@ mod tests {
         fn apply(&self, _op: &Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
             Ok(())
         }
-        fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> {
-            Ok(Box::new(std::io::Cursor::new(vec![])))
-        }
-        fn restore(&self, _snapshot: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> {
-            Ok(())
-        }
-        fn applied_chaintips(&self) -> Result<Vec<(lattice_model::PubKey, Hash)>, Self::Error> {
-            Ok(Vec::new())
-        }
     }
 
     impl StateLogic for MockLogic {

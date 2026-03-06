@@ -6,7 +6,7 @@
 #[cfg(test)]
 mod tests {
     use lattice_kernel::OpenedStore;
-    use lattice_model::{types::Hash, NodeIdentity, Op, PubKey, StateMachine, StateWriter};
+    use lattice_model::{types::Hash, NodeIdentity, Op, PubKey, StateMachine, StateWriter, StoreIdentity, StoreMeta};
     use lattice_model::StorageConfig;
     use std::sync::{Arc, RwLock};
     use uuid::Uuid;
@@ -26,15 +26,6 @@ mod tests {
     impl StateMachine for TestStateMachine {
         type Error = std::io::Error;
 
-        fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> {
-            Ok(Box::new(std::io::Cursor::new(Vec::new())))
-        }
-        fn restore(&self, _snapshot: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> {
-            Ok(())
-        }
-        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
-            Ok(Vec::new())
-        }
         fn apply(
             &self,
             op: &Op<'_>,
@@ -42,6 +33,15 @@ mod tests {
         ) -> Result<(), Self::Error> {
             self.applied.write().unwrap().push(op.id());
             Ok(())
+        }
+    }
+
+    impl StoreIdentity for TestStateMachine {
+        fn store_meta(&self) -> StoreMeta {
+            StoreMeta::default()
+        }
+        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
+            Ok(Vec::new())
         }
     }
 

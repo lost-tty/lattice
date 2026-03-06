@@ -594,18 +594,6 @@ mod tests {
     impl lattice_model::StateMachine for MockStateMachine {
         type Error = std::io::Error;
 
-        fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> {
-            Ok(Box::new(std::io::Cursor::new(Vec::new())))
-        }
-
-        fn restore(&self, _snapshot: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
-            Ok(self.tips.read().unwrap().clone().into_iter().collect())
-        }
-
         fn apply(
             &self,
             op: &lattice_model::Op,
@@ -614,6 +602,15 @@ mod tests {
             self.tips.write().unwrap().insert(op.info.author, op.id());
             self.applied_ops.write().unwrap().insert(op.id());
             Ok(())
+        }
+    }
+
+    impl lattice_model::StoreIdentity for MockStateMachine {
+        fn store_meta(&self) -> lattice_model::StoreMeta {
+            lattice_model::StoreMeta::default()
+        }
+        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
+            Ok(self.tips.read().unwrap().clone().into_iter().collect())
         }
     }
 
@@ -1325,18 +1322,6 @@ mod tests {
     impl lattice_model::StateMachine for FailingMockStateMachine {
         type Error = std::io::Error;
 
-        fn snapshot(&self) -> Result<Box<dyn std::io::Read + Send>, Self::Error> {
-            Ok(Box::new(std::io::Cursor::new(Vec::new())))
-        }
-
-        fn restore(&self, _snapshot: Box<dyn std::io::Read + Send>) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
-            Ok(self.tips.read().unwrap().clone().into_iter().collect())
-        }
-
         fn apply(
             &self,
             op: &lattice_model::Op,
@@ -1351,6 +1336,15 @@ mod tests {
             self.tips.write().unwrap().insert(op.info.author, op.id());
             self.applied_ops.write().unwrap().insert(op.id());
             Ok(())
+        }
+    }
+
+    impl lattice_model::StoreIdentity for FailingMockStateMachine {
+        fn store_meta(&self) -> lattice_model::StoreMeta {
+            lattice_model::StoreMeta::default()
+        }
+        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
+            Ok(self.tips.read().unwrap().clone().into_iter().collect())
         }
     }
 

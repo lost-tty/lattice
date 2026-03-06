@@ -4,7 +4,7 @@
 //! DAG-based conflict resolution and merge strategies.
 //!
 //! - `KvState` implements `StateMachine` and `CommandHandler` traits
-//! - Use `Store<PersistentKvState>` directly with `KvStoreExt` for operations
+//! - Use `Store<SystemLayer<KvState>>` directly with `KvStoreExt` for operations
 
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/lattice.kv.rs"));
@@ -58,9 +58,6 @@ pub enum WatchEventKind {
 pub mod state;
 pub use proto::KvPayload;
 pub use state::KvState;
-
-/// Type alias for KV store state wrapped in PersistentState for use with direct_opener()  
-pub type PersistentKvState = lattice_storage::PersistentState<KvState>;
 
 pub const KV_DESCRIPTOR_BYTES: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/kv_descriptor.bin"));

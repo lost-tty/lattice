@@ -5,12 +5,11 @@ use dag::{DagScope, ScopedDag};
 use lattice_model::{Hash, IntentionInfo, Op, PubKey, StateMachine, StateWriter};
 use lattice_model::{Openable, StoreTypeProvider};
 use lattice_proto::storage::{universal_op, UniversalOp};
-use lattice_storage::{StateDbError, StateLogic, TABLE_DATA};
+use lattice_storage::{StateBackend, StateDbError, StateFactory, StateLogic, TABLE_DATA};
 use lattice_store_base::{BoxByteStream, CommandHandler, StreamError, StreamHandler, StreamProvider, Subscriber};
 use prost::Message;
 use std::borrow::Cow;
 use std::future::Future;
-use std::io::Read;
 use std::pin::Pin;
 use thiserror::Error;
 use uuid::Uuid;
@@ -125,11 +124,7 @@ impl<S: StateLogic> SystemLayer<S> {
 
 // ==================== StateMachine Implementation ====================
 
-impl<S> StateMachine for SystemLayer<S>
-where
-    S: StateMachine + StateLogic,
-    S::Error: std::error::Error + Send + Sync + 'static,
-{
+impl<S: StateLogic> StateMachine for SystemLayer<S> {
     type Error = SystemLayerError;
 
     fn apply(&self, op: &Op, dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
@@ -146,24 +141,6 @@ where
 
         Ok(())
     }
-
-    fn snapshot(&self) -> Result<Box<dyn Read + Send>, Self::Error> {
-        self.inner
-            .snapshot()
-            .map_err(|e| SystemLayerError::Inner(Box::new(e)))
-    }
-
-    fn restore(&self, snapshot: Box<dyn Read + Send>) -> Result<(), Self::Error> {
-        self.inner
-            .restore(snapshot)
-            .map_err(|e| SystemLayerError::Inner(Box::new(e)))
-    }
-
-    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, Self::Error> {
-        self.inner
-            .applied_chaintips()
-            .map_err(|e| SystemLayerError::Inner(Box::new(e)))
-    }
 }
 
 // ==================== Trait Delegations ====================
@@ -171,6 +148,13 @@ where
 impl<S: StateLogic> lattice_model::StoreIdentity for SystemLayer<S> {
     fn store_meta(&self) -> lattice_model::StoreMeta {
         self.inner.backend().get_meta()
+    }
+
+    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
+        self.inner
+            .backend()
+            .get_applied_chaintips()
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -180,10 +164,15 @@ impl<S: StoreTypeProvider> StoreTypeProvider for SystemLayer<S> {
     }
 }
 
-impl<S: Openable + StateLogic> Openable for SystemLayer<S> {
+impl<S: StateFactory + StoreTypeProvider + 'static> Openable for SystemLayer<S> {
     fn open(id: Uuid, config: &lattice_model::StorageConfig) -> Result<Self, String> {
-        let inner = S::open(id, config)?;
-        Ok(Self::new(inner))
+        let (expected_type, expected_version) = match config {
+            lattice_model::StorageConfig::File(_) => (Some(S::store_type()), 1),
+            lattice_model::StorageConfig::InMemory => (None, 0),
+        };
+        let backend =
+            StateBackend::open(id, config, expected_type, expected_version).map_err(|e| e.to_string())?;
+        Ok(Self::new(S::create(backend)))
     }
 }
 

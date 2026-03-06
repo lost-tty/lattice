@@ -8,28 +8,24 @@ use std::time::Duration;
 
 // ==================== Test Helpers ====================
 
-type PersistentNullState =
-    lattice_systemstore::SystemLayer<lattice_mockkernel::PersistentNullState>;
+type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>;
 
 /// Helper to create a node with NullState opener (in-memory storage).
 fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
         .in_memory()
         .with_opener(STORE_TYPE_NULLSTORE, |registry| {
-            direct_opener::<PersistentNullState>(registry)
+            direct_opener::<TestNullState>(registry)
         })
 }
 
-// Use lattice-systemstore wrappers for system capabilities
-type PersistentKvState = lattice_systemstore::SystemLayer<
-    lattice_storage::PersistentState<lattice_kvstore::KvState>,
->;
+type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
 
 /// File-backed node builder for tests that need persistence across restarts.
 fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
         .with_opener(STORE_TYPE_KVSTORE, |registry| {
-            direct_opener::<PersistentKvState>(registry)
+            direct_opener::<TestKvState>(registry)
         })
 }
 
