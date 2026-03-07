@@ -24,6 +24,16 @@ pub struct StoreInfo {
     pub store_id: Uuid,
 }
 
+/// Projection status: cursor vs witness log head.
+/// A gap between `last_applied_seq` and `witness_head_seq` indicates a stall.
+#[derive(Debug, Clone)]
+pub struct ProjectionStatus {
+    pub last_applied_seq: u64,
+    pub last_applied_hash: Hash,
+    pub witness_head_seq: u64,
+    pub witness_head_hash: Hash,
+}
+
 use std::any::Any;
 
 /// Trait for type-erased store handles in the registry.
@@ -382,6 +392,21 @@ impl<S: StateMachine> Store<S> {
             .await;
         resp_rx.await.unwrap_or_default()
     }
+
+    /// Get projection status (cursor position vs witness log head).
+    pub async fn projection_status(&self) -> ProjectionStatus {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = self
+            .tx
+            .send(ReplicationControllerCmd::ProjectionStatus { resp: resp_tx })
+            .await;
+        resp_rx.await.unwrap_or(ProjectionStatus {
+            last_applied_seq: 0,
+            last_applied_hash: Hash::ZERO,
+            witness_head_seq: 0,
+            witness_head_hash: Hash::ZERO,
+        })
+    }
 }
 
 // ==================== StateWriter implementation ====================
@@ -680,6 +705,12 @@ impl<S: StateMachine + StoreIdentity + 'static> StoreInspector for Store<S> {
                 .map_err(|_| StoreError::ChannelClosed)?;
             Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
         })
+    }
+
+    fn projection_status(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = ProjectionStatus> + Send + '_>> {
+        Box::pin(Store::projection_status(self))
     }
 }
 

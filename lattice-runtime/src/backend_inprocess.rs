@@ -375,11 +375,16 @@ impl LatticeBackend for InProcessBackend {
             let tips = inspector.author_tips().await?;
             let intention_count = inspector.intention_count().await;
             let witness_count = inspector.witness_count().await;
+            let proj = inspector.projection_status().await;
 
             Ok(StoreDetails {
                 author_count: tips.len() as u32,
                 intention_count,
                 witness_count,
+                last_applied_seq: proj.last_applied_seq,
+                last_applied_hash: proj.last_applied_hash.as_bytes().to_vec(),
+                witness_head_seq: proj.witness_head_seq,
+                witness_head_hash: proj.witness_head_hash.as_bytes().to_vec(),
             })
         })
     }

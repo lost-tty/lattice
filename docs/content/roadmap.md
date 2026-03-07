@@ -172,7 +172,7 @@ Eliminated dual-cache architecture (`StoreRegistry` + `StoreManager`). Single `S
 - [x] **Test: `apply_witnessed_batch` rejects invalid witness signatures.** Send witness records with a bad signature. Verify nothing is inserted.
 
 ### 16F: Stall Reporting
-- [ ] **Framework exposes projection status** via `StoreMeta`: `{ last_applied_witness: (u64, Hash), witness_head: (u64, Hash) }`. Gap between cursor and head indicates stall. Surfaced via `store status` CLI.
+- [x] **Framework exposes projection status** via `ProjectionStatus`: `{ last_applied_seq, last_applied_hash, witness_head_seq, witness_head_hash }`. Gap between cursor and head indicates stall. Surfaced via `store status` CLI (`Projection: N/M`, `(STALLED)` when behind).
 - [ ] **Non-blocking stall.** A stalled projection does NOT block: witnessing continues, sync continues, other stores are unaffected. Only reads against the stalled store's state return stale data (with a warning flag).
 
 ### 16G: Bootstrap Alignment

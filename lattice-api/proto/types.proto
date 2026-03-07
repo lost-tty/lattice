@@ -148,6 +148,10 @@ message StoreDetails {
   uint32 author_count = 1;
   uint64 intention_count = 2;
   uint64 witness_count = 3;
+  uint64 last_applied_seq = 4;
+  bytes last_applied_hash = 5;
+  uint64 witness_head_seq = 6;
+  bytes witness_head_hash = 7;
 }
 
 message SyncResult {

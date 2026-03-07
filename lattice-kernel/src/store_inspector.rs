@@ -3,7 +3,7 @@
 //! Provides async methods for inspecting store state.
 //! Implemented by Store<S> for any StateMachine S.
 
-use crate::store::StoreError;
+use crate::store::{ProjectionStatus, StoreError};
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, SignedIntention, WitnessEntry};
 use lattice_model::{BranchInspection, Uuid};
@@ -53,4 +53,7 @@ pub trait StoreInspector: Send + Sync {
         &self,
         heads: Vec<Hash>,
     ) -> Pin<Box<dyn Future<Output = Result<BranchInspection, StoreError>> + Send + '_>>;
+
+    /// Projection status: cursor position vs witness log head.
+    fn projection_status(&self) -> Pin<Box<dyn Future<Output = ProjectionStatus> + Send + '_>>;
 }

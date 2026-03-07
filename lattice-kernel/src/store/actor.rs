@@ -71,6 +71,10 @@ pub enum ReplicationControllerCmd {
         heads: Vec<Hash>,
         resp: oneshot::Sender<Result<lattice_model::BranchInspection, StateError>>,
     },
+    /// Get projection status (cursor vs witness head)
+    ProjectionStatus {
+        resp: oneshot::Sender<crate::store::handle::ProjectionStatus>,
+    },
     /// Shutdown the actor
     Shutdown,
 }
@@ -275,6 +279,25 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 let result = lattice_model::inspect_branches(&*store, &heads)
                     .map_err(|e| StateError::Backend(e.to_string()));
                 let _ = resp.send(result);
+            }
+            ReplicationControllerCmd::ProjectionStatus { resp } => {
+                let store = self.intention_store.read().expect("Lock poisoned");
+                let (head_seq, head_hash) = store.witness_head();
+                let cursor = self
+                    .state
+                    .last_applied_witness()
+                    .unwrap_or(Hash::ZERO);
+                let cursor_seq = if cursor == Hash::ZERO {
+                    0
+                } else {
+                    store.get_witness_seq_for(&cursor).unwrap_or(0)
+                };
+                let _ = resp.send(crate::store::handle::ProjectionStatus {
+                    last_applied_seq: cursor_seq,
+                    last_applied_hash: cursor,
+                    witness_head_seq: head_seq,
+                    witness_head_hash: head_hash,
+                });
             }
             ReplicationControllerCmd::Shutdown => {
                 // Handled in select! above

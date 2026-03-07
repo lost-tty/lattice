@@ -390,6 +390,16 @@ pub async fn cmd_store_status(
         if details.witness_count > 0 {
             let _ = writeln!(w, "Witnesses:  {}", details.witness_count);
         }
+        if details.witness_head_seq > 0 {
+            let stalled = details.witness_head_seq > details.last_applied_seq;
+            let _ = writeln!(
+                w,
+                "Projection: {}/{}{}",
+                details.last_applied_seq,
+                details.witness_head_seq,
+                if stalled { " (STALLED)" } else { "" }
+            );
+        }
     }
 
     Ok(Continue)

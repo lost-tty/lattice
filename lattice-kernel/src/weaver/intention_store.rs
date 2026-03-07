@@ -615,11 +615,23 @@ impl IntentionStore {
         Ok(table.len()?)
     }
 
+    /// Sequence number and content hash of the latest witness log entry.
+    /// Returns `(0, Hash::ZERO)` when the log is empty.
+    pub fn witness_head(&self) -> (u64, Hash) {
+        (self.witness_seq, self.last_witness_hash)
+    }
+
     /// Iterate all witness records in sequence order.
     /// Returns (seq, content_hash, record) tuples.
     /// Get the entire witness log (WARNING: O(N) memory usage)
     pub fn witness_log(&self) -> Result<Vec<WitnessEntry>, IntentionStoreError> {
         self.scan_witness_log(None, usize::MAX)
+    }
+
+    /// Look up the witness sequence number for an intention hash.
+    /// Returns `None` if the intention has not been witnessed.
+    pub fn get_witness_seq_for(&self, hash: &Hash) -> Option<u64> {
+        self.get_witness_seq(hash).ok().flatten()
     }
 
     /// Get the witness sequence number for a given intention hash.
