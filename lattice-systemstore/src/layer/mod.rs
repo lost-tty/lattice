@@ -3,7 +3,7 @@ mod dag;
 use crate::store::SystemState;
 use dag::{DagScope, ScopedDag};
 use lattice_model::{Hash, IntentionInfo, Op, StateMachine, StateWriter, SystemEvent};
-use lattice_model::{Openable, StoreTypeProvider};
+use lattice_model::Openable;
 use lattice_proto::storage::{universal_op, UniversalOp};
 use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, TABLE_DATA, TABLE_SYSTEM};
 use lattice_store_base::{BoxByteStream, CommandHandler, StreamError, StreamHandler, StreamProvider, Subscriber};
@@ -166,6 +166,10 @@ impl<S: StateLogic> SystemLayer<S> {
 impl<S: StateLogic> StateMachine for SystemLayer<S> {
     type Error = SystemLayerError;
 
+    fn store_type() -> &'static str {
+        S::store_type()
+    }
+
     fn apply(&self, op: &Op, dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
         let universal = UniversalOp::decode(op.info.payload.as_ref()).map_err(|e| {
             SystemLayerError::Inner(format!("invalid UniversalOp envelope: {e}").into())
@@ -204,13 +208,7 @@ impl<S: StateLogic> lattice_model::StoreIdentity for SystemLayer<S> {
     }
 }
 
-impl<S: StoreTypeProvider> StoreTypeProvider for SystemLayer<S> {
-    fn store_type() -> &'static str {
-        S::store_type()
-    }
-}
-
-impl<S: StateLogic + StoreTypeProvider + 'static> Openable for SystemLayer<S> {
+impl<S: StateLogic + 'static> Openable for SystemLayer<S> {
     fn open(id: Uuid, config: &lattice_model::StorageConfig) -> Result<Self, String> {
         let (expected_type, expected_version) = match config {
             lattice_model::StorageConfig::File(_) => (Some(S::store_type()), 1),

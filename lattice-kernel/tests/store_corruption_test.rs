@@ -26,6 +26,10 @@ mod tests {
     impl StateMachine for TestStateMachine {
         type Error = std::io::Error;
 
+        fn store_type() -> &'static str {
+            "test:corruption"
+        }
+
         fn apply(
             &self,
             op: &Op<'_>,

@@ -15,6 +15,9 @@ use std::sync::Arc;
 struct MockState;
 impl StateMachine for MockState {
     type Error = lattice_kernel::StateError;
+    fn store_type() -> &'static str {
+        "test:mock"
+    }
     fn apply(
         &self,
         _op: &lattice_model::Op,

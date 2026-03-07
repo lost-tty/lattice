@@ -353,12 +353,10 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
     // Every code path (local submit, network ingest, bootstrap, startup)
     // goes through these same two steps.
 
-    /// Ingest a batch of witness records and intentions (Bootstrap/Clone).
+    /// Verify peer witness signatures and extract the authorized intentions,
+    /// then delegate to the standard ingestion path.
     ///
-    /// For each witness record: verify the peer's signature, extract the
-    /// intention hash from the verified content, find the matching intention,
-    /// and insert it. Only intentions referenced by a valid witness are accepted.
-    /// Then uses the standard witness_ready + project_new_entries path.
+    /// Only intentions referenced by a valid witness record are accepted.
     fn apply_witnessed_batch(
         &mut self,
         store: &mut IntentionStore,
@@ -366,19 +364,20 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
         intentions: Vec<SignedIntention>,
         peer_id: PubKey,
     ) -> Result<(), ReplicationControllerError> {
-        // Verify all peer witness signatures
         let verifying_key = lattice_model::crypto::verifying_key(&peer_id).map_err(|_| {
             ReplicationControllerError::State(StateError::Unauthorized(
                 "Invalid peer public key".to_string(),
             ))
         })?;
 
-        let mut intention_map = std::collections::HashMap::new();
+        let mut intention_map = HashMap::new();
         for intention in intentions {
             intention_map.insert(intention.intention.hash(), intention);
         }
 
-        // Verify each witness, then insert only the intention it references
+        // Verify each witness signature and collect the referenced intentions
+        // in witness order.
+        let mut authorized = Vec::with_capacity(witness_records.len());
         for record in &witness_records {
             let content =
                 crate::weaver::verify_witness(record, &verifying_key).map_err(|e| {
@@ -395,18 +394,22 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                     ))
                 })?;
 
-            if let Some(intention) = intention_map.get(&intention_hash) {
-                store.insert(intention)?;
-            } else {
-                return Err(ReplicationControllerError::State(StateError::Backend(
-                    format!("Missing intention for witness {}", intention_hash),
-                )));
+            match intention_map.remove(&intention_hash) {
+                Some(intention) => authorized.push(intention),
+                None => {
+                    // Already inserted by a previous batch, or genuinely missing.
+                    // If the intention is already in our store, that's fine — skip it.
+                    if !store.contains(&intention_hash)? {
+                        return Err(ReplicationControllerError::State(StateError::Backend(
+                            format!("Missing intention for witness {}", intention_hash),
+                        )));
+                    }
+                }
             }
         }
 
-        // Standard path: witness ready intentions, then project to state
-        self.witness_ready(store)?;
-        self.project_new_entries(store)?;
+        // Standard path: verify intention signatures, insert, witness, project.
+        self.apply_ingested_batch(store, authorized)?;
 
         Ok(())
     }
@@ -713,6 +716,10 @@ mod tests {
 
     impl lattice_model::StateMachine for MockStateMachine {
         type Error = std::io::Error;
+
+        fn store_type() -> &'static str {
+            "test:mock"
+        }
 
         fn apply(
             &self,
@@ -1438,6 +1445,10 @@ mod tests {
 
     impl lattice_model::StateMachine for FailingMockStateMachine {
         type Error = std::io::Error;
+
+        fn store_type() -> &'static str {
+            "test:failing"
+        }
 
         fn apply(
             &self,

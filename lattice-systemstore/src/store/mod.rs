@@ -122,6 +122,10 @@ impl SystemState {
 impl StateLogic for SystemState {
     type Updates = Vec<SystemEvent>;
 
+    fn store_type() -> &'static str {
+        "core:system"
+    }
+
     fn create(db: ScopedDb) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         Self { db, event_tx }

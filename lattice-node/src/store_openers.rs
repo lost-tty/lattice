@@ -6,7 +6,7 @@
 
 use crate::store_manager::{OpenedStoreBundle, StoreManagerError, StoreOpener};
 use lattice_model::{Openable, StorageConfig, Uuid};
-use lattice_model::{StoreIdentity, StoreTypeProvider};
+use lattice_model::StoreIdentity;
 use lattice_store_base::{CommandHandler, Introspectable, StreamProvider};
 use std::sync::Arc;
 
@@ -21,7 +21,6 @@ where
         + Introspectable
         + CommandHandler
         + StreamProvider
-        + StoreTypeProvider
         + StoreIdentity
         + Send
         + Sync
@@ -43,7 +42,6 @@ where
         + Introspectable
         + CommandHandler
         + StreamProvider
-        + StoreTypeProvider
         + StoreIdentity
         + Send
         + Sync

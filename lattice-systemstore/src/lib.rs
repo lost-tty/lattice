@@ -244,6 +244,10 @@ mod tests {
     impl StateLogic for MockLogic {
         type Updates = ();
 
+        fn store_type() -> &'static str {
+            "test:mock"
+        }
+
         fn create(_scoped: ScopedDb) -> Self {
             MockLogic
         }

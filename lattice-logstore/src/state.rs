@@ -147,6 +147,10 @@ impl LogState {
 impl StateLogic for LogState {
     type Updates = Vec<u8>;
 
+    fn store_type() -> &'static str {
+        lattice_model::STORE_TYPE_LOGSTORE
+    }
+
     fn create(db: ScopedDb) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         Self { db, event_tx }
@@ -184,15 +188,6 @@ impl StateLogic for LogState {
     /// Notify watchers of new entry.
     fn notify(&self, content: Self::Updates) {
         let _ = self.event_tx.send(LogEvent { content });
-    }
-}
-
-// StoreTypeProvider - declares this is a LogStore
-use lattice_model::{StoreTypeProvider, STORE_TYPE_LOGSTORE};
-
-impl StoreTypeProvider for LogState {
-    fn store_type() -> &'static str {
-        STORE_TYPE_LOGSTORE
     }
 }
 

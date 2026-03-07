@@ -168,6 +168,10 @@ impl KvState {
 impl StateLogic for KvState {
     type Updates = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
+    fn store_type() -> &'static str {
+        lattice_model::STORE_TYPE_KVSTORE
+    }
+
     fn create(db: ScopedDb) -> Self {
         let (watcher_tx, _) = broadcast::channel(1024);
         Self { db, watcher_tx }
@@ -214,15 +218,6 @@ impl StateLogic for KvState {
             };
             let _ = self.watcher_tx.send(WatchEvent { key, kind });
         }
-    }
-}
-
-// StoreTypeProvider - declares this is a KvStore
-use lattice_model::{StoreTypeProvider, STORE_TYPE_KVSTORE};
-
-impl StoreTypeProvider for KvState {
-    fn store_type() -> &'static str {
-        STORE_TYPE_KVSTORE
     }
 }
 

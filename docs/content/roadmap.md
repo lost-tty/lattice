@@ -174,10 +174,10 @@ Eliminated dual-cache architecture (`StoreRegistry` + `StoreManager`). Single `S
 
 ### 16F: Stall Reporting
 - [x] **Framework exposes projection status** via `ProjectionStatus`: `{ last_applied_seq, last_applied_hash, witness_head_seq, witness_head_hash }`. Gap between cursor and head indicates stall. Surfaced via `store status` CLI (`Projection: N/M`, `(STALLED)` when behind).
-- [ ] **Non-blocking stall.** A stalled projection does NOT block: witnessing continues, sync continues, other stores are unaffected. Only reads against the stalled store's state return stale data (with a warning flag).
+- [x] **Non-blocking stall.** Witnessing continues, sync continues, other stores are unaffected. `project_new_entries` stops at the first failing entry and returns `Ok(count)` — no error propagation. Stall is surfaced via `ProjectionStatus` / `store status (STALLED)`.
 
 ### 16G: Bootstrap Alignment
-- [ ] **Delete `apply_witnessed_batch`.** Bootstrap now uses the same two-step path: insert + witness the peer's entries into the log, then `project_new_entries()`. No special code path.
+- [x] **`apply_witnessed_batch` collapsed into `apply_ingested_batch`.** Verification layer extracts authorized intentions from peer witness records, then delegates to the standard ingestion path (insert → `witness_ready` → `project_new_entries`). No separate code path.
 - [x] **Switch projection cursor to witness content hash.** `last_applied_witness` stores `blake3(WitnessRecord.content)`. `TABLE_WITNESS_CONTENT_INDEX` maps content hash → seq. `scan_witness_log` takes `start_seq: u64` directly — callers resolve externally. `project_new_entries` stores content hash, resolves via `get_content_seq_for()`. Bootstrap protocol uses `start_seq`/`last_seq` (no hashes). `SyncProvider` streaming paginates by seq.
 - [x] **`scan_witness_log` takes seq, not hash.** Removed hash→seq resolution from inside `scan_witness_log`. All callers (projection, bootstrap handler, bootstrap client, `SyncProvider` stream) pass a `u64` seq directly. Bootstrap proto changed from `start_hash bytes` to `start_seq uint64`, response includes `last_seq`.
 
@@ -186,10 +186,10 @@ Eliminated dual-cache architecture (`StoreRegistry` + `StoreManager`). Single `S
 
 ### 16I: Cleanup
 
-- [ ] Scope domain crate tests closer — add generic `TestHarness<S: StateLogic>` to `lattice-storage` (behind `test-support` feature), replace duplicated harnesses in `lattice-kvstore` and `lattice-logstore` unit tests. Internal `#[cfg(test)]` tests already call `StateLogic::apply` directly (correct); integration tests in `tests/` go through `SystemLayer` (correct). Only the boilerplate needs dedup.
 - [ ] Move `lattice-kvstore/tests/sync_compliance.rs` to `lattice-systemstore/tests/` — tests chain rules, snapshot/restore, convergence via `SystemLayer`, not KV-specific logic. Use `NullState` where possible, keep `KvState` only for tests that need real merge behavior.
 - [x] Remove `MetaStore::backfill_store_types()` migration (all nodes migrated).
 - [x] Remove `store_registry.rs` and `StoreRegistry` re-exports (verified: file deleted, type gone, no external consumers).
+- [x] Merge `StoreTypeProvider` into `StateMachine` / `StateLogic` — `store_type()` now lives on both traits. `StoreTypeProvider` trait deleted. One fewer bound in `StoreHandle`/`direct_opener` where clauses.
 
 ---
 
@@ -203,6 +203,7 @@ Review and clean up tests, reduce unnecessary dependencies, fix multi-peer boots
 ### 17B: Test Review & NullStore Migration
 - [ ] Review all integration tests — replace `KvStore` with `NullStore` wherever the test does not exercise KV-specific logic (chain rules, sync compliance, actor lifecycle, etc.).
 - [ ] Unify `test_node_builder` and `file_node_builder` helpers into a single shared builder (see Technical Debt).
+- [ ] Scope domain crate tests closer — add generic `TestHarness<S: StateLogic>` to `lattice-storage` (behind `test-support` feature), replace duplicated harnesses in `lattice-kvstore` and `lattice-logstore` unit tests. Internal `#[cfg(test)]` tests already call `StateLogic::apply` directly (correct); integration tests in `tests/` go through `SystemLayer` (correct). Only the boilerplate needs dedup.
 - [ ] Audit test coverage gaps exposed by the migration.
 
 ### 17C: Proto Definition Audit

@@ -694,6 +694,11 @@ impl<'a, R: Read> Read for HashingReader<'a, R> {
 pub trait StateLogic: Send + Sync {
     type Updates;
 
+    /// Returns the store type identifier (e.g., "core:kvstore").
+    fn store_type() -> &'static str
+    where
+        Self: Sized;
+
     /// Construct the state machine from a scoped database handle.
     fn create(db: ScopedDb) -> Self
     where

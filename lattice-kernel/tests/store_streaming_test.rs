@@ -16,6 +16,10 @@ struct MockStateMachine;
 impl StateMachine for MockStateMachine {
     type Error = std::io::Error;
 
+    fn store_type() -> &'static str {
+        "test:mock"
+    }
+
     fn apply(&self, _op: &Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
         Ok(())
     }

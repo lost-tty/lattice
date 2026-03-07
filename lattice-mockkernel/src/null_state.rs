@@ -7,7 +7,7 @@
 //! intentions (via `SystemBatch`) and verify convergence (via `table_fingerprint`
 //! / `intention_count`) without pulling in kvstore or any real store crate.
 
-use lattice_model::{Op, StoreTypeProvider};
+use lattice_model::Op;
 use lattice_storage::{ScopedDb, StateDbError, StateLogic};
 use lattice_store_base::{CommandHandler, Introspectable, StreamHandler, StreamProvider};
 use once_cell::sync::Lazy;
@@ -51,6 +51,10 @@ pub struct NullState;
 impl StateLogic for NullState {
     type Updates = ();
 
+    fn store_type() -> &'static str {
+        STORE_TYPE_NULLSTORE
+    }
+
     fn create(_db: ScopedDb) -> Self {
         Self
     }
@@ -65,16 +69,6 @@ impl StateLogic for NullState {
     }
 
     fn notify(&self, _updates: Self::Updates) {}
-}
-
-// ---------------------------------------------------------------------------
-// StoreTypeProvider
-// ---------------------------------------------------------------------------
-
-impl StoreTypeProvider for NullState {
-    fn store_type() -> &'static str {
-        STORE_TYPE_NULLSTORE
-    }
 }
 
 // ---------------------------------------------------------------------------

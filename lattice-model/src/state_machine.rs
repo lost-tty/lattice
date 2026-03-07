@@ -47,6 +47,11 @@ pub trait StateMachine: Send + Sync {
     /// The specific error type returned by this state machine
     type Error: Error + Send + Sync + 'static;
 
+    /// Returns the store type identifier (e.g., "core:kvstore").
+    fn store_type() -> &'static str
+    where
+        Self: Sized;
+
     /// Apply an operation to the state.
     ///
     /// Returns `Err` if the payload cannot be decoded or applied. This stalls
