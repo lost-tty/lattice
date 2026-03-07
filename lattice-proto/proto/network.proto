@@ -48,7 +48,7 @@ message SyncDone {
 // 7. Bootstrap (Clone) Protocol
 message BootstrapRequest {
   bytes store_id = 1;      // Store UUID
-  bytes start_hash = 2;    // Hash of the last known witness entry (or all-zeros for start)
+  uint64 start_seq = 2;    // Witness sequence number to start from (inclusive; 0 = from beginning)
   uint32 limit = 3;        // Max items to fetch
 }
 
@@ -57,6 +57,7 @@ message BootstrapResponse {
   repeated lattice.weaver.WitnessRecord witness_records = 2;
   repeated lattice.weaver.SignedIntention intentions = 3;
   bool done = 4;
+  uint64 last_seq = 5;     // Sequence number of the last witness entry in this batch
 }
 
 // 4. Fetch Intentions — used to retrieve missing data

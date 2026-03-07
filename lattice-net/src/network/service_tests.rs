@@ -254,7 +254,7 @@ mod tests {
 
         fn scan_witness_log(
             &self,
-            _: Option<Hash>,
+            _: u64,
             _: usize,
         ) -> Pin<
             Box<

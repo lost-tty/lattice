@@ -8,7 +8,7 @@ use lattice_model::{
 use prost::Message;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
-use uuid::Uuid; // For decoding WitnessContent
+use uuid::Uuid;
 
 #[derive(Clone, Default)]
 struct MockStateMachine;
@@ -76,9 +76,8 @@ async fn test_scan_witness_log_streaming() -> Result<(), Box<dyn std::error::Err
     let count = handle.witness_count().await;
     assert_eq!(count, 10, "Should have 10 witness entries");
 
-    // Test Streaming: limit 5
-    // start_hash=None should start from genesis
-    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, None, 5);
+    // Test Streaming: limit 5, start from seq 1 (genesis)
+    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, 1, 5);
     let mut entries = Vec::new();
     while let Some(res) = stream.next().await {
         entries.push(res.expect("stream error"));
@@ -87,22 +86,10 @@ async fn test_scan_witness_log_streaming() -> Result<(), Box<dyn std::error::Err
     assert_eq!(entries[0].seq, 1, "First entry should be seq 1");
     assert_eq!(entries[4].seq, 5, "Fifth entry should be seq 5");
 
-    // Get the intention hash of the last entry to continue iteration
-    // scan_witness_log expects an IntentionHash to look up the sequence number in TABLE_WITNESS_INDEX
-    let last_content = &entries.last().unwrap().content;
-    let last_witness_content =
-        lattice_kernel::proto::weaver::WitnessContent::decode(last_content.as_slice())
-            .expect("Should decode WitnessContent");
-    let last_intention_hash =
-        Hash::try_from(last_witness_content.intention_hash.as_slice()).expect("Invalid hash");
-
-    // Test Streaming: limit 5, starting after last_intention_hash
-    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(
-        &handle,
-        Some(last_intention_hash),
-        5,
-    );
-    // Since scan_witness_log(Some(h)) starts AFTER h, we should get seq 6..10
+    // Page 2: start from seq after last entry
+    let next_seq = entries.last().unwrap().seq + 1;
+    let mut stream =
+        <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, next_seq, 5);
 
     let mut entries_page2 = Vec::new();
     while let Some(res) = stream.next().await {
@@ -125,19 +112,10 @@ async fn test_scan_witness_log_streaming() -> Result<(), Box<dyn std::error::Err
         "Intention hash mismatch"
     );
 
-    // Test Streaming: limit 5, starting after last entry of page 2
-    let last_content_page2 = &entries_page2.last().unwrap().content;
-    let last_witness_content_page2 =
-        lattice_kernel::proto::weaver::WitnessContent::decode(last_content_page2.as_slice())
-            .expect("Should decode WitnessContent");
-    let last_intention_hash_page2 =
-        Hash::try_from(last_witness_content_page2.intention_hash.as_slice()).expect("Invalid hash");
-
-    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(
-        &handle,
-        Some(last_intention_hash_page2),
-        5,
-    );
+    // Page 3: should be empty (all 10 consumed)
+    let next_seq = entries_page2.last().unwrap().seq + 1;
+    let mut stream =
+        <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, next_seq, 5);
 
     let mut entries_empty = Vec::new();
     while let Some(res) = stream.next().await {

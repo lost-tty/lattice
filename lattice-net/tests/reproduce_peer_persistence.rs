@@ -86,7 +86,7 @@ async fn test_peer_persistence_after_bootstrap() {
     // Server B is NetworkService, get_store returns Option<NetworkStore>
     let net_store = server_b.get_store(store_id).expect("net store");
     use futures_util::StreamExt;
-    let mut stream = net_store.scan_witness_log(None, 100);
+    let mut stream = net_store.scan_witness_log(1, 100);
     tracing::info!("--- Witness Log Dump ---");
     while let Some(res) = stream.next().await {
         let entry = res.expect("entry");

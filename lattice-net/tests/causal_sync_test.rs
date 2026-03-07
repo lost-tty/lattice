@@ -58,7 +58,7 @@ async fn test_sync_preserves_causal_order_in_witness_log() {
     // Get the witness log from A
     let a_provider = root_handle_a.as_sync_provider();
     let mut log_a = Vec::new();
-    let mut a_stream = a_provider.scan_witness_log(None, 100);
+    let mut a_stream = a_provider.scan_witness_log(1, 100);
     while let Some(Ok(record)) = a_stream.next().await {
         log_a.push(record);
     }
@@ -132,7 +132,7 @@ async fn test_sync_preserves_causal_order_in_witness_log() {
     // 3. Verify Witness Log on Node B matches the causal order
     let b_provider = root_handle_b.as_sync_provider();
     let mut log_b = Vec::new();
-    let mut b_stream = b_provider.scan_witness_log(None, 100);
+    let mut b_stream = b_provider.scan_witness_log(1, 100);
     while let Some(Ok(record)) = b_stream.next().await {
         log_b.push(record);
     }

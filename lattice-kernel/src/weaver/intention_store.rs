@@ -33,6 +33,11 @@ const TABLE_WITNESS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("witne
 /// Witness index: intention hash (32 bytes) → witness sequence number (8 bytes big-endian).
 const TABLE_WITNESS_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("witness_index");
 
+/// Witness content index: witness content hash (32 bytes) → witness sequence number (8 bytes BE).
+/// Used by the projection cursor to resolve a witness content hash back to a seq.
+const TABLE_WITNESS_CONTENT_INDEX: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("witness_content_index");
+
 /// Author tips table: PubKey (32 bytes) → latest intention Hash (32 bytes).
 const TABLE_AUTHOR_TIPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("author_tips");
 
@@ -153,6 +158,7 @@ impl IntentionStore {
             let _ = write_txn.open_table(TABLE_INTENTIONS)?;
             let _ = write_txn.open_table(TABLE_WITNESS)?;
             let _ = write_txn.open_table(TABLE_WITNESS_INDEX)?;
+            let _ = write_txn.open_table(TABLE_WITNESS_CONTENT_INDEX)?;
             let _ = write_txn.open_table(TABLE_AUTHOR_TIPS)?;
             let _ = write_txn.open_table(TABLE_FLOATING)?;
             let _ = write_txn.open_multimap_table(TABLE_FLOATING_BY_PREV)?;
@@ -260,6 +266,7 @@ impl IntentionStore {
             let intention_table = write_txn.open_table(TABLE_INTENTIONS)?;
             let witness_table = write_txn.open_table(TABLE_WITNESS)?;
             let mut witness_index = write_txn.open_table(TABLE_WITNESS_INDEX)?;
+            let mut content_index = write_txn.open_table(TABLE_WITNESS_CONTENT_INDEX)?;
 
             let mut max_seq = 0;
             let mut expected_prev = Hash::ZERO;
@@ -294,7 +301,8 @@ impl IntentionStore {
                     }
                     .into());
                 }
-                expected_prev = lattice_model::crypto::content_hash(&record.content);
+                let witness_content_hash = lattice_model::crypto::content_hash(&record.content);
+                expected_prev = witness_content_hash;
 
                 let intention_hash =
                     Hash::try_from(content.intention_hash.as_slice()).map_err(|_| {
@@ -316,9 +324,13 @@ impl IntentionStore {
                 self.author_tips
                     .insert(signed.intention.author, intention_hash);
 
-                // Backfill witness index
+                // Backfill indexes
                 let seq_key = seq.to_be_bytes();
                 witness_index.insert(intention_hash.as_bytes().as_slice(), seq_key.as_slice())?;
+                content_index.insert(
+                    witness_content_hash.as_bytes().as_slice(),
+                    seq_key.as_slice(),
+                )?;
             }
 
             self.witness_seq = max_seq;
@@ -437,9 +449,12 @@ impl IntentionStore {
             let mut table = write_txn.open_table(TABLE_WITNESS)?;
             table.insert(seq_key.as_slice(), proto_bytes.as_slice())?;
 
-            // Update witness index
+            // Update witness indexes
             let mut witness_idx = write_txn.open_table(TABLE_WITNESS_INDEX)?;
             witness_idx.insert(hash.as_bytes().as_slice(), seq_key.as_slice())?;
+
+            let mut content_idx = write_txn.open_table(TABLE_WITNESS_CONTENT_INDEX)?;
+            content_idx.insert(new_witness_hash.as_bytes().as_slice(), seq_key.as_slice())?;
 
             let mut tips = write_txn.open_table(TABLE_AUTHOR_TIPS)?;
             tips.insert(intention.author.0.as_slice(), hash.as_bytes().as_slice())?;
@@ -625,13 +640,31 @@ impl IntentionStore {
     /// Returns (seq, content_hash, record) tuples.
     /// Get the entire witness log (WARNING: O(N) memory usage)
     pub fn witness_log(&self) -> Result<Vec<WitnessEntry>, IntentionStoreError> {
-        self.scan_witness_log(None, usize::MAX)
+        self.scan_witness_log(1, usize::MAX)
     }
 
     /// Look up the witness sequence number for an intention hash.
     /// Returns `None` if the intention has not been witnessed.
     pub fn get_witness_seq_for(&self, hash: &Hash) -> Option<u64> {
         self.get_witness_seq(hash).ok().flatten()
+    }
+
+    /// Look up the witness sequence number for a witness content hash.
+    /// Returns `None` if the hash is not found.
+    pub fn get_content_seq_for(&self, hash: &Hash) -> Result<Option<u64>, IntentionStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let index = read_txn.open_table(TABLE_WITNESS_CONTENT_INDEX)?;
+        match index.get(hash.as_bytes().as_slice())? {
+            Some(v) => Ok(Some(u64::from_be_bytes(v.value().try_into().map_err(
+                |_| Corruption::FieldLength {
+                    table: "witness_content_index",
+                    field: "seq",
+                    expected: 8,
+                    actual: v.value().len(),
+                },
+            )?))),
+            None => Ok(None),
+        }
     }
 
     /// Get the witness sequence number for a given intention hash.
@@ -651,28 +684,15 @@ impl IntentionStore {
         }
     }
 
-    /// Scan witness log from a given start point.
+    /// Scan witness log starting from `start_seq` (inclusive).
     ///
-    /// If `start_hash` is provided:
-    /// - If `Hash::ZERO`, starts from genesis (seq 1).
-    /// - If found, starts from the entry *after* it.
-    /// - If not found, returns error.
-    ///
-    /// If `start_hash` is None, starts from genesis.
+    /// Callers resolve their cursor (hash, seq, etc.) to a sequence number
+    /// before calling this method.
     pub fn scan_witness_log(
         &self,
-        start_hash: Option<Hash>,
+        start_seq: u64,
         limit: usize,
     ) -> Result<Vec<WitnessEntry>, IntentionStoreError> {
-        let start_seq = match start_hash {
-            Some(h) if h != Hash::ZERO => {
-                self.get_witness_seq(&h)?
-                    .ok_or_else(|| IntentionStoreError::MissingIntention(h))?
-                    + 1 // Start scanning AFTER the known hash (inclusive start = seq + 1)
-            }
-            _ => 1, // Genesis starts at 1
-        };
-
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE_WITNESS)?;
 

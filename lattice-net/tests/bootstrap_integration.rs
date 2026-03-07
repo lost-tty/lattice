@@ -65,7 +65,7 @@ async fn test_bootstrap_clone_flow() {
 
     // A. Verify Store A can scan witness log
     // scan_witness_log returns the stream directly
-    let mut stream = store_a.scan_witness_log(None, 100);
+    let mut stream = store_a.scan_witness_log(1, 100);
 
     let mut batch = Vec::new();
     while let Some(result) = stream.next().await {

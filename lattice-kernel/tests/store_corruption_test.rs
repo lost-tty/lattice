@@ -6,7 +6,7 @@
 #[cfg(test)]
 mod tests {
     use lattice_kernel::OpenedStore;
-    use lattice_model::{types::Hash, NodeIdentity, Op, PubKey, StateMachine, StateWriter, StoreIdentity, StoreMeta};
+    use lattice_model::{types::Hash, NodeIdentity, Op, StateMachine, StateWriter, StoreIdentity, StoreMeta};
     use lattice_model::StorageConfig;
     use std::sync::{Arc, RwLock};
     use uuid::Uuid;

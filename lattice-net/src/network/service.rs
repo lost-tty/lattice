@@ -461,7 +461,7 @@ impl<T: Transport> NetworkService<T> {
         tracing::info!("Bootstrap: connecting to peer {}", peer_id);
 
         let mut total_ingested: u64 = 0;
-        let mut start_hash = Hash::ZERO.to_vec();
+        let mut start_seq: u64 = 0;
         let mut fully_done = false;
 
         let conn = self.transport.connect(&peer_id).await?;
@@ -472,7 +472,7 @@ impl<T: Transport> NetworkService<T> {
             let req = PeerMessage {
                 message: Some(peer_message::Message::BootstrapRequest(BootstrapRequest {
                     store_id: store_id.as_bytes().to_vec(),
-                    start_hash: start_hash.clone(),
+                    start_seq,
                     limit: 1000,
                 })),
             };
@@ -490,12 +490,8 @@ impl<T: Transport> NetworkService<T> {
                     if !resp.witness_records.is_empty() {
                         let count = resp.witness_records.len() as u64;
 
-                        if let Some(last_record) = resp.witness_records.last() {
-                            let content = lattice_proto::weaver::WitnessContent::decode(
-                                last_record.content.as_slice(),
-                            )?;
-                            start_hash = content.intention_hash;
-                        }
+                        // Resume after the last entry in this batch
+                        start_seq = resp.last_seq + 1;
 
                         let intentions: Vec<_> = resp
                             .intentions

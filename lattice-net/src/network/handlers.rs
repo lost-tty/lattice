@@ -231,7 +231,7 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     let (_store_id, authorized_store) =
         get_authorized_store(provider, &req.store_id, remote_pubkey)?;
 
-    let start_hash = parse_optional_hash(&req.start_hash, "start_hash")?;
+    let start_seq = if req.start_seq == 0 { 1 } else { req.start_seq };
 
     let max_limit = if req.limit == 0 {
         1000
@@ -240,15 +240,17 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
     };
     let max_limit = std::cmp::min(max_limit, 10_000);
 
-    let mut stream = authorized_store.scan_witness_log(start_hash, max_limit);
+    let mut stream = authorized_store.scan_witness_log(start_seq, max_limit);
 
     let mut witness_batch = Vec::new();
     let mut intention_hashes = Vec::new();
     let mut total_processed = 0;
+    let mut last_seq = 0u64;
     const BATCH_SIZE: usize = 100;
 
     while let Some(result) = stream.next().await {
         let entry = result?;
+        last_seq = entry.seq;
 
         witness_batch.push(WitnessRecord {
             content: entry.content.clone(),
@@ -271,6 +273,7 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
                 &req.store_id,
                 &witness_batch,
                 &intention_hashes,
+                last_seq,
                 false,
             )
             .await?;
@@ -288,6 +291,7 @@ pub async fn handle_bootstrap_request<W: tokio::io::AsyncWrite + Send + Unpin>(
             &req.store_id,
             &witness_batch,
             &intention_hashes,
+            last_seq,
             is_done,
         )
         .await?;
@@ -302,6 +306,7 @@ async fn send_bootstrap_batch<W: tokio::io::AsyncWrite + Send + Unpin>(
     store_id_bytes: &[u8],
     witness_records: &[WitnessRecord],
     intention_hashes: &[Hash],
+    last_seq: u64,
     done: bool,
 ) -> Result<(), LatticeNetError> {
     if witness_records.is_empty() && !done {
@@ -317,6 +322,7 @@ async fn send_bootstrap_batch<W: tokio::io::AsyncWrite + Send + Unpin>(
                 witness_records: witness_records.to_vec(),
                 intentions: intentions_to_proto(&intentions),
                 done,
+                last_seq,
             },
         )),
     };

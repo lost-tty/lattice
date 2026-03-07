@@ -128,7 +128,7 @@ Changes:
 Remaining decisions for witness-first:
 - [x] **`last_applied_witness: (u64, Hash)`**: framework-owned. Written by `project_new_entries()` after each successful state projection. Read on restart to resume. Stored as `ProjectionCursor` protobuf in `TABLE_META`.
 - [x] **`stalled_at` removed**: stall is implicit — gap between `ProjectionCursor` and witness log head. No separate record needed.
-- [ ] Decide if chain tips and witness cursor should remain in `TABLE_META` or split into a separate table.
+- [x] Decide if chain tips and witness cursor should remain in `TABLE_META` or split into a separate table.
 
 **Step 1 — Witness-first conversion:**
 
@@ -178,62 +178,87 @@ Eliminated dual-cache architecture (`StoreRegistry` + `StoreManager`). Single `S
 
 ### 16G: Bootstrap Alignment
 - [ ] **Delete `apply_witnessed_batch`.** Bootstrap now uses the same two-step path: insert + witness the peer's entries into the log, then `project_new_entries()`. No special code path.
-- [ ] **Switch projection cursor to witness content hash.** `last_applied_witness` should store `blake3(WitnessRecord.content)` instead of intention hash — the cursor tracks position in the witness log, so it should use the log's native identity. Attempted in-session but reverted (broke production). Requires: (1) `TABLE_WITNESS_CONTENT_INDEX` (`content_hash → seq`) alongside existing `TABLE_WITNESS_INDEX`, (2) `scan_witness_log` resolves via content index, (3) `project_new_entries` stores content hash, (4) `SyncProvider` streaming paginates by content hash, (5) bootstrap protocol sends content hash cursor. Single-peer pagination works (hash round-trips to same peer). Needs paginated bootstrap test via lattice-net-sim before re-attempting.
-- [ ] **Multi-peer bootstrap is broken.** Witness log order is node-local — each node witnesses in its own arrival order. Resuming from peer A's cursor on peer B skips entries regardless of hash type. Multi-peer failover needs set reconciliation, not linear log scanning.
+- [x] **Switch projection cursor to witness content hash.** `last_applied_witness` stores `blake3(WitnessRecord.content)`. `TABLE_WITNESS_CONTENT_INDEX` maps content hash → seq. `scan_witness_log` takes `start_seq: u64` directly — callers resolve externally. `project_new_entries` stores content hash, resolves via `get_content_seq_for()`. Bootstrap protocol uses `start_seq`/`last_seq` (no hashes). `SyncProvider` streaming paginates by seq.
+- [x] **`scan_witness_log` takes seq, not hash.** Removed hash→seq resolution from inside `scan_witness_log`. All callers (projection, bootstrap handler, bootstrap client, `SyncProvider` stream) pass a `u64` seq directly. Bootstrap proto changed from `start_hash bytes` to `start_seq uint64`, response includes `last_seq`.
 
 ### 16H: Payload Validation Strategy Update
 - [ ] **Update "stall on failure" contract** in `StateMachine` trait docs. Stall still applies — but the stall point moves from "intention stays floating, never witnessed" to "intention is witnessed, state projection pauses." The effect on the local user is the same (stale state until upgrade). The effect on the network is better (sync and other authors are unblocked).
 
 ### 16I: Cleanup
 
-- [ ] Scope domain crate tests closer: internal `#[cfg(test)]` tests should call `StateLogic::apply(table, op, dag)` directly (no `SystemLayer`); integration tests in `tests/` go through `SystemLayer`. Currently some tests still open raw write transactions via `StateBackend` — consider a small test-only helper in `lattice-storage` to reduce ceremony.
-- [ ] Move `STORE_TYPE_KVSTORE` and `STORE_TYPE_LOGSTORE` constants out of `lattice-model` into their respective store crates (`lattice-kvstore`, `lattice-logstore`). `lattice-model` shouldn't know about specific store types.
+- [ ] Scope domain crate tests closer — add generic `TestHarness<S: StateLogic>` to `lattice-storage` (behind `test-support` feature), replace duplicated harnesses in `lattice-kvstore` and `lattice-logstore` unit tests. Internal `#[cfg(test)]` tests already call `StateLogic::apply` directly (correct); integration tests in `tests/` go through `SystemLayer` (correct). Only the boilerplate needs dedup.
+- [ ] Move `lattice-kvstore/tests/sync_compliance.rs` to `lattice-systemstore/tests/` — tests chain rules, snapshot/restore, convergence via `SystemLayer`, not KV-specific logic. Use `NullState` where possible, keep `KvState` only for tests that need real merge behavior.
 - [x] Remove `MetaStore::backfill_store_types()` migration (all nodes migrated).
-- [ ] Remove `store_registry.rs` and `StoreRegistry` re-exports from `lattice-node` and `lattice-runtime` public API (done as part of 16D merge, but verify no external consumers).
-- [ ] Stale author chaintips in state.db: `verify_and_update_tip` writes `tip/<pubkey>` entries but nothing ever removes them. Revoked authors leave dead records. Low priority (64 bytes per author), but snapshots include stale data.
+- [x] Remove `store_registry.rs` and `StoreRegistry` re-exports (verified: file deleted, type gone, no external consumers).
 
 ---
 
-## Milestone 17: Log Lifecycle & Pruning
+## Milestone 17: Housekeeping
+
+Review and clean up tests, reduce unnecessary dependencies, fix multi-peer bootstrap.
+
+### 17A: Multi-Peer Bootstrap
+- [ ] **Multi-peer bootstrap is broken.** Witness log order is node-local — each node witnesses in its own arrival order. Resuming from peer A's cursor on peer B skips entries regardless of hash type. Multi-peer failover needs set reconciliation, not linear log scanning.
+
+### 17B: Test Review & NullStore Migration
+- [ ] Review all integration tests — replace `KvStore` with `NullStore` wherever the test does not exercise KV-specific logic (chain rules, sync compliance, actor lifecycle, etc.).
+- [ ] Unify `test_node_builder` and `file_node_builder` helpers into a single shared builder (see Technical Debt).
+- [ ] Audit test coverage gaps exposed by the migration.
+
+### 17C: Proto Definition Audit
+- [ ] Audit `lattice-proto`: identify proto definitions that are only consumed by a single crate. Move those definitions into the consuming crate's own proto files. If all definitions can be relocated, remove `lattice-proto` entirely.
+
+### 17D: Crate Dependency Graph Review
+- [ ] Review the dependency graph between workspace crates. Identify unnecessary or circular dependencies, overly broad re-exports, and crates that pull in more than they need. Clean up after M13 and M16 reshuffling.
+
+---
+
+## Milestone 18: Log Lifecycle & Pruning
 
 Manage log growth on long-running nodes via stability frontier, snapshots, pruning, and finality checkpoints.
 
 > **See:** [Stability Frontier](stability-frontier.md) for the full design.
 
-### 17A: Stability Frontier & Tip Attestations
+### 18A: Stability Frontier & Tip Attestations
 - [ ] `SystemOp::TipAttestation { tips: Vec<(PubKey, Hash)> }` — publish changed author tips as SystemOps
 - [ ] Attestation keys in `TABLE_SYSTEM`: `attestation/{attester}/{author} → Hash` (LWW by HLC)
 - [ ] Derive per-author frontier: `frontier[A] = min(tip[A] across all Active peers)`
 - [ ] Attestation triggers: post-sync, batch threshold, periodic heartbeat (~15 min), graceful shutdown
 - [ ] **Lag metric:** Per-peer divergence from local tips, surfaced via `NodeEvent::PeerLagWarning` and `store status`
 
-### 17B: Snapshotting
-- [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Options: tempfile-based replay (works today, heavy on I/O) or in-memory `StateBackend` variant (cleaner). **Note:** `StateMachine::snapshot()`/`restore()` were removed in M16A Step 3 — the old `StateBackend::snapshot_internal()` serialization format is deleted. M17 will design a new snapshot mechanism tailored to pruning requirements (frontier-aware, incremental, possibly stored in a separate `snapshot.db`).
+### 18B: Snapshotting
+- [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Options: tempfile-based replay (works today, heavy on I/O) or in-memory `StateBackend` variant (cleaner). **Note:** `StateMachine::snapshot()`/`restore()` were removed in M16A Step 3 — the old `StateBackend::snapshot_internal()` serialization format is deleted. M18 will design a new snapshot mechanism tailored to pruning requirements (frontier-aware, incremental, possibly stored in a separate `snapshot.db`).
 - [ ] Store snapshots in `snapshot.db` (per-store, includes `TABLE_SYSTEM` attestation state)
 - [ ] Bootstrap new peers from snapshot + tail sync instead of full log replay
 - [ ] **Future optimization:** Inverse operations stored in `WitnessRecord` could allow rolling back from current state to frontier in O(head − frontier), avoiding replay. Deferred until profiling shows replay is a bottleneck.
 
-### 17C: Pruning
+### 18C: Pruning
 - [ ] `truncate_prefix` for all intentions per author up to `frontier[A]`
 - [ ] Discard individual attestation intentions below the frontier (snapshot carries state forward)
 - [ ] Preserve intentions newer than frontier
 
-### 17D: Checkpointing / Finality
+### 18C½: Store-Level Pruning Hints
+Store-defined intention metadata that guides consensus pruning. Both hints are advisory — pruning only happens once all peers have attested past the relevant intentions (standard frontier rules).
+- [ ] **Supersede hint** (`supersedes_all: true`): Intention declares it supersedes all prior state (e.g., a full snapshot-as-intention, or a state reset). Everything causally before it is safe to prune. The pruner can treat it as a new root, discarding the entire prefix. Useful for stores that periodically compact their state into a single intention.
+- [ ] **Ephemeral hint** (`ephemeral: true`): Intention declares it is unlikely to ever be a causal dependency (e.g., a key deletion in a KV store — no future operation will depend on the deleted value). Chains ending at ephemeral intentions may be pruned more aggressively — once all peers have witnessed them past the frontier, the pruner can discard them without waiting for a full snapshot cycle.
+- [ ] Wire hints through `Intention` proto field (bitflags or enum), surface in `Op` for state machines, respect in `truncate_prefix` (18C).
+
+### 18D: Checkpointing / Finality
 - [ ] Periodically finalize state hash (protect against "Deep History Attacks")
 - [ ] Signed checkpoint intentions in sigchain
 - [ ] Nodes reject intentions that contradict finalized checkpoints
 
-### 17E: Recursive Store Bootstrapping (Pruning-Aware)
+### 18E: Recursive Store Bootstrapping (Pruning-Aware)
 - [ ] `RecursiveWatcher` identifies child stores from live state, not just intention logs.
 - [ ] Bootstrapping a child store requires a **Two-Phase Protocol** because Negentropy cannot sync from an implicit zero-genesis if the store has been pruned.
 - [ ] **Phase 1 (Snapshot):** Request the opaque snapshot (`state.db`) from the peer for the discovered child store.
 - [ ] **Phase 2 (Tail Sync):** Run Negentropy to sync floating intentions that occurred *after* the snapshot's causal frontier.
 
-### 17F: Hash Index Optimization ✅
+### 18F: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
 - [x] Support 100M+ intentions without excessive RAM
 
-### 17G: Advanced Sync Optimization (Future)
+### 18G: Advanced Sync Optimization (Future)
 - [ ] **Modular-Add Fingerprints:** Replace XOR-based fingerprints with modular addition (mod 2^256). XOR is linear and cancels duplicates (`a ⊕ a = 0`); mod-add is strictly more robust at identical cost. Affected sites:
   - `IntentionStore::xor_fingerprint()` / `derive_table_fingerprint()` / `fingerprint_range()` in `lattice-kernel`
   - `SyncProvider` trait docs in `lattice-kernel/src/sync_provider.rs`
@@ -247,64 +272,64 @@ Manage log growth on long-running nodes via stability frontier, snapshots, pruni
 
 ---
 
-## Milestone 18: Content-Addressable Store (CAS)
+## Milestone 19: Content-Addressable Store (CAS)
 
 Node-local content-addressable blob storage. Replication policy managed separately. Requires M11 and M12.
 
-### 18A: Low-Level Storage (`lattice-cas`)
+### 19A: Low-Level Storage (`lattice-cas`)
 - [ ] `CasBackend` trait interface (`fs`, `block`, `s3`)
 - [ ] Isolation: Mandatory `store_id` for all ops
 - [ ] `redb` metadata index: ARC (Adaptive Replacement Cache), RefCounting
 - [ ] `FsBackend`: Sharded local disk blob storage
 
-### 18B: Replication & Safety (`CasManager`)
+### 19B: Replication & Safety (`CasManager`)
 - [ ] `ReplicationPolicy` trait: `crush_map()` and `replication_factor()` from System Table
 - [ ] `StateMachine::referenced_blobs()`: Pinning via State declarations
 - [ ] Pull-based reconciler: `ensure(cid)`, `calculate_duties()`, `gc()` with Soft Handoff
 
-### 18C: Wasm & FUSE Integration
+### 19C: Wasm & FUSE Integration
 - [ ] **Wasm**: Host Handles (avoid linear memory copy)
 - [ ] **FUSE**: `get_range` (random access) and `put_batch` (buffered write)
 - [ ] **Encryption**: Store-side encryption (client responsibility)
 
-### 18D: CLI & Observability
+### 19D: CLI & Observability
 - [ ] `cas put`, `cas get`, `cas pin`, `cas status`
 
 ---
 
-## Milestone 19: Lattice File Sync MVP
+## Milestone 20: Lattice File Sync MVP
 
-File sync over Lattice. Requires M11 (Sync) and M18 (CAS).
+File sync over Lattice. Requires M11 (Sync) and M19 (CAS).
 
-### 19A: Filesystem Logic
+### 20A: Filesystem Logic
 - [ ] Define `DirEntry` schema: `{ name, mode, cid, modified_at }` in KV Store
 - [ ] Map file operations (`write`, `mkdir`, `rename`) to KV Ops
 
-### 19B: FUSE Interface
+### 20B: FUSE Interface
 - [ ] Write `lattice-fs` using the `fuser` crate
 - [ ] Mount the Store as a folder on Linux/macOS
 - [ ] **Demo:** `cp photo.jpg ~/lattice/` → Syncs to second node
 
 ---
 
-## Milestone 20: Wasm Runtime
+## Milestone 21: Wasm Runtime
 
 Replace hardcoded state machines with dynamic Wasm modules.
 
-### 20A: Wasm Integration
+### 21A: Wasm Integration
 - [ ] Integrate `wasmtime` into the Kernel
 - [ ] Define minimal Host ABI: `kv_get`, `kv_set`, `log_append`, `get_head`
 - [ ] Replace hardcoded `KvStore::apply()` with `WasmRuntime::call_apply()`
 - [ ] Map Host Functions to `StorageBackend` calls (M9 prerequisite)
 
-### 20B: Data Structures & Verification
+### 21B: Data Structures & Verification
 - [ ] Finalize `Intention`, `SignedIntention`, `Hash`, `PubKey` structs for Wasm boundary
 - [ ] Wasm-side Intention DAG verification (optional, for paranoid clients)
 - **Deliverable:** A "Counter" Wasm module that increments a value when it receives an Op
 
 ---
 
-## Milestone 21: N-Node Simulator
+## Milestone 22: N-Node Simulator
 
 Scriptable simulation framework for testing Lattice networking at scale. Built on the `lattice-net-sim` crate (M12B).
 
@@ -315,19 +340,19 @@ Scriptable simulation framework for testing Lattice networking at scale. Built o
 
 ---
 
-## Milestone 22: Embedded Proof ("Lattice Nano")
+## Milestone 23: Embedded Proof ("Lattice Nano")
 
 Run the kernel on the RP2350.
 
 > Because CLI is already separated from Daemon (M7) and storage is abstracted (M9), only the Daemon needs porting.
 > **Note:** Requires substantial refactoring of `lattice-kernel` to support `no_std`.
 
-### 22A: `no_std` Refactoring
+### 23A: `no_std` Refactoring
 - [ ] Split `lattice-kernel` into `core` (logic) and `std` (IO)
 - [ ] Replace `wasmtime` (JIT) with `wasmi` (Interpreter) for embedded target
 - [ ] Port storage layer to `sequential-storage` (Flash) via `StorageBackend`
 
-### 22B: Hardware Demo
+### 23B: Hardware Demo
 - [ ] Build physical USB stick prototype
 - [ ] Implement BLE/Serial transport
 - [ ] Sync a file from Laptop → Stick → Phone without Internet
@@ -342,13 +367,15 @@ Run the kernel on the RP2350.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
 - [ ] **DAG Reachability Index**: `DagQueries` methods (`find_lca`, `is_ancestor`, `get_path`) use naive BFS. For large DAGs, add generation numbers (prune impossible ancestors by depth) or bloom filters (compact ancestor summaries) for O(log N) reachability. Not needed until BFS becomes a bottleneck.
 - [ ] **Sync Trigger & Bootstrap Controller Review**: Review how and when sync is triggered (currently ad-hoc in `active_peer_ids` or `complete_join_handshake`). Consider introducing a dedicated `BootstrapController` to manage initial sync state, retry logic, and transition to steady-state gossip/sync.
+- [ ] **Move `STORE_TYPE_KVSTORE` / `STORE_TYPE_LOGSTORE`** out of `lattice-model` into their respective store crates. `lattice-model` shouldn't know about specific store types.
+- [ ] **Stale author chaintips in state.db**: `verify_and_update_tip` writes `tip/<pubkey>` entries but nothing ever removes them. Revoked authors leave dead records. Low priority (64 bytes per author), but snapshots include stale data.
 - [ ] **Decouple Iroh transport key from lattice signing identity**: Iroh requires raw `SigningKey` bytes to derive its QUIC node identity (`lattice-net-iroh/src/transport.rs`), which is incompatible with HSM/TPM backends where the private key never leaves the hardware. Options: (1) derive a transport subkey from the HSM if it supports ECDH/key derivation, (2) give Iroh its own ephemeral key and add a post-connect attestation protocol to bind transport identity to lattice `PubKey`, (3) wait for Iroh to support trait-based signing. Option 2 also decouples transport identity from signing identity, which helps with key rotation and multi-device. Trade-off: nodes can no longer assume Iroh `NodeId` == lattice `PubKey`, so a mapping/attestation step is needed after connection.
 
 ---
 
 ## Discussion
 
-- [x] ~~Does StateMachine need snapshot/restore once we have IntentionStore pruning/snapshots?~~ **Resolved (M16A Step 3):** Removed from `StateMachine`. Not used in production — replication is witness-log-based. M17 will redesign snapshot mechanism for pruning when requirements are clear.
+- [x] ~~Does StateMachine need snapshot/restore once we have IntentionStore pruning/snapshots?~~ **Resolved (M16A Step 3):** Removed from `StateMachine`. Not used in production — replication is witness-log-based. M18 will redesign snapshot mechanism for pruning when requirements are clear.
 - [ ] Revoking a Peer is untested. How do we ensure removed peers will not receive future Intentions?
 
 ---

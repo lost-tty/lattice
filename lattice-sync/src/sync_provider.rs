@@ -114,7 +114,7 @@ pub trait SyncProvider: Send + Sync {
 
     fn scan_witness_log(
         &self,
-        start_hash: Option<Hash>,
+        start_seq: u64,
         limit: usize,
     ) -> Pin<
         Box<

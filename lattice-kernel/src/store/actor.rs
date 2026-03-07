@@ -290,7 +290,7 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 let cursor_seq = if cursor == Hash::ZERO {
                     0
                 } else {
-                    store.get_witness_seq_for(&cursor).unwrap_or(0)
+                    store.get_content_seq_for(&cursor).ok().flatten().unwrap_or(0)
                 };
                 let _ = resp.send(crate::store::handle::ProjectionStatus {
                     last_applied_seq: cursor_seq,
@@ -563,21 +563,33 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
         &self,
         store: &IntentionStore,
     ) -> Result<u64, ReplicationControllerError> {
-        let mut cursor = self
+        let cursor_hash = self
             .state
             .last_applied_witness()
             .map_err(|e| ReplicationControllerError::State(StateError::Backend(e)))?;
 
+        // Resolve the witness content hash cursor to a sequence number.
+        let mut next_seq = if cursor_hash == Hash::ZERO {
+            1
+        } else {
+            store
+                .get_content_seq_for(&cursor_hash)
+                .map_err(|e| {
+                    ReplicationControllerError::State(StateError::Backend(e.to_string()))
+                })?
+                .ok_or_else(|| {
+                    ReplicationControllerError::State(StateError::Backend(format!(
+                        "Projection cursor {} not found in witness content index",
+                        cursor_hash
+                    )))
+                })?
+                + 1
+        };
+
         let mut projected = 0u64;
 
-        let start = if cursor == Hash::ZERO {
-            None
-        } else {
-            Some(cursor)
-        };
         loop {
-            let scan_from = if projected == 0 { start } else { Some(cursor) };
-            let entries = store.scan_witness_log(scan_from, 256)?;
+            let entries = store.scan_witness_log(next_seq, 256)?;
             if entries.is_empty() {
                 break;
             }
@@ -634,11 +646,14 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                     return Ok(projected);
                 }
 
-                cursor = intention_hash;
                 self.state
-                    .set_last_applied_witness(cursor)
+                    .set_last_applied_witness(entry.content_hash)
                     .map_err(|e| ReplicationControllerError::State(StateError::Backend(e)))?;
                 projected += 1;
+            }
+
+            if let Some(last) = entries.last() {
+                next_seq = last.seq + 1;
             }
         }
 

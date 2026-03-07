@@ -7,9 +7,7 @@ use crate::weaver::intention_store::IntentionStore;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, SignedIntention, WitnessEntry};
 use lattice_model::Uuid;
-use lattice_proto::weaver::WitnessContent;
 use prost::Message;
-
 use lattice_model::NodeIdentity;
 use lattice_model::StoreMeta;
 use lattice_model::{StateMachine, StoreIdentity, SystemEvent};
@@ -537,7 +535,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
 
     fn scan_witness_log(
         &self,
-        start_hash: Option<Hash>,
+        start_seq: u64,
         limit: usize,
     ) -> Pin<
         Box<
@@ -549,7 +547,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         let store = self.intention_store.clone();
 
         Box::pin(async_stream::try_stream! {
-            let mut current_start = start_hash;
+            let mut next_seq = start_seq;
             let mut remaining = limit;
             let batch_size = 1000; // Hardcoded internal batch size
 
@@ -558,7 +556,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
 
                 // Fetch a batch in a blocking task
                 let batch = run_store_read(store.clone(), move |guard| {
-                    guard.scan_witness_log(current_start, fetch_limit)
+                    guard.scan_witness_log(next_seq, fetch_limit)
                 }).await?;
 
                 if batch.is_empty() {
@@ -567,21 +565,7 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
 
                 remaining -= batch.len();
                 if let Some(last) = batch.last() {
-                    // Update start_hash for next batch using INTENTION hash (since we index by intention hash)
-                    match WitnessContent::decode(last.content.as_slice()) {
-                         Ok(content) => {
-                             if let Ok(hash) = Hash::try_from(content.intention_hash.as_slice()) {
-                                 current_start = Some(hash);
-                             } else {
-                                 tracing::warn!("Invalid hash in witness content during scan");
-                                 break;
-                             }
-                         },
-                         Err(e) => {
-                             tracing::warn!("Failed to decode witness content during scan: {}", e);
-                             break;
-                         }
-                    }
+                    next_seq = last.seq + 1;
                 }
 
                 for item in batch {

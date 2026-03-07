@@ -176,7 +176,7 @@ impl NetworkStore {
 
     pub fn scan_witness_log(
         &self,
-        start_hash: Option<Hash>,
+        start_seq: u64,
         limit: usize,
     ) -> std::pin::Pin<
         Box<
@@ -185,7 +185,7 @@ impl NetworkStore {
                 + '_,
         >,
     > {
-        self.sync.scan_witness_log(start_hash, limit)
+        self.sync.scan_witness_log(start_seq, limit)
     }
 }
 
