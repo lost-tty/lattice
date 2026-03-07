@@ -20,5 +20,7 @@ redb = { workspace = true }
 prost-reflect = { workspace = true }
 futures-util = { workspace = true }
 hex.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream = { workspace = true, features = ["sync"] }
 [dev-dependencies]
 tempfile = "3"

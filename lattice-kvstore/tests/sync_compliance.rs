@@ -7,8 +7,9 @@ use lattice_model::{Op, StateMachine, Uuid};
 use lattice_proto::storage::UniversalOp;
 use lattice_storage::{
     ScopedDb, SnapshotError, StateBackend, StateDbError, StateLogic, StorageConfig, TABLE_DATA,
+    TABLE_SYSTEM,
 };
-use lattice_systemstore::SystemLayer;
+use lattice_systemstore::{SystemLayer, SystemState};
 use prost::Message;
 
 static NULL_DAG: NullDag = NullDag;
@@ -23,16 +24,20 @@ fn wrap_app_data(raw: Vec<u8>) -> Vec<u8> {
 
 fn new_test_store() -> SystemLayer<KvState> {
     let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-    let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-    let inner = KvState::create(scoped);
-    SystemLayer::new(backend, inner)
+    let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+    let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
+    let inner = KvState::create(app_scoped);
+    let system = SystemState::create(sys_scoped);
+    SystemLayer::new(backend, inner, system)
 }
 
 fn open_test_store(id: Uuid, config: &StorageConfig) -> SystemLayer<KvState> {
     let backend = StateBackend::open(id, config, None, 0).unwrap();
-    let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-    let inner = KvState::create(scoped);
-    SystemLayer::new(backend, inner)
+    let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+    let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
+    let inner = KvState::create(app_scoped);
+    let system = SystemState::create(sys_scoped);
+    SystemLayer::new(backend, inner, system)
 }
 
 fn create_test_op(

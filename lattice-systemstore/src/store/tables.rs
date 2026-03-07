@@ -9,13 +9,16 @@ use prost::Message;
 use redb::Table;
 
 /// Wrapper around the raw system table to enforce typed access and CRDT rules.
-pub struct SystemTable<'a, 'dag> {
-    table: Table<'a, &'static [u8], &'static [u8]>,
+pub struct SystemTable<'a, 'txn, 'dag> {
+    table: &'a mut Table<'txn, &'static [u8], &'static [u8]>,
     dag: &'dag dyn DagQueries,
 }
 
-impl<'a, 'dag> SystemTable<'a, 'dag> {
-    pub fn new(table: Table<'a, &'static [u8], &'static [u8]>, dag: &'dag dyn DagQueries) -> Self {
+impl<'a, 'txn, 'dag> SystemTable<'a, 'txn, 'dag> {
+    pub fn new(
+        table: &'a mut Table<'txn, &'static [u8], &'static [u8]>,
+        dag: &'dag dyn DagQueries,
+    ) -> Self {
         Self { table, dag }
     }
 

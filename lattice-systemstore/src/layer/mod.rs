@@ -2,10 +2,10 @@ mod dag;
 
 use crate::store::SystemState;
 use dag::{DagScope, ScopedDag};
-use lattice_model::{Hash, IntentionInfo, Op, PubKey, StateMachine, StateWriter};
+use lattice_model::{Hash, IntentionInfo, Op, PubKey, StateMachine, StateWriter, SystemEvent};
 use lattice_model::{Openable, StoreTypeProvider};
 use lattice_proto::storage::{universal_op, UniversalOp};
-use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, TABLE_DATA};
+use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, TABLE_DATA, TABLE_SYSTEM};
 use lattice_store_base::{BoxByteStream, CommandHandler, StreamError, StreamHandler, StreamProvider, Subscriber};
 use prost::Message;
 use std::borrow::Cow;
@@ -25,22 +25,36 @@ pub enum SystemLayerError {
 
 /// A wrapper layer that adds SystemStore capabilities to any state machine.
 ///
-/// Owns the `StateBackend` (database, chain tips, metadata). Domain crates
-/// only receive a `ScopedDb` for read-only access to their table.
+/// Owns the `StateBackend` (database, chain tips, metadata), the `SystemState`
+/// (system table logic + event broadcast), and the inner app-data state machine.
 ///
 /// Implements the "Y-Adapter" pattern:
-/// - Intercepts `SystemOp`s and applies them to `TABLE_SYSTEM`.
+/// - Intercepts `SystemOp`s and applies them to `TABLE_SYSTEM` via `SystemState`.
 /// - Delegates `AppData` ops to the inner state machine's `TABLE_DATA`.
 /// - Owns the single write transaction for both paths.
-#[derive(Clone)]
 pub struct SystemLayer<S> {
     backend: StateBackend,
     inner: S,
+    system: SystemState,
+}
+
+impl<S: Clone> Clone for SystemLayer<S> {
+    fn clone(&self) -> Self {
+        // SystemState holds a ScopedDb (Clone) and broadcast::Sender (Clone-like).
+        // But SystemState doesn't derive Clone — create a fresh one sharing the same DB.
+        let system_scoped = ScopedDb::new(self.backend.db_shared(), TABLE_SYSTEM);
+        let system = SystemState::create(system_scoped);
+        Self {
+            backend: self.backend.clone(),
+            inner: self.inner.clone(),
+            system,
+        }
+    }
 }
 
 impl<S> SystemLayer<S> {
-    pub fn new(backend: StateBackend, inner: S) -> Self {
-        Self { backend, inner }
+    pub fn new(backend: StateBackend, inner: S, system: SystemState) -> Self {
+        Self { backend, inner, system }
     }
 
     /// Access the inner app-data state machine.
@@ -53,9 +67,14 @@ impl<S> SystemLayer<S> {
         &self.backend
     }
 
-    /// Access the system store (reads from `TABLE_SYSTEM` in the shared database).
-    pub fn system_state(&self) -> SystemState<'_> {
-        SystemState::new(self.backend.db())
+    /// Access the system state machine (reads from `TABLE_SYSTEM`).
+    pub fn system(&self) -> &SystemState {
+        &self.system
+    }
+
+    /// Subscribe to system events emitted after each system op apply+commit.
+    pub fn subscribe_system_events(&self) -> tokio::sync::broadcast::Receiver<SystemEvent> {
+        self.system.subscribe()
     }
 }
 
@@ -65,19 +84,19 @@ impl<S> SystemLayer<S> {
 // This eliminates the duplicated transaction ceremony: one `begin_write →
 // verify_and_update_tip → mutate → commit → notify` for everything.
 
-/// Result of a unified apply: the optional app-data updates to notify after commit.
+/// Result of a unified apply: the optional updates to notify after commit.
 enum ApplyResult<U> {
     /// Op was a no-op (idempotent duplicate or empty envelope).
     Skipped,
-    /// SystemOp applied — no app-data notifications needed.
-    System,
+    /// SystemOp applied — carry the events for post-commit notification.
+    System(Vec<SystemEvent>),
     /// AppData applied — carry the updates for post-commit notification.
     AppData(U),
 }
 
 impl<S: StateLogic> SystemLayer<S> {
     /// Unified transaction: decode envelope, verify chain, route to correct table,
-    /// mutate, and commit. Returns the app-data updates (if any) for post-commit
+    /// mutate, and commit. Returns the updates (if any) for post-commit
     /// notification.
     fn apply_unified(
         &self,
@@ -85,7 +104,7 @@ impl<S: StateLogic> SystemLayer<S> {
         dag: &dyn lattice_model::DagQueries,
         universal: UniversalOp,
     ) -> Result<ApplyResult<S::Updates>, StateDbError> {
-        let mut write_txn = self.backend.db().begin_write()?;
+        let write_txn = self.backend.db().begin_write()?;
 
         // Verify chain integrity (idempotence check)
         let should_apply = self
@@ -100,8 +119,22 @@ impl<S: StateLogic> SystemLayer<S> {
         let result = match universal.op {
             Some(universal_op::Op::System(sys_op)) => {
                 let sys_dag = ScopedDag { inner: dag, scope: DagScope::System };
-                SystemState::mutate(&mut write_txn, sys_op, op, &sys_dag)?;
-                ApplyResult::System
+                // Build an Op whose payload is the raw SystemOp bytes (what ScopedDag produces)
+                let sys_payload = sys_op.encode_to_vec();
+                let sys_op_view = Op {
+                    info: IntentionInfo {
+                        hash: op.info.hash,
+                        payload: Cow::Owned(sys_payload),
+                        timestamp: op.info.timestamp,
+                        author: op.info.author,
+                    },
+                    causal_deps: op.causal_deps,
+                    prev_hash: op.prev_hash,
+                };
+                let mut table = write_txn.open_table(TABLE_SYSTEM)?;
+                let events = self.system.apply(&mut table, &sys_op_view, &sys_dag)?;
+                drop(table);
+                ApplyResult::System(events)
             }
             Some(universal_op::Op::AppData(data)) => {
                 let new_op = Op {
@@ -141,8 +174,10 @@ impl<S: StateLogic> StateMachine for SystemLayer<S> {
         let result = self.apply_unified(op, dag, universal)?;
 
         // Notify watchers after commit
-        if let ApplyResult::AppData(updates) = result {
-            self.inner.notify(updates);
+        match result {
+            ApplyResult::AppData(updates) => self.inner.notify(updates),
+            ApplyResult::System(events) => self.system.notify(events),
+            ApplyResult::Skipped => {}
         }
 
         Ok(())
@@ -177,9 +212,11 @@ impl<S: StateLogic + StoreTypeProvider + 'static> Openable for SystemLayer<S> {
         };
         let backend =
             StateBackend::open(id, config, expected_type, expected_version).map_err(|e| e.to_string())?;
-        let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-        let inner = S::create(scoped);
-        Ok(Self::new(backend, inner))
+        let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+        let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
+        let inner = S::create(app_scoped);
+        let system = SystemState::create(sys_scoped);
+        Ok(Self::new(backend, inner, system))
     }
 }
 

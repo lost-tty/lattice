@@ -119,8 +119,8 @@ Changes:
 - [x] Update `MockWriter<S>` — wraps `Arc<SystemLayer<S>>`, uses `StoreIdentity` for chain tips, wraps payload in `UniversalOp::AppData`
 - [x] Update all test helpers (`new_test_store`, `open_test_store`) and domain crate tests
 - [x] Run full test suite
-- [ ] Make `SystemState` implement `StateLogic` (same trait as `KvState`/`LogState`). Currently `SystemState::mutate()` is a static method taking `&mut WriteTransaction` — it should be an owned struct with `ScopedDb`, `create(ScopedDb)`, and `apply(&self, &mut Table, op, dag)`.
-- [ ] `SystemState` should emit `SystemEvent` via `broadcast::Sender` in `notify()`, same as `KvState` emits `WatchEvent`. Delete `subscribe_system_events()` which currently decodes events by re-parsing the witness log stream — the apply path already has the decoded op.
+- [x] Make `SystemState` implement `StateLogic` (same trait as `KvState`/`LogState`). `SystemState` is now an owned struct with `ScopedDb` (scoped to `TABLE_SYSTEM`), `create(ScopedDb)`, and `apply(&self, &mut Table, op, dag) -> Result<Vec<SystemEvent>>`. `SystemLayer` holds both `inner: S` and `system: SystemState`.
+- [x] `SystemState` emits `SystemEvent` via `broadcast::Sender` in `notify()`, same as `KvState` emits `WatchEvent`. Deleted `subscribe_system_events()` and `decode_system_event()` — events are emitted inline from the apply match arms where the data is already decoded. `SystemWatcher` blanket now uses `SystemReader::subscribe_system_events()` (backed by the broadcast channel) instead of re-parsing the witness log.
 - [ ] Scope domain crate tests closer: internal `#[cfg(test)]` tests should call `StateLogic::apply(table, op, dag)` directly (no `SystemLayer`); integration tests in `tests/` go through `SystemLayer`. Currently some tests still open raw write transactions via `StateBackend` — consider a small test-only helper in `lattice-storage` to reduce ceremony.
 - [ ] Move `STORE_TYPE_KVSTORE` and `STORE_TYPE_LOGSTORE` constants out of `lattice-model` into their respective store crates (`lattice-kvstore`, `lattice-logstore`). `lattice-model` shouldn't know about specific store types.
 

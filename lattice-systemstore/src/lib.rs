@@ -102,6 +102,14 @@ pub trait SystemReader: Send + Sync {
     fn _get_deps(&self, _key: &[u8]) -> Result<Vec<Hash>, SystemReadError> {
         Ok(Vec::new())
     }
+
+    /// Subscribe to persisted system events emitted from `SystemState::notify()`.
+    ///
+    /// Default returns an empty stream. `SystemLayer` overrides this with
+    /// a broadcast receiver connected to the `SystemState`'s event channel.
+    fn subscribe_system_events(&self) -> Pin<Box<dyn Stream<Item = SystemEvent> + Send>> {
+        Box::pin(futures_util::stream::empty())
+    }
 }
 
 /// Trait for writing system-level operations.
@@ -179,6 +187,10 @@ where
     fn _get_deps(&self, key: &[u8]) -> Result<Vec<Hash>, SystemReadError> {
         self.state()._get_deps(key)
     }
+
+    fn subscribe_system_events(&self) -> Pin<Box<dyn Stream<Item = SystemEvent> + Send>> {
+        self.state().subscribe_system_events()
+    }
 }
 
 /// Any handle implementing `StateWriter + Clone` automatically delegates
@@ -203,17 +215,19 @@ where
     }
 }
 
-/// Any handle implementing `StoreEventSource` automatically
-/// merges log-derived system events with ephemeral local events into a single stream.
+/// Any handle providing `StateProvider` (whose state implements `SystemReader`)
+/// and `StoreEventSource` automatically merges persisted system events (from
+/// `SystemState::notify()`) with ephemeral local events (like `BootstrapComplete`).
 impl<T> SystemWatcher for T
 where
-    T: StoreEventSource + Send + Sync,
+    T: StateProvider + StoreEventSource + Send + Sync,
+    T::State: SystemReader,
 {
     fn subscribe_events(&self) -> Pin<Box<dyn Stream<Item = SystemEvent> + Send>> {
-        let log_stream = crate::store::events::subscribe_system_events(self);
+        let persisted_stream = self.state().subscribe_system_events();
         let local_stream = self.subscribe_local_events();
         Box::pin(futures_util::stream::select(
-            log_stream,
+            persisted_stream,
             Box::pin(local_stream),
         ))
     }
@@ -223,7 +237,7 @@ where
 mod tests {
     use super::*;
     use lattice_model::{Op, Uuid};
-    use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, StorageConfig};
+    use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, StorageConfig, TABLE_DATA, TABLE_SYSTEM};
 
     struct MockLogic;
 
@@ -251,8 +265,11 @@ mod tests {
         fn takes_system_reader<T: super::SystemReader>(_t: &T) {}
 
         let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-        let logic = MockLogic;
-        let system_store = SystemLayer::new(backend, logic);
+        let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+        let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
+        let logic = MockLogic::create(scoped);
+        let system = SystemState::create(sys_scoped);
+        let system_store = SystemLayer::new(backend, logic, system);
 
         takes_system_reader(&system_store);
     }

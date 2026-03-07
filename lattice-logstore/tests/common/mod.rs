@@ -1,9 +1,11 @@
 use lattice_logstore::LogState;
 use lattice_mockkernel::MockWriter;
 use lattice_model::Uuid;
-use lattice_storage::{ScopedDb, StateBackend, StateLogic, StorageConfig, TABLE_DATA};
+use lattice_storage::{
+    ScopedDb, StateBackend, StateLogic, StorageConfig, TABLE_DATA, TABLE_SYSTEM,
+};
 use lattice_store_base::{CommandDispatcher, CommandHandler, StateProvider};
-use lattice_systemstore::SystemLayer;
+use lattice_systemstore::{SystemLayer, SystemState};
 use prost_reflect::DynamicMessage;
 use std::future::Future;
 use std::pin::Pin;
@@ -20,9 +22,11 @@ impl TestLogStore {
         let store_id = Uuid::new_v4();
         let backend = StateBackend::open(store_id, &StorageConfig::InMemory, None, 0)
             .expect("failed to open backend");
-        let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-        let inner = LogState::create(scoped);
-        let state = Arc::new(SystemLayer::new(backend, inner));
+        let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+        let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
+        let inner = LogState::create(app_scoped);
+        let system = SystemState::create(sys_scoped);
+        let state = Arc::new(SystemLayer::new(backend, inner, system));
         let writer = MockWriter::new(state.clone());
 
         Self { state, writer }
