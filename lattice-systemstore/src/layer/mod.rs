@@ -196,6 +196,18 @@ impl<S: StateLogic> lattice_model::StoreIdentity for SystemLayer<S> {
             .get_applied_chaintips()
             .map_err(|e| e.to_string())
     }
+
+    fn last_applied_witness(&self) -> Result<Hash, String> {
+        self.backend
+            .last_applied_witness()
+            .map_err(|e| e.to_string())
+    }
+
+    fn set_last_applied_witness(&self, hash: Hash) -> Result<(), String> {
+        self.backend
+            .set_last_applied_witness(&hash)
+            .map_err(|e| e.to_string())
+    }
 }
 
 impl<S: StoreTypeProvider> StoreTypeProvider for SystemLayer<S> {

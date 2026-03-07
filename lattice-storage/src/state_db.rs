@@ -17,6 +17,7 @@ pub const KEY_STORE_ID: &[u8] = b"store_id";
 pub const KEY_STORE_TYPE: &[u8] = b"store_type";
 pub const KEY_SCHEMA_VERSION: &[u8] = b"schema_version";
 pub const PREFIX_TIP: &[u8] = b"tip/";
+pub const KEY_LAST_APPLIED_WITNESS: &[u8] = b"last_applied_witness";
 
 // ==================== Scoped Database Access ====================
 
@@ -442,6 +443,35 @@ impl StateBackend {
         }
 
         Ok(tips)
+    }
+
+    /// Get the projection cursor — the content hash of the last witness entry
+    /// that was successfully projected onto state.
+    ///
+    /// Returns `Hash::ZERO` if no entries have been projected yet.
+    pub fn last_applied_witness(&self) -> Result<Hash, StateDbError> {
+        let txn = self.db.begin_read()?;
+        let table = match txn.open_table(TABLE_META) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Hash::ZERO),
+            Err(e) => return Err(e.into()),
+        };
+        match table.get(KEY_LAST_APPLIED_WITNESS)? {
+            Some(v) => Hash::try_from(v.value())
+                .map_err(|_| StateDbError::Conversion("Invalid projection cursor hash".into())),
+            None => Ok(Hash::ZERO),
+        }
+    }
+
+    /// Advance the projection cursor after a successful state apply.
+    pub fn set_last_applied_witness(&self, hash: &Hash) -> Result<(), StateDbError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(TABLE_META)?;
+            table.insert(KEY_LAST_APPLIED_WITNESS, hash.as_slice())?;
+        }
+        txn.commit()?;
+        Ok(())
     }
 
     /// Helper for standard Lattice stores: snapshots 'data' table and 'meta' table.

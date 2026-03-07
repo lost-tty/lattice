@@ -11,8 +11,10 @@ use lattice_model::types::PubKey;
 use lattice_model::weaver::{
     Condition, FloatingIntention, Intention, SignedIntention, WitnessEntry,
 };
-use lattice_model::{NodeIdentity, StateMachine};
+use lattice_model::{NodeIdentity, StateMachine, StoreIdentity};
 use lattice_proto::weaver::WitnessRecord;
+use prost::Message;
+use tracing::{info, error};
 use uuid::Uuid;
 
 use std::collections::HashMap;
@@ -119,7 +121,7 @@ pub struct ReplicationController<S: StateMachine> {
     intention_tx: broadcast::Sender<SignedIntention>,
 }
 
-impl<S: StateMachine> ReplicationController<S> {
+impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
     /// Create a new ReplicationController
     pub fn new(
         store_id: Uuid,
@@ -141,6 +143,16 @@ impl<S: StateMachine> ReplicationController<S> {
 
     /// Run the actor loop
     pub async fn run(mut self, shutdown_token: tokio_util::sync::CancellationToken) {
+        // Project any unapplied witness log entries from a previous session
+        {
+            let store = self.intention_store.read().expect("Lock poisoned");
+            match self.project_new_entries(&store) {
+                Ok(0) => {}
+                Ok(n) => info!(store_id = %self.store_id, entries = n, "startup projection"),
+                Err(e) => error!(store_id = %self.store_id, "startup projection failed: {}", e),
+            }
+        }
+
         loop {
             tokio::select! {
                 _ = shutdown_token.cancelled() => {
@@ -309,7 +321,21 @@ impl<S: StateMachine> ReplicationController<S> {
         Ok(hash)
     }
 
-    /// Ingest a batch of witness records and intentions (Bootstrap/Clone)
+    // ==================== Witness-First Core ====================
+    //
+    // The witness log is the WAL. Two phases:
+    //   1. witness_ready()       — advance the witness log (no state touch)
+    //   2. project_new_entries() — project witness log → state machine
+    //
+    // Every code path (local submit, network ingest, bootstrap, startup)
+    // goes through these same two steps.
+
+    /// Ingest a batch of witness records and intentions (Bootstrap/Clone).
+    ///
+    /// For each witness record: verify the peer's signature, extract the
+    /// intention hash from the verified content, find the matching intention,
+    /// and insert it. Only intentions referenced by a valid witness are accepted.
+    /// Then uses the standard witness_ready + project_new_entries path.
     fn apply_witnessed_batch(
         &mut self,
         store: &mut IntentionStore,
@@ -317,28 +343,27 @@ impl<S: StateMachine> ReplicationController<S> {
         intentions: Vec<SignedIntention>,
         peer_id: PubKey,
     ) -> Result<(), ReplicationControllerError> {
-        // 1. Create HashMap of intentions
-        let mut intention_map = std::collections::HashMap::new();
-        for intention in intentions {
-            intention_map.insert(intention.intention.hash(), intention);
-        }
-
+        // Verify all peer witness signatures
         let verifying_key = lattice_model::crypto::verifying_key(&peer_id).map_err(|_| {
             ReplicationControllerError::State(StateError::Unauthorized(
                 "Invalid peer public key".to_string(),
             ))
         })?;
 
-        // 2. Iterate witness records
-        for record in witness_records {
-            // Verify WitnessRecord signature (signed by bootstrap peer)
-            // Use helper that handles content hashing correctly
-            let content = crate::weaver::verify_witness(&record, &verifying_key).map_err(|e| {
-                ReplicationControllerError::State(StateError::Unauthorized(format!(
-                    "Invalid witness signature: {}",
-                    e
-                )))
-            })?;
+        let mut intention_map = std::collections::HashMap::new();
+        for intention in intentions {
+            intention_map.insert(intention.intention.hash(), intention);
+        }
+
+        // Verify each witness, then insert only the intention it references
+        for record in &witness_records {
+            let content =
+                crate::weaver::verify_witness(record, &verifying_key).map_err(|e| {
+                    ReplicationControllerError::State(StateError::Unauthorized(format!(
+                        "Invalid witness signature: {}",
+                        e
+                    )))
+                })?;
 
             let intention_hash =
                 Hash::try_from(content.intention_hash.as_slice()).map_err(|_| {
@@ -347,21 +372,23 @@ impl<S: StateMachine> ReplicationController<S> {
                     ))
                 })?;
 
-            // 3. Find and Apply Intention
             if let Some(intention) = intention_map.get(&intention_hash) {
                 store.insert(intention)?;
-                self.apply_intention_to_state(store, intention)?;
             } else {
-                // Missing intention for a witness record implies incomplete batch or sync error
                 return Err(ReplicationControllerError::State(StateError::Backend(
                     format!("Missing intention for witness {}", intention_hash),
                 )));
             }
         }
+
+        // Standard path: witness ready intentions, then project to state
+        self.witness_ready(store)?;
+        self.project_new_entries(store)?;
+
         Ok(())
     }
 
-    /// Ingest a batch of signed intentions from network (replacing single ingest)
+    /// Ingest a batch of signed intentions from network.
     fn apply_ingested_batch(
         &mut self,
         store: &mut IntentionStore,
@@ -392,14 +419,17 @@ impl<S: StateMachine> ReplicationController<S> {
                 continue;
             }
 
-            // Use helper
-            match self.process_intention(store, &signed)? {
-                IngestResult::Applied => {}
-                IngestResult::MissingDeps(mut m) => {
-                    missing_deps.append(&mut m);
-                }
+            // Insert then detect gaps
+            store.insert(&signed)?;
+            let gap = self.detect_gap(store, &signed);
+            if let Some(dep) = gap {
+                missing_deps.push(dep);
             }
         }
+
+        // Witness all ready floating intentions, then project to state
+        self.witness_ready(store)?;
+        self.project_new_entries(store)?;
 
         // Filter out resolved deps and deduplicate
         missing_deps.sort_by(|a, b| {
@@ -409,8 +439,8 @@ impl<S: StateMachine> ReplicationController<S> {
                 .then_with(|| a.since.0.cmp(&b.since.0))
                 .then_with(|| a.author.0.cmp(&b.author.0))
         });
-        missing_deps.dedup();
 
+        missing_deps.dedup();
         missing_deps.retain(|d| !store.contains(&d.prev).unwrap_or(false));
 
         if missing_deps.is_empty() {
@@ -428,27 +458,35 @@ impl<S: StateMachine> ReplicationController<S> {
         // Store it
         store.insert(signed)?;
 
-        // Try to apply, checking for gaps relative to this candidate
-        let missing_opt = self.apply_ready_intentions(store, Some(signed))?;
+        // Witness all ready floating intentions (including this one if deps met)
+        self.witness_ready(store)?;
 
-        match missing_opt {
+        // Project witness log → state machine
+        self.project_new_entries(store)?;
+
+        // Check for gaps
+        let gap = self.detect_gap(store, signed);
+        match gap {
             Some(missing) => Ok(IngestResult::MissingDeps(vec![missing])),
             None => Ok(IngestResult::Applied),
         }
     }
 
-    /// Apply floating intentions that are ready (store_prev matches a tip and conditions met).
-    /// Returns a MissingDep if the optionally provided candidate is still stuck on a missing parent.
+    /// Witness floating intentions whose dependencies are all witnessed.
     ///
-    /// If a state machine rejects a payload (e.g. version skew), the intention stays
-    /// floating and that author's chain stalls — but other authors are unaffected.
-    fn apply_ready_intentions(
+    /// Loops until no more intentions become ready. Does NOT touch state.
+    fn witness_ready(
         &mut self,
-        store: &mut crate::weaver::IntentionStore,
-        candidate: Option<&SignedIntention>,
-    ) -> Result<Option<crate::store::MissingDep>, ReplicationControllerError> {
+        store: &mut IntentionStore,
+    ) -> Result<usize, ReplicationControllerError> {
+        let wall_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let mut total = 0;
         loop {
-            let mut applied_any = false;
+            let mut witnessed_any = false;
 
             // Collect current tips + Hash::ZERO (for new authors)
             let prevs: Vec<Hash> = store
@@ -462,102 +500,143 @@ impl<S: StateMachine> ReplicationController<S> {
                 let candidates = store.floating_by_prev(&prev)?;
 
                 for signed in &candidates {
-                    // Check causal conditions — deps must be witnessed, not just stored
+                    // Causal deps must be witnessed
                     let deps_met = match &signed.intention.condition {
-                        Condition::V1(deps) => {
-                            let mut met = true;
-                            for dep in deps {
-                                if !store.is_witnessed(dep)? {
-                                    met = false;
-                                    break;
-                                }
-                            }
-                            met
-                        }
+                        Condition::V1(deps) => deps.iter().all(|dep| {
+                            store.is_witnessed(dep).unwrap_or(false)
+                        }),
                     };
                     if !deps_met {
                         continue;
                     }
 
-                    // If apply fails (e.g. version skew), the intention stays
-                    // floating and the author's chain stalls. Other authors
-                    // are unaffected.
-                    if self.apply_intention_to_state(store, signed).is_ok() {
-                        applied_any = true;
+                    match store.witness(&signed.intention, wall_time, &self.node_identity) {
+                        Ok(_) => {
+                            witnessed_any = true;
+                            total += 1;
+                        }
+                        Err(IntentionStoreError::AlreadyWitnessed(_)) => {}
+                        Err(e) => return Err(e.into()),
                     }
                 }
             }
 
-            if !applied_any {
+            if !witnessed_any {
                 break;
             }
         }
+        Ok(total)
+    }
 
-        // GAP DETECTION: Check if candidate is stuck on a missing parent
-        if let Some(signed) = candidate {
-            let prev = signed.intention.store_prev;
-            if prev != Hash::ZERO && !store.contains(&prev)? {
-                let author = signed.intention.author;
-                let since = store.author_tip(&author);
-                return Ok(Some(crate::store::MissingDep {
-                    prev,
-                    since,
-                    author,
-                }));
+    /// Project new witness log entries into the state machine.
+    ///
+    /// Reads the witness log forward from the projection cursor,
+    /// looks up each intention, and calls `state.apply()`. Updates the
+    /// cursor after each successful projection.
+    ///
+    /// If apply fails (version skew), projection stops — the gap between
+    /// the cursor and the witness log head indicates the stall.
+    fn project_new_entries(
+        &self,
+        store: &IntentionStore,
+    ) -> Result<u64, ReplicationControllerError> {
+        let mut cursor = self
+            .state
+            .last_applied_witness()
+            .map_err(|e| ReplicationControllerError::State(StateError::Backend(e)))?;
+
+        let mut projected = 0u64;
+
+        let start = if cursor == Hash::ZERO {
+            None
+        } else {
+            Some(cursor)
+        };
+        loop {
+            let scan_from = if projected == 0 { start } else { Some(cursor) };
+            let entries = store.scan_witness_log(scan_from, 256)?;
+            if entries.is_empty() {
+                break;
+            }
+
+            for entry in &entries {
+                let content =
+                    lattice_proto::weaver::WitnessContent::decode(entry.content.as_slice())
+                        .map_err(|e| {
+                            ReplicationControllerError::State(StateError::Backend(format!(
+                                "Invalid WitnessContent at seq {}: {}",
+                                entry.seq, e
+                            )))
+                        })?;
+
+                let intention_hash =
+                    Hash::try_from(content.intention_hash.as_slice()).map_err(|_| {
+                        ReplicationControllerError::State(StateError::Backend(format!(
+                            "Invalid intention hash in witness seq {}",
+                            entry.seq
+                        )))
+                    })?;
+
+                let signed = store.get(&intention_hash)?.ok_or_else(|| {
+                    ReplicationControllerError::State(StateError::Backend(format!(
+                        "Missing intention {} for witness seq {}",
+                        intention_hash, entry.seq
+                    )))
+                })?;
+
+                let intention = &signed.intention;
+                let causal_deps = match &intention.condition {
+                    Condition::V1(deps) => deps,
+                };
+
+                let op = lattice_model::Op {
+                    info: lattice_model::IntentionInfo {
+                        hash: intention_hash,
+                        payload: std::borrow::Cow::Borrowed(&intention.ops),
+                        timestamp: intention.timestamp,
+                        author: intention.author,
+                    },
+                    causal_deps,
+                    prev_hash: intention.store_prev,
+                };
+
+                if let Err(e) = self.state.apply(&op, store) {
+                    eprintln!(
+                        "Projection stalled at witness seq {} (intention {}): {}",
+                        entry.seq, intention_hash, e
+                    );
+                    return Ok(projected);
+                }
+
+                cursor = intention_hash;
+                self.state
+                    .set_last_applied_witness(cursor)
+                    .map_err(|e| ReplicationControllerError::State(StateError::Backend(e)))?;
+                projected += 1;
             }
         }
 
-        Ok(None)
+        Ok(projected)
     }
 
-    /// Apply a single intention's ops to the state machine
-    fn apply_intention_to_state(
-        &mut self,
-        store: &mut IntentionStore,
+    /// Check if a candidate intention is stuck on a missing parent.
+    fn detect_gap(
+        &self,
+        store: &IntentionStore,
         signed: &SignedIntention,
-    ) -> Result<(), ReplicationControllerError> {
-        let intention = &signed.intention;
-        let hash = intention.hash();
-
-        let causal_deps = match &intention.condition {
-            Condition::V1(deps) => deps,
-        };
-
-        let op = lattice_model::Op {
-            info: lattice_model::IntentionInfo {
-                hash,
-                payload: std::borrow::Cow::Borrowed(&intention.ops),
-                timestamp: intention.timestamp,
-                author: intention.author,
-            },
-            causal_deps,
-            prev_hash: intention.store_prev,
-        };
-
-        self.state.apply(&op, store).map_err(|e| {
-            let msg = format!(
-                "FATAL: State divergence! Intention {} (author {}) apply failed: {}",
-                hash,
-                hex::encode(intention.author),
-                e
-            );
-            eprintln!("{}", msg);
-            ReplicationControllerError::State(StateError::Backend(msg))
-        })?;
-
-        // Write witness record — this is a local node witnessing the intention
-        let wall_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        match store.witness(&intention, wall_time, &self.node_identity) {
-            Ok(_) => {}
-            Err(IntentionStoreError::AlreadyWitnessed(_)) => {} // idempotent
-            Err(e) => return Err(e.into()),
+    ) -> Option<crate::store::MissingDep> {
+        let prev = signed.intention.store_prev;
+        if prev != Hash::ZERO && !store.contains(&prev).unwrap_or(false) {
+            let author = signed.intention.author;
+            let since = store.author_tip(&author);
+            Some(crate::store::MissingDep {
+                prev,
+                since,
+                author,
+            })
+        } else {
+            None
         }
-
-        Ok(())
     }
 }
 
@@ -1370,12 +1449,14 @@ mod tests {
         Ok((handle, info, join_handle))
     }
 
-    /// Test that a malformed payload stalls the author's chain:
-    /// - The bad intention is stored but NOT witnessed/applied
-    /// - Subsequent intentions from the same author are blocked
-    /// - Other authors are unaffected
+    /// Test that a malformed payload stalls ALL projection:
+    /// - The bad intention is witnessed (witness-first: witnessing doesn't need
+    ///   payload comprehension) but NOT projected onto state
+    /// - Projection stalls at that witness log entry — the log is sequential,
+    ///   so all subsequent entries (from any author) are also not projected
+    /// - The witness log keeps advancing independently of projection
     #[tokio::test]
-    async fn test_malformed_payload_stalls_author_chain() {
+    async fn test_malformed_payload_stalls_projection() {
         let identity_a = NodeIdentity::generate(); // local node
         let identity_b = NodeIdentity::generate(); // peer with bad payload
         let identity_c = NodeIdentity::generate(); // unrelated peer
@@ -1409,15 +1490,15 @@ mod tests {
         let s2 = SignedIntention::sign(i2, &identity_b);
         let h2 = s2.intention.hash();
 
-        // Ingest succeeds (intention is stored) but apply is skipped (stalled)
+        // Ingest succeeds (intention is witnessed) but projection stalls
         let _result = handle.ingest_intention(s2).await;
         assert!(
             !handle.state().has_applied(h2),
-            "malformed op must NOT be applied"
+            "malformed op must NOT be projected"
         );
 
-        // 3. Ingest a valid follow-up from identity_b — should also fail
-        //    because the bad intention stalled the chain at h1
+        // 3. Ingest a valid follow-up from identity_b — also not projected
+        //    because projection is stalled at the bad entry
         let i3 = Intention {
             author: identity_b.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
@@ -1428,17 +1509,14 @@ mod tests {
         };
         let s3 = SignedIntention::sign(i3, &identity_b);
         let h3 = s3.intention.hash();
-
-        // The follow-up floats (its store_prev h2 is not witnessed).
-        // ingest_intention returns Ok(MissingDeps) or Ok(Applied) but
-        // the intention should NOT be applied.
         let _ = handle.ingest_intention(s3).await;
         assert!(
             !handle.state().has_applied(h3),
-            "follow-up after stalled chain must NOT be applied"
+            "follow-up after stall must NOT be projected"
         );
 
-        // 4. A different author (identity_c) should be completely unaffected
+        // 4. A different author's intention is witnessed but also NOT projected,
+        //    because projection is sequential and stalled at the bad entry
         let i4 = Intention {
             author: identity_c.public_key(),
             timestamp: lattice_model::hlc::HLC::now(),
@@ -1451,8 +1529,8 @@ mod tests {
         let h4 = s4.intention.hash();
         handle.ingest_intention(s4).await.unwrap();
         assert!(
-            handle.state().has_applied(h4),
-            "other author must not be affected by stalled chain"
+            !handle.state().has_applied(h4),
+            "other author also stalled — projection is sequential"
         );
 
         handle.close().await;

@@ -60,6 +60,19 @@ pub trait StoreIdentity: Send + Sync {
 
     /// Returns all author public keys and their last applied operation hash.
     fn applied_chaintips(&self) -> Result<Vec<(crate::PubKey, crate::Hash)>, String>;
+
+    /// Returns the projection cursor — the content hash of the last witness
+    /// entry that was successfully projected onto state.
+    ///
+    /// `Hash::ZERO` means no entries have been projected yet.
+    fn last_applied_witness(&self) -> Result<crate::Hash, String> {
+        Ok(crate::Hash::ZERO)
+    }
+
+    /// Advance the projection cursor after a successful state apply.
+    fn set_last_applied_witness(&self, _hash: crate::Hash) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// High-level system update events.

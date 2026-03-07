@@ -2,17 +2,17 @@
 
 use super::actor::{ReplicationController, ReplicationControllerCmd};
 use super::error::StoreError;
-use super::IngestResult;
+use super::{IngestResult, StateError};
 use crate::weaver::intention_store::IntentionStore;
 use lattice_model::types::{Hash, PubKey};
-use lattice_model::weaver::{Condition, FloatingIntention, SignedIntention, WitnessEntry};
+use lattice_model::weaver::{FloatingIntention, SignedIntention, WitnessEntry};
 use lattice_model::Uuid;
 use lattice_proto::weaver::WitnessContent;
 use prost::Message;
 
 use lattice_model::NodeIdentity;
 use lattice_model::StoreMeta;
-use lattice_model::{Op, StateMachine, StoreIdentity, SystemEvent};
+use lattice_model::{StateMachine, StoreIdentity, SystemEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -22,7 +22,6 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone)]
 pub struct StoreInfo {
     pub store_id: Uuid,
-    pub entries_replayed: u64,
 }
 
 use std::any::Any;
@@ -141,25 +140,20 @@ impl<S> std::fmt::Debug for Store<S> {
 pub struct OpenedStore<S> {
     store_id: Uuid,
     state: Arc<S>,
-    entries_replayed: u64,
     intention_store: Option<Arc<std::sync::RwLock<IntentionStore>>>,
 }
 
 impl<S: StateMachine + StoreIdentity + 'static> OpenedStore<S> {
-    /// Create from an already-opened state machine.
-    /// Opens the IntentionStore and replays any unapplied intentions.
     pub fn new(
         store_id: Uuid,
         config: &lattice_model::StorageConfig,
         state: Arc<S>,
-    ) -> Result<Self, super::StateError> {
+    ) -> Result<Self, StateError> {
         let intention_store = IntentionStore::open(store_id, config)?;
-        let entries_replayed = replay_intentions(&intention_store, &state)?;
 
         Ok(Self {
             store_id,
             state,
-            entries_replayed,
             intention_store: Some(Arc::new(std::sync::RwLock::new(intention_store))),
         })
     }
@@ -172,7 +166,7 @@ impl<S: StateMachine + StoreIdentity + 'static> OpenedStore<S> {
     pub fn into_handle(
         self,
         node_identity: NodeIdentity,
-    ) -> Result<(Store<S>, StoreInfo, ActorRunner<S>), super::StateError> {
+    ) -> Result<(Store<S>, StoreInfo, ActorRunner<S>), StateError> {
         let (tx, rx) = mpsc::channel(32);
         let (intention_tx, _rx) = broadcast::channel(64);
         let (local_system_event_tx, _sys_rx) = broadcast::channel(16);
@@ -207,17 +201,12 @@ impl<S: StateMachine + StoreIdentity + 'static> OpenedStore<S> {
         };
         let info = StoreInfo {
             store_id: self.store_id,
-            entries_replayed: self.entries_replayed,
         };
         Ok((handle, info, runner))
     }
 
     pub fn state(&self) -> &S {
         &self.state
-    }
-
-    pub fn entries_replayed(&self) -> u64 {
-        self.entries_replayed
     }
 }
 
@@ -227,7 +216,7 @@ pub struct ActorRunner<S: StateMachine> {
     shutdown_token: CancellationToken,
 }
 
-impl<S: StateMachine + Send + Sync + 'static> ActorRunner<S> {
+impl<S: StateMachine + StoreIdentity + Send + Sync + 'static> ActorRunner<S> {
     pub async fn run(self) {
         self.actor.run(self.shutdown_token).await;
     }
@@ -727,71 +716,6 @@ impl<S: StateMachine + Send + Sync + 'static> StoreEventSource for Store<S> {
     }
 }
 
-/// Replay intentions from the store into the state machine.
-/// Returns number of intentions replayed.
-fn replay_intentions<S: StateMachine + StoreIdentity>(
-    store: &IntentionStore,
-    state: &Arc<S>,
-) -> Result<u64, super::StateError> {
-    let applied_tips = state
-        .applied_chaintips()
-        .map_err(super::StateError::Backend)?;
-    let applied_map: HashMap<PubKey, Hash> = applied_tips.into_iter().collect();
-
-    // Get all stored intentions and compare tips
-    let store_tips = store.all_author_tips().clone();
-    let mut entries_replayed = 0u64;
-
-    for (author, store_tip) in &store_tips {
-        let applied_tip = applied_map.get(author).cloned().unwrap_or(Hash::ZERO);
-        if *store_tip == applied_tip {
-            continue; // Already caught up
-        }
-
-        // Need to replay intentions from this author.
-        // Walk the chain from store_tip backwards to find unapplied ones,
-        // then apply in forward order.
-        let mut chain = Vec::new();
-        let mut current = *store_tip;
-        while current != applied_tip && current != Hash::ZERO {
-            if let Some(signed) = store.get(&current)?
-            {
-                let prev = signed.intention.store_prev;
-                chain.push(signed);
-                current = prev;
-            } else {
-                break; // Gap in chain
-            }
-        }
-
-        // Apply in forward order (oldest first)
-        chain.reverse();
-        for signed in chain {
-            let intention = &signed.intention;
-            let hash = intention.hash();
-            let causal_deps = match &intention.condition {
-                Condition::V1(deps) => deps,
-            };
-            let op = Op {
-                info: lattice_model::IntentionInfo {
-                    hash,
-                    payload: std::borrow::Cow::Borrowed(&intention.ops),
-                    timestamp: intention.timestamp,
-                    author: intention.author,
-                },
-                causal_deps,
-                prev_hash: intention.store_prev,
-            };
-            state
-                .apply(&op, store)
-                .map_err(|e| super::StateError::Backend(e.to_string()))?;
-            entries_replayed += 1;
-        }
-    }
-
-    Ok(entries_replayed)
-}
-
 /// Helper to run a read operation on the intention store in a blocking task
 fn run_store_read<F, R>(
     store: Arc<std::sync::RwLock<IntentionStore>>,
@@ -806,7 +730,7 @@ where
     Box::pin(async move {
         tokio::task::spawn_blocking(move || {
             let guard = store.read().expect("Lock poisoned");
-            f(&guard).map_err(|e| StoreError::Store(super::StateError::Backend(e.to_string())))
+            f(&guard).map_err(|e| StoreError::Store(StateError::Backend(e.to_string())))
         })
         .await
         .map_err(|_| StoreError::ChannelClosed)?

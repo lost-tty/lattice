@@ -329,6 +329,11 @@ impl Node {
 
     /// Start the node - loads all root stores from meta.db and emits NetworkStore events.
     pub async fn start(&self) -> Result<(), NodeError> {
+        // MIGRATION: backfill store_type for legacy StoreRecords
+        if let Err(e) = self.meta.backfill_store_types(&self.data_dir) {
+            tracing::warn!(error = %e, "Failed to backfill store types in meta.db");
+        }
+
         for (store_id, _info) in self.meta.list_rootstores()? {
             // 1. Open the store (resolve type from disk)
             let (handle, store_type) =

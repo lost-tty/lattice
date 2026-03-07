@@ -10,7 +10,7 @@ use lattice_kernel::{
     store::{OpenedStore, RegistryEntry, StateError, Store, StoreInfo},
     NodeIdentity,
 };
-use lattice_model::{StateMachine, StoreIdentity};
+use lattice_model::{StateMachine, StoreIdentity, StoreTypeProvider};
 use lattice_model::StorageConfig;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -89,11 +89,20 @@ impl StoreRegistry {
             .map_err(|e| StateError::Backend(e.to_string()))
     }
 
+    /// Get the store type from meta.db (source of truth).
+    pub fn store_type_from_meta(&self, store_id: Uuid) -> Result<Option<String>, StateError> {
+        let record = self
+            .meta
+            .get_store(store_id)
+            .map_err(|e| StateError::Backend(e.to_string()))?;
+        Ok(record.map(|r| r.store_type).filter(|t| !t.is_empty()))
+    }
+
     /// Create a new store (registers in meta.db, creates storage)
     /// Does NOT open or spawn actor - use get_or_open() for that
     pub fn create<S, F>(&self, store_id: Uuid, open_fn: F) -> Result<Uuid, StateError>
     where
-        S: StateMachine + StoreIdentity + Send + Sync + 'static,
+        S: StateMachine + StoreIdentity + StoreTypeProvider + Send + Sync + 'static,
         F: FnOnce(&StorageConfig) -> Result<S, StateError>,
     {
         self.ensure_dirs(store_id)?;
@@ -106,12 +115,14 @@ impl StoreRegistry {
         let _ = OpenedStore::new(store_id, &intentions_config, state)?;
 
         // Register in meta
-        self.meta.add_store(store_id, Uuid::nil()).map_err(|e| {
-            StateError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        self.meta
+            .add_store(store_id, Uuid::nil(), S::store_type())
+            .map_err(|e| {
+                StateError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+            })?;
         Ok(store_id)
     }
 
@@ -134,7 +145,6 @@ impl StoreRegistry {
                 if let Some(handle) = boxed_store.as_any().downcast_ref::<Store<S>>() {
                     let info = StoreInfo {
                         store_id,
-                        entries_replayed: 0,
                     };
                     return Ok((handle.clone(), info));
                 } else {

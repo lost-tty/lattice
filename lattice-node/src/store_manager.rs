@@ -34,6 +34,12 @@ pub enum StoreManagerError {
     LockPoisoned,
     #[error("No opener registered for type: {0}")]
     NoOpener(String),
+    #[error("Store type mismatch for {store_id}: meta.db says {expected}, state.db says {actual}")]
+    StoreTypeMismatch {
+        store_id: Uuid,
+        expected: String,
+        actual: String,
+    },
 }
 
 /// Trait for opening stores of a specific type
@@ -156,10 +162,27 @@ impl StoreManager {
         &self,
         store_id: Uuid,
     ) -> Result<(Arc<dyn StoreHandle>, String), StoreManagerError> {
-        // Peek metadata from disk
-        let (_, store_type, _version) = self.registry.peek_store_info(store_id)?;
+        // Get store type from meta.db (source of truth).
+        // Fall back to state.db for stores created before meta.db tracked the type.
+        let meta_type = self.registry.store_type_from_meta(store_id)?;
+        let disk_type = self.registry.peek_store_info(store_id).ok().map(|(_, t, _)| t);
 
-        // Open using the resolved type string directly
+        let store_type = match (meta_type, disk_type) {
+            (Some(mt), Some(dt)) => {
+                if mt != dt {
+                    return Err(StoreManagerError::StoreTypeMismatch {
+                        store_id,
+                        expected: mt,
+                        actual: dt,
+                    });
+                }
+                mt
+            }
+            (Some(mt), None) => mt, // state.db missing — will be recreated
+            (None, Some(dt)) => dt, // legacy store without type in meta.db
+            (None, None) => return Err(StoreManagerError::NotFound(store_id)),
+        };
+
         let handle = self.open(store_id, &store_type)?;
         Ok((handle, store_type))
     }

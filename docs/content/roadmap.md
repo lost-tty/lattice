@@ -121,20 +121,12 @@ Changes:
 - [x] Run full test suite
 - [x] Make `SystemState` implement `StateLogic` (same trait as `KvState`/`LogState`). `SystemState` is now an owned struct with `ScopedDb` (scoped to `TABLE_SYSTEM`), `create(ScopedDb)`, and `apply(&self, &mut Table, op, dag) -> Result<Vec<SystemEvent>>`. `SystemLayer` holds both `inner: S` and `system: SystemState`.
 - [x] `SystemState` emits `SystemEvent` via `broadcast::Sender` in `notify()`, same as `KvState` emits `WatchEvent`. Deleted `subscribe_system_events()` and `decode_system_event()` — events are emitted inline from the apply match arms where the data is already decoded. `SystemWatcher` blanket now uses `SystemReader::subscribe_system_events()` (backed by the broadcast channel) instead of re-parsing the witness log.
-- [ ] Scope domain crate tests closer: internal `#[cfg(test)]` tests should call `StateLogic::apply(table, op, dag)` directly (no `SystemLayer`); integration tests in `tests/` go through `SystemLayer`. Currently some tests still open raw write transactions via `StateBackend` — consider a small test-only helper in `lattice-storage` to reduce ceremony.
-- [ ] Move `STORE_TYPE_KVSTORE` and `STORE_TYPE_LOGSTORE` constants out of `lattice-model` into their respective store crates (`lattice-kvstore`, `lattice-logstore`). `lattice-model` shouldn't know about specific store types.
 
 ### 16C: Witness-First Core
 
-Convert to witness-first. `TABLE_META` ownership is resolved: `SystemLayer` owns `StateBackend` which owns `TABLE_META`. Domain crates can't see it.
-
-**`TABLE_META` ownership (resolved in 16B):**
-
-`TABLE_META` holds store identity (store_id, store_type, schema_version — written once at creation) and per-author chain tips (tip/<pubkey> → hash — written on every apply). `SystemLayer` owns `StateBackend`, which reads/writes `TABLE_META` via `get_meta()` and `verify_and_update_tip()`. Domain crates only see `ScopedDb` scoped to `TABLE_DATA`.
-
 Remaining decisions for witness-first:
-- [ ] **`last_applied_witness: Hash`**: framework-owned. Written by `project_new_entries()` after each successful state projection. Read on restart to resume.
-- [ ] **`stalled_at: Option<(Hash, String)>`**: framework-owned. Records where projection stopped (version skew).
+- [x] **`last_applied_witness: (u64, Hash)`**: framework-owned. Written by `project_new_entries()` after each successful state projection. Read on restart to resume. Stored as `ProjectionCursor` protobuf in `TABLE_META`.
+- [x] **`stalled_at` removed**: stall is implicit — gap between `ProjectionCursor` and witness log head. No separate record needed.
 - [ ] Decide if chain tips and witness cursor should remain in `TABLE_META` or split into a separate table.
 
 **Step 1 — Witness-first conversion:**
@@ -153,24 +145,30 @@ Intention DAG ──► witness_ready() ──► Witness Log ──► project_
 - **Witness** = "I verified this intention's structural integrity (valid signature, correct chain, matching store_id) and committed it to my local ordering." Does NOT imply payload comprehension.
 - **State projection** = derived view of the witness log. May lag behind the log if the state machine can't decode a payload (version skew). Catches up on upgrade.
 
-- [ ] **`witness_ready()`**: Loop through floating intentions whose deps are witnessed. Witness each one. Do not touch state. Returns count of newly witnessed entries.
-- [ ] **`project_new_entries()`**: Read witness log from `last_applied_witness` forward. For each entry, build `Op`, call `state.apply()` via the unified transaction path. Update `last_applied_witness` after each successful projection. If projection fails (version skew), record `stalled_at` and stop — the witness log keeps advancing independently.
-- [ ] **`witness()` becomes the commit point.** Must succeed (not `let _ =`); if it fails, the intention stays floating.
+- [x] **`witness_ready()`**: Loop through floating intentions whose deps are witnessed. Witness each one. Do not touch state. Returns count of newly witnessed entries.
+- [x] **`project_new_entries()`**: Free function. Read witness log from `last_applied_witness` forward. For each entry, build `Op`, call `state.apply()`. Update `ProjectionCursor` after each successful projection. If projection fails (version skew), stop — the witness log keeps advancing independently.
+- [x] **`witness()` becomes the commit point.** Must succeed (not `let _ =`); if it fails, the intention stays floating.
 - [ ] **Drop `StateMachine::applied_chaintips()`**. Per-author chain tips remain framework-internal (needed for `verify_and_update_tip`), but not exposed to state machines.
-- [ ] **`replay_intentions()` becomes `project_new_entries()`** — same code path for restart, post-witness, and post-bootstrap. No tip-comparison, no chain-walking.
+- [x] **`replay_intentions()` becomes `project_new_entries()`** — same code path for restart, post-witness, and post-bootstrap. No tip-comparison, no chain-walking.
 
-### 16D: Stall Reporting
-- [ ] **Framework exposes projection status** via `StoreMeta`: `{ last_applied_witness: Hash, witness_head: Hash, stalled_at: Option<(Hash, String)> }`. Surfaced via `store status` CLI.
+### 16D: Bootstrap Security Tests
+- [ ] **Test: `apply_witnessed_batch` rejects substituted intentions.** Hand over witness records for intention A but substitute intention B in the intentions list. Verify B is not inserted/witnessed.
+- [ ] **Test: `apply_witnessed_batch` rejects invalid witness signatures.** Send witness records with a bad signature. Verify nothing is inserted.
+
+### 16E: Stall Reporting
+- [ ] **Framework exposes projection status** via `StoreMeta`: `{ last_applied_witness: (u64, Hash), witness_head: (u64, Hash) }`. Gap between cursor and head indicates stall. Surfaced via `store status` CLI.
 - [ ] **Non-blocking stall.** A stalled projection does NOT block: witnessing continues, sync continues, other stores are unaffected. Only reads against the stalled store's state return stale data (with a warning flag).
 
-### 16E: Bootstrap Alignment
+### 16F: Bootstrap Alignment
 - [ ] **Delete `apply_witnessed_batch`.** Bootstrap now uses the same two-step path: insert + witness the peer's entries into the log, then `project_new_entries()`. No special code path.
 
-### 16F: Payload Validation Strategy Update
+### 16G: Payload Validation Strategy Update
 - [ ] **Update "stall on failure" contract** in `StateMachine` trait docs. Stall still applies — but the stall point moves from "intention stays floating, never witnessed" to "intention is witnessed, state projection pauses." The effect on the local user is the same (stale state until upgrade). The effect on the network is better (sync and other authors are unblocked).
 
-### Future: System Store Separation
-Deferred to a later milestone: make the system table a sibling store with its own DAG instead of a `SystemLayer` wrapper. This eliminates the `UniversalOp` envelope and dual-table pattern entirely, but changes the replication model (two DAGs per logical store) and touches join protocol, sync, gossip, and `RecursiveWatcher`.
+### 16H: Cleanup
+
+- [ ] Scope domain crate tests closer: internal `#[cfg(test)]` tests should call `StateLogic::apply(table, op, dag)` directly (no `SystemLayer`); integration tests in `tests/` go through `SystemLayer`. Currently some tests still open raw write transactions via `StateBackend` — consider a small test-only helper in `lattice-storage` to reduce ceremony.
+- [ ] Move `STORE_TYPE_KVSTORE` and `STORE_TYPE_LOGSTORE` constants out of `lattice-model` into their respective store crates (`lattice-kvstore`, `lattice-logstore`). `lattice-model` shouldn't know about specific store types.
 
 ---
 

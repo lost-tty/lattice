@@ -12,7 +12,6 @@ blake3 = { workspace = true }
 lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
 prost.workspace = true
-prost-reflect.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

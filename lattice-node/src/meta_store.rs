@@ -117,8 +117,13 @@ impl MetaStore {
 
     // ==================== Store Operations ====================
 
-    /// Register a new store with its parent association
-    pub fn add_store(&self, store_id: Uuid, parent_id: Uuid) -> Result<(), MetaStoreError> {
+    /// Register a new store with its parent association and type
+    pub fn add_store(
+        &self,
+        store_id: Uuid,
+        parent_id: Uuid,
+        store_type: &str,
+    ) -> Result<(), MetaStoreError> {
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(STORES_TABLE)?;
@@ -129,12 +134,23 @@ impl MetaStore {
             let info = StoreRecord {
                 parent_id: parent_id.as_bytes().to_vec(),
                 created_at: now,
+                store_type: store_type.to_owned(),
             };
             let bytes = info.encode_to_vec();
             table.insert(store_id.as_bytes().as_slice(), bytes.as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
+    }
+
+    /// Look up a single store's record
+    pub fn get_store(&self, store_id: Uuid) -> Result<Option<StoreRecord>, MetaStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(STORES_TABLE)?;
+        match table.get(store_id.as_bytes().as_slice())? {
+            Some(value) => Ok(StoreRecord::decode(value.value()).ok()),
+            None => Ok(None),
+        }
     }
 
     /// List all registered stores with their info
@@ -194,8 +210,8 @@ mod tests {
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
 
-        meta.add_store(id1, Uuid::nil()).unwrap();
-        meta.add_store(id2, Uuid::nil()).unwrap();
+        meta.add_store(id1, Uuid::nil(), "core:kvstore").unwrap();
+        meta.add_store(id2, Uuid::nil(), "core:kvstore").unwrap();
 
         let stores = meta.list_stores().unwrap();
         let store_ids: Vec<Uuid> = stores.iter().map(|(id, _)| *id).collect();
