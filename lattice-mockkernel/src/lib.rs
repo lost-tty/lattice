@@ -2,7 +2,7 @@
 //!
 //! Provides:
 //! - `MockWriter<S>` — a generic StateWriter that applies operations directly
-//!   to state without the full replication stack.
+//!   via `SystemLayer<S>` without the full replication stack.
 //! - `NullState` — a minimal state machine with no application logic, for tests
 //!   that only need the kernel (intentions, sync, gossip) without any real store.
 
@@ -15,9 +15,10 @@ use lattice_model::dag_queries::NullDag;
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{Condition, Intention};
-use lattice_model::Op;
+use lattice_model::{Op, StateMachine, StoreIdentity};
 use lattice_model::{StateWriter, StateWriterError};
-use lattice_storage::state_db::StateLogic;
+use lattice_storage::StateLogic;
+use lattice_systemstore::SystemLayer;
 use prost::Message;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -25,22 +26,20 @@ use tokio::sync::broadcast;
 
 static NULL_DAG: NullDag = NullDag;
 
-/// A mock StateWriter that applies operations directly to state.
+/// A mock StateWriter that applies operations via `SystemLayer<S>`.
 ///
-/// Generic over `S: StateLogic + StateMachine` - works with any store
-/// (KvState, LogState, etc). Useful for testing without the full replication stack.
+/// Wraps payloads in `UniversalOp::AppData` and calls `StateMachine::apply`
+/// on `SystemLayer<S>`, which owns the transaction ceremony and backend.
 pub struct MockWriter<S: StateLogic> {
-    state: Arc<S>,
+    state: Arc<SystemLayer<S>>,
     next_hash: Arc<AtomicU64>,
-    /// Monotonic wall_time: max(system_ms, prev+1) to guarantee unique timestamps.
     next_wall_time: Arc<AtomicU64>,
     entry_tx: broadcast::Sender<Vec<u8>>,
     store_id: lattice_model::Uuid,
 }
 
 impl<S: StateLogic> MockWriter<S> {
-    /// Create a new MockWriter wrapping the given state.
-    pub fn new(state: Arc<S>) -> Self {
+    pub fn new(state: Arc<SystemLayer<S>>) -> Self {
         let (entry_tx, _) = broadcast::channel(128);
         Self {
             state,
@@ -51,20 +50,13 @@ impl<S: StateLogic> MockWriter<S> {
         }
     }
 
-    /// Get a reference to the underlying state.
-    pub fn state(&self) -> &Arc<S> {
+    /// Get a reference to the underlying SystemLayer.
+    pub fn state(&self) -> &Arc<SystemLayer<S>> {
         &self.state
     }
 
-    /// Get the entry broadcast sender (for injecting test data).
     pub fn entry_tx(&self) -> &broadcast::Sender<Vec<u8>> {
         &self.entry_tx
-    }
-}
-
-impl<S: StateLogic> AsRef<S> for MockWriter<S> {
-    fn as_ref(&self) -> &S {
-        &*self.state
     }
 }
 
@@ -118,24 +110,27 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
             hasher.update(&payload);
             let hash = Hash::from(*hasher.finalize().as_bytes());
 
-            // Fixed author for mock
             let author = PubKey::from([1u8; 32]);
 
-            // Find current chaintip for this author
+            // Find current chaintip for this author via StoreIdentity
             let prev_hash = state
-                .backend()
-                .get_applied_chaintips()
-                .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?
+                .applied_chaintips()
+                .map_err(|e| StateWriterError::SubmitFailed(e))?
                 .into_iter()
                 .find(|(a, _)| a == &author)
                 .map(|(_, h)| h)
                 .unwrap_or(Hash::ZERO);
 
-            // Create and apply Op
+            // Wrap payload in UniversalOp::AppData envelope
+            let envelope = lattice_proto::storage::UniversalOp {
+                op: Some(lattice_proto::storage::universal_op::Op::AppData(payload.clone())),
+            };
+            let wrapped = envelope.encode_to_vec();
+
             let op = Op {
                 info: lattice_model::IntentionInfo {
                     hash,
-                    payload: std::borrow::Cow::Borrowed(&payload),
+                    payload: std::borrow::Cow::Owned(wrapped),
                     timestamp,
                     author,
                 },
@@ -143,7 +138,7 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
                 prev_hash,
             };
 
-            StateLogic::apply(&*state, &op, &NULL_DAG)
+            state.apply(&op, &NULL_DAG)
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
 
             // Emit as SignedIntention format (matching real kernel)

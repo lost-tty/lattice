@@ -33,5 +33,7 @@ prost-build = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 lattice-kvstore-api = { workspace = true }
+lattice-proto = { workspace = true }
+lattice-systemstore = { workspace = true }
 tempfile = "3"
 lattice-mockkernel = { workspace = true }

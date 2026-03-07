@@ -76,73 +76,68 @@ trait StoreIdentity: Send + Sync {
 }
 ```
 
-### 16B: Storage Abstraction
+### 16B: Backend Ownership & Trait Consolidation
 
-Introduce `TableRead`/`TableWrite` traits to decouple state machines from redb. Goal: state machines become pure functions testable with `HashMapStorage`, and duplicated boilerplate across KvState/LogState/SystemState collapses.
+Move backend ownership from domain crates into `SystemLayer`. Domain crates receive a `ScopedDb` (read-only handle scoped to their table) instead of a full `StateBackend`. Consolidate `StateLogic` and `StateMachine` into a clean two-level split: domain crates implement `StateLogic` (table-level apply), `SystemLayer` implements `StateMachine` (transaction-level apply for the kernel).
 
-**Step 1 — Define traits** (`lattice-model`):
+> **Before:** Domain crates hold `backend: StateBackend` + `db: Arc<Database>` (full DB access). Two redundant apply traits (`StateMachine::apply(op, dag)` and `StateLogic::apply(op, dag)` default impl).
+> **After:** Domain crates hold `ScopedDb` (read-only, one table). `SystemLayer` owns `StateBackend`. One trait per level: `StateLogic::apply(table, op, dag)` for domain crates, `StateMachine::apply(op, dag)` for the kernel.
 
-Two traits. `TableRead` for read operations, `TableWrite` extends it with mutations. `HashMapStorage` (BTreeMap-backed) implements both for zero-dep testing.
+**Step 1 — `ScopedDb` wrapper** (`lattice-storage`): ✅
+
+`ScopedDb` wraps `Arc<Database>` + `TableDefinition` and exposes `begin_read() -> ScopedReadTxn`. `ScopedReadTxn::open_table()` can only open the scoped table. Domain crates use this for read-path queries (`get`, `scan`, `list`) without access to `TABLE_META` or `TABLE_SYSTEM`.
+
+**Step 2 — Consolidate traits, move backend into `SystemLayer`**:
+
+Rename `StateLogic::mutate()` to `StateLogic::apply()`. Remove `StateLogic::backend()` and the default `StateLogic::apply(op, dag)` impl (dead code — `SystemLayer` bypasses it). Remove `StateMachine` impls from domain crates (`KvState`, `LogState`, `NullState`). Change `StateFactory::create(StateBackend)` to `StateFactory::create(ScopedDb)`. Move `StateBackend` into `SystemLayer` struct. Update `SystemLayer::apply_unified()` to use `self.backend` instead of `self.inner.backend()`.
+
+Trait split after this step:
 
 ```
-trait TableRead {
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
-    fn range(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
-    fn iter(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+// Domain crates implement this (lattice-storage)
+trait StateLogic: Send + Sync {
+    type Updates;
+    fn apply(&self, table: &mut Table, op: &Op, dag: &dyn DagQueries) -> Result<Self::Updates, StateDbError>;
+    fn notify(&self, updates: Self::Updates);
 }
-trait TableWrite: TableRead {
-    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
-    fn delete(&mut self, key: &[u8]) -> Result<()>;
+
+// SystemLayer implements this (lattice-model)
+trait StateMachine: Send + Sync {
+    type Error;
+    fn apply(&self, op: &Op, dag: &dyn DagQueries) -> Result<(), Self::Error>;
 }
 ```
 
-Operations derived from actual usage: `KVTable` uses `get`+`insert`; `ReadOnlyKVTable` uses `get`+`range`+`iter`; `LogState` uses `get`+`insert`+`iter`+`iter().rev()`. `delete` included for future state machines (current ones model deletion as tombstones via `put`). Read path (queries served to clients) stays on the concrete `Database` reference — `TableRead`/`TableWrite` are for the apply path and for decoupling `lattice-kvtable` from redb.
-
-- [ ] Define `TableRead` and `TableWrite` traits in `lattice-model/src/storage.rs`
-- [ ] Implement `HashMapStorage` (BTreeMap-backed, implements both traits)
-- [ ] Wire into `lattice-model/src/lib.rs`, `cargo check`
-
-**Step 2 — Adapt `KVTable` and `SystemTable`** (`lattice-kvtable`, `lattice-systemstore`):
-
-`KVTable::new()` takes `&mut dyn TableWrite` instead of `&mut redb::Table`. `ReadOnlyKVTable::new()` takes `&dyn TableRead` instead of generic `T: ReadableTable`. `SystemTable` follows (it delegates to `KVTable` internally).
-
-- [ ] Adapt `KVTable` to `&mut dyn TableWrite`
-- [ ] Adapt `ReadOnlyKVTable` to `&dyn TableRead`
-- [ ] Adapt `SystemTable` (delegates to `KVTable`, should follow automatically)
-- [ ] Run full test suite
-
-**Step 3 — Concrete redb impls** (`lattice-storage`):
-
-Bridge the new traits to redb so existing production code keeps working.
-
-- [ ] `RedbTableStorage`: implements `TableRead`+`TableWrite` backed by `&mut redb::Table`
-- [ ] `RedbReadOnlyTableStorage`: implements `TableRead` backed by redb read table
-- [ ] Wire into `SystemLayer`, `KvState`, `LogState` — replace direct `redb::Table` usage with trait-wrapped calls
-- [ ] Run full test suite
-
-**Step 4 — Pure-logic tests**:
-
-Validate state machines are fully decoupled from redb.
-
-- [ ] Rewrite KVTable unit tests to use `HashMapStorage`
-- [ ] Pure-logic test: feed `KvState` a sequence of `Op`s with `HashMapStorage` + `HashMapDag`
-- [ ] Pure-logic test: feed `SystemState` ops with `HashMapStorage`
+Changes:
+- [x] Rename `StateLogic::mutate()` to `StateLogic::apply()`, remove `backend()` and default `apply()`
+- [x] Remove `StateMachine` impls from `KvState`, `LogState`, `NullState`
+- [x] Fold `StateFactory` into `StateLogic::create(ScopedDb)`, delete `StateFactory` trait
+- [x] Update `KvState`, `LogState` to hold `ScopedDb` instead of `backend` + `db`
+- [x] Update `NullState` to unit struct (no reads, no state)
+- [x] Move `StateBackend` into `SystemLayer` struct, update `apply_unified()` and `StoreIdentity` impl
+- [x] Update `SystemLayer::open()` to keep backend, pass `ScopedDb` to `S::create()`
+- [x] Update `MockWriter<S>` — wraps `Arc<SystemLayer<S>>`, uses `StoreIdentity` for chain tips, wraps payload in `UniversalOp::AppData`
+- [x] Update all test helpers (`new_test_store`, `open_test_store`) and domain crate tests
+- [x] Run full test suite
+- [ ] Make `SystemState` implement `StateLogic` (same trait as `KvState`/`LogState`). Currently `SystemState::mutate()` is a static method taking `&mut WriteTransaction` — it should be an owned struct with `ScopedDb`, `create(ScopedDb)`, and `apply(&self, &mut Table, op, dag)`.
+- [ ] `SystemState` should emit `SystemEvent` via `broadcast::Sender` in `notify()`, same as `KvState` emits `WatchEvent`. Delete `subscribe_system_events()` which currently decodes events by re-parsing the witness log stream — the apply path already has the decoded op.
+- [ ] Scope domain crate tests closer: internal `#[cfg(test)]` tests should call `StateLogic::apply(table, op, dag)` directly (no `SystemLayer`); integration tests in `tests/` go through `SystemLayer`. Currently some tests still open raw write transactions via `StateBackend` — consider a small test-only helper in `lattice-storage` to reduce ceremony.
+- [ ] Move `STORE_TYPE_KVSTORE` and `STORE_TYPE_LOGSTORE` constants out of `lattice-model` into their respective store crates (`lattice-kvstore`, `lattice-logstore`). `lattice-model` shouldn't know about specific store types.
 
 ### 16C: Witness-First Core
 
-Decide `TABLE_META` ownership and convert to witness-first. `TABLE_META` currently holds per-author chain tips (`verify_and_update_tip`) and store metadata. After 16A, `SystemLayer` owns the write transaction and already calls `verify_and_update_tip`. For witness-first, `TABLE_META` also needs `last_applied_witness` — the cursor into the witness log, driven by the framework.
+Convert to witness-first. `TABLE_META` ownership is resolved: `SystemLayer` owns `StateBackend` which owns `TABLE_META`. Domain crates can't see it.
 
-**Step 1 — Clarify `TABLE_META` ownership:**
+**`TABLE_META` ownership (resolved in 16B):**
 
-`TABLE_META` currently holds two unrelated concerns: store identity (store_id, store_type, schema_version — written once at creation) and per-author chain tips (tip/<pubkey> → hash — written on every apply). After 16A Step 3, `store_meta()` moves to `SystemLayer` which reads `TABLE_META` directly via `StateBackend::get_meta()`. The three production callers are: `SystemLayer` (trait impl), `Store<S>` (via `StoreInspector`), and `InProcessBackend::store_status()` (gRPC).
+`TABLE_META` holds store identity (store_id, store_type, schema_version — written once at creation) and per-author chain tips (tip/<pubkey> → hash — written on every apply). `SystemLayer` owns `StateBackend`, which reads/writes `TABLE_META` via `get_meta()` and `verify_and_update_tip()`. Domain crates only see `ScopedDb` scoped to `TABLE_DATA`.
 
-- [ ] **Chain tips** (per-author `prev_hash` tracking): stays with `SystemLayer` / whoever owns the write transaction. Part of the apply ceremony.
+Remaining decisions for witness-first:
 - [ ] **`last_applied_witness: Hash`**: framework-owned. Written by `project_new_entries()` after each successful state projection. Read on restart to resume.
 - [ ] **`stalled_at: Option<(Hash, String)>`**: framework-owned. Records where projection stopped (version skew).
-- [ ] **Store metadata** (id, type, schema_version): stays in `TABLE_META`, read-only after creation. `store_meta()` is a `SystemLayer` method, not a `StateMachine` method.
-- [ ] Decide if these should remain in one table or split into `TABLE_META` (store-level) + `TABLE_CHAIN_TIPS` (per-author).
+- [ ] Decide if chain tips and witness cursor should remain in `TABLE_META` or split into a separate table.
 
-**Step 2 — Witness-first conversion:**
+**Step 1 — Witness-first conversion:**
 
 The witness log becomes the sole interface between the DAG layer and the state machine. The two halves are fully decoupled:
 

@@ -222,26 +222,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_model::{Op, StateMachine, Uuid};
-    use lattice_storage::{StateBackend, StateDbError, StateLogic, StorageConfig};
+    use lattice_model::{Op, Uuid};
+    use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, StorageConfig};
 
-    struct MockLogic {
-        backend: StateBackend,
-    }
-
-    impl StateMachine for MockLogic {
-        type Error = StateDbError;
-        fn apply(&self, _op: &Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
+    struct MockLogic;
 
     impl StateLogic for MockLogic {
         type Updates = ();
-        fn backend(&self) -> &StateBackend {
-            &self.backend
+
+        fn create(_scoped: ScopedDb) -> Self {
+            MockLogic
         }
-        fn mutate(
+
+        fn apply(
             &self,
             _table: &mut redb::Table<&[u8], &[u8]>,
             _op: &Op,
@@ -249,19 +242,17 @@ mod tests {
         ) -> Result<(), StateDbError> {
             Ok(())
         }
+
         fn notify(&self, _updates: ()) {}
     }
 
     #[test]
     fn test_system_layer_impls_system_reader() {
-        // This test simply validates that compilation succeeds for the trait bound
-        fn takes_system_reader<T: super::SystemReader>(_t: &T) {} // Explicit super::SystemReader
+        fn takes_system_reader<T: super::SystemReader>(_t: &T) {}
 
         let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-        let logic = MockLogic { backend };
-
-        // Wrap logic in SystemLayer
-        let system_store = SystemLayer::new(logic);
+        let logic = MockLogic;
+        let system_store = SystemLayer::new(backend, logic);
 
         takes_system_reader(&system_store);
     }

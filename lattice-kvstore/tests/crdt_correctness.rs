@@ -8,10 +8,19 @@ use lattice_model::dag_queries::{HashMapDag, NullDag};
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::{Op, StateMachine};
+use lattice_store_base::StateProvider;
 use prost::Message;
 use std::time::Duration;
 
 static NULL_DAG: NullDag = NullDag;
+
+/// Wrap raw app-data bytes in a UniversalOp::AppData envelope.
+fn wrap_app_data(raw: Vec<u8>) -> Vec<u8> {
+    let envelope = lattice_proto::storage::UniversalOp {
+        op: Some(lattice_proto::storage::universal_op::Op::AppData(raw)),
+    };
+    envelope.encode_to_vec()
+}
 
 fn create_test_op(
     key: &[u8],
@@ -23,7 +32,8 @@ fn create_test_op(
     deps: &[Hash],
 ) -> Op<'static> {
     let kv_op = Operation::put(key, value);
-    let payload = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    let raw = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    let payload = wrap_app_data(raw);
 
     let deps_leaked = Box::leak(deps.to_vec().into_boxed_slice());
 
@@ -48,7 +58,8 @@ fn create_delete_op(
     deps: &[Hash],
 ) -> Op<'static> {
     let kv_op = Operation::delete(key);
-    let payload = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    let raw = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    let payload = wrap_app_data(raw);
 
     let deps_leaked = Box::leak(deps.to_vec().into_boxed_slice());
 
@@ -131,7 +142,6 @@ async fn test_subscribe_stream_tombstone_should_not_resurrect() {
 #[test]
 fn test_concurrent_genesis_merge() {
     let store = TestStore::new();
-    let state = &store.state;
     let dag = HashMapDag::new();
 
     let key = b"genesis_key";
@@ -161,17 +171,17 @@ fn test_concurrent_genesis_merge() {
 
     dag.record(&op1);
     dag.record(&op2);
-    state.apply(&op1, &dag).unwrap();
-    state.apply(&op2, &dag).unwrap();
+    store.state.apply(&op1, &dag).unwrap();
+    store.state.apply(&op2, &dag).unwrap();
 
     // Two concurrent heads — LWW picks one, but both should be tracked
     assert_eq!(
-        state.head_hashes(key).unwrap().len(),
+        store.state().head_hashes(key).unwrap().len(),
         2,
         "Should preserve both genesis heads"
     );
     assert!(
-        state.get(key).unwrap().is_some(),
+        store.state().get(key).unwrap().is_some(),
         "LWW should resolve to a value"
     );
 }
@@ -179,7 +189,6 @@ fn test_concurrent_genesis_merge() {
 #[test]
 fn test_concurrent_writes_produce_multi_heads() {
     let store = TestStore::new();
-    let state = &store.state;
     let dag = HashMapDag::new();
 
     let key = b"conflict_key";
@@ -209,16 +218,16 @@ fn test_concurrent_writes_produce_multi_heads() {
 
     dag.record(&op1);
     dag.record(&op2);
-    state.apply(&op1, &dag).unwrap();
-    state.apply(&op2, &dag).unwrap();
+    store.state.apply(&op1, &dag).unwrap();
+    store.state.apply(&op2, &dag).unwrap();
 
     assert_eq!(
-        state.head_hashes(key).unwrap().len(),
+        store.state().head_hashes(key).unwrap().len(),
         2,
         "Expected 2 concurrent heads"
     );
     assert!(
-        state.get(key).unwrap().is_some(),
+        store.state().get(key).unwrap().is_some(),
         "LWW should resolve to a value"
     );
 }
@@ -226,7 +235,6 @@ fn test_concurrent_writes_produce_multi_heads() {
 #[test]
 fn test_causal_dependency_chain() {
     let store = TestStore::new();
-    let state = &store.state;
     let key = b"chain_key";
     let author = PubKey::from([1u8; 32]);
     let hlc1 = HLC::now();
@@ -234,29 +242,28 @@ fn test_causal_dependency_chain() {
     // 1. Genesis
     let hash1 = Hash::from([0x11; 32]);
     let op1 = create_test_op(key, b"v1", author, hash1, hlc1, Hash::ZERO, &[]);
-    state.apply(&op1, &NULL_DAG).unwrap();
+    store.state.apply(&op1, &NULL_DAG).unwrap();
 
-    assert_eq!(state.head_hashes(key).unwrap(), vec![hash1]);
-    assert_eq!(state.get(key).unwrap(), Some(b"v1".to_vec()));
+    assert_eq!(store.state().head_hashes(key).unwrap(), vec![hash1]);
+    assert_eq!(store.state().get(key).unwrap(), Some(b"v1".to_vec()));
 
     // 2. Child (points to hash1, later time)
     let hlc2 = next_hlc(hlc1);
     let hash2 = Hash::from([0x22; 32]);
     let op2 = create_test_op(key, b"v2", author, hash2, hlc2, hash1, &[hash1]); // Prev=hash1, Deps=[hash1]
-    state.apply(&op2, &NULL_DAG).unwrap();
+    store.state.apply(&op2, &NULL_DAG).unwrap();
 
     assert_eq!(
-        state.head_hashes(key).unwrap(),
+        store.state().head_hashes(key).unwrap(),
         vec![hash2],
         "Op2 should supersede Op1"
     );
-    assert_eq!(state.get(key).unwrap(), Some(b"v2".to_vec()));
+    assert_eq!(store.state().get(key).unwrap(), Some(b"v2".to_vec()));
 }
 
 #[test]
 fn test_concurrent_put_and_delete_conflict() {
     let store = TestStore::new();
-    let state = &store.state;
     let dag = HashMapDag::new();
     let key = b"pd_conflict";
     let author1 = PubKey::from([1u8; 32]);
@@ -267,7 +274,7 @@ fn test_concurrent_put_and_delete_conflict() {
     let hash1 = Hash::from([0x11; 32]);
     let op1 = create_test_op(key, b"v1", author1, hash1, hlc, Hash::ZERO, &[]);
     dag.record(&op1);
-    state.apply(&op1, &dag).unwrap();
+    store.state.apply(&op1, &dag).unwrap();
 
     // 2. Concurrent Branch A: Put v2 (Author 1)
     let hlc_a = next_hlc(hlc);
@@ -280,17 +287,17 @@ fn test_concurrent_put_and_delete_conflict() {
 
     dag.record(&op2a);
     dag.record(&op2b);
-    state.apply(&op2a, &dag).unwrap();
-    state.apply(&op2b, &dag).unwrap();
+    store.state.apply(&op2a, &dag).unwrap();
+    store.state.apply(&op2b, &dag).unwrap();
 
     assert_eq!(
-        state.head_hashes(key).unwrap().len(),
+        store.state().head_hashes(key).unwrap().len(),
         2,
         "Expected conflict between Put and Delete"
     );
     // Same HLC, tiebreak by author: author2 ([2u8;32]) > author1 ([1u8;32]), and author2 did the delete
     assert_eq!(
-        state.get(key).unwrap(),
+        store.state().get(key).unwrap(),
         None,
         "LWW tiebreak: author2 (delete) wins"
     );
@@ -299,7 +306,6 @@ fn test_concurrent_put_and_delete_conflict() {
 #[test]
 fn test_resurrection_causality() {
     let store = TestStore::new();
-    let state = &store.state;
     let key = b"zombie_key";
     let author = PubKey::from([1u8; 32]);
     let hlc1 = HLC::now();
@@ -307,27 +313,27 @@ fn test_resurrection_causality() {
     // 1. Put v1
     let hash1 = Hash::from([0x11; 32]);
     let op1 = create_test_op(key, b"v1", author, hash1, hlc1, Hash::ZERO, &[]);
-    state.apply(&op1, &NULL_DAG).unwrap();
+    store.state.apply(&op1, &NULL_DAG).unwrap();
 
     // 2. Delete (Child of op1)
     let hlc2 = next_hlc(hlc1);
     let hash2 = Hash::from([0x22; 32]);
     let op2 = create_delete_op(key, author, hash2, hlc2, hash1, &[hash1]);
-    state.apply(&op2, &NULL_DAG).unwrap();
+    store.state.apply(&op2, &NULL_DAG).unwrap();
 
     // 3. Resurrect (Put v2 pointing to Delete) - Valid child of delete
     let hlc3 = next_hlc(hlc2);
     let hash3 = Hash::from([0x33; 32]);
     let op3 = create_test_op(key, b"v2", author, hash3, hlc3, hash2, &[hash2]);
 
-    state.apply(&op3, &NULL_DAG).unwrap();
+    store.state.apply(&op3, &NULL_DAG).unwrap();
 
     assert_eq!(
-        state.head_hashes(key).unwrap().len(),
+        store.state().head_hashes(key).unwrap().len(),
         1,
         "Resurrection should simply advance the chain"
     );
-    assert_eq!(state.get(key).unwrap(), Some(b"v2".to_vec()));
+    assert_eq!(store.state().get(key).unwrap(), Some(b"v2".to_vec()));
 }
 
 // ==================== Conflict Detection Tests ====================

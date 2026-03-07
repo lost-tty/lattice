@@ -18,6 +18,55 @@ pub const KEY_STORE_TYPE: &[u8] = b"store_type";
 pub const KEY_SCHEMA_VERSION: &[u8] = b"schema_version";
 pub const PREFIX_TIP: &[u8] = b"tip/";
 
+// ==================== Scoped Database Access ====================
+
+/// Read-only handle scoped to a single redb table.
+///
+/// Domain crates receive this instead of `Arc<Database>` so they can only
+/// read their own table (e.g. `TABLE_DATA`), not `TABLE_META` or `TABLE_SYSTEM`.
+#[derive(Clone)]
+pub struct ScopedDb {
+    db: Arc<Database>,
+    table: TableDefinition<'static, &'static [u8], &'static [u8]>,
+}
+
+impl ScopedDb {
+    pub fn new(
+        db: Arc<Database>,
+        table: TableDefinition<'static, &'static [u8], &'static [u8]>,
+    ) -> Self {
+        Self { db, table }
+    }
+
+    /// Open a read-only transaction scoped to this table.
+    pub fn begin_read(&self) -> Result<ScopedReadTxn, StateDbError> {
+        let txn = self.db.begin_read()?;
+        Ok(ScopedReadTxn {
+            txn,
+            table: self.table,
+        })
+    }
+}
+
+/// A read transaction that can only open the scoped table.
+pub struct ScopedReadTxn {
+    txn: redb::ReadTransaction,
+    table: TableDefinition<'static, &'static [u8], &'static [u8]>,
+}
+
+impl ScopedReadTxn {
+    /// Open the scoped table. Returns `None` if the table doesn't exist yet.
+    pub fn open_table(
+        &self,
+    ) -> Result<Option<redb::ReadOnlyTable<&'static [u8], &'static [u8]>>, StateDbError> {
+        match self.txn.open_table(self.table) {
+            Ok(t) => Ok(Some(t)),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
 /// Wrapper for the 5 distinct redb error types.
 ///
 /// Redb doesn't provide a unified error enum. Callers never need to distinguish
@@ -119,6 +168,7 @@ pub enum SnapshotError {
 /// - Opening/Creating the store with verification.
 /// - Validating chain integrity (tips).
 /// - Managing state identity (rolling hash).
+#[derive(Clone)]
 pub struct StateBackend {
     db: Arc<Database>,
     id: Uuid,
@@ -639,72 +689,31 @@ impl<'a, R: Read> Read for HashingReader<'a, R> {
 
 // ==================== Composition Pattern ====================
 
-/// Core trait for Lattice state machines.
+/// Domain crate interface for state machines.
 ///
-/// Provides the unified apply pattern: txn → verify → mutate → update identity → commit → notify
-///
-/// Implementors provide:
-/// - `backend()` - access to storage backend
-/// - `mutate()` - decode payload and apply mutations
-/// - `notify()` - notify watchers of changes
+/// `SystemLayer` owns the write transaction and calls `apply()` with a
+/// pre-opened `&mut redb::Table` scoped to the domain crate's table.
+/// Domain crates decode the payload, update the table, and return
+/// notification data for watchers.
 pub trait StateLogic: Send + Sync {
-    /// Store-specific notification data type.
     type Updates;
 
-    /// Access the underlying backend.
-    fn backend(&self) -> &StateBackend;
+    /// Construct the state machine from a scoped database handle.
+    fn create(db: ScopedDb) -> Self
+    where
+        Self: Sized;
 
     /// Decode payload and apply mutations to the table.
-    /// Returns notification data for watchers.
     ///
-    /// Returning `Err` stalls the author's chain — the intention will not be
-    /// witnessed and all subsequent intentions from that author are blocked.
-    /// This is correct for unrecognized payload formats (version skew) and
-    /// I/O failures. See [`StateMachine`](lattice_model::StateMachine) for
-    /// the full error contract.
-    fn mutate(
+    /// Called by `SystemLayer` inside an open write transaction.
+    /// Returning `Err` stalls the author's chain.
+    fn apply(
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn DagQueries,
     ) -> Result<Self::Updates, StateDbError>;
 
-    /// Notify watchers of changes.
+    /// Notify watchers of changes after the transaction commits.
     fn notify(&self, updates: Self::Updates);
-
-    /// Apply an operation to the state.
-    ///
-    /// Default implementation: begin txn → verify chain → mutate → commit → notify
-    fn apply(&self, op: &Op, dag: &dyn DagQueries) -> Result<(), StateDbError> {
-        let write_txn = self.backend().db().begin_write()?;
-
-        // 0. Validate Chain Integrity (and idempotence)
-        let should_apply = self.backend().verify_and_update_tip(
-            &write_txn,
-            &op.info.author,
-            op.id(),
-            op.prev_hash,
-        )?;
-        if !should_apply {
-            // Idempotent duplicate, just return success
-            return Ok(());
-        }
-
-        // 1. Delegate to logic
-        let mut table = write_txn.open_table(TABLE_DATA)?;
-        let updates = self.mutate(&mut table, op, dag)?;
-        drop(table); // Release borrow
-
-        write_txn.commit()?;
-
-        // 2. Notify watchers (only if applied)
-        self.notify(updates);
-
-        Ok(())
-    }
-}
-
-/// Trait for constructing state logic from a backend.
-pub trait StateFactory: StateLogic {
-    fn create(backend: StateBackend) -> Self;
 }

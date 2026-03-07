@@ -6,8 +6,7 @@
 //! Uses redb for efficient embedded storage. Per-key state is encoded as
 //! `proto::Value { oneof kind { value | tombstone }, heads[] }` via `KVTable`.
 
-// Internal table names
-use lattice_storage::{StateBackend, StateDbError, StateFactory, StateLogic, TABLE_DATA};
+use lattice_storage::{ScopedDb, StateDbError, StateLogic};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -33,9 +32,7 @@ use lattice_model::{Hash, Op};
 use lattice_store_base::{FieldFormat, Introspectable};
 use prost::Message;
 use prost_reflect::DescriptorPool;
-use redb::Database;
 use regex::bytes::Regex;
-use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// Persistent state for KV with DAG conflict resolution.
@@ -43,8 +40,7 @@ use tokio::sync::broadcast;
 /// This is a derived materialized view - the actual source of truth is
 /// the intention log managed by the replication layer.
 pub struct KvState {
-    backend: StateBackend,
-    db: Arc<Database>,
+    db: ScopedDb,
     watcher_tx: broadcast::Sender<WatchEvent>,
 }
 
@@ -55,12 +51,6 @@ impl std::fmt::Debug for KvState {
 }
 
 impl KvState {
-    /// Get a reference to the underlying database.
-    /// Used by extension traits for additional operations.
-    pub fn db(&self) -> &Database {
-        &self.db
-    }
-
     /// Subscribe to state changes.
     pub fn subscribe(&self) -> broadcast::Receiver<WatchEvent> {
         self.watcher_tx.subscribe()
@@ -70,10 +60,10 @@ impl KvState {
     /// Returns `None` for missing keys or tombstone-only.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateDbError> {
         let txn = self.db.begin_read()?;
-        let table = match txn.open_table(TABLE_DATA) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let table = match txn.open_table() {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
         ro.get(key).into_state_err()
@@ -88,10 +78,10 @@ impl KvState {
         key: &[u8],
     ) -> Result<(Option<Vec<u8>>, bool), StateDbError> {
         let txn = self.db.begin_read()?;
-        let table = match txn.open_table(TABLE_DATA) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok((None, false)),
-            Err(e) => return Err(e.into()),
+        let table = match txn.open_table() {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok((None, false)),
+            Err(e) => return Err(e),
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
         ro.get_with_conflict(key).into_state_err()
@@ -103,9 +93,9 @@ impl KvState {
         key: &[u8],
     ) -> Result<lattice_kvtable::InspectResult, StateDbError> {
         let txn = self.db.begin_read()?;
-        let table = match txn.open_table(TABLE_DATA) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => {
+        let table = match txn.open_table() {
+            Ok(Some(t)) => t,
+            Ok(None) => {
                 return Ok(lattice_kvtable::InspectResult {
                     exists: false,
                     value: None,
@@ -114,7 +104,7 @@ impl KvState {
                     heads: Vec::new(),
                 })
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
         ro.inspect(key).into_state_err()
@@ -123,10 +113,10 @@ impl KvState {
     /// Return the head hashes for a key (for causal deps and conflict counting).
     pub fn head_hashes(&self, key: &[u8]) -> Result<Vec<Hash>, StateDbError> {
         let txn = self.db.begin_read()?;
-        let table = match txn.open_table(TABLE_DATA) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
+        let table = match txn.open_table() {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
         ro.heads(key).into_state_err()
@@ -145,10 +135,10 @@ impl KvState {
         F: FnMut(Vec<u8>, Option<Vec<u8>>, bool) -> Result<bool, StateDbError>,
     {
         let txn = self.db.begin_read()?;
-        let table = match txn.open_table(TABLE_DATA) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
-            Err(e) => return Err(e.into()),
+        let table = match txn.open_table() {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(e),
         };
         let ro = lattice_kvtable::ReadOnlyKVTable::new(table);
 
@@ -173,30 +163,17 @@ impl KvState {
     }
 }
 
-// ==================== StateMachine Implementation ====================
-//
-// Delegates to StateLogic::apply() for the transaction ceremony.
-// Tests call StateMachine::apply() directly on KvState.
-
-impl lattice_model::StateMachine for KvState {
-    type Error = StateDbError;
-
-    fn apply(&self, op: &Op, dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
-        StateLogic::apply(self, op, dag)
-    }
-}
-
 // ==================== StateLogic trait implementation ====================
 
 impl StateLogic for KvState {
     type Updates = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
-    fn backend(&self) -> &StateBackend {
-        &self.backend
+    fn create(db: ScopedDb) -> Self {
+        let (watcher_tx, _) = broadcast::channel(1024);
+        Self { db, watcher_tx }
     }
 
-    /// Decode payload and apply KV mutations to the table.
-    fn mutate(
+    fn apply(
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
@@ -236,18 +213,6 @@ impl StateLogic for KvState {
                 None => WatchEventKind::Delete,
             };
             let _ = self.watcher_tx.send(WatchEvent { key, kind });
-        }
-    }
-}
-
-impl StateFactory for KvState {
-    fn create(backend: StateBackend) -> Self {
-        let (watcher_tx, _) = broadcast::channel(1024);
-        let db = backend.db_shared();
-        Self {
-            backend,
-            db,
-            watcher_tx,
         }
     }
 }
@@ -714,19 +679,50 @@ mod tests {
     use lattice_model::dag_queries::{HashMapDag, NullDag};
     use lattice_model::hlc::HLC;
     use lattice_model::{PubKey, Uuid};
-    use lattice_model::StateMachine;
-    use lattice_storage::StorageConfig;
+    use lattice_storage::{StateBackend, StorageConfig, TABLE_DATA};
+
     static NULL_DAG: NullDag = NullDag;
 
-    fn new_test_store() -> KvState {
-        let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-        KvState::create(backend)
+    struct TestHarness {
+        backend: StateBackend,
+        store: KvState,
     }
 
-    /// Test that StateMachine::apply works correctly for put operations
+    impl TestHarness {
+        fn new() -> Self {
+            let backend =
+                StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
+            let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+            let store = KvState::create(scoped);
+            Self { backend, store }
+        }
+
+        /// Open a write transaction, apply the op via StateLogic, and commit.
+        fn apply(
+            &self,
+            op: &Op,
+            dag: &dyn lattice_model::DagQueries,
+        ) -> Result<(), StateDbError> {
+            let write_txn = self.backend.db().begin_write()?;
+            {
+                let mut table = write_txn.open_table(TABLE_DATA)?;
+                let updates = self.store.apply(&mut table, op, dag)?;
+                drop(table);
+                write_txn.commit()?;
+                self.store.notify(updates);
+            }
+            Ok(())
+        }
+    }
+
+    fn new_test_harness() -> TestHarness {
+        TestHarness::new()
+    }
+
+    /// Test that StateLogic::apply works correctly for put operations
     #[test]
-    fn test_state_machine_apply_put() {
-        let store = new_test_store();
+    fn test_state_logic_apply_put() {
+        let h = new_test_harness();
 
         // Create an Op with a Put payload
         let key = b"test/key";
@@ -754,18 +750,18 @@ mod tests {
             prev_hash: Hash::ZERO,
         };
 
-        // Apply via StateMachine trait
-        StateMachine::apply(&store, &op, &NULL_DAG).unwrap();
+        // Apply via StateLogic trait
+        h.apply(&op, &NULL_DAG).unwrap();
 
         // Verify the value is stored
-        assert_eq!(store.get(key).unwrap(), Some(value.to_vec()));
-        assert_eq!(store.head_hashes(key).unwrap(), vec![op_hash]);
+        assert_eq!(h.store.get(key).unwrap(), Some(value.to_vec()));
+        assert_eq!(h.store.head_hashes(key).unwrap(), vec![op_hash]);
     }
 
     /// Test that multiple puts to same key creates proper head list
     #[test]
-    fn test_state_machine_concurrent_puts() {
-        let store = new_test_store();
+    fn test_concurrent_puts() {
+        let h = new_test_harness();
         let dag = HashMapDag::new();
 
         let key = b"shared/key";
@@ -775,18 +771,18 @@ mod tests {
         let hash_a = Hash::from([11u8; 32]);
         let op_a = make_put_op(key, b"value_a", hash_a, author_a, &[], Hash::ZERO);
         dag.record(&op_a);
-        StateMachine::apply(&store, &op_a, &dag).unwrap();
+        h.apply(&op_a, &dag).unwrap();
 
         // Second put from author B (concurrent - no deps)
         let author_b = PubKey::from([20u8; 32]);
         let hash_b = Hash::from([21u8; 32]);
         let op_b = make_put_op(key, b"value_b", hash_b, author_b, &[], Hash::ZERO);
         dag.record(&op_b);
-        StateMachine::apply(&store, &op_b, &dag).unwrap();
+        h.apply(&op_b, &dag).unwrap();
 
         // Should have 2 concurrent heads
         assert_eq!(
-            store.head_hashes(key).unwrap().len(),
+            h.store.head_hashes(key).unwrap().len(),
             2,
             "Expected 2 concurrent heads"
         );
@@ -797,17 +793,17 @@ mod tests {
         let deps = vec![hash_a, hash_b];
         let op_c = make_put_op(key, b"merged", hash_c, author_c, &deps, Hash::ZERO);
         dag.record(&op_c);
-        StateMachine::apply(&store, &op_c, &dag).unwrap();
+        h.apply(&op_c, &dag).unwrap();
 
         // Should now have only 1 head (the merge)
-        assert_eq!(store.head_hashes(key).unwrap(), vec![hash_c]);
-        assert_eq!(store.get(key).unwrap(), Some(b"merged".to_vec()));
+        assert_eq!(h.store.head_hashes(key).unwrap(), vec![hash_c]);
+        assert_eq!(h.store.get(key).unwrap(), Some(b"merged".to_vec()));
     }
 
-    /// Test delete operation via StateMachine trait
+    /// Test delete operation via StateLogic trait
     #[test]
-    fn test_state_machine_apply_delete() {
-        let store = new_test_store();
+    fn test_apply_delete() {
+        let h = new_test_harness();
 
         let key = b"to/delete";
 
@@ -815,20 +811,20 @@ mod tests {
         let author = PubKey::from([5u8; 32]);
         let put_hash = Hash::from([6u8; 32]);
         let put_op = make_put_op(key, b"exists", put_hash, author, &[], Hash::ZERO);
-        StateMachine::apply(&store, &put_op, &NULL_DAG).unwrap();
+        h.apply(&put_op, &NULL_DAG).unwrap();
 
         // Verify it exists
-        assert_eq!(store.get(key).unwrap(), Some(b"exists".to_vec()));
+        assert_eq!(h.store.get(key).unwrap(), Some(b"exists".to_vec()));
 
         // Now delete it
         let del_hash = Hash::from([7u8; 32]);
         let del_op = make_delete_op(key, del_hash, author, &[put_hash], put_hash);
-        StateMachine::apply(&store, &del_op, &NULL_DAG).unwrap();
+        h.apply(&del_op, &NULL_DAG).unwrap();
 
         // Should be deleted (tombstone → get returns None)
-        assert_eq!(store.get(key).unwrap(), None);
+        assert_eq!(h.store.get(key).unwrap(), None);
         assert_eq!(
-            store.head_hashes(key).unwrap().len(),
+            h.store.head_hashes(key).unwrap().len(),
             1,
             "Tombstone head should still exist"
         );
@@ -914,7 +910,7 @@ mod tests {
     /// Test that apply_op with duplicate keys in payload uses last-wins (reverse iteration)
     #[test]
     fn test_apply_op_duplicate_keys_last_wins() {
-        let store = new_test_store();
+        let h = new_test_harness();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -927,17 +923,17 @@ mod tests {
             Operation::put(key.as_slice(), b"second"),
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
-        StateMachine::apply(&store, &op, &NULL_DAG).unwrap();
+        h.apply(&op, &NULL_DAG).unwrap();
 
         // Second put should win, single head
-        assert_eq!(store.get(key).unwrap(), Some(b"second".to_vec()));
-        assert_eq!(store.head_hashes(key).unwrap().len(), 1);
+        assert_eq!(h.store.get(key).unwrap(), Some(b"second".to_vec()));
+        assert_eq!(h.store.head_hashes(key).unwrap().len(), 1);
     }
 
     /// Test that apply_op with put then delete on same key results in deletion
     #[test]
     fn test_apply_op_put_then_delete_same_key() {
-        let store = new_test_store();
+        let h = new_test_harness();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -949,17 +945,17 @@ mod tests {
             Operation::delete(key.as_slice()),
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
-        StateMachine::apply(&store, &op, &NULL_DAG).unwrap();
+        h.apply(&op, &NULL_DAG).unwrap();
 
         // Delete should win (last op), single head
-        assert_eq!(store.get(key).unwrap(), None);
-        assert_eq!(store.head_hashes(key).unwrap().len(), 1);
+        assert_eq!(h.store.get(key).unwrap(), None);
+        assert_eq!(h.store.head_hashes(key).unwrap().len(), 1);
     }
 
     /// Test that apply_op with delete then put on same key results in value
     #[test]
     fn test_apply_op_delete_then_put_same_key() {
-        let store = new_test_store();
+        let h = new_test_harness();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -971,18 +967,18 @@ mod tests {
             Operation::put(key.as_slice(), b"resurrected"),
         ];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
-        StateMachine::apply(&store, &op, &NULL_DAG).unwrap();
+        h.apply(&op, &NULL_DAG).unwrap();
 
         // Put should win (last op), single head
-        assert_eq!(store.get(key).unwrap(), Some(b"resurrected".to_vec()));
-        assert_eq!(store.head_hashes(key).unwrap().len(), 1);
+        assert_eq!(h.store.get(key).unwrap(), Some(b"resurrected".to_vec()));
+        assert_eq!(h.store.head_hashes(key).unwrap().len(), 1);
     }
 
     /// Test that empty keys are applied at apply_op level (validation is build-time only).
     /// This ensures deterministic replay - once signed, always apply.
     #[test]
     fn test_apply_op_empty_key_allowed() {
-        let store = new_test_store();
+        let h = new_test_harness();
 
         let author = PubKey::from([1u8; 32]);
         let hash = Hash::from([2u8; 32]);
@@ -991,11 +987,11 @@ mod tests {
         let ops = vec![Operation::put(b"".as_slice(), b"value")];
         let op = make_multi_op(ops, hash, author, &[], Hash::ZERO);
 
-        StateMachine::apply(&store, &op, &NULL_DAG)
+        h.apply(&op, &NULL_DAG)
             .expect("Empty key should be applied at apply_op level");
 
         // Verify it was stored
-        assert_eq!(store.get(b"").unwrap(), Some(b"value".to_vec()));
-        assert_eq!(store.head_hashes(b"").unwrap().len(), 1);
+        assert_eq!(h.store.get(b"").unwrap(), Some(b"value".to_vec()));
+        assert_eq!(h.store.head_hashes(b"").unwrap().len(), 1);
     }
 }

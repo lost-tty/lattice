@@ -5,11 +5,10 @@
 
 use lattice_model::{Op, PubKey, SExpr};
 
-use redb::{Database, ReadableTable, ReadableTableMetadata};
+use redb::{ReadableTable, ReadableTableMetadata};
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// Event emitted when a new log entry is appended
@@ -29,13 +28,11 @@ pub struct LogEntry {
     pub content: Vec<u8>,
 }
 
-use lattice_storage::{StateBackend, StateDbError, StateFactory, StateLogic, TABLE_DATA};
+use lattice_storage::{ScopedDb, StateDbError, StateLogic};
 
 /// LogState - append-only log with redb persistence
 pub struct LogState {
-    backend: StateBackend,
-    db: Arc<Database>,
-    /// Broadcast channel for log entry events
+    db: ScopedDb,
     event_tx: broadcast::Sender<LogEvent>,
 }
 
@@ -48,11 +45,6 @@ impl std::fmt::Debug for LogState {
 // ==================== Openable Implementation ====================
 
 impl LogState {
-    /// Get access to the database
-    pub fn db(&self) -> &redb::Database {
-        &self.db
-    }
-
     /// Subscribe to log entry events
     pub fn subscribe(&self) -> broadcast::Receiver<LogEvent> {
         self.event_tx.subscribe()
@@ -111,25 +103,22 @@ impl LogState {
             Ok(t) => t,
             Err(_) => return Vec::new(),
         };
-        let table = match txn.open_table(TABLE_DATA) {
-            Ok(t) => t,
-            Err(_) => return Vec::new(),
+        let table = match txn.open_table() {
+            Ok(Some(t)) => t,
+            _ => return Vec::new(),
         };
 
         match table.iter() {
             Ok(iter) => {
                 if let Some(n) = tail {
-                    // Optimized tail: read newest first, take N
                     let mut entries: Vec<_> = iter
                         .rev()
                         .filter_map(Self::decode_db_result)
                         .take(n)
                         .collect();
-                    // Restore chronological order (Oldest -> Newest)
                     entries.reverse();
                     entries
                 } else {
-                    // Read all (chronological)
                     iter.filter_map(Self::decode_db_result).collect()
                 }
             }
@@ -143,9 +132,9 @@ impl LogState {
             Ok(t) => t,
             Err(_) => return 0,
         };
-        let table = match txn.open_table(TABLE_DATA) {
-            Ok(t) => t,
-            Err(_) => return 0,
+        let table = match txn.open_table() {
+            Ok(Some(t)) => t,
+            _ => return 0,
         };
         table.len().unwrap_or(0) as usize
     }
@@ -158,12 +147,12 @@ impl LogState {
 impl StateLogic for LogState {
     type Updates = Vec<u8>;
 
-    fn backend(&self) -> &StateBackend {
-        &self.backend
+    fn create(db: ScopedDb) -> Self {
+        let (event_tx, _) = broadcast::channel(1024);
+        Self { db, event_tx }
     }
 
-    /// Decode payload and apply log mutation to the table.
-    fn mutate(
+    fn apply(
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
@@ -195,32 +184,6 @@ impl StateLogic for LogState {
     /// Notify watchers of new entry.
     fn notify(&self, content: Self::Updates) {
         let _ = self.event_tx.send(LogEvent { content });
-    }
-}
-
-impl StateFactory for LogState {
-    fn create(backend: StateBackend) -> Self {
-        let (event_tx, _) = broadcast::channel(1024);
-        let db = backend.db_shared();
-        Self { backend, db, event_tx }
-    }
-}
-
-// ==================== StateMachine Implementation ====================
-//
-// Delegates to StateLogic::apply() for the transaction ceremony.
-
-impl lattice_model::StateMachine for LogState {
-    type Error = StateDbError;
-
-    fn apply(&self, op: &Op, dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
-        StateLogic::apply(self, op, dag)
-    }
-}
-
-impl AsRef<LogState> for LogState {
-    fn as_ref(&self) -> &LogState {
-        self
     }
 }
 
@@ -433,18 +396,47 @@ mod tests {
     use super::*;
     use lattice_model::dag_queries::NullDag;
     use lattice_model::hlc::HLC;
-    use lattice_model::{Hash, Op, PubKey, StateMachine, Uuid};
-    use lattice_storage::StorageConfig;
+    use lattice_model::{Hash, Op, PubKey, Uuid};
+    use lattice_storage::{StateBackend, StorageConfig, TABLE_DATA};
+
     static NULL_DAG: NullDag = NullDag;
 
-    fn new_test_store() -> LogState {
-        let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-        LogState::create(backend)
+    struct TestHarness {
+        backend: StateBackend,
+        store: LogState,
     }
 
-    fn open_store(id: Uuid, config: &StorageConfig) -> LogState {
-        let backend = StateBackend::open(id, config, None, 0).unwrap();
-        LogState::create(backend)
+    impl TestHarness {
+        fn new() -> Self {
+            let backend =
+                StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
+            let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+            let store = LogState::create(scoped);
+            Self { backend, store }
+        }
+
+        fn open(id: Uuid, config: &StorageConfig) -> Self {
+            let backend = StateBackend::open(id, config, None, 0).unwrap();
+            let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+            let store = LogState::create(scoped);
+            Self { backend, store }
+        }
+
+        fn apply(
+            &self,
+            op: &Op,
+            dag: &dyn lattice_model::DagQueries,
+        ) -> Result<(), StateDbError> {
+            let write_txn = self.backend.db().begin_write()?;
+            {
+                let mut table = write_txn.open_table(TABLE_DATA)?;
+                let updates = self.store.apply(&mut table, op, dag)?;
+                drop(table);
+                write_txn.commit()?;
+                self.store.notify(updates);
+            }
+            Ok(())
+        }
     }
 
     #[test]
@@ -454,7 +446,7 @@ mod tests {
         let author = PubKey::from([1u8; 32]);
         let id = Uuid::new_v4();
         let config = StorageConfig::File(dir.path().to_path_buf());
-        let state = open_store(id, &config);
+        let h = TestHarness::open(id, &config);
 
         let op = Op {
             info: lattice_model::IntentionInfo {
@@ -470,20 +462,20 @@ mod tests {
             causal_deps: &[],
         };
 
-        StateMachine::apply(&state, &op, &NULL_DAG).unwrap();
-        assert_eq!(state.read(None).len(), 1);
+        h.apply(&op, &NULL_DAG).unwrap();
+        assert_eq!(h.store.read(None).len(), 1);
 
-        drop(state);
+        drop(h);
 
         // Re-open with SAME ID
-        let state2 = open_store(id, &config);
-        assert_eq!(state2.read(None).len(), 1);
-        assert_eq!(state2.read(None)[0].content, b"hello world");
+        let h2 = TestHarness::open(id, &config);
+        assert_eq!(h2.store.read(None).len(), 1);
+        assert_eq!(h2.store.read(None)[0].content, b"hello world");
     }
 
     #[test]
     fn test_ordering() {
-        let state = new_test_store();
+        let h = TestHarness::new();
 
         let author1 = PubKey::from([1u8; 32]);
         let author2 = PubKey::from([2u8; 32]);
@@ -503,7 +495,7 @@ mod tests {
             prev_hash: Hash::ZERO,
             causal_deps: &causal_deps,
         };
-        StateMachine::apply(&state, &op3, &NULL_DAG).unwrap();
+        h.apply(&op3, &NULL_DAG).unwrap();
 
         let op1 = Op {
             info: lattice_model::IntentionInfo {
@@ -518,7 +510,7 @@ mod tests {
             prev_hash: Hash::ZERO,
             causal_deps: &causal_deps,
         };
-        StateMachine::apply(&state, &op1, &NULL_DAG).unwrap();
+        h.apply(&op1, &NULL_DAG).unwrap();
 
         let op2 = Op {
             info: lattice_model::IntentionInfo {
@@ -533,17 +525,17 @@ mod tests {
             prev_hash: Hash::from([1u8; 32]), // Chain to op1
             causal_deps: &causal_deps,
         };
-        StateMachine::apply(&state, &op2, &NULL_DAG).unwrap();
+        h.apply(&op2, &NULL_DAG).unwrap();
 
         // read(None) should return in HLC order
-        let entries = state.read(None);
+        let entries = h.store.read(None);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].content, b"first");
         assert_eq!(entries[1].content, b"second");
         assert_eq!(entries[2].content, b"third");
 
         // Test tail reading (read last 2)
-        let tail = state.read(Some(2));
+        let tail = h.store.read(Some(2));
         assert_eq!(tail.len(), 2);
         // Should be strictly chronological (second, third)
         assert_eq!(tail[0].content, b"second");
@@ -554,7 +546,7 @@ mod tests {
     fn test_snapshot_restore() {
         let store_id = Uuid::new_v4();
 
-        let state1 = open_store(store_id, &StorageConfig::InMemory);
+        let h1 = TestHarness::open(store_id, &StorageConfig::InMemory);
 
         let author = PubKey::from([1u8; 32]);
         let start_hlc = HLC::now();
@@ -568,21 +560,23 @@ mod tests {
             prev_hash: Hash::ZERO,
             causal_deps: &[],
         };
-        StateMachine::apply(&state1, &op, &NULL_DAG).unwrap();
+        h1.apply(&op, &NULL_DAG).unwrap();
 
         // Take snapshot
         let mut snapshot_bytes = Vec::new();
-        state1.backend().snapshot(&mut snapshot_bytes).unwrap();
+        h1.backend.snapshot(&mut snapshot_bytes).unwrap();
 
         // Restore to fresh state with SAME store ID (restore validates ID)
-        let state2 = open_store(store_id, &StorageConfig::InMemory);
-        state2.backend().restore(&mut std::io::Cursor::new(snapshot_bytes)).unwrap();
+        let h2 = TestHarness::open(store_id, &StorageConfig::InMemory);
+        h2.backend
+            .restore(&mut std::io::Cursor::new(snapshot_bytes))
+            .unwrap();
 
         // Verify
-        assert_eq!(state2.len(), 1);
-        let entries = state2.read(None);
+        assert_eq!(h2.store.len(), 1);
+        let entries = h2.store.read(None);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, b"log_entry_1");
-        assert_eq!(entries[0].timestamp, state1.read(None)[0].timestamp);
+        assert_eq!(entries[0].timestamp, h1.store.read(None)[0].timestamp);
     }
 }

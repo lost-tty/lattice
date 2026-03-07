@@ -3,7 +3,7 @@ pub mod state_db;
 
 // Re-export common items
 pub use state_db::{
-    ChainError, RedbError, SnapshotError, StateBackend, StateDbError, StateFactory, StateLogic,
+    ChainError, RedbError, ScopedDb, SnapshotError, StateBackend, StateDbError, StateLogic,
     TableMap, TABLE_DATA, TABLE_META, TABLE_SYSTEM,
 };
 // Re-export for convenience — canonical home is lattice_model::StorageConfig

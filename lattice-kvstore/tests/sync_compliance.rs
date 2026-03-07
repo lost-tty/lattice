@@ -3,22 +3,36 @@ use lattice_kvstore_api::Operation;
 use lattice_model::dag_queries::{HashMapDag, NullDag};
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
-use lattice_model::Op;
-use lattice_model::Uuid;
+use lattice_model::{Op, StateMachine, Uuid};
+use lattice_proto::storage::UniversalOp;
 use lattice_storage::{
-    ChainError, SnapshotError, StateBackend, StateDbError, StateFactory, StateLogic, StorageConfig,
+    ScopedDb, SnapshotError, StateBackend, StateDbError, StateLogic, StorageConfig, TABLE_DATA,
 };
+use lattice_systemstore::SystemLayer;
 use prost::Message;
+
 static NULL_DAG: NullDag = NullDag;
 
-fn new_test_store() -> KvState {
-    let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-    KvState::create(backend)
+/// Wrap raw app-data bytes in a UniversalOp::AppData envelope.
+fn wrap_app_data(raw: Vec<u8>) -> Vec<u8> {
+    let envelope = UniversalOp {
+        op: Some(lattice_proto::storage::universal_op::Op::AppData(raw)),
+    };
+    envelope.encode_to_vec()
 }
 
-fn open_test_store(id: Uuid, config: &StorageConfig) -> KvState {
+fn new_test_store() -> SystemLayer<KvState> {
+    let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
+    let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+    let inner = KvState::create(scoped);
+    SystemLayer::new(backend, inner)
+}
+
+fn open_test_store(id: Uuid, config: &StorageConfig) -> SystemLayer<KvState> {
     let backend = StateBackend::open(id, config, None, 0).unwrap();
-    KvState::create(backend)
+    let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+    let inner = KvState::create(scoped);
+    SystemLayer::new(backend, inner)
 }
 
 fn create_test_op(
@@ -30,7 +44,8 @@ fn create_test_op(
     prev_hash: Hash,
 ) -> Op<'static> {
     let kv_op = Operation::put(key, value);
-    let payload = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    let raw = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    let payload = wrap_app_data(raw);
 
     Op {
         info: lattice_model::IntentionInfo {
@@ -45,16 +60,16 @@ fn create_test_op(
 }
 
 /// Helper: take snapshot and return bytes
-fn snapshot_bytes(state: &impl StateLogic) -> Vec<u8> {
+fn snapshot_bytes(store: &SystemLayer<KvState>) -> Vec<u8> {
     let mut buf = Vec::new();
-    state.backend().snapshot(&mut buf).unwrap();
+    store.backend().snapshot(&mut buf).unwrap();
     buf
 }
 
 #[test]
 fn test_snapshot_restore() {
     let store_id = Uuid::new_v4();
-    let state1 = open_test_store(store_id, &StorageConfig::InMemory);
+    let store1 = open_test_store(store_id, &StorageConfig::InMemory);
 
     let author = PubKey::from([1u8; 32]);
     let hash = Hash::from([0xCC; 32]);
@@ -67,40 +82,43 @@ fn test_snapshot_restore() {
         Hash::ZERO,
     );
 
-    state1.apply(&op, &NULL_DAG).unwrap();
+    store1.apply(&op, &NULL_DAG).unwrap();
 
     // Take Snapshot
-    let snapshot1_bytes = snapshot_bytes(&state1);
+    let snapshot1_bytes = snapshot_bytes(&store1);
 
     // Create fresh state
-    let state2 = open_test_store(store_id, &StorageConfig::InMemory);
+    let store2 = open_test_store(store_id, &StorageConfig::InMemory);
 
     // Restore
-    state2
+    store2
         .backend()
         .restore(&mut std::io::Cursor::new(snapshot1_bytes.clone()))
         .unwrap();
 
     // Verify Data
-    assert_eq!(state2.get(b"snap_key").unwrap(), Some(b"snap_val".to_vec()));
+    assert_eq!(
+        store2.app_state().get(b"snap_key").unwrap(),
+        Some(b"snap_val".to_vec())
+    );
 
     // Take another snapshot - should be byte-identical to original
-    let snapshot2_bytes = snapshot_bytes(&state2);
+    let snapshot2_bytes = snapshot_bytes(&store2);
     assert_eq!(
         snapshot1_bytes, snapshot2_bytes,
         "Snapshot after restore should be byte-identical"
     );
 
     // Verify Chaintips preserved
-    let tips = state2.backend().get_applied_chaintips().unwrap();
+    let tips = store2.backend().get_applied_chaintips().unwrap();
     assert_eq!(tips.len(), 1);
     assert_eq!(tips[0].1, hash);
 }
 
 #[test]
 fn test_convergence_concurrent_operations() {
-    let state1 = new_test_store();
-    let state2 = new_test_store();
+    let store1 = new_test_store();
+    let store2 = new_test_store();
 
     let dag = HashMapDag::new();
     let start_hlc = HLC::now();
@@ -118,18 +136,21 @@ fn test_convergence_concurrent_operations() {
     dag.record(&op2);
 
     // Node A: 1 then 2
-    state1.apply(&op1, &dag).unwrap();
-    state1.apply(&op2, &dag).unwrap();
+    store1.apply(&op1, &dag).unwrap();
+    store1.apply(&op2, &dag).unwrap();
 
     // Node B: 2 then 1
-    state2.apply(&op2, &dag).unwrap();
-    state2.apply(&op1, &dag).unwrap();
+    store2.apply(&op2, &dag).unwrap();
+    store2.apply(&op1, &dag).unwrap();
 
     // Convergence Check: both nodes should have same LWW value and same head hashes
-    assert_eq!(state1.get(b"key1").unwrap(), state2.get(b"key1").unwrap());
+    assert_eq!(
+        store1.app_state().get(b"key1").unwrap(),
+        store2.app_state().get(b"key1").unwrap()
+    );
 
-    let hashes1 = state1.head_hashes(b"key1").unwrap();
-    let hashes2 = state2.head_hashes(b"key1").unwrap();
+    let hashes1 = store1.app_state().head_hashes(b"key1").unwrap();
+    let hashes2 = store2.app_state().head_hashes(b"key1").unwrap();
     assert_eq!(hashes1.len(), 2);
     assert_eq!(
         hashes1, hashes2,
@@ -140,7 +161,7 @@ fn test_convergence_concurrent_operations() {
 #[test]
 fn test_restore_overwrites_existing_data() {
     let store_id = Uuid::new_v4();
-    let state = open_test_store(store_id, &StorageConfig::InMemory);
+    let store = open_test_store(store_id, &StorageConfig::InMemory);
 
     let author = PubKey::from([1u8; 32]);
     let start_hlc = HLC::now();
@@ -148,21 +169,21 @@ fn test_restore_overwrites_existing_data() {
     // 1. Create State with "key_old"
     let hash1 = Hash::from([0xAA; 32]);
     let op1 = create_test_op(b"key_old", b"val_old", author, hash1, start_hlc, Hash::ZERO);
-    state.apply(&op1, &NULL_DAG).unwrap();
+    store.apply(&op1, &NULL_DAG).unwrap();
 
-    assert!(state.get(b"key_old").unwrap().is_some());
+    assert!(store.app_state().get(b"key_old").unwrap().is_some());
 
     // 2. Prepare a Snapshot that ONLY has "key_new"
     // MUST use same store_id for restore to work
-    let state_snap = open_test_store(store_id, &StorageConfig::InMemory);
+    let store_snap = open_test_store(store_id, &StorageConfig::InMemory);
     let hash2 = Hash::from([0xBB; 32]);
     let op2 = create_test_op(b"key_new", b"val_new", author, hash2, start_hlc, Hash::ZERO);
-    state_snap.apply(&op2, &NULL_DAG).unwrap();
+    store_snap.apply(&op2, &NULL_DAG).unwrap();
 
-    let snapshot_bytes_orig = snapshot_bytes(&state_snap);
+    let snapshot_bytes_orig = snapshot_bytes(&store_snap);
 
     // 3. Restore snapshot onto the FIRST state (which has key_old)
-    state
+    store
         .backend()
         .restore(&mut std::io::Cursor::new(snapshot_bytes_orig.clone()))
         .unwrap();
@@ -172,14 +193,17 @@ fn test_restore_overwrites_existing_data() {
     // - key_new should represent the state
 
     assert_eq!(
-        state.get(b"key_old").unwrap(),
+        store.app_state().get(b"key_old").unwrap(),
         None,
         "Ghost key_old remained after restore!"
     );
-    assert_eq!(state.get(b"key_new").unwrap(), Some(b"val_new".to_vec()));
+    assert_eq!(
+        store.app_state().get(b"key_new").unwrap(),
+        Some(b"val_new".to_vec())
+    );
 
     // Snapshot after restore should match original
-    let snapshot_bytes_after = snapshot_bytes(&state);
+    let snapshot_bytes_after = snapshot_bytes(&store);
     assert_eq!(
         snapshot_bytes_orig, snapshot_bytes_after,
         "Snapshot mismatch after restore"
@@ -188,7 +212,7 @@ fn test_restore_overwrites_existing_data() {
 
 #[test]
 fn test_delete_correctness() {
-    let state = new_test_store();
+    let store = new_test_store();
 
     let author = PubKey::from([1u8; 32]);
     let start_hlc = HLC::now();
@@ -196,10 +220,13 @@ fn test_delete_correctness() {
     // 1. Insert
     let hash1 = Hash::from([0xA1; 32]);
     let op1 = create_test_op(b"del_key", b"val", author, hash1, start_hlc, Hash::ZERO);
-    state.apply(&op1, &NULL_DAG).unwrap();
+    store.apply(&op1, &NULL_DAG).unwrap();
 
-    assert_eq!(state.get(b"del_key").unwrap(), Some(b"val".to_vec()));
-    assert_eq!(state.head_hashes(b"del_key").unwrap().len(), 1);
+    assert_eq!(
+        store.app_state().get(b"del_key").unwrap(),
+        Some(b"val".to_vec())
+    );
+    assert_eq!(store.app_state().head_hashes(b"del_key").unwrap().len(), 1);
 
     // 2. Delete (Add Tombstone) - must have causal_dep on hash1 to supersede it
     let hash2 = Hash::from([0xB2; 32]);
@@ -208,7 +235,8 @@ fn test_delete_correctness() {
         counter: 0,
     };
     let kv_op = Operation::delete(b"del_key");
-    let payload = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    let raw = KvPayload { ops: vec![kv_op] }.encode_to_vec();
+    let payload = wrap_app_data(raw);
     let op2 = Op {
         info: lattice_model::IntentionInfo {
             hash: hash2,
@@ -219,12 +247,12 @@ fn test_delete_correctness() {
         causal_deps: &[hash1], // Causally supersedes hash1
         prev_hash: hash1,
     };
-    state.apply(&op2, &NULL_DAG).unwrap();
+    store.apply(&op2, &NULL_DAG).unwrap();
 
     // Tombstone: get returns None, but head still exists
-    assert_eq!(state.get(b"del_key").unwrap(), None);
+    assert_eq!(store.app_state().get(b"del_key").unwrap(), None);
     assert_eq!(
-        state.head_hashes(b"del_key").unwrap().len(),
+        store.app_state().head_hashes(b"del_key").unwrap().len(),
         1,
         "Tombstone with causal dep should supersede the put"
     );
@@ -232,7 +260,7 @@ fn test_delete_correctness() {
 
 #[test]
 fn test_chain_rules_compliance() {
-    let state = new_test_store();
+    let store = new_test_store();
     let dag = HashMapDag::new();
     let author = PubKey::from([0x99; 32]);
     let hlc = HLC::now();
@@ -241,12 +269,10 @@ fn test_chain_rules_compliance() {
 
     // 1. Invalid Genesis (Prev != ZERO)
     let bad_genesis = create_test_op(b"k", b"v", author, hash1, hlc, Hash::from([0x01; 32]));
-    let err = state.apply(&bad_genesis, &dag).unwrap_err();
+    let err = store.apply(&bad_genesis, &dag).unwrap_err();
+    let err_str = err.to_string().to_lowercase();
     assert!(
-        matches!(
-            err,
-            StateDbError::InvalidChain(ChainError::InvalidGenesis { .. })
-        ),
+        err_str.contains("invalid genesis"),
         "Expected InvalidGenesis, got: {:?}",
         err,
     );
@@ -254,21 +280,39 @@ fn test_chain_rules_compliance() {
     // 2. Valid Genesis
     let valid_genesis = create_test_op(b"k", b"v", author, hash1, hlc, Hash::ZERO);
     dag.record(&valid_genesis);
-    state.apply(&valid_genesis, &dag).unwrap();
+    store.apply(&valid_genesis, &dag).unwrap();
 
     // 3. Idempotency (Apply same op again)
     // Should return Ok
-    state.apply(&valid_genesis, &dag).unwrap();
+    store.apply(&valid_genesis, &dag).unwrap();
 
     // 4. Broken Link (Prev != Current Tip)
     let hash2 = Hash::from([0x22; 32]);
     let bad_link = create_test_op(b"k", b"v2", author, hash2, hlc, Hash::ZERO); // Prev should be hash1
-    let err = state.apply(&bad_link, &dag).unwrap_err();
+    let err = store.apply(&bad_link, &dag).unwrap_err();
+    let err_str = err.to_string().to_lowercase();
     assert!(
-        matches!(
-            err,
-            StateDbError::InvalidChain(ChainError::BrokenChain { .. })
-        ),
+        err_str.contains("broken chain"),
+        "Expected BrokenChain, got: {:?}",
+        err,
+    );
+
+    // 2. Valid Genesis
+    let valid_genesis = create_test_op(b"k", b"v", author, hash1, hlc, Hash::ZERO);
+    dag.record(&valid_genesis);
+    store.apply(&valid_genesis, &dag).unwrap();
+
+    // 3. Idempotency (Apply same op again)
+    // Should return Ok
+    store.apply(&valid_genesis, &dag).unwrap();
+
+    // 4. Broken Link (Prev != Current Tip)
+    let hash2 = Hash::from([0x22; 32]);
+    let bad_link = create_test_op(b"k", b"v2", author, hash2, hlc, Hash::ZERO); // Prev should be hash1
+    let err = store.apply(&bad_link, &dag).unwrap_err();
+    let err_str = err.to_string().to_lowercase();
+    assert!(
+        err_str.contains("broken chain"),
         "Expected BrokenChain, got: {:?}",
         err,
     );
@@ -276,30 +320,30 @@ fn test_chain_rules_compliance() {
     // 5. Valid Link
     let valid_link = create_test_op(b"k", b"v2", author, hash2, hlc, hash1);
     dag.record(&valid_link);
-    state.apply(&valid_link, &dag).unwrap();
+    store.apply(&valid_link, &dag).unwrap();
 }
 
 #[test]
 fn test_snapshot_checksum_failure() {
     let store_id = Uuid::new_v4();
-    let state1 = open_test_store(store_id, &StorageConfig::InMemory);
+    let store1 = open_test_store(store_id, &StorageConfig::InMemory);
 
     // Add some data
     let author = PubKey::from([1u8; 32]);
     let hash = Hash::from([0xAA; 32]);
     let op = create_test_op(b"key", b"val", author, hash, HLC::now(), Hash::ZERO);
-    state1.apply(&op, &NULL_DAG).unwrap();
+    store1.apply(&op, &NULL_DAG).unwrap();
 
-    let snap_bytes = snapshot_bytes(&state1);
+    let snap_bytes = snapshot_bytes(&store1);
 
     // Corrupt the LAST byte (part of checksum)
     let len = snap_bytes.len();
     let mut corrupt_checksum = snap_bytes.clone();
     corrupt_checksum[len - 1] ^= 0xFF;
 
-    let state2 = open_test_store(store_id, &StorageConfig::InMemory);
+    let store2 = open_test_store(store_id, &StorageConfig::InMemory);
 
-    let err = state2
+    let err = store2
         .backend()
         .restore(&mut std::io::Cursor::new(corrupt_checksum))
         .unwrap_err();
@@ -316,7 +360,7 @@ fn test_snapshot_checksum_failure() {
     let mut corrupt_data = snap_bytes.clone();
     corrupt_data[50] ^= 0xFF;
 
-    let err_data = state2
+    let err_data = store2
         .backend()
         .restore(&mut std::io::Cursor::new(corrupt_data))
         .unwrap_err();
@@ -332,15 +376,15 @@ fn test_snapshot_checksum_failure() {
 
 #[test]
 fn test_snapshot_uuid_mismatch() {
-    let state1 = new_test_store();
+    let store1 = new_test_store();
 
     let mut snapshot_bytes = Vec::new();
-    state1.backend().snapshot(&mut snapshot_bytes).unwrap();
+    store1.backend().snapshot(&mut snapshot_bytes).unwrap();
 
     // Open with DIFFERENT UUID
-    let state2 = new_test_store();
+    let store2 = new_test_store();
 
-    let err = state2
+    let err = store2
         .backend()
         .restore(&mut std::io::Cursor::new(snapshot_bytes))
         .unwrap_err();

@@ -5,7 +5,7 @@ use dag::{DagScope, ScopedDag};
 use lattice_model::{Hash, IntentionInfo, Op, PubKey, StateMachine, StateWriter};
 use lattice_model::{Openable, StoreTypeProvider};
 use lattice_proto::storage::{universal_op, UniversalOp};
-use lattice_storage::{StateBackend, StateDbError, StateFactory, StateLogic, TABLE_DATA};
+use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, TABLE_DATA};
 use lattice_store_base::{BoxByteStream, CommandHandler, StreamError, StreamHandler, StreamProvider, Subscriber};
 use prost::Message;
 use std::borrow::Cow;
@@ -23,32 +23,39 @@ pub enum SystemLayerError {
     Db(#[from] StateDbError),
 }
 
-/// A wrapper layer that adds SystemStore capabilities to any StateMachine.
+/// A wrapper layer that adds SystemStore capabilities to any state machine.
 ///
-/// This implements the "Y-Adapter" pattern:
-/// - Intercepts `SystemOp`s and applies them to the local System Table.
-/// - Delegates `AppData` ops to the inner state machine.
-/// - Implements `SystemReader` locally, avoiding orphan rules.
+/// Owns the `StateBackend` (database, chain tips, metadata). Domain crates
+/// only receive a `ScopedDb` for read-only access to their table.
+///
+/// Implements the "Y-Adapter" pattern:
+/// - Intercepts `SystemOp`s and applies them to `TABLE_SYSTEM`.
+/// - Delegates `AppData` ops to the inner state machine's `TABLE_DATA`.
+/// - Owns the single write transaction for both paths.
 #[derive(Clone)]
 pub struct SystemLayer<S> {
+    backend: StateBackend,
     inner: S,
 }
 
 impl<S> SystemLayer<S> {
-    pub fn new(inner: S) -> Self {
-        Self { inner }
+    pub fn new(backend: StateBackend, inner: S) -> Self {
+        Self { backend, inner }
     }
 
     /// Access the inner app-data state machine.
     pub fn app_state(&self) -> &S {
         &self.inner
     }
-}
 
-impl<S: StateLogic> SystemLayer<S> {
+    /// Access the storage backend.
+    pub fn backend(&self) -> &StateBackend {
+        &self.backend
+    }
+
     /// Access the system store (reads from `TABLE_SYSTEM` in the shared database).
     pub fn system_state(&self) -> SystemState<'_> {
-        SystemState::new(self.inner.backend().db())
+        SystemState::new(self.backend.db())
     }
 }
 
@@ -78,12 +85,11 @@ impl<S: StateLogic> SystemLayer<S> {
         dag: &dyn lattice_model::DagQueries,
         universal: UniversalOp,
     ) -> Result<ApplyResult<S::Updates>, StateDbError> {
-        let mut write_txn = self.inner.backend().db().begin_write()?;
+        let mut write_txn = self.backend.db().begin_write()?;
 
         // Verify chain integrity (idempotence check)
         let should_apply = self
-            .inner
-            .backend()
+            .backend
             .verify_and_update_tip(&write_txn, &op.info.author, op.id(), op.prev_hash)?;
 
         if !should_apply {
@@ -110,7 +116,7 @@ impl<S: StateLogic> SystemLayer<S> {
                 };
                 let app_dag = ScopedDag { inner: dag, scope: DagScope::AppData };
                 let mut table = write_txn.open_table(TABLE_DATA)?;
-                let updates = self.inner.mutate(&mut table, &new_op, &app_dag)?;
+                let updates = self.inner.apply(&mut table, &new_op, &app_dag)?;
                 drop(table); // Release borrow before commit
                 ApplyResult::AppData(updates)
             }
@@ -147,12 +153,11 @@ impl<S: StateLogic> StateMachine for SystemLayer<S> {
 
 impl<S: StateLogic> lattice_model::StoreIdentity for SystemLayer<S> {
     fn store_meta(&self) -> lattice_model::StoreMeta {
-        self.inner.backend().get_meta()
+        self.backend.get_meta()
     }
 
     fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
-        self.inner
-            .backend()
+        self.backend
             .get_applied_chaintips()
             .map_err(|e| e.to_string())
     }
@@ -164,7 +169,7 @@ impl<S: StoreTypeProvider> StoreTypeProvider for SystemLayer<S> {
     }
 }
 
-impl<S: StateFactory + StoreTypeProvider + 'static> Openable for SystemLayer<S> {
+impl<S: StateLogic + StoreTypeProvider + 'static> Openable for SystemLayer<S> {
     fn open(id: Uuid, config: &lattice_model::StorageConfig) -> Result<Self, String> {
         let (expected_type, expected_version) = match config {
             lattice_model::StorageConfig::File(_) => (Some(S::store_type()), 1),
@@ -172,7 +177,9 @@ impl<S: StateFactory + StoreTypeProvider + 'static> Openable for SystemLayer<S> 
         };
         let backend =
             StateBackend::open(id, config, expected_type, expected_version).map_err(|e| e.to_string())?;
-        Ok(Self::new(S::create(backend)))
+        let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+        let inner = S::create(scoped);
+        Ok(Self::new(backend, inner))
     }
 }
 

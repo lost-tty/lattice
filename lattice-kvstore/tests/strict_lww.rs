@@ -1,6 +1,7 @@
 mod common;
 use common::TestStore;
 use lattice_kvstore_api::KvStoreExt;
+use lattice_store_base::StateProvider;
 
 #[tokio::test]
 async fn test_kv_handle_strict_updates() {
@@ -13,8 +14,8 @@ async fn test_kv_handle_strict_updates() {
         .await
         .expect("put 1 failed");
 
-    assert_eq!(store.state.get(key).unwrap(), Some(value.to_vec()));
-    assert_eq!(store.state.head_hashes(key).unwrap(), vec![hash1]);
+    assert_eq!(store.state().get(key).unwrap(), Some(value.to_vec()));
+    assert_eq!(store.state().head_hashes(key).unwrap(), vec![hash1]);
 
     // Second Put (Same Value)
     let hash2 = store
@@ -29,9 +30,9 @@ async fn test_kv_handle_strict_updates() {
     );
 
     // 4. Verify state updated to new hash
-    assert_eq!(store.state.get(key).unwrap(), Some(value.to_vec()));
+    assert_eq!(store.state().get(key).unwrap(), Some(value.to_vec()));
     assert_eq!(
-        store.state.head_hashes(key).unwrap(),
+        store.state().head_hashes(key).unwrap(),
         vec![hash2],
         "State should point to new hash"
     );
