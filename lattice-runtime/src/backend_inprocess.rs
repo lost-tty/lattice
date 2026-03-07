@@ -9,6 +9,7 @@ use lattice_api::proto::{StoreMeta, StoreRef};
 use lattice_model::store_info::PeerStrategy;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, WitnessEntry};
+use lattice_model::SExpr;
 use lattice_node::Node;
 use lattice_systemstore::SystemBatch;
 use prost_reflect::prost::Message;
@@ -86,6 +87,64 @@ impl LatticeBackend for InProcessBackend {
 
     fn node_id(&self) -> Vec<u8> {
         self.node.node_id().to_vec()
+    }
+
+    fn node_meta(&self) -> AsyncResult<'_, Vec<SExpr>> {
+        Box::pin(async move {
+            let meta = self.node.meta();
+            let mut sections = Vec::new();
+
+            // meta table (name)
+            let mut meta_entries = Vec::new();
+            if let Ok(Some(name)) = meta.name() {
+                meta_entries.push(SExpr::list(vec![SExpr::sym("name"), SExpr::str(&name)]));
+            }
+            sections.push(SExpr::list(
+                std::iter::once(SExpr::sym("meta"))
+                    .chain(meta_entries)
+                    .collect(),
+            ));
+
+            // rootstores table
+            if let Ok(roots) = meta.list_rootstores() {
+                let mut rows: Vec<SExpr> = Vec::new();
+                for (id, record) in &roots {
+                    rows.push(SExpr::list(vec![
+                        SExpr::sym("root"),
+                        SExpr::list(vec![SExpr::sym("id"), SExpr::str(&id.to_string())]),
+                        SExpr::list(vec![SExpr::sym("joined-at"), SExpr::Num(record.joined_at)]),
+                    ]));
+                }
+                sections.push(SExpr::list(
+                    std::iter::once(SExpr::sym("rootstores"))
+                        .chain(rows)
+                        .collect(),
+                ));
+            }
+
+            // stores table
+            if let Ok(stores) = meta.list_stores() {
+                let mut rows: Vec<SExpr> = Vec::new();
+                for (id, record) in &stores {
+                    let parent = Uuid::from_slice(&record.parent_id)
+                        .unwrap_or(Uuid::nil());
+                    rows.push(SExpr::list(vec![
+                        SExpr::sym("store"),
+                        SExpr::list(vec![SExpr::sym("id"), SExpr::str(&id.to_string())]),
+                        SExpr::list(vec![SExpr::sym("parent"), SExpr::str(&parent.to_string())]),
+                        SExpr::list(vec![SExpr::sym("type"), SExpr::str(&record.store_type)]),
+                        SExpr::list(vec![SExpr::sym("created-at"), SExpr::Num(record.created_at)]),
+                    ]));
+                }
+                sections.push(SExpr::list(
+                    std::iter::once(SExpr::sym("stores"))
+                        .chain(rows)
+                        .collect(),
+                ));
+            }
+
+            Ok(sections)
+        })
     }
 
     fn subscribe(&self) -> BackendResult<EventReceiver> {
@@ -207,11 +266,17 @@ impl LatticeBackend for InProcessBackend {
             match parent_id {
                 None => {
                     // List Roots
-                    let stored_roots = self.node.meta().list_rootstores()?;
+                    let meta = self.node.meta();
+                    let stored_roots = meta.list_rootstores()?;
+                    let store_records: std::collections::HashMap<Uuid, _> =
+                        meta.list_stores()?.into_iter().collect();
                     let mut result = Vec::new();
 
                     for (id, _info) in stored_roots {
-                        let info = self.node.store_manager().get_info(&id);
+                        let store_type = store_records
+                            .get(&id)
+                            .map(|r| r.store_type.clone())
+                            .unwrap_or_default();
                         let name = self
                             .node
                             .store_manager()
@@ -219,7 +284,6 @@ impl LatticeBackend for InProcessBackend {
                             .and_then(|h| h.as_system())
                             .and_then(|s| s.get_name().ok().flatten())
                             .unwrap_or_default();
-                        let store_type = info.map(|i| i.store_type).unwrap_or_default();
 
                         result.push(StoreRef {
                             id: id.as_bytes().to_vec(),

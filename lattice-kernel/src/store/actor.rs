@@ -14,7 +14,7 @@ use lattice_model::weaver::{
 use lattice_model::{NodeIdentity, StateMachine, StoreIdentity};
 use lattice_proto::weaver::WitnessRecord;
 use prost::Message;
-use tracing::{info, error};
+use tracing::{info, warn, error};
 use uuid::Uuid;
 
 use std::collections::HashMap;
@@ -601,9 +601,12 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 };
 
                 if let Err(e) = self.state.apply(&op, store) {
-                    eprintln!(
-                        "Projection stalled at witness seq {} (intention {}): {}",
-                        entry.seq, intention_hash, e
+                    warn!(
+                        store_id = %self.store_id,
+                        seq = entry.seq,
+                        intention = %intention_hash,
+                        error = %e,
+                        "Projection stalled"
                     );
                     return Ok(projected);
                 }
@@ -1531,6 +1534,144 @@ mod tests {
         assert!(
             !handle.state().has_applied(h4),
             "other author also stalled — projection is sequential"
+        );
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_witnessed_batch_rejects_substituted_intention() {
+        let identity_local = NodeIdentity::generate();
+        let identity_peer = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, identity_local.clone()).unwrap();
+
+        // Peer creates intention A and witnesses it
+        let i_a = Intention {
+            author: identity_peer.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"legit_payload".to_vec(),
+        };
+        let s_a = SignedIntention::sign(i_a, &identity_peer);
+        let h_a = s_a.intention.hash();
+
+        // Peer creates intention B (different payload)
+        let i_b = Intention {
+            author: identity_peer.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"substituted_payload".to_vec(),
+        };
+        let s_b = SignedIntention::sign(i_b, &identity_peer);
+        let h_b = s_b.intention.hash();
+        assert_ne!(h_a, h_b);
+
+        // Build a valid witness record for intention A
+        let content = lattice_proto::weaver::WitnessContent {
+            store_id: TEST_STORE.as_bytes().to_vec(),
+            intention_hash: h_a.as_bytes().to_vec(),
+            wall_time: 0,
+            prev_hash: vec![0u8; 32],
+        };
+        let content_bytes = content.encode_to_vec();
+        use lattice_model::crypto::HashSigner;
+        let digest = lattice_model::crypto::content_hash(&content_bytes);
+        let sig = identity_peer.sign_hash(&digest);
+        let witness_record = lattice_proto::weaver::WitnessRecord {
+            content: content_bytes,
+            signature: sig.0.to_vec(),
+        };
+
+        // Hand over witness for A but substitute intention B in the intentions list
+        let result = handle
+            .ingest_witness_batch(
+                vec![witness_record],
+                vec![s_b.clone()],
+                identity_peer.public_key(),
+            )
+            .await;
+
+        // Should fail: witness references A but only B was provided
+        assert!(result.is_err(), "Should reject when witness intention is missing");
+
+        // B must NOT be inserted or witnessed
+        assert!(
+            !handle.state().has_applied(h_b),
+            "Substituted intention B should not be applied"
+        );
+        assert_eq!(
+            handle.intention_count().await, 0,
+            "No intentions should be stored"
+        );
+        assert_eq!(
+            handle.witness_count().await, 0,
+            "No witness records should be stored"
+        );
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_witnessed_batch_rejects_invalid_signature() {
+        let identity_local = NodeIdentity::generate();
+        let identity_peer = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, identity_local.clone()).unwrap();
+
+        // Peer creates a valid intention
+        let i_a = Intention {
+            author: identity_peer.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"payload".to_vec(),
+        };
+        let s_a = SignedIntention::sign(i_a, &identity_peer);
+        let h_a = s_a.intention.hash();
+
+        // Build witness content referencing intention A
+        let content = lattice_proto::weaver::WitnessContent {
+            store_id: TEST_STORE.as_bytes().to_vec(),
+            intention_hash: h_a.as_bytes().to_vec(),
+            wall_time: 0,
+            prev_hash: vec![0u8; 32],
+        };
+        let content_bytes = content.encode_to_vec();
+
+        // Corrupt the signature: use garbage bytes instead of a real signature
+        let bad_record = lattice_proto::weaver::WitnessRecord {
+            content: content_bytes,
+            signature: vec![0xFFu8; 64],
+        };
+
+        let result = handle
+            .ingest_witness_batch(
+                vec![bad_record],
+                vec![s_a.clone()],
+                identity_peer.public_key(),
+            )
+            .await;
+
+        assert!(result.is_err(), "Should reject witness with invalid signature");
+
+        // Nothing should be inserted or applied
+        assert!(
+            !handle.state().has_applied(h_a),
+            "Intention should not be applied"
+        );
+        assert_eq!(
+            handle.intention_count().await, 0,
+            "No intentions should be stored"
+        );
+        assert_eq!(
+            handle.witness_count().await, 0,
+            "No witness records should be stored"
         );
 
         handle.close().await;

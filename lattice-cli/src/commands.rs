@@ -142,6 +142,8 @@ fn format_recursive_help(cmd: &clap::Command, prefix: &str, output: &mut String)
 pub enum NodeSubcommand {
     /// Show node info (local identity)
     Status,
+    /// Dump meta.db contents
+    Meta,
     /// Set display name for this node
     SetName { name: String },
     /// Join a store/mesh using an invite token
@@ -297,6 +299,7 @@ pub async fn handle_command(
 
         LatticeCommand::Node { subcommand } => match subcommand {
             NodeSubcommand::Status => node_commands::cmd_status(backend, writer).await,
+            NodeSubcommand::Meta => node_commands::cmd_meta(backend, writer).await,
             NodeSubcommand::SetName { name } => {
                 node_commands::cmd_set_name(backend, &name, writer).await
             }

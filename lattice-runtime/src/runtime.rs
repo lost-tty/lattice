@@ -2,13 +2,13 @@
 
 use crate::backend_inprocess::InProcessBackend;
 use crate::{LatticeBackend, NetworkService, Node, NodeBuilder, RpcServer};
-use lattice_node::{StoreOpener, StoreRegistry};
+use lattice_node::StoreOpener;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 /// Type alias for opener factory closures (matches NodeBuilder's signature).
-type OpenerFactory = Box<dyn FnOnce(Arc<StoreRegistry>) -> Box<dyn StoreOpener> + Send>;
+type OpenerFactory = Box<dyn FnOnce() -> Box<dyn StoreOpener> + Send>;
 
 /// A running Lattice runtime with Node, network, and optional RPC server.
 pub struct Runtime {
@@ -94,14 +94,14 @@ impl RuntimeBuilder {
     /// # Example
     /// ```ignore
     /// Runtime::builder()
-    ///     .with_opener("custom:mystore", |registry| {
-    ///         direct_opener::<SystemLayer<MyState>>(registry)
+    ///     .with_opener("custom:mystore", || {
+    ///         direct_opener::<SystemLayer<MyState>>()
     ///     })
     ///     .build().await
     /// ```
     pub fn with_opener<F>(mut self, store_type: impl Into<String>, factory: F) -> Self
     where
-        F: FnOnce(Arc<StoreRegistry>) -> Box<dyn StoreOpener> + Send + 'static,
+        F: FnOnce() -> Box<dyn StoreOpener> + Send + 'static,
     {
         self.opener_factories
             .push((store_type.into(), Box::new(factory)));
@@ -120,11 +120,11 @@ impl RuntimeBuilder {
         use lattice_node::direct_opener;
         use lattice_systemstore::SystemLayer;
 
-        self.with_opener(STORE_TYPE_KVSTORE, |registry| {
-            direct_opener::<SystemLayer<KvState>>(registry)
+        self.with_opener(STORE_TYPE_KVSTORE, || {
+            direct_opener::<SystemLayer<KvState>>()
         })
-        .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-            direct_opener::<SystemLayer<LogState>>(registry)
+        .with_opener(STORE_TYPE_LOGSTORE, || {
+            direct_opener::<SystemLayer<LogState>>()
         })
     }
 

@@ -27,13 +27,13 @@ pub fn temp_data_dir(name: &str) -> lattice_node::DataDir {
 pub fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
         .in_memory()
-        .with_opener(STORE_TYPE_KVSTORE, |registry| {
+        .with_opener(STORE_TYPE_KVSTORE, || {
             direct_opener::<
                 lattice_systemstore::SystemLayer<lattice_kvstore::KvState>,
-            >(registry)
+            >()
         })
-        .with_opener(STORE_TYPE_NULLSTORE, |registry| {
-            direct_opener::<TestNullState>(registry)
+        .with_opener(STORE_TYPE_NULLSTORE, || {
+            direct_opener::<TestNullState>()
         })
 }
 

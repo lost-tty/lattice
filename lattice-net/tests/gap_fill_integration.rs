@@ -16,11 +16,11 @@ use std::sync::Arc;
 fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
         .in_memory()
-        .with_opener(STORE_TYPE_KVSTORE, |registry| {
-            direct_opener::<SystemLayer<KvState>>(registry)
+        .with_opener(STORE_TYPE_KVSTORE, || {
+            direct_opener::<SystemLayer<KvState>>()
         })
-        .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-            direct_opener::<SystemLayer<LogState>>(registry)
+        .with_opener(STORE_TYPE_LOGSTORE, || {
+            direct_opener::<SystemLayer<LogState>>()
         })
 }
 

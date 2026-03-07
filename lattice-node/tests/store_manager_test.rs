@@ -1,5 +1,7 @@
+use lattice_kvstore_api::KvStoreExt;
 use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::NodeIdentity;
+use lattice_model::Uuid;
 use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_node::data_dir::DataDir;
 use lattice_node::{direct_opener, Node, NodeBuilder};
@@ -14,8 +16,8 @@ type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullSt
 fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
         .in_memory()
-        .with_opener(STORE_TYPE_NULLSTORE, |registry| {
-            direct_opener::<TestNullState>(registry)
+        .with_opener(STORE_TYPE_NULLSTORE, || {
+            direct_opener::<TestNullState>()
         })
 }
 
@@ -24,8 +26,8 @@ type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
 /// File-backed node builder for tests that need persistence across restarts.
 fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
-        .with_opener(STORE_TYPE_KVSTORE, |registry| {
-            direct_opener::<TestKvState>(registry)
+        .with_opener(STORE_TYPE_KVSTORE, || {
+            direct_opener::<TestKvState>()
         })
 }
 
@@ -699,4 +701,236 @@ async fn test_system_batch_produces_single_intention() {
         "SystemBatch with 2 ops should produce exactly 1 intention, got {}",
         after - before
     );
+}
+
+// ==================== Meta.db Store Registration ====================
+
+#[tokio::test]
+async fn test_child_store_has_correct_parent_in_meta() {
+    let ctx = TestCtx::new();
+
+    let root_id = ctx
+        .node
+        .create_store(None, Some("root".to_string()), STORE_TYPE_NULLSTORE)
+        .await
+        .unwrap();
+
+    let child_id = ctx
+        .node
+        .create_store(
+            Some(root_id),
+            Some("child".to_string()),
+            STORE_TYPE_NULLSTORE,
+        )
+        .await
+        .unwrap();
+    wait_for_open(ctx.sm(), child_id).await;
+
+    // Root store should have nil parent
+    let root_record = ctx.node.meta().get_store(root_id).unwrap().unwrap();
+    assert_eq!(
+        Uuid::from_slice(&root_record.parent_id).unwrap(),
+        Uuid::nil(),
+        "Root store parent should be nil"
+    );
+
+    // Child store should have root as parent
+    let child_record = ctx.node.meta().get_store(child_id).unwrap().unwrap();
+    assert_eq!(
+        Uuid::from_slice(&child_record.parent_id).unwrap(),
+        root_id,
+        "Child store parent should be the root store"
+    );
+    assert_eq!(child_record.store_type, STORE_TYPE_NULLSTORE);
+}
+
+#[tokio::test]
+async fn test_create_store_populates_stores_table() {
+    let ctx = TestCtx::new();
+
+    let store_id = ctx
+        .node
+        .create_store(None, Some("test-root".to_string()), STORE_TYPE_NULLSTORE)
+        .await
+        .unwrap();
+
+    let record = ctx
+        .node
+        .meta()
+        .get_store(store_id)
+        .unwrap()
+        .expect("StoreRecord should exist in STORES_TABLE");
+    assert_eq!(record.store_type, STORE_TYPE_NULLSTORE);
+    assert_eq!(
+        Uuid::from_slice(&record.parent_id).unwrap(),
+        Uuid::nil(),
+        "Root store parent should be nil"
+    );
+    assert!(record.created_at > 0, "created_at should be set");
+
+    // Also present in rootstores table
+    let rootstores = ctx.node.meta().list_rootstores().unwrap();
+    assert!(
+        rootstores.iter().any(|(id, _)| *id == store_id),
+        "Should appear in ROOTSTORES_TABLE"
+    );
+}
+
+#[tokio::test]
+async fn test_joined_store_populates_stores_table() {
+    // Node A creates the store, Node B joins via invite
+    let ctx_a = TestCtx::new();
+    let ctx_b = TestCtx::new();
+
+    let store_id = ctx_a
+        .node
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
+        .await
+        .unwrap();
+    let token_str = ctx_a
+        .sm()
+        .create_invite(store_id, ctx_a.node.node_id())
+        .await
+        .unwrap();
+    let invite = lattice_node::Invite::parse(&token_str).unwrap();
+
+    // Node A accepts Node B
+    ctx_a
+        .node
+        .accept_join(ctx_b.node.node_id(), store_id, &invite.secret)
+        .await
+        .unwrap();
+
+    // Node B completes the join
+    ctx_b
+        .node
+        .complete_join(
+            store_id,
+            STORE_TYPE_NULLSTORE,
+            vec![ctx_a.node.node_id()],
+        )
+        .await
+        .unwrap();
+
+    // Verify Node B's meta.db has the store in STORES_TABLE
+    let record = ctx_b
+        .node
+        .meta()
+        .get_store(store_id)
+        .unwrap()
+        .expect("Joined store should appear in STORES_TABLE");
+    assert_eq!(record.store_type, STORE_TYPE_NULLSTORE);
+
+    // And in rootstores
+    let rootstores = ctx_b.node.meta().list_rootstores().unwrap();
+    assert!(
+        rootstores.iter().any(|(id, _)| *id == store_id),
+        "Joined store should appear in ROOTSTORES_TABLE"
+    );
+}
+
+#[tokio::test]
+async fn test_state_db_recovery() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = DataDir::new(tmp.path().to_path_buf());
+
+    // Phase 1: Create store, write data, shutdown
+    let store_id;
+    {
+        let node = file_node_builder(DataDir::new(data_dir.base()))
+            .build()
+            .unwrap();
+        store_id = node
+            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .await
+            .unwrap();
+        let handle = node.store_manager().get_handle(&store_id).unwrap();
+        handle
+            .put(b"/key".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
+        // Wait for the intention to be witnessed and projected
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if handle.as_inspector().witness_count().await >= 2 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for witness");
+        node.shutdown().await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Phase 2: Delete state.db but keep intentions (witness log)
+    let state_dir = data_dir.store_state_dir(store_id);
+    std::fs::remove_dir_all(&state_dir).unwrap();
+
+    // Phase 3: Reopen — actor should recover state from witness log
+    let node = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match file_node_builder(DataDir::new(data_dir.base())).build() {
+                Ok(n) => return n,
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    })
+    .await
+    .expect("Failed to rebuild node");
+    node.start().await.unwrap();
+    wait_for_open(node.store_manager(), store_id).await;
+
+    // Give the actor time to project witness entries onto fresh state
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let handle = node.store_manager().get_handle(&store_id).unwrap();
+    let result = handle.get(b"/key".to_vec()).await.unwrap();
+    assert_eq!(
+        result.value,
+        Some(b"value".to_vec()),
+        "State should be recovered from witness log"
+    );
+}
+
+#[tokio::test]
+async fn test_open_existing_resolves_type_from_meta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = DataDir::new(tmp.path().to_path_buf());
+
+    // Phase 1: Create store, shutdown
+    let store_id;
+    {
+        let node = file_node_builder(DataDir::new(data_dir.base()))
+            .build()
+            .unwrap();
+        store_id = node
+            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .await
+            .unwrap();
+        node.shutdown().await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Phase 2: Reopen — verify open_existing resolves type from meta.db
+    let node = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match file_node_builder(DataDir::new(data_dir.base())).build() {
+                Ok(n) => return n,
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    })
+    .await
+    .expect("Failed to rebuild node");
+
+    // Verify meta.db has the type before opening
+    let meta_record = node.meta().get_store(store_id).unwrap().unwrap();
+    assert_eq!(meta_record.store_type, STORE_TYPE_KVSTORE);
+
+    // open_existing should resolve type from meta.db and return it
+    let (handle, resolved_type) = node.store_manager().open_existing(store_id).unwrap();
+    assert_eq!(resolved_type, STORE_TYPE_KVSTORE);
+    assert_eq!(handle.store_type(), STORE_TYPE_KVSTORE);
 }

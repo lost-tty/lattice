@@ -1,6 +1,7 @@
 //! Node commands - local identity operations
 
 use crate::commands::{CmdResult, CommandOutput::*, Writer};
+use crate::display_helpers::render_sexpr_pretty_colored;
 use lattice_runtime::LatticeBackend;
 use std::io::Write;
 
@@ -18,6 +19,24 @@ pub async fn cmd_status(backend: &dyn LatticeBackend, writer: Writer) -> CmdResu
                 let _ = writeln!(w, "Data:     {}", status.data_path);
             }
             let _ = writeln!(w, "Root stores: {}", status.mesh_count);
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+        }
+    }
+
+    Ok(Continue)
+}
+
+/// Dump meta.db contents
+pub async fn cmd_meta(backend: &dyn LatticeBackend, writer: Writer) -> CmdResult {
+    let mut w = writer.clone();
+
+    match backend.node_meta().await {
+        Ok(sections) => {
+            for section in &sections {
+                let _ = writeln!(w, "{}", render_sexpr_pretty_colored(section, 8));
+            }
         }
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);

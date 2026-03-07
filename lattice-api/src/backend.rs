@@ -106,6 +106,7 @@ pub trait LatticeBackend: Send + Sync {
     fn node_status(&self) -> AsyncResult<'_, NodeStatus>;
     fn node_set_name(&self, name: &str) -> AsyncResult<'_, ()>;
     fn node_id(&self) -> Vec<u8>;
+    fn node_meta(&self) -> AsyncResult<'_, Vec<SExpr>>;
 
     /// Subscribe to backend events (store ready, join failed, etc.)
     fn subscribe(&self) -> BackendResult<EventReceiver>;

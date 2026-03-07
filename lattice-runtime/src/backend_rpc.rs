@@ -58,6 +58,12 @@ impl LatticeBackend for RpcBackend {
         self.node_id.clone()
     }
 
+    fn node_meta(&self) -> AsyncResult<'_, Vec<lattice_model::SExpr>> {
+        Box::pin(async move {
+            Err(BackendApiError::NotSupported("node meta not available over RPC").into())
+        })
+    }
+
     fn subscribe(&self) -> BackendResult<EventReceiver> {
         let client = self.client.clone();
         let (tx, event_rx) = tokio::sync::mpsc::unbounded_channel();

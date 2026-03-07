@@ -1,11 +1,13 @@
-//! Store Manager - manages a registry of open stores
+//! Store Manager - single owner of store lifecycle, caching, and metadata
 //!
+//! Merged from the former StoreRegistry + StoreManager split.
 //! Uses factory registration pattern: register StoreOpener for each type string,
 //! then call open(id, type) to get handles.
 
-use crate::StoreHandle;
-use crate::{peer_manager::PeerManager, NodeEvent, StoreRegistry};
-use lattice_model::{InviteStatus, NetEvent, PeerProvider, Uuid};
+use crate::{DataDir, MetaStore, StoreHandle};
+use crate::{peer_manager::PeerManager, NodeEvent};
+use lattice_kernel::NodeIdentity;
+use lattice_model::{InviteStatus, NetEvent, PeerProvider, StorageConfig, Uuid};
 use lattice_net_types::{NetworkStore, NetworkStoreRegistry};
 use lattice_systemstore::SystemBatch;
 use std::collections::HashMap;
@@ -42,10 +44,25 @@ pub enum StoreManagerError {
     },
 }
 
-/// Trait for opening stores of a specific type
+/// Bundle returned by StoreOpener::open() — type-erased handle + spawned actor task.
+pub struct OpenedStoreBundle {
+    pub handle: Arc<dyn StoreHandle>,
+    pub task: tokio::task::JoinHandle<()>,
+}
+
+/// Trait for opening stores of a specific type.
+///
+/// Openers are pure factories — they receive configs and node identity,
+/// construct the state machine, spawn the actor, and return a type-erased bundle.
+/// No reference to StoreManager is needed (no callback pattern).
 pub trait StoreOpener: Send + Sync {
-    /// Open or create a store by ID, returning StoreHandle
-    fn open(&self, store_id: Uuid) -> Result<Arc<dyn StoreHandle>, StoreManagerError>;
+    fn open(
+        &self,
+        store_id: Uuid,
+        state_config: &StorageConfig,
+        intentions_config: &StorageConfig,
+        node_identity: &NodeIdentity,
+    ) -> Result<OpenedStoreBundle, StoreManagerError>;
 }
 
 /// Metadata about a managed store
@@ -63,38 +80,99 @@ struct StoredEntry {
     peer_manager: Arc<PeerManager>,
 }
 
-/// A store registry that holds open stores.
-/// Lives at Node level, shared by all meshes.
+/// Manages store lifecycle: opening, caching, registration, shutdown.
+///
+/// Single owner of all store handles and actor tasks.
+/// Replaces the former StoreRegistry + StoreManager split.
 pub struct StoreManager {
-    registry: Arc<StoreRegistry>,
+    data_dir: DataDir,
+    meta: Arc<MetaStore>,
+    node_identity: Arc<NodeIdentity>,
     event_tx: broadcast::Sender<NodeEvent>,
     net_tx: broadcast::Sender<NetEvent>,
     stores: RwLock<HashMap<Uuid, StoredEntry>>,
     openers: RwLock<HashMap<String, Box<dyn StoreOpener>>>,
     watchers: RwLock<HashMap<Uuid, Arc<crate::watcher::RecursiveWatcher>>>,
+    /// Tracked actor task handles for clean shutdown
+    actor_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// When true, all stores use in-memory backends (no filesystem).
+    in_memory: bool,
 }
 
 impl StoreManager {
-    /// Create an empty StoreManager.
     pub fn new(
-        registry: Arc<StoreRegistry>,
+        data_dir: DataDir,
+        meta: Arc<MetaStore>,
+        node_identity: Arc<NodeIdentity>,
         event_tx: broadcast::Sender<NodeEvent>,
         net_tx: broadcast::Sender<NetEvent>,
+        in_memory: bool,
     ) -> Self {
         Self {
-            registry,
+            data_dir,
+            meta,
+            node_identity,
             event_tx,
             net_tx,
             stores: RwLock::new(HashMap::new()),
             openers: RwLock::new(HashMap::new()),
             watchers: RwLock::new(HashMap::new()),
+            actor_tasks: std::sync::Mutex::new(Vec::new()),
+            in_memory,
         }
     }
 
-    /// Get the underlying registry for direct store access
-    pub fn registry(&self) -> &Arc<StoreRegistry> {
-        &self.registry
+    // ==================== Config Helpers ====================
+
+    fn state_config(&self, store_id: Uuid) -> StorageConfig {
+        if self.in_memory {
+            StorageConfig::InMemory
+        } else {
+            let store_dir = self.data_dir.store_dir(store_id);
+            StorageConfig::File(store_dir.join("state"))
+        }
     }
+
+    fn intentions_config(&self, store_id: Uuid) -> StorageConfig {
+        if self.in_memory {
+            StorageConfig::InMemory
+        } else {
+            let store_dir = self.data_dir.store_dir(store_id);
+            StorageConfig::File(store_dir.join("intentions"))
+        }
+    }
+
+    fn ensure_dirs(&self, store_id: Uuid) -> Result<(), StoreManagerError> {
+        if !self.in_memory {
+            let store_dir = self.data_dir.store_dir(store_id);
+            let intentions_dir = store_dir.join("intentions");
+            std::fs::create_dir_all(&intentions_dir)
+                .map_err(|e| StoreManagerError::Storage(lattice_kernel::store::StateError::Io(e)))?;
+        }
+        Ok(())
+    }
+
+    // ==================== Type Resolution ====================
+
+    /// Peek store metadata (type, version) from state.db without fully opening it.
+    pub fn peek_store_info(&self, store_id: Uuid) -> Result<(Uuid, String, u64), StoreManagerError> {
+        let store_dir = self.data_dir.store_dir(store_id);
+        let state_dir = store_dir.join("state");
+
+        lattice_storage::StateBackend::peek_info(&state_dir)
+            .map_err(|e| StoreManagerError::Storage(lattice_kernel::store::StateError::Backend(e.to_string())))
+    }
+
+    /// Get the store type from meta.db (source of truth).
+    pub fn store_type_from_meta(&self, store_id: Uuid) -> Result<Option<String>, StoreManagerError> {
+        let record = self
+            .meta
+            .get_store(store_id)
+            .map_err(|e| StoreManagerError::Storage(lattice_kernel::store::StateError::Backend(e.to_string())))?;
+        Ok(record.map(|r| r.store_type).filter(|t| !t.is_empty()))
+    }
+
+    // ==================== Opener Registration ====================
 
     /// Register an opener for a store type string.
     pub fn register_opener(&self, store_type: impl Into<String>, opener: Box<dyn StoreOpener>) {
@@ -103,13 +181,30 @@ impl StoreManager {
         }
     }
 
+    // ==================== Store Opening ====================
+
     /// Open a store by ID and type using the registered opener.
-    /// Does NOT register the store - call register() after.
+    /// Handles caching — returns existing handle if already open.
+    /// Does not register the store (no PeerManager yet) — call register() after.
     pub fn open(
         &self,
         store_id: Uuid,
         store_type: &str,
     ) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
+        // Check cache first
+        {
+            let stores = self.stores.read().map_err(|_| StoreManagerError::LockPoisoned)?;
+            if let Some(entry) = stores.get(&store_id) {
+                return Ok(entry.store_handle.clone());
+            }
+        }
+
+        // Not cached — open via the appropriate opener
+        self.ensure_dirs(store_id)?;
+
+        let state_config = self.state_config(store_id);
+        let intentions_config = self.intentions_config(store_id);
+
         let openers = self
             .openers
             .read()
@@ -119,11 +214,18 @@ impl StoreManager {
             .get(store_type)
             .ok_or_else(|| StoreManagerError::NoOpener(store_type.to_string()))?;
 
-        opener.open(store_id)
+        let bundle = opener.open(store_id, &state_config, &intentions_config, &self.node_identity)?;
+
+        // Track the actor task
+        if let Ok(mut tasks) = self.actor_tasks.lock() {
+            tasks.push(bundle.task);
+        }
+
+        Ok(bundle.handle)
     }
 
     /// Create a new store with a fresh UUID.
-    /// Does NOT register the store - call register() after.
+    /// Does not register the store — call register() after.
     pub async fn create(
         &self,
         name: Option<String>,
@@ -157,15 +259,15 @@ impl StoreManager {
     }
 
     /// Open an existing store by ID, resolving its type from persisted metadata.
-    /// Does not register the store - call register() after.
+    /// Does not register the store — call register() after.
     pub fn open_existing(
         &self,
         store_id: Uuid,
     ) -> Result<(Arc<dyn StoreHandle>, String), StoreManagerError> {
         // Get store type from meta.db (source of truth).
         // Fall back to state.db for stores created before meta.db tracked the type.
-        let meta_type = self.registry.store_type_from_meta(store_id)?;
-        let disk_type = self.registry.peek_store_info(store_id).ok().map(|(_, t, _)| t);
+        let meta_type = self.store_type_from_meta(store_id)?;
+        let disk_type = self.peek_store_info(store_id).ok().map(|(_, t, _)| t);
 
         let store_type = match (meta_type, disk_type) {
             (Some(mt), Some(dt)) => {
@@ -179,7 +281,10 @@ impl StoreManager {
                 mt
             }
             (Some(mt), None) => mt, // state.db missing — will be recreated
-            (None, Some(dt)) => dt, // legacy store without type in meta.db
+            (None, Some(_)) => {
+                // Store type missing from meta.db — this should not happen post-migration.
+                return Err(StoreManagerError::NotFound(store_id));
+            }
             (None, None) => return Err(StoreManagerError::NotFound(store_id)),
         };
 
@@ -187,10 +292,14 @@ impl StoreManager {
         Ok((handle, store_type))
     }
 
-    /// Register an opened store with its peer_manager. Emits NetEvent::StoreReady.
+    // ==================== Store Registration ====================
+
+    /// Register an opened store with its peer_manager.
+    /// Writes to meta.db STORES_TABLE and emits NetEvent::StoreReady.
     pub fn register(
         &self,
         store_id: Uuid,
+        parent_id: Uuid,
         store_handle: Arc<dyn StoreHandle>,
         store_type: impl Into<String>,
         peer_manager: Arc<PeerManager>,
@@ -218,12 +327,19 @@ impl StoreManager {
             info!(store_id = %store_id, store_type = %store_type, "Registered store");
         }
 
+        // Persist in meta.db (idempotent — skips if already present)
+        if let Err(e) = self.meta.add_store(store_id, parent_id, &store_type) {
+            warn!(store_id = %store_id, error = %e, "Failed to persist store in meta.db");
+        }
+
         // Emit events (outside lock)
         let _ = self.event_tx.send(NodeEvent::StoreReady { store_id });
         let _ = self.net_tx.send(NetEvent::StoreReady { store_id });
 
         Ok(())
     }
+
+    // ==================== Store Queries ====================
 
     /// Get a StoreHandle by ID. Returns None if not found.
     pub fn get_handle(&self, store_id: &Uuid) -> Option<Arc<dyn StoreHandle>> {
@@ -274,6 +390,8 @@ impl StoreManager {
             })
     }
 
+    // ==================== Store Lifecycle ====================
+
     pub fn close(&self, store_id: &Uuid) -> Result<(), StoreManagerError> {
         // Stop watcher if exists
         self.stop_watching(store_id);
@@ -283,8 +401,10 @@ impl StoreManager {
             .write()
             .map_err(|_| StoreManagerError::LockPoisoned)?;
 
-        stores.remove(store_id);
-        self.registry.close(store_id);
+        if let Some(entry) = stores.remove(store_id) {
+            // Signal actor shutdown before dropping the handle
+            entry.store_handle.shutdown();
+        }
 
         info!(store_id = %store_id, "Closed store");
         Ok(())
@@ -333,7 +453,7 @@ impl StoreManager {
         }
     }
 
-    /// Shutdown the entire StoreManager: stop all watchers, close all stores, release all handles.
+    /// Shutdown the entire StoreManager: stop all watchers, close all stores, await actor tasks.
     pub async fn shutdown(&self) {
         // 1. Stop all watchers first (they hold Arc<StoreManager>)
         {
@@ -344,19 +464,32 @@ impl StoreManager {
             }
         }
 
-        // 2. Close all stores (drops StoreHandle arcs)
+        // 2. Signal all actors to shutdown, then drop handles
         {
             if let Ok(mut stores) = self.stores.write() {
-                let ids: Vec<Uuid> = stores.keys().copied().collect();
-                for id in &ids {
-                    self.registry.close(id);
+                for entry in stores.values() {
+                    entry.store_handle.shutdown();
                 }
                 stores.clear();
             }
         }
 
+        // 3. Await all actor tasks
+        let tasks = {
+            if let Ok(mut guard) = self.actor_tasks.lock() {
+                std::mem::take(&mut *guard)
+            } else {
+                Vec::new()
+            }
+        };
+
+        for task in tasks {
+            let _ = task.await;
+        }
+
         info!("StoreManager shutdown complete");
     }
+
     // ==================== Child Store Management ====================
 
     /// Create a new child store declaration in a root/parent store.
@@ -390,6 +523,7 @@ impl StoreManager {
 
         self.register(
             child_id,
+            parent_id,
             handle.clone(),
             store_type.to_string(),
             peer_manager,
@@ -593,7 +727,7 @@ impl StoreManager {
             self.close_descendants(child_id);
         }
 
-        // Close this store (stops watcher + removes from registry)
+        // Close this store (stops watcher + removes from cache)
         let _ = self.close(&store_id);
     }
 }

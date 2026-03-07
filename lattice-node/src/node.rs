@@ -1,7 +1,7 @@
 //! Local Lattice node API with multi-store support
 
 use crate::{
-    meta_store::MetaStoreError, peer_manager::PeerManagerError, store_registry::StoreRegistry,
+    meta_store::MetaStoreError, peer_manager::PeerManagerError,
     DataDir, MetaStore, StoreHandle, Uuid,
 };
 use lattice_kernel::{store::StateError, NodeError as IdentityError, NodeIdentity, PeerStatus};
@@ -99,10 +99,10 @@ pub struct NodeBuilder {
     /// and pass it to ensure proper ownership.
     net_tx: Option<broadcast::Sender<NetEvent>>,
     name: Option<String>,
-    /// Store opener factories to call after registry is created
+    /// Store opener factories
     opener_factories: Vec<(
         String,
-        Box<dyn FnOnce(std::sync::Arc<StoreRegistry>) -> Box<dyn crate::StoreOpener> + Send>,
+        Box<dyn FnOnce() -> Box<dyn crate::StoreOpener> + Send>,
     )>,
     /// When true, all stores use in-memory backends (no filesystem for store data).
     in_memory: bool,
@@ -146,11 +146,9 @@ impl NodeBuilder {
     }
 
     /// Register a store opener factory for a given store type string.
-    /// The factory receives the registry and returns the opener.
-    /// This allows openers to be created after the registry exists.
     pub fn with_opener<F>(mut self, store_type: impl Into<String>, factory: F) -> Self
     where
-        F: FnOnce(std::sync::Arc<StoreRegistry>) -> Box<dyn crate::StoreOpener> + Send + 'static,
+        F: FnOnce() -> Box<dyn crate::StoreOpener> + Send + 'static,
     {
         self.opener_factories
             .push((store_type.into(), Box::new(factory)));
@@ -184,20 +182,18 @@ impl NodeBuilder {
 
         let node_identity = std::sync::Arc::new(node_identity);
         let meta = std::sync::Arc::new(meta);
-        let registry = std::sync::Arc::new(if self.in_memory {
-            StoreRegistry::new_in_memory(self.data_dir.clone(), meta.clone(), node_identity.clone())
-        } else {
-            StoreRegistry::new(self.data_dir.clone(), meta.clone(), node_identity.clone())
-        });
         let store_manager = std::sync::Arc::new(crate::StoreManager::new(
-            registry.clone(),
+            self.data_dir.clone(),
+            meta.clone(),
+            node_identity.clone(),
             event_tx.clone(),
             net_tx.clone(),
+            self.in_memory,
         ));
 
         // Create openers from factories and register
         for (store_type, factory) in self.opener_factories {
-            let opener = factory(registry.clone());
+            let opener = factory();
             store_manager.register_opener(store_type, opener);
         }
 
@@ -205,7 +201,6 @@ impl NodeBuilder {
             data_dir: self.data_dir,
             node_identity,
             meta,
-            registry,
             store_manager,
             event_tx,
             net_tx,
@@ -219,8 +214,7 @@ pub struct Node {
     data_dir: DataDir,
     node_identity: std::sync::Arc<NodeIdentity>,
     meta: std::sync::Arc<MetaStore>,
-    registry: std::sync::Arc<StoreRegistry>,
-    /// Store manager (shared by all meshes)
+    /// Store manager — single owner of store lifecycle
     store_manager: std::sync::Arc<crate::StoreManager>,
     /// Events for CLI/UI listeners
     event_tx: broadcast::Sender<NodeEvent>,
@@ -329,19 +323,15 @@ impl Node {
 
     /// Start the node - loads all root stores from meta.db and emits NetworkStore events.
     pub async fn start(&self) -> Result<(), NodeError> {
-        // MIGRATION: backfill store_type for legacy StoreRecords
-        if let Err(e) = self.meta.backfill_store_types(&self.data_dir) {
-            tracing::warn!(error = %e, "Failed to backfill store types in meta.db");
-        }
-
         for (store_id, _info) in self.meta.list_rootstores()? {
             // 1. Open the store (resolve type from disk)
             let (handle, store_type) =
-                if let Ok((handle, store_type)) = self.store_manager.open_existing(store_id) {
-                    (handle, store_type)
-                } else {
-                    tracing::warn!("Failed to open root store {}", store_id);
-                    continue;
+                match self.store_manager.open_existing(store_id) {
+                    Ok((handle, store_type)) => (handle, store_type),
+                    Err(e) => {
+                        tracing::warn!(store_id = %store_id, error = %e, "Failed to open root store");
+                        continue;
+                    }
                 };
 
             // 2. Create PeerManager and register the store
@@ -363,7 +353,7 @@ impl Node {
 
             if let Err(e) = self
                 .store_manager
-                .register(store_id, handle, &store_type, peer_manager)
+                .register(store_id, Uuid::nil(), handle, &store_type, peer_manager)
             {
                 tracing::warn!("Failed to register root store {}: {:?}", store_id, e);
                 continue;
@@ -380,11 +370,7 @@ impl Node {
     /// Stop the node and all its watchers.
     /// Ensures database handles are released for clean shutdown.
     pub async fn shutdown(&self) {
-        // 1. Stop all watchers and close all stores (releases Arc<StoreHandle> refs)
         self.store_manager.shutdown().await;
-
-        // 2. Shutdown registry (awaits actor tasks, releases DB handles)
-        self.registry.shutdown().await;
     }
 
     /// Request to join a mesh via the given peer.
@@ -482,7 +468,7 @@ impl Node {
         }
 
         self.store_manager
-            .register(store_id, handle.clone(), store_type, peer_manager)?;
+            .register(store_id, Uuid::nil(), handle.clone(), store_type, peer_manager)?;
 
         // Start watching
         self.store_manager.start_watching(store_id)?;
@@ -566,7 +552,7 @@ impl Node {
             let peer_manager = crate::PeerManager::new(system).await?;
 
             self.store_manager
-                .register(store_id, handle, store_type, peer_manager.clone())?;
+                .register(store_id, Uuid::nil(), handle, store_type, peer_manager.clone())?;
 
             // 3. Start Watcher
             // Note: start_watching requires Arc<StoreManager>. Node holds it.
@@ -700,25 +686,25 @@ mod tests {
     fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
         NodeBuilder::new(data_dir)
             .in_memory()
-            .with_opener(STORE_TYPE_KVSTORE, |registry| {
-                direct_opener::<TestKvState>(registry)
+            .with_opener(STORE_TYPE_KVSTORE, || {
+                direct_opener::<TestKvState>()
             })
-            .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-                direct_opener::<TestLogState>(registry)
+            .with_opener(STORE_TYPE_LOGSTORE, || {
+                direct_opener::<TestLogState>()
             })
-            .with_opener(STORE_TYPE_NULLSTORE, |registry| {
-                direct_opener::<TestNullState>(registry)
+            .with_opener(STORE_TYPE_NULLSTORE, || {
+                direct_opener::<TestNullState>()
             })
     }
 
     /// File-backed node builder for tests that need persistence across restarts.
     fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
         NodeBuilder::new(data_dir)
-            .with_opener(STORE_TYPE_KVSTORE, |registry| {
-                direct_opener::<TestKvState>(registry)
+            .with_opener(STORE_TYPE_KVSTORE, || {
+                direct_opener::<TestKvState>()
             })
-            .with_opener(STORE_TYPE_LOGSTORE, |registry| {
-                direct_opener::<TestLogState>(registry)
+            .with_opener(STORE_TYPE_LOGSTORE, || {
+                direct_opener::<TestLogState>()
             })
     }
 

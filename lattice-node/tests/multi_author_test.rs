@@ -13,8 +13,8 @@ type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullSt
 fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
         .in_memory()
-        .with_opener(STORE_TYPE_NULLSTORE, |registry| {
-            direct_opener::<TestNullState>(registry)
+        .with_opener(STORE_TYPE_NULLSTORE, || {
+            direct_opener::<TestNullState>()
         })
 }
 
@@ -49,7 +49,7 @@ async fn open_replica(ctx: &TestCtx, store_id: Uuid, store_type: &str) -> Arc<dy
 
     // 3. Register
     ctx.sm()
-        .register(store_id, handle.clone(), store_type, pm)
+        .register(store_id, Uuid::nil(), handle.clone(), store_type, pm)
         .expect("register replica");
 
     // 4. Start Watching

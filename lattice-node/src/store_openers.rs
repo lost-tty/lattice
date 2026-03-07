@@ -1,24 +1,21 @@
 //! Store opener factory
 //!
 //! Provides a generic opener factory for creating StoreOpener implementations.
-//! Uses the handle-less architecture where Store<S> implements StoreHandle directly.
+//! Openers are pure factories — they construct the state machine, create the
+//! actor, and return a type-erased handle. No reference to StoreManager needed.
 
-use crate::store_manager::{StoreManagerError, StoreOpener};
-use crate::{StoreHandle, StoreRegistry};
+use crate::store_manager::{OpenedStoreBundle, StoreManagerError, StoreOpener};
 use lattice_model::{Openable, StorageConfig, Uuid};
-use std::sync::Arc;
-
-// ==== Direct opener (handle-less pattern) ====
-
 use lattice_model::{StoreIdentity, StoreTypeProvider};
 use lattice_store_base::{CommandHandler, Introspectable, StreamProvider};
+use std::sync::Arc;
 
-/// Create a store opener that returns `Store<S>` directly without a wrapper handle.
+/// Create a store opener that constructs `Store<S>` directly.
 ///
-/// This is the standard pattern - no separate handle type needed.
-/// The `Store<S>` implements `StoreHandle` directly when `S` satisfies the required traits.
-/// Note: Clone bound is NOT required on S because Store<S> wraps state in Arc.
-pub fn direct_opener<S>(registry: Arc<StoreRegistry>) -> Box<dyn StoreOpener>
+/// The opener is a pure factory — it receives configs and node identity,
+/// constructs the state machine, spawns the actor, and returns a type-erased
+/// handle bundle. No reference to the store manager is needed.
+pub fn direct_opener<S>() -> Box<dyn StoreOpener>
 where
     S: Openable
         + Introspectable
@@ -32,13 +29,11 @@ where
         + lattice_systemstore::SystemReader,
 {
     Box::new(DirectOpenerImpl::<S> {
-        registry,
         _marker: std::marker::PhantomData,
     })
 }
 
 struct DirectOpenerImpl<S> {
-    registry: Arc<StoreRegistry>,
     _marker: std::marker::PhantomData<fn() -> S>,
 }
 
@@ -55,13 +50,30 @@ where
         + 'static
         + lattice_systemstore::SystemReader,
 {
-    fn open(&self, store_id: Uuid) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
-        let (store, _) = self
-            .registry
-            .get_or_open(store_id, |config: &StorageConfig| {
-                S::open(store_id, config).map_err(lattice_kernel::store::StateError::Backend)
-            })?;
+    fn open(
+        &self,
+        store_id: Uuid,
+        state_config: &StorageConfig,
+        intentions_config: &StorageConfig,
+        node_identity: &lattice_kernel::NodeIdentity,
+    ) -> Result<OpenedStoreBundle, StoreManagerError> {
+        let state = Arc::new(
+            S::open(store_id, state_config)
+                .map_err(lattice_kernel::store::StateError::Backend)?,
+        );
 
-        Ok(Arc::new(store))
+        let opened = lattice_kernel::store::OpenedStore::new(
+            store_id,
+            intentions_config,
+            state,
+        )?;
+
+        let (store, _info, runner) = opened.into_handle(node_identity.clone())?;
+        let task = tokio::spawn(async move { runner.run().await });
+
+        Ok(OpenedStoreBundle {
+            handle: Arc::new(store),
+            task,
+        })
     }
 }

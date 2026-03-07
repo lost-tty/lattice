@@ -151,24 +151,42 @@ Intention DAG ──► witness_ready() ──► Witness Log ──► project_
 - [ ] **Drop `StateMachine::applied_chaintips()`**. Per-author chain tips remain framework-internal (needed for `verify_and_update_tip`), but not exposed to state machines.
 - [x] **`replay_intentions()` becomes `project_new_entries()`** — same code path for restart, post-witness, and post-bootstrap. No tip-comparison, no chain-walking.
 
-### 16D: Bootstrap Security Tests
-- [ ] **Test: `apply_witnessed_batch` rejects substituted intentions.** Hand over witness records for intention A but substitute intention B in the intentions list. Verify B is not inserted/witnessed.
-- [ ] **Test: `apply_witnessed_batch` rejects invalid witness signatures.** Send witness records with a bad signature. Verify nothing is inserted.
+### 16D: Merge StoreRegistry into StoreManager & State Recovery
 
-### 16E: Stall Reporting
+Eliminated dual-cache architecture (`StoreRegistry` + `StoreManager`). Single `StoreManager` owns store lifecycle. Openers are pure factories. `STORES_TABLE` in meta.db is now populated (was always empty — dead code path).
+
+- [x] **Step 1 — Opener becomes pure factory.** `StoreOpener::open(store_id, configs, identity) -> OpenedStoreBundle`. No reference to StoreManager.
+- [x] **Step 2 — StoreRegistry absorbed into StoreManager.** Single struct, single cache. `store_registry.rs` deleted.
+- [x] **Step 3 — Meta.db registration.** `register(store_id, parent_id, ...)` writes to STORES_TABLE with correct parent_id. `store_list()` reads store_type from STORES_TABLE.
+- [x] **Step 4 — Recovery.** `open_existing()` resolves type from STORES_TABLE. `Node::start()` logs actual errors.
+- [x] **Step 5 — CLI.** `node meta` command dumps meta.db tables as s-expressions.
+- [x] **Step 6 — Tests:**
+  - [x] `test_child_store_has_correct_parent_in_meta`
+  - [x] `test_create_store_populates_stores_table`
+  - [x] `test_joined_store_populates_stores_table`
+  - [x] `test_state_db_recovery`
+  - [x] `test_open_existing_resolves_type_from_meta`
+
+### 16E: Bootstrap Security Tests
+- [x] **Test: `apply_witnessed_batch` rejects substituted intentions.** Hand over witness records for intention A but substitute intention B in the intentions list. Verify B is not inserted/witnessed.
+- [x] **Test: `apply_witnessed_batch` rejects invalid witness signatures.** Send witness records with a bad signature. Verify nothing is inserted.
+
+### 16F: Stall Reporting
 - [ ] **Framework exposes projection status** via `StoreMeta`: `{ last_applied_witness: (u64, Hash), witness_head: (u64, Hash) }`. Gap between cursor and head indicates stall. Surfaced via `store status` CLI.
 - [ ] **Non-blocking stall.** A stalled projection does NOT block: witnessing continues, sync continues, other stores are unaffected. Only reads against the stalled store's state return stale data (with a warning flag).
 
-### 16F: Bootstrap Alignment
+### 16G: Bootstrap Alignment
 - [ ] **Delete `apply_witnessed_batch`.** Bootstrap now uses the same two-step path: insert + witness the peer's entries into the log, then `project_new_entries()`. No special code path.
 
-### 16G: Payload Validation Strategy Update
+### 16H: Payload Validation Strategy Update
 - [ ] **Update "stall on failure" contract** in `StateMachine` trait docs. Stall still applies — but the stall point moves from "intention stays floating, never witnessed" to "intention is witnessed, state projection pauses." The effect on the local user is the same (stale state until upgrade). The effect on the network is better (sync and other authors are unblocked).
 
-### 16H: Cleanup
+### 16I: Cleanup
 
 - [ ] Scope domain crate tests closer: internal `#[cfg(test)]` tests should call `StateLogic::apply(table, op, dag)` directly (no `SystemLayer`); integration tests in `tests/` go through `SystemLayer`. Currently some tests still open raw write transactions via `StateBackend` — consider a small test-only helper in `lattice-storage` to reduce ceremony.
 - [ ] Move `STORE_TYPE_KVSTORE` and `STORE_TYPE_LOGSTORE` constants out of `lattice-model` into their respective store crates (`lattice-kvstore`, `lattice-logstore`). `lattice-model` shouldn't know about specific store types.
+- [x] Remove `MetaStore::backfill_store_types()` migration (all nodes migrated).
+- [ ] Remove `store_registry.rs` and `StoreRegistry` re-exports from `lattice-node` and `lattice-runtime` public API (done as part of 16D merge, but verify no external consumers).
 
 ---
 
@@ -314,6 +332,7 @@ Run the kernel on the RP2350.
 
 ## Technical Debt
 
+- [ ] **Unify test node builders**: Find all `test_node_builder` and `file_node_builder` helpers across tests and consolidate into a single shared builder.
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.

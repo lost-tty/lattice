@@ -117,7 +117,7 @@ impl RecursiveWatcher {
     async fn reconcile_stores(
         store_manager: &Arc<StoreManager>,
         root: &Arc<dyn StoreHandle>,
-        _root_store_id: Uuid,
+        root_store_id: Uuid,
         peer_manager: &Arc<PeerManager>,
         opened_stores: &Arc<RwLock<HashSet<Uuid>>>,
     ) -> Result<(), String> {
@@ -150,7 +150,7 @@ impl RecursiveWatcher {
                     // If type is "unknown" (from SystemTable), try to resolve from disk registry
                     let mut store_type = decl.store_type.clone();
                     if store_type == "unknown" {
-                        if let Ok((_, t, _)) = store_manager.registry().peek_store_info(decl.id) {
+                        if let Ok((_, t, _)) = store_manager.peek_store_info(decl.id) {
                             store_type = t;
                         }
                     }
@@ -161,6 +161,7 @@ impl RecursiveWatcher {
                             // Note: We deliberately use root's peer manager for children (Inherited)
                             if let Err(e) = store_manager.register(
                                 decl.id,
+                                root_store_id,
                                 opened,
                                 &store_type,
                                 peer_manager.clone(),

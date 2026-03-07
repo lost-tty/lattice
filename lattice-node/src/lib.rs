@@ -16,14 +16,12 @@ pub mod peer_manager;
 pub mod store_handle;
 pub mod store_manager;
 pub mod store_openers;
-pub mod store_registry;
 pub mod token;
 pub mod watcher;
 
 pub use store_handle::StoreHandle;
 pub use store_manager::{StoreManager, StoreManagerError, StoreOpener};
 pub use store_openers::direct_opener;
-pub use store_registry::StoreRegistry;
 pub use token::Invite;
 
 // Re-export from lattice-kernel (replication engine)
