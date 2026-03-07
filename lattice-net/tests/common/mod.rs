@@ -14,9 +14,11 @@ use tokio::time::Duration;
 
 type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>;
 
-/// Create a temp data directory, cleaning up any existing one.
+/// Create a temp data directory with a unique path to avoid collisions
+/// between concurrent test binaries.
 pub fn temp_data_dir(name: &str) -> lattice_node::DataDir {
-    let path = std::env::temp_dir().join(format!("lattice_test_{}", name));
+    let unique = format!("lattice_test_{}_{}", name, std::process::id());
+    let path = std::env::temp_dir().join(unique);
     let _ = std::fs::remove_dir_all(&path);
     lattice_node::DataDir::new(path)
 }
