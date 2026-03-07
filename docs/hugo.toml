@@ -62,6 +62,11 @@ theme = "lattice-theme"
     parent = "reference"
     weight = 5
   [[menus.main]]
+    name = "State Machine Interfaces"
+    pageRef = "/reference/state-machines"
+    parent = "reference"
+    weight = 6
+  [[menus.main]]
     name = "Simulation Harness"
     pageRef = "/simulation"
     parent = "reference"
