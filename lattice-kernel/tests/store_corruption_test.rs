@@ -40,9 +40,6 @@ mod tests {
         fn store_meta(&self) -> StoreMeta {
             StoreMeta::default()
         }
-        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
-            Ok(Vec::new())
-        }
     }
 
     /// Test that corrupting the redb database file is detected on reopen.

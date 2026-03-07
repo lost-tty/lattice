@@ -113,11 +113,6 @@ fn test_snapshot_restore() {
         snapshot1_bytes, snapshot2_bytes,
         "Snapshot after restore should be byte-identical"
     );
-
-    // Verify Chaintips preserved
-    let tips = store2.backend().get_applied_chaintips().unwrap();
-    assert_eq!(tips.len(), 1);
-    assert_eq!(tips[0].1, hash);
 }
 
 #[test]

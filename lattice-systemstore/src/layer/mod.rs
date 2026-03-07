@@ -2,7 +2,7 @@ mod dag;
 
 use crate::store::SystemState;
 use dag::{DagScope, ScopedDag};
-use lattice_model::{Hash, IntentionInfo, Op, PubKey, StateMachine, StateWriter, SystemEvent};
+use lattice_model::{Hash, IntentionInfo, Op, StateMachine, StateWriter, SystemEvent};
 use lattice_model::{Openable, StoreTypeProvider};
 use lattice_proto::storage::{universal_op, UniversalOp};
 use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, TABLE_DATA, TABLE_SYSTEM};
@@ -189,12 +189,6 @@ impl<S: StateLogic> StateMachine for SystemLayer<S> {
 impl<S: StateLogic> lattice_model::StoreIdentity for SystemLayer<S> {
     fn store_meta(&self) -> lattice_model::StoreMeta {
         self.backend.get_meta()
-    }
-
-    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
-        self.backend
-            .get_applied_chaintips()
-            .map_err(|e| e.to_string())
     }
 
     fn last_applied_witness(&self) -> Result<Hash, String> {

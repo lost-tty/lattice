@@ -411,40 +411,6 @@ impl StateBackend {
         Ok(true)
     }
 
-    /// Retrieve all applied chain tips (Author -> Last Hash).
-    pub fn get_applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, StateDbError> {
-        let txn = self.db.begin_read()?;
-        let table = match txn.open_table(TABLE_META) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
-            Err(e) => return Err(e.into()),
-        };
-
-        let mut tips = Vec::new();
-        // Scan all keys starting with "tip/"
-        for entry in table.range(PREFIX_TIP..)? {
-            let (k, v) = entry?;
-            let k_bytes = k.value();
-
-            // Safety check prefix
-            if !k_bytes.starts_with(PREFIX_TIP) {
-                break;
-            }
-
-            // Extract PubKey from key (strip "tip/")
-            let author_bytes = &k_bytes[PREFIX_TIP.len()..];
-            let author = PubKey::try_from(author_bytes)
-                .map_err(|_| StateDbError::Conversion("Invalid author in meta".into()))?;
-
-            let hash = Hash::try_from(v.value())
-                .map_err(|_| StateDbError::Conversion("Invalid hash in meta".into()))?;
-
-            tips.push((author, hash));
-        }
-
-        Ok(tips)
-    }
-
     /// Get the projection cursor — the content hash of the last witness entry
     /// that was successfully projected onto state.
     ///

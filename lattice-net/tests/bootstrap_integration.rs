@@ -27,11 +27,6 @@ impl StoreIdentity for MockState {
     fn store_meta(&self) -> StoreMeta {
         StoreMeta::default()
     }
-    fn applied_chaintips(
-        &self,
-    ) -> Result<Vec<(lattice_model::types::PubKey, lattice_model::types::Hash)>, String> {
-        Ok(Vec::new())
-    }
 }
 
 async fn create_store(id: Uuid, identity: NodeIdentity) -> Arc<Store<MockState>> {

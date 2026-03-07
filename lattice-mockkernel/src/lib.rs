@@ -15,13 +15,13 @@ use lattice_model::dag_queries::NullDag;
 use lattice_model::hlc::HLC;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{Condition, Intention};
-use lattice_model::{Op, StateMachine, StoreIdentity};
+use lattice_model::{Op, StateMachine};
 use lattice_model::{StateWriter, StateWriterError};
 use lattice_storage::StateLogic;
 use lattice_systemstore::SystemLayer;
 use prost::Message;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 static NULL_DAG: NullDag = NullDag;
@@ -34,6 +34,7 @@ pub struct MockWriter<S: StateLogic> {
     state: Arc<SystemLayer<S>>,
     next_hash: Arc<AtomicU64>,
     next_wall_time: Arc<AtomicU64>,
+    prev_hash: Arc<Mutex<Hash>>,
     entry_tx: broadcast::Sender<Vec<u8>>,
     store_id: lattice_model::Uuid,
 }
@@ -45,6 +46,7 @@ impl<S: StateLogic> MockWriter<S> {
             state,
             next_hash: Arc::new(AtomicU64::new(1)),
             next_wall_time: Arc::new(AtomicU64::new(0)),
+            prev_hash: Arc::new(Mutex::new(Hash::ZERO)),
             entry_tx,
             store_id: lattice_model::Uuid::new_v4(),
         }
@@ -66,6 +68,7 @@ impl<S: StateLogic> Clone for MockWriter<S> {
             state: self.state.clone(),
             next_hash: self.next_hash.clone(),
             next_wall_time: self.next_wall_time.clone(),
+            prev_hash: self.prev_hash.clone(),
             entry_tx: self.entry_tx.clone(),
             store_id: self.store_id,
         }
@@ -93,6 +96,7 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
         let state = self.state.clone();
         let hash_num = self.next_hash.fetch_add(1, Ordering::SeqCst);
         let next_wt = self.next_wall_time.clone();
+        let prev_hash_lock = self.prev_hash.clone();
         let tx = self.entry_tx.clone();
         let store_id = self.store_id;
 
@@ -112,14 +116,7 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
 
             let author = PubKey::from([1u8; 32]);
 
-            // Find current chaintip for this author via StoreIdentity
-            let prev_hash = state
-                .applied_chaintips()
-                .map_err(|e| StateWriterError::SubmitFailed(e))?
-                .into_iter()
-                .find(|(a, _)| a == &author)
-                .map(|(_, h)| h)
-                .unwrap_or(Hash::ZERO);
+            let prev_hash = *prev_hash_lock.lock().expect("Lock poisoned");
 
             // Wrap payload in UniversalOp::AppData envelope
             let envelope = lattice_proto::storage::UniversalOp {
@@ -140,6 +137,8 @@ impl<S: StateLogic + Send + Sync> StateWriter for MockWriter<S> {
 
             state.apply(&op, &NULL_DAG)
                 .map_err(|e| StateWriterError::SubmitFailed(e.to_string()))?;
+
+            *prev_hash_lock.lock().expect("Lock poisoned") = hash;
 
             // Emit as SignedIntention format (matching real kernel)
             let intention = Intention {

@@ -25,9 +25,6 @@ impl StoreIdentity for MockStateMachine {
     fn store_meta(&self) -> StoreMeta {
         StoreMeta::default()
     }
-    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
-        Ok(vec![])
-    }
 }
 
 #[tokio::test]

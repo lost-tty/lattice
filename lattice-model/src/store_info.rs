@@ -58,9 +58,6 @@ pub struct StoreMeta {
 pub trait StoreIdentity: Send + Sync {
     fn store_meta(&self) -> StoreMeta;
 
-    /// Returns all author public keys and their last applied operation hash.
-    fn applied_chaintips(&self) -> Result<Vec<(crate::PubKey, crate::Hash)>, String>;
-
     /// Returns the projection cursor — the content hash of the last witness
     /// entry that was successfully projected onto state.
     ///

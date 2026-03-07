@@ -72,7 +72,8 @@ trait StateMachine {
 ```
 trait StoreIdentity: Send + Sync {
     fn store_meta(&self) -> StoreMeta;
-    fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String>;
+    fn last_applied_witness(&self) -> Result<Hash, String>;
+    fn set_last_applied_witness(&self, hash: Hash) -> Result<(), String>;
 }
 ```
 
@@ -148,7 +149,7 @@ Intention DAG ──► witness_ready() ──► Witness Log ──► project_
 - [x] **`witness_ready()`**: Loop through floating intentions whose deps are witnessed. Witness each one. Do not touch state. Returns count of newly witnessed entries.
 - [x] **`project_new_entries()`**: Free function. Read witness log from `last_applied_witness` forward. For each entry, build `Op`, call `state.apply()`. Update `ProjectionCursor` after each successful projection. If projection fails (version skew), stop — the witness log keeps advancing independently.
 - [x] **`witness()` becomes the commit point.** Must succeed (not `let _ =`); if it fails, the intention stays floating.
-- [ ] **Drop `StateMachine::applied_chaintips()`**. Per-author chain tips remain framework-internal (needed for `verify_and_update_tip`), but not exposed to state machines.
+- [x] **Drop `StoreIdentity::applied_chaintips()`**. Removed from trait, SystemLayer impl, StateBackend getter, and all mock impls. Per-author chain tips remain in state.db (needed by `verify_and_update_tip`) but are no longer exposed. `MockWriter` tracks `prev_hash` internally instead of reading from `StoreIdentity`.
 - [x] **`replay_intentions()` becomes `project_new_entries()`** — same code path for restart, post-witness, and post-bootstrap. No tip-comparison, no chain-walking.
 
 ### 16D: Merge StoreRegistry into StoreManager & State Recovery
@@ -177,6 +178,8 @@ Eliminated dual-cache architecture (`StoreRegistry` + `StoreManager`). Single `S
 
 ### 16G: Bootstrap Alignment
 - [ ] **Delete `apply_witnessed_batch`.** Bootstrap now uses the same two-step path: insert + witness the peer's entries into the log, then `project_new_entries()`. No special code path.
+- [ ] **Switch projection cursor to witness content hash.** `last_applied_witness` should store `blake3(WitnessRecord.content)` instead of intention hash — the cursor tracks position in the witness log, so it should use the log's native identity. Attempted in-session but reverted (broke production). Requires: (1) `TABLE_WITNESS_CONTENT_INDEX` (`content_hash → seq`) alongside existing `TABLE_WITNESS_INDEX`, (2) `scan_witness_log` resolves via content index, (3) `project_new_entries` stores content hash, (4) `SyncProvider` streaming paginates by content hash, (5) bootstrap protocol sends content hash cursor. Single-peer pagination works (hash round-trips to same peer). Needs paginated bootstrap test via lattice-net-sim before re-attempting.
+- [ ] **Multi-peer bootstrap is broken.** Witness log order is node-local — each node witnesses in its own arrival order. Resuming from peer A's cursor on peer B skips entries regardless of hash type. Multi-peer failover needs set reconciliation, not linear log scanning.
 
 ### 16H: Payload Validation Strategy Update
 - [ ] **Update "stall on failure" contract** in `StateMachine` trait docs. Stall still applies — but the stall point moves from "intention stays floating, never witnessed" to "intention is witnessed, state projection pauses." The effect on the local user is the same (stale state until upgrade). The effect on the network is better (sync and other authors are unblocked).
@@ -187,6 +190,7 @@ Eliminated dual-cache architecture (`StoreRegistry` + `StoreManager`). Single `S
 - [ ] Move `STORE_TYPE_KVSTORE` and `STORE_TYPE_LOGSTORE` constants out of `lattice-model` into their respective store crates (`lattice-kvstore`, `lattice-logstore`). `lattice-model` shouldn't know about specific store types.
 - [x] Remove `MetaStore::backfill_store_types()` migration (all nodes migrated).
 - [ ] Remove `store_registry.rs` and `StoreRegistry` re-exports from `lattice-node` and `lattice-runtime` public API (done as part of 16D merge, but verify no external consumers).
+- [ ] Stale author chaintips in state.db: `verify_and_update_tip` writes `tip/<pubkey>` entries but nothing ever removes them. Revoked authors leave dead records. Low priority (64 bytes per author), but snapshots include stale data.
 
 ---
 

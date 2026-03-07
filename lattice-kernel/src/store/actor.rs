@@ -714,9 +714,6 @@ mod tests {
         fn store_meta(&self) -> lattice_model::StoreMeta {
             lattice_model::StoreMeta::default()
         }
-        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
-            Ok(self.tips.read().unwrap().clone().into_iter().collect())
-        }
     }
 
     const TEST_STORE: Uuid = Uuid::from_bytes([1u8; 16]);
@@ -1447,9 +1444,6 @@ mod tests {
     impl lattice_model::StoreIdentity for FailingMockStateMachine {
         fn store_meta(&self) -> lattice_model::StoreMeta {
             lattice_model::StoreMeta::default()
-        }
-        fn applied_chaintips(&self) -> Result<Vec<(PubKey, Hash)>, String> {
-            Ok(self.tips.read().unwrap().clone().into_iter().collect())
         }
     }
 
