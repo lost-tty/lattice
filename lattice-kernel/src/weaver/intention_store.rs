@@ -174,18 +174,28 @@ impl IntentionStore {
             table_fingerprint: Hash::ZERO,
         };
 
-        // Fast path: load author tips and derive witness state from tables
-        let has_tips = {
+        // Check whether all derived indexes are populated.  If any are
+        // empty while the witness log is not, rebuild everything from the
+        // witness log.  This handles both first-open and upgrades that add
+        // new index tables.
+        let needs_rebuild = {
             let read_txn = store.db.begin_read()?;
-            let tips = read_txn.open_table(TABLE_AUTHOR_TIPS)?;
-            tips.len()? > 0
+            let witness = read_txn.open_table(TABLE_WITNESS)?;
+            let has_witnesses = witness.len()? > 0;
+            if has_witnesses {
+                let tips = read_txn.open_table(TABLE_AUTHOR_TIPS)?;
+                let witness_idx = read_txn.open_table(TABLE_WITNESS_INDEX)?;
+                let content_idx = read_txn.open_table(TABLE_WITNESS_CONTENT_INDEX)?;
+                tips.len()? == 0 || witness_idx.len()? == 0 || content_idx.len()? == 0
+            } else {
+                false
+            }
         };
 
-        if has_tips {
-            store.load_persisted_state()?;
-        } else {
-            // First open or migration: replay witness log, persist author tips + witness index
+        if needs_rebuild {
             store.rebuild_indexes()?;
+        } else {
+            store.load_persisted_state()?;
         }
 
         // Derive table fingerprint from all intention keys
@@ -1395,6 +1405,71 @@ mod tests {
         let _h3 = store.insert(&s3).unwrap();
         store.witness(&i3, 300, &test_signing_key()).unwrap();
         assert_eq!(store.intention_count().unwrap(), 3);
+    }
+
+    // Regression: a store upgraded from before TABLE_WITNESS_CONTENT_INDEX
+    // existed has author tips (so load_persisted_state runs) but an empty
+    // content index. get_content_seq_for must still work after reopen.
+    #[test]
+    fn content_index_rebuilt_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, pk) = make_key();
+
+        // Phase 1: create store with witnessed intentions
+        let content_hash_seq2;
+        {
+            let mut store = open_store(dir.path());
+            let i1 = make_intention(pk, Hash::ZERO, vec![1]);
+            let s1 = SignedIntention::sign(i1.clone(), &key);
+            let h1 = store.insert(&s1).unwrap();
+            store.witness(&i1, 100, &test_signing_key()).unwrap();
+
+            let i2 = make_intention(pk, h1, vec![2]);
+            let s2 = SignedIntention::sign(i2.clone(), &key);
+            store.insert(&s2).unwrap();
+            store.witness(&i2, 200, &test_signing_key()).unwrap();
+
+            // Remember the content hash for seq 2 (the cursor the projection
+            // would store after applying both entries)
+            let entries = store.scan_witness_log(2, 1).unwrap();
+            content_hash_seq2 = entries[0].content_hash;
+
+            // Verify content index works before we break it
+            assert!(store
+                .get_content_seq_for(&content_hash_seq2)
+                .unwrap()
+                .is_some());
+        }
+
+        // Phase 2: simulate pre-migration database by clearing the content
+        // index while leaving author tips intact
+        {
+            let db = redb::Database::open(dir.path().join("log.db")).unwrap();
+            let write_txn = db.begin_write().unwrap();
+            {
+                let mut idx = write_txn.open_table(TABLE_WITNESS_CONTENT_INDEX).unwrap();
+                // Drain the table
+                let keys: Vec<Vec<u8>> = idx
+                    .iter()
+                    .unwrap()
+                    .map(|e| e.unwrap().0.value().to_vec())
+                    .collect();
+                for k in &keys {
+                    idx.remove(k.as_slice()).unwrap();
+                }
+            }
+            write_txn.commit().unwrap();
+        }
+
+        // Phase 3: reopen -- load_persisted_state must detect and rebuild
+        // the empty content index
+        let store = open_store(dir.path());
+        let resolved = store.get_content_seq_for(&content_hash_seq2).unwrap();
+        assert_eq!(
+            resolved,
+            Some(2),
+            "Content index should be rebuilt on open when empty"
+        );
     }
 
     #[test]

@@ -399,6 +399,13 @@ pub async fn cmd_store_status(
                 details.witness_head_seq,
                 if stalled { " (STALLED)" } else { "" }
             );
+            if !details.last_applied_hash.iter().all(|&b| b == 0) {
+                let _ = writeln!(
+                    w,
+                    "Cursor:     {}",
+                    hex::encode(&details.last_applied_hash)
+                );
+            }
         }
     }
 

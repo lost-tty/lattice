@@ -28,8 +28,8 @@ title: "Roadmap"
 
 Test cleanup, dependency review.
 
-- [ ] `store status` should show projection cursor
-- [ ] Bug on start: ERROR startup projection failed: State error: Backend error: Projection cursor xxx not found in witness content index store_id=yyy (needs testcase)
+- [x] `store status` should show projection cursor
+- [x] Bug on start: projection cursor not found in witness content index. Root cause: stores created before `TABLE_WITNESS_CONTENT_INDEX` existed had author tips (so `load_persisted_state` ran) but empty content index. Fixed: `backfill_content_index()` runs on open when the index is empty.
 
 ### 17A: Test Infrastructure Unification
 - [ ] **Unify `test_node_builder`**: 6 copies across 5 files, each registering different opener sets. Consolidate into a single configurable builder in `lattice-mockkernel` (e.g., `TestNodeBuilder::new().with_kv().with_log().with_null().in_memory().build(data_dir)`). Current locations: `lattice-node/src/node.rs`, `lattice-node/tests/store_manager_test.rs`, `lattice-node/tests/multi_author_test.rs`, `lattice-net/tests/common/mod.rs`, `lattice-net/tests/gap_fill_integration.rs`, `lattice-net-iroh/tests/iroh_integration_test.rs`.
