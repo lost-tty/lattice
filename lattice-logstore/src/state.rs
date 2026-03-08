@@ -9,7 +9,6 @@ use redb::{ReadableTable, ReadableTableMetadata};
 
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::broadcast;
 
 /// Event emitted when a new log entry is appended
 #[derive(Debug, Clone)]
@@ -28,12 +27,11 @@ pub struct LogEntry {
     pub content: Vec<u8>,
 }
 
-use lattice_storage::{ScopedDb, StateDbError, StateLogic};
+use lattice_storage::{StateContext, StateDbError, StateLogic};
 
 /// LogState - append-only log with redb persistence
 pub struct LogState {
-    db: ScopedDb,
-    event_tx: broadcast::Sender<LogEvent>,
+    ctx: StateContext<LogEvent>,
 }
 
 impl std::fmt::Debug for LogState {
@@ -46,8 +44,8 @@ impl std::fmt::Debug for LogState {
 
 impl LogState {
     /// Subscribe to log entry events
-    pub fn subscribe(&self) -> broadcast::Receiver<LogEvent> {
-        self.event_tx.subscribe()
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<LogEvent> {
+        self.ctx.subscribe()
     }
 
     /// Build compound key: HLC (8 bytes, big-endian for sort) + Author (32 bytes)
@@ -99,7 +97,7 @@ impl LogState {
 
     /// Read entries (all or last N, always chronological)
     pub fn read(&self, tail: Option<usize>) -> Vec<LogEntry> {
-        let txn = match self.db.begin_read() {
+        let txn = match self.ctx.db().begin_read() {
             Ok(t) => t,
             Err(_) => return Vec::new(),
         };
@@ -128,7 +126,7 @@ impl LogState {
 
     /// Get entry count
     pub fn len(&self) -> usize {
-        let txn = match self.db.begin_read() {
+        let txn = match self.ctx.db().begin_read() {
             Ok(t) => t,
             Err(_) => return 0,
         };
@@ -144,6 +142,12 @@ impl LogState {
     }
 }
 
+impl From<StateContext<LogEvent>> for LogState {
+    fn from(ctx: StateContext<LogEvent>) -> Self {
+        Self { ctx }
+    }
+}
+
 impl StateLogic for LogState {
     type Event = LogEvent;
 
@@ -151,9 +155,8 @@ impl StateLogic for LogState {
         lattice_model::STORE_TYPE_LOGSTORE
     }
 
-    fn create(db: ScopedDb) -> Self {
-        let (event_tx, _) = broadcast::channel(1024);
-        Self { db, event_tx }
+    fn context(&self) -> &StateContext<Self::Event> {
+        &self.ctx
     }
 
     fn apply(
@@ -183,10 +186,6 @@ impl StateLogic for LogState {
         table.insert(key.as_slice(), value.as_slice())?;
 
         Ok(vec![LogEvent { content: op.info.payload.to_vec() }])
-    }
-
-    fn event_sender(&self) -> &broadcast::Sender<Self::Event> {
-        &self.event_tx
     }
 }
 
@@ -373,7 +372,7 @@ mod tests {
     use lattice_model::dag_queries::NullDag;
     use lattice_model::hlc::HLC;
     use lattice_model::{Hash, Op, PubKey, Uuid};
-    use lattice_storage::{StateBackend, StorageConfig, TABLE_DATA};
+    use lattice_storage::{ScopedDb, StateBackend, StorageConfig, TABLE_DATA};
 
     static NULL_DAG: NullDag = NullDag;
 
@@ -387,14 +386,14 @@ mod tests {
             let backend =
                 StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
             let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-            let store = LogState::create(scoped);
+            let store = LogState::from(StateContext::new(scoped));
             Self { backend, store }
         }
 
         fn open(id: Uuid, config: &StorageConfig) -> Self {
             let backend = StateBackend::open(id, config, None, 0).unwrap();
             let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-            let store = LogState::create(scoped);
+            let store = LogState::from(StateContext::new(scoped));
             Self { backend, store }
         }
 
@@ -406,10 +405,10 @@ mod tests {
             let write_txn = self.backend.db().begin_write()?;
             {
                 let mut table = write_txn.open_table(TABLE_DATA)?;
-                let updates = self.store.apply(&mut table, op, dag)?;
+                let events = self.store.apply(&mut table, op, dag)?;
                 drop(table);
                 write_txn.commit()?;
-                self.store.notify(updates);
+                self.store.ctx.notify(events);
             }
             Ok(())
         }

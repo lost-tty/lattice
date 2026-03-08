@@ -237,17 +237,10 @@ where
 mod tests {
     use super::*;
     use lattice_model::{Op, Uuid};
-    use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, StorageConfig, TABLE_DATA, TABLE_SYSTEM};
+    use lattice_storage::{ScopedDb, StateBackend, StateContext, StateDbError, StateLogic, StorageConfig, TABLE_DATA, TABLE_SYSTEM};
 
     struct MockLogic {
-        event_tx: tokio::sync::broadcast::Sender<()>,
-    }
-
-    impl MockLogic {
-        fn new() -> Self {
-            let (event_tx, _) = tokio::sync::broadcast::channel(1);
-            Self { event_tx }
-        }
+        ctx: StateContext<()>,
     }
 
     impl StateLogic for MockLogic {
@@ -257,8 +250,8 @@ mod tests {
             "test:mock"
         }
 
-        fn create(_scoped: ScopedDb) -> Self {
-            MockLogic::new()
+        fn context(&self) -> &StateContext<Self::Event> {
+            &self.ctx
         }
 
         fn apply(
@@ -269,10 +262,6 @@ mod tests {
         ) -> Result<Vec<Self::Event>, StateDbError> {
             Ok(vec![])
         }
-
-        fn event_sender(&self) -> &tokio::sync::broadcast::Sender<Self::Event> {
-            &self.event_tx
-        }
     }
 
     #[test]
@@ -280,10 +269,10 @@ mod tests {
         fn takes_system_reader<T: super::SystemReader>(_t: &T) {}
 
         let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-        let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
+        let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
         let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
-        let logic = MockLogic::create(scoped);
-        let system = SystemState::create(sys_scoped);
+        let logic = MockLogic { ctx: StateContext::new(app_scoped) };
+        let system = SystemState::from(StateContext::new(sys_scoped));
         let system_store = SystemLayer::new(backend, logic, system);
 
         takes_system_reader(&system_store);

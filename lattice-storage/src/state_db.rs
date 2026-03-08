@@ -684,6 +684,40 @@ impl<'a, R: Read> Read for HashingReader<'a, R> {
     }
 }
 
+// ==================== State Context ====================
+
+/// Bundles a scoped database handle with a broadcast channel for events.
+///
+/// Every state machine holds a `StateContext<E>` instead of separate
+/// `ScopedDb` + `broadcast::Sender<E>` fields. Provides `subscribe()` for
+/// streaming and `notify()` for post-commit event dispatch.
+pub struct StateContext<E: Clone + Send> {
+    db: ScopedDb,
+    event_tx: broadcast::Sender<E>,
+}
+
+impl<E: Clone + Send> StateContext<E> {
+    pub fn new(db: ScopedDb) -> Self {
+        let (event_tx, _) = broadcast::channel(1024);
+        Self { db, event_tx }
+    }
+
+    pub fn db(&self) -> &ScopedDb {
+        &self.db
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<E> {
+        self.event_tx.subscribe()
+    }
+
+    /// Dispatch events to watchers after the transaction commits.
+    pub fn notify(&self, events: Vec<E>) {
+        for event in events {
+            let _ = self.event_tx.send(event);
+        }
+    }
+}
+
 // ==================== Composition Pattern ====================
 
 /// Domain crate interface for state machines.
@@ -700,10 +734,8 @@ pub trait StateLogic: Send + Sync {
     where
         Self: Sized;
 
-    /// Construct the state machine from a scoped database handle.
-    fn create(db: ScopedDb) -> Self
-    where
-        Self: Sized;
+    /// Access the state context (scoped DB + event channel).
+    fn context(&self) -> &StateContext<Self::Event>;
 
     /// Decode payload and apply mutations to the table.
     ///
@@ -715,15 +747,4 @@ pub trait StateLogic: Send + Sync {
         op: &Op,
         dag: &dyn DagQueries,
     ) -> Result<Vec<Self::Event>, StateDbError>;
-
-    /// Returns the broadcast sender for dispatching events to watchers.
-    fn event_sender(&self) -> &broadcast::Sender<Self::Event>;
-
-    /// Dispatch events to watchers after the transaction commits.
-    fn notify(&self, events: Vec<Self::Event>) {
-        let sender = self.event_sender();
-        for event in events {
-            let _ = sender.send(event);
-        }
-    }
 }

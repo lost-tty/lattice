@@ -31,23 +31,76 @@ The framework wraps your struct in `SystemLayer<YourState>`, which handles trans
 
 The production type stack is `Store<SystemLayer<YourState>>`.
 
+## StateContext
+
+Every state machine holds a `StateContext<E>`, which bundles a read-only database handle with a broadcast channel for events:
+
+```rust
+pub struct StateContext<E: Clone + Send> { /* db + event_tx */ }
+
+impl<E: Clone + Send> StateContext<E> {
+    pub fn new(db: ScopedDb) -> Self;
+    pub fn db(&self) -> &ScopedDb;
+    pub fn subscribe(&self) -> broadcast::Receiver<E>;
+    pub fn notify(&self, events: Vec<E>);
+}
+```
+
+The `ScopedDb` inside is a read-only handle scoped to a single redb table. For application state machines this is `TABLE_DATA`. Use it for queries outside the apply path (e.g., `get`, `list`, `scan`). You cannot access other tables.
+
+`notify()` dispatches events to watchers after the framework commits the transaction. `apply()` returns events as data; the framework calls `context().notify(events)` only after a successful commit. Watchers only see committed state.
+
 ## StateLogic
 
 The core trait. Your state machine decodes payloads and mutates a redb table.
 
 ```rust
 pub trait StateLogic: Send + Sync {
-    type Event;
+    type Event: Clone + Send;
 
     fn store_type() -> &'static str where Self: Sized;
-    fn create(db: ScopedDb) -> Self where Self: Sized;
+    fn context(&self) -> &StateContext<Self::Event>;
     fn apply(
         &self,
         table: &mut Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn DagQueries,
     ) -> Result<Vec<Self::Event>, StateDbError>;
-    fn notify(&self, events: Vec<Self::Event>);
+}
+```
+
+State machines also implement `From<StateContext<E>>` so the framework can construct them generically.
+
+### Minimal example
+
+```rust
+pub struct CounterState {
+    ctx: StateContext<CounterEvent>,
+}
+
+impl From<StateContext<CounterEvent>> for CounterState {
+    fn from(ctx: StateContext<CounterEvent>) -> Self {
+        Self { ctx }
+    }
+}
+
+impl StateLogic for CounterState {
+    type Event = CounterEvent;
+
+    fn store_type() -> &'static str { "myapp:counter" }
+
+    fn context(&self) -> &StateContext<Self::Event> { &self.ctx }
+
+    fn apply(
+        &self,
+        table: &mut Table<&[u8], &[u8]>,
+        op: &Op,
+        dag: &dyn DagQueries,
+    ) -> Result<Vec<Self::Event>, StateDbError> {
+        let payload = CounterPayload::decode(op.info.payload.as_ref())?;
+        // ... mutate table ...
+        Ok(vec![CounterEvent::Incremented(payload.delta)])
+    }
 }
 ```
 
@@ -55,33 +108,9 @@ pub trait StateLogic: Send + Sync {
 
 Returns a unique identifier for your store type (e.g., `"core:kvstore"`, `"myapp:counter"`). Convention is `namespace:name`. Core types use `core:*`. Stored in the database on creation; opening an existing store with a different type fails.
 
-### create()
-
-Construct your state machine. Called once when the store is opened. The `ScopedDb` is a read-only handle scoped to `TABLE_DATA`. Use it for queries outside the apply path (e.g., `get`, `list`, `scan`). You cannot access other tables.
-
-```rust
-fn create(db: ScopedDb) -> Self {
-    let (event_tx, _) = broadcast::channel(1024);
-    Self { db, event_tx }
-}
-```
-
 ### apply()
 
 Called inside a write transaction with `TABLE_DATA` already open. Decode `op.info.payload`, update the table, and return events for watchers.
-
-```rust
-fn apply(
-    &self,
-    table: &mut Table<&[u8], &[u8]>,
-    op: &Op,
-    dag: &dyn DagQueries,
-) -> Result<Vec<Self::Event>, StateDbError> {
-    let payload = MyPayload::decode(op.info.payload.as_ref())?;
-    table.insert(payload.key.as_bytes(), payload.value.as_bytes())?;
-    Ok(vec![MyEvent::Updated { key: payload.key, value: payload.value }])
-}
-```
 
 The `Op` contains:
 - `info.hash`: intention hash (unique ID)
@@ -93,25 +122,11 @@ The `Op` contains:
 
 The `dag` parameter lets you query the intention DAG. Useful for conflict resolution, e.g., comparing timestamps of concurrent writes via `dag.find_lca()`.
 
-**If `apply()` returns `Err`**, state projection pauses. The intention is already committed to the witness log — sync and other authors continue normally. The local user sees stale state until the issue is resolved (e.g., code upgrade). This prevents silent state divergence across nodes.
+**If `apply()` returns `Err`**, state projection pauses. The intention is already committed to the witness log; sync and other authors continue normally. The local user sees stale state until the issue is resolved (e.g., code upgrade). This prevents silent state divergence across nodes.
 
 `apply()` should only fail for things the local node can't handle: unknown payload format, I/O errors, corruption. Semantic validation (e.g., "key must not be empty") belongs in `CommandHandler`, before the payload is signed into an intention.
 
-### notify()
-
-Called after the transaction commits with the events returned by `apply()`. Send them to your broadcast channel here.
-
-```rust
-fn notify(&self, events: Vec<Self::Event>) {
-    for event in events {
-        let _ = self.event_tx.send(event);
-    }
-}
-```
-
-Every state machine's `notify()` looks like this: iterate events, send to channel. The reason it exists as a separate method: `apply()` runs inside a write transaction that could still fail after it returns (e.g., commit error). By returning events as data and letting the framework call `notify()` after a successful commit, watchers only see committed state.
-
-If your state machine has no watchers, use `type Event = ()` and leave `notify()` empty.
+If your state machine has no watchers, use `type Event = ()` and return an empty vec.
 
 ## CommandHandler
 
@@ -242,8 +257,7 @@ flowchart TD
     IS -->|witness_ready| WL[Witness Log]
     WL -->|project_new_entries| AP(["`**StateLogic::apply**`"])
     AP -->|update| DB
-    AP --> NT(["`**StateLogic::notify**`"])
-    NT -->|stream events| Client
+    AP -->|events via StateContext| Client
 ```
 
 Rounded nodes are your code. Square nodes are framework internals.

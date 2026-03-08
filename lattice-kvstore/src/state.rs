@@ -6,7 +6,7 @@
 //! Uses redb for efficient embedded storage. Per-key state is encoded as
 //! `proto::Value { oneof kind { value | tombstone }, heads[] }` via `KVTable`.
 
-use lattice_storage::{ScopedDb, StateDbError, StateLogic};
+use lattice_storage::{StateContext, StateDbError, StateLogic};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -33,15 +33,12 @@ use lattice_store_base::{FieldFormat, Introspectable};
 use prost::Message;
 use prost_reflect::DescriptorPool;
 use regex::bytes::Regex;
-use tokio::sync::broadcast;
-
 /// Persistent state for KV with DAG conflict resolution.
 ///
 /// This is a derived materialized view - the actual source of truth is
 /// the intention log managed by the replication layer.
 pub struct KvState {
-    db: ScopedDb,
-    event_tx: broadcast::Sender<WatchEvent>,
+    ctx: StateContext<WatchEvent>,
 }
 
 impl std::fmt::Debug for KvState {
@@ -52,14 +49,14 @@ impl std::fmt::Debug for KvState {
 
 impl KvState {
     /// Subscribe to state changes.
-    pub fn subscribe(&self) -> broadcast::Receiver<WatchEvent> {
-        self.event_tx.subscribe()
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<WatchEvent> {
+        self.ctx.subscribe()
     }
 
     /// Get the materialized LWW value for a key.
     /// Returns `None` for missing keys or tombstone-only.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateDbError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(None),
@@ -77,7 +74,7 @@ impl KvState {
         &self,
         key: &[u8],
     ) -> Result<(Option<Vec<u8>>, bool), StateDbError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok((None, false)),
@@ -92,7 +89,7 @@ impl KvState {
         &self,
         key: &[u8],
     ) -> Result<lattice_kvtable::InspectResult, StateDbError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => {
@@ -112,7 +109,7 @@ impl KvState {
 
     /// Return the head hashes for a key (for causal deps and conflict counting).
     pub fn head_hashes(&self, key: &[u8]) -> Result<Vec<Hash>, StateDbError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(Vec::new()),
@@ -134,7 +131,7 @@ impl KvState {
     where
         F: FnMut(Vec<u8>, Option<Vec<u8>>, bool) -> Result<bool, StateDbError>,
     {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(()),
@@ -165,6 +162,12 @@ impl KvState {
 
 // ==================== StateLogic trait implementation ====================
 
+impl From<StateContext<WatchEvent>> for KvState {
+    fn from(ctx: StateContext<WatchEvent>) -> Self {
+        Self { ctx }
+    }
+}
+
 impl StateLogic for KvState {
     type Event = WatchEvent;
 
@@ -172,9 +175,8 @@ impl StateLogic for KvState {
         lattice_model::STORE_TYPE_KVSTORE
     }
 
-    fn create(db: ScopedDb) -> Self {
-        let (event_tx, _) = broadcast::channel(1024);
-        Self { db, event_tx }
+    fn context(&self) -> &StateContext<Self::Event> {
+        &self.ctx
     }
 
     fn apply(
@@ -211,10 +213,6 @@ impl StateLogic for KvState {
         }
 
         Ok(events)
-    }
-
-    fn event_sender(&self) -> &broadcast::Sender<Self::Event> {
-        &self.event_tx
     }
 }
 
@@ -652,7 +650,7 @@ mod tests {
     use lattice_model::dag_queries::{HashMapDag, NullDag};
     use lattice_model::hlc::HLC;
     use lattice_model::{PubKey, Uuid};
-    use lattice_storage::{StateBackend, StorageConfig, TABLE_DATA};
+    use lattice_storage::{ScopedDb, StateBackend, StorageConfig, TABLE_DATA};
 
     static NULL_DAG: NullDag = NullDag;
 
@@ -666,7 +664,7 @@ mod tests {
             let backend =
                 StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
             let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-            let store = KvState::create(scoped);
+            let store = KvState::from(StateContext::new(scoped));
             Self { backend, store }
         }
 
@@ -679,10 +677,10 @@ mod tests {
             let write_txn = self.backend.db().begin_write()?;
             {
                 let mut table = write_txn.open_table(TABLE_DATA)?;
-                let updates = self.store.apply(&mut table, op, dag)?;
+                let events = self.store.apply(&mut table, op, dag)?;
                 drop(table);
                 write_txn.commit()?;
-                self.store.notify(updates);
+                self.store.ctx.notify(events);
             }
             Ok(())
         }

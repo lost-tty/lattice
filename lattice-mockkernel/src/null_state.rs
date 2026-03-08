@@ -8,11 +8,10 @@
 //! / `intention_count`) without pulling in kvstore or any real store crate.
 
 use lattice_model::Op;
-use lattice_storage::{ScopedDb, StateDbError, StateLogic};
+use lattice_storage::{StateContext, StateDbError, StateLogic};
 use lattice_store_base::{CommandHandler, Introspectable, StreamHandler, StreamProvider};
 use once_cell::sync::Lazy;
 use prost_reflect::{DescriptorPool, DynamicMessage, ServiceDescriptor};
-use tokio::sync::broadcast;
 
 /// Store type constant for NullState, analogous to `STORE_TYPE_KVSTORE`.
 pub const STORE_TYPE_NULLSTORE: &str = "core:nullstore";
@@ -44,13 +43,18 @@ static NULL_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
 /// the redb table. Chain tip tracking is handled by
 /// `SystemLayer<NullState>` which owns the backend.
 pub struct NullState {
-    _db: ScopedDb,
-    event_tx: broadcast::Sender<()>,
+    ctx: StateContext<()>,
 }
 
 // ---------------------------------------------------------------------------
 // StateLogic — no-op apply
 // ---------------------------------------------------------------------------
+
+impl From<StateContext<()>> for NullState {
+    fn from(ctx: StateContext<()>) -> Self {
+        Self { ctx }
+    }
+}
 
 impl StateLogic for NullState {
     type Event = ();
@@ -59,9 +63,8 @@ impl StateLogic for NullState {
         STORE_TYPE_NULLSTORE
     }
 
-    fn create(db: ScopedDb) -> Self {
-        let (event_tx, _) = broadcast::channel(1024);
-        Self { _db: db, event_tx }
+    fn context(&self) -> &StateContext<Self::Event> {
+        &self.ctx
     }
 
     fn apply(
@@ -71,10 +74,6 @@ impl StateLogic for NullState {
         _dag: &dyn lattice_model::DagQueries,
     ) -> Result<Vec<Self::Event>, StateDbError> {
         Ok(vec![])
-    }
-
-    fn event_sender(&self) -> &broadcast::Sender<Self::Event> {
-        &self.event_tx
     }
 }
 

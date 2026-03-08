@@ -5,7 +5,7 @@ use dag::{DagScope, ScopedDag};
 use lattice_model::{Hash, IntentionInfo, Op, StateMachine, StateWriter, SystemEvent};
 use lattice_model::Openable;
 use lattice_proto::storage::{universal_op, UniversalOp};
-use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, TABLE_DATA, TABLE_SYSTEM};
+use lattice_storage::{ScopedDb, StateBackend, StateContext, StateDbError, StateLogic, TABLE_DATA, TABLE_SYSTEM};
 use lattice_store_base::{BoxByteStream, CommandHandler, StreamError, StreamHandler, StreamProvider, Subscriber};
 use prost::Message;
 use std::borrow::Cow;
@@ -40,10 +40,9 @@ pub struct SystemLayer<S> {
 
 impl<S: Clone> Clone for SystemLayer<S> {
     fn clone(&self) -> Self {
-        // SystemState holds a ScopedDb (Clone) and broadcast::Sender (Clone-like).
-        // But SystemState doesn't derive Clone — create a fresh one sharing the same DB.
+        // SystemState doesn't derive Clone — create a fresh one sharing the same DB.
         let system_scoped = ScopedDb::new(self.backend.db_shared(), TABLE_SYSTEM);
-        let system = SystemState::create(system_scoped);
+        let system = SystemState::from(StateContext::new(system_scoped));
         Self {
             backend: self.backend.clone(),
             inner: self.inner.clone(),
@@ -178,8 +177,8 @@ impl<S: StateLogic> StateMachine for SystemLayer<S> {
 
         // Notify watchers after commit
         match result {
-            ApplyResult::AppData(events) => self.inner.notify(events),
-            ApplyResult::System(events) => self.system.notify(events),
+            ApplyResult::AppData(events) => self.inner.context().notify(events),
+            ApplyResult::System(events) => self.system.context().notify(events),
             ApplyResult::Skipped => {}
         }
 
@@ -207,7 +206,7 @@ impl<S: StateLogic> lattice_model::StoreIdentity for SystemLayer<S> {
     }
 }
 
-impl<S: StateLogic + 'static> Openable for SystemLayer<S> {
+impl<S: StateLogic + From<StateContext<S::Event>> + 'static> Openable for SystemLayer<S> {
     fn open(id: Uuid, config: &lattice_model::StorageConfig) -> Result<Self, String> {
         let (expected_type, expected_version) = match config {
             lattice_model::StorageConfig::File(_) => (Some(S::store_type()), 1),
@@ -217,8 +216,8 @@ impl<S: StateLogic + 'static> Openable for SystemLayer<S> {
             StateBackend::open(id, config, expected_type, expected_version).map_err(|e| e.to_string())?;
         let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
         let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
-        let inner = S::create(app_scoped);
-        let system = SystemState::create(sys_scoped);
+        let inner = S::from(StateContext::new(app_scoped));
+        let system = SystemState::from(StateContext::new(sys_scoped));
         Ok(Self::new(backend, inner, system))
     }
 }

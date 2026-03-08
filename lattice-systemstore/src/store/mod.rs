@@ -10,31 +10,29 @@ use lattice_proto::storage::{
     hierarchy_op, invite_op, peer_op, peer_strategy, peer_strategy_op, store_op, system_op,
     ChildStatus as ProtoChildStatus, PeerStatus as ProtoStatus, SystemOp,
 };
-use lattice_storage::{ScopedDb, StateDbError, StateLogic};
+use lattice_storage::{StateContext, StateDbError, StateLogic};
 use prost::Message;
-use tokio::sync::broadcast;
 
 /// System store: reads and writes to `TABLE_SYSTEM` in a redb database.
 ///
-/// Holds a `ScopedDb` for reads (scoped to `TABLE_SYSTEM`) and a broadcast
+/// Holds a `StateContext` for reads (scoped to `TABLE_SYSTEM`) and a broadcast
 /// channel for emitting `SystemEvent`s after commit.
 ///
 /// Parallel to `KvState` and `LogState` — all three implement `StateLogic`.
 pub struct SystemState {
-    db: ScopedDb,
-    event_tx: broadcast::Sender<SystemEvent>,
+    ctx: StateContext<SystemEvent>,
 }
 
 impl SystemState {
     /// Subscribe to system events emitted after each apply+commit.
-    pub fn subscribe(&self) -> broadcast::Receiver<SystemEvent> {
-        self.event_tx.subscribe()
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<SystemEvent> {
+        self.ctx.subscribe()
     }
 
     // ==================== Read Path ====================
 
     pub fn get_peer(&self, pubkey: &PubKey) -> Result<Option<PeerInfo>, SystemReadError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(None),
@@ -44,7 +42,7 @@ impl SystemState {
     }
 
     pub fn get_peers(&self) -> Result<Vec<PeerInfo>, SystemReadError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(Vec::new()),
@@ -54,7 +52,7 @@ impl SystemState {
     }
 
     pub fn get_children(&self) -> Result<Vec<StoreLink>, SystemReadError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(Vec::new()),
@@ -64,7 +62,7 @@ impl SystemState {
     }
 
     pub fn get_peer_strategy(&self) -> Result<Option<PeerStrategy>, SystemReadError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(None),
@@ -77,7 +75,7 @@ impl SystemState {
         &self,
         token_hash: &[u8],
     ) -> Result<Option<lattice_model::InviteInfo>, SystemReadError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(None),
@@ -87,7 +85,7 @@ impl SystemState {
     }
 
     pub fn list_all(&self) -> Result<Vec<(String, Vec<u8>)>, SystemReadError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(Vec::new()),
@@ -97,7 +95,7 @@ impl SystemState {
     }
 
     pub fn get_name(&self) -> Result<Option<String>, SystemReadError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(None),
@@ -107,7 +105,7 @@ impl SystemState {
     }
 
     pub fn get_deps(&self, key: &[u8]) -> Result<Vec<Hash>, SystemReadError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.ctx.db().begin_read()?;
         let table = match txn.open_table() {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(Vec::new()),
@@ -119,6 +117,12 @@ impl SystemState {
 
 // ==================== StateLogic Implementation ====================
 
+impl From<StateContext<SystemEvent>> for SystemState {
+    fn from(ctx: StateContext<SystemEvent>) -> Self {
+        Self { ctx }
+    }
+}
+
 impl StateLogic for SystemState {
     type Event = SystemEvent;
 
@@ -126,9 +130,8 @@ impl StateLogic for SystemState {
         "core:system"
     }
 
-    fn create(db: ScopedDb) -> Self {
-        let (event_tx, _) = broadcast::channel(1024);
-        Self { db, event_tx }
+    fn context(&self) -> &StateContext<Self::Event> {
+        &self.ctx
     }
 
     fn apply(
@@ -141,10 +144,6 @@ impl StateLogic for SystemState {
         let mut events = Vec::new();
         apply_system_op(table, sys_op, op, dag, &mut events)?;
         Ok(events)
-    }
-
-    fn event_sender(&self) -> &broadcast::Sender<Self::Event> {
-        &self.event_tx
     }
 }
 
