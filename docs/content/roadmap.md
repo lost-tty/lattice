@@ -222,7 +222,7 @@ Run the kernel on the RP2350.
 ## Technical Debt
 
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
-- [ ] **REGRESSION**: `node set-name` creates two intentions with the same op per store. `Node::set_name` calls `publish_name_to()` for each active store, which each creates a `PeerOp::SetName` intention via `SystemBatch`. Investigate whether duplicate submissions are happening (e.g., store list contains duplicates, or the call is invoked twice).
+- [x] **REGRESSION**: `node set-name` created duplicate intentions. Root cause: child stores share parent's PeerManager, but `set_name` iterated all store IDs. Fixed: deduplicate by `Arc::as_ptr` on PeerManager.
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
 - [ ] **DAG Reachability Index**: `DagQueries` methods (`find_lca`, `is_ancestor`, `get_path`) use naive BFS. For large DAGs, add generation numbers (prune impossible ancestors by depth) or bloom filters (compact ancestor summaries) for O(log N) reachability. Not needed until BFS becomes a bottleneck.

@@ -8,7 +8,9 @@ use lattice_kernel::{store::StateError, NodeError as IdentityError, NodeIdentity
 
 use lattice_model::types::PubKey;
 use lattice_model::NetEvent;
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tracing::error;
@@ -285,9 +287,16 @@ impl Node {
     /// Updates meta.db and publishes to all active meshes.
     pub async fn set_name(&self, name: &str) -> Result<(), NodeError> {
         self.meta.set_name(name)?;
-        // Publish to all active meshes
+        // Publish to each unique PeerManager. Child stores share their
+        // parent's PeerManager, so deduplicating by Arc pointer avoids
+        // submitting the same SetPeerName intention multiple times.
+        let mut seen = HashSet::new();
         for store_id in self.store_manager.list_store_ids() {
-            let _ = self.publish_name_to(store_id).await;
+            if let Some(pm) = self.store_manager.get_peer_manager(&store_id) {
+                if seen.insert(Arc::as_ptr(&pm) as usize) {
+                    let _ = self.publish_name_to(store_id).await;
+                }
+            }
         }
         Ok(())
     }
@@ -460,10 +469,6 @@ impl Node {
         let peer_manager = crate::PeerManager::new(system.clone()).await?;
 
         for peer in &bootstrap_peers {
-            // Persist peer as Active so it is available for sync/gossip
-            peer_manager
-                .set_peer_status(*peer, PeerStatus::Active)
-                .await?;
             peer_manager.add_bootstrap_peer(*peer);
         }
 

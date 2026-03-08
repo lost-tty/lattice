@@ -937,3 +937,57 @@ async fn test_open_existing_resolves_type_from_meta() {
     assert_eq!(resolved_type, STORE_TYPE_KVSTORE);
     assert_eq!(handle.store_type(), STORE_TYPE_KVSTORE);
 }
+
+// ==================== Duplicate Intention Regression ====================
+
+// Regression: node set-name with root + child stores should produce exactly
+// one SetPeerName intention on the root store, not one per store ID.
+// Child stores share the parent's PeerManager, so iterating all store IDs
+// caused the same operation to be submitted twice.
+#[tokio::test]
+async fn test_set_name_does_not_duplicate_across_child_stores() {
+    let ctx = TestCtx::new();
+
+    let root_id = ctx
+        .node
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
+        .await
+        .unwrap();
+    wait_for_open(ctx.sm(), root_id).await;
+
+    let child_id = ctx
+        .node
+        .create_store(Some(root_id), None, STORE_TYPE_NULLSTORE)
+        .await
+        .unwrap();
+    wait_for_open(ctx.sm(), child_id).await;
+
+    let handle = ctx.sm().get_handle(&root_id).expect("root handle");
+    let before = handle.as_inspector().intention_count().await;
+
+    ctx.node.set_name("regression-test").await.unwrap();
+
+    // Wait for at least one new intention
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let count = handle.as_inspector().intention_count().await;
+            if count > before {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("set_name did not produce an intention within timeout");
+
+    // Give a brief window for any spurious second intention to land
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let final_count = handle.as_inspector().intention_count().await;
+
+    assert_eq!(
+        final_count - before,
+        1,
+        "set_name should produce exactly 1 intention on root store, got {}",
+        final_count - before
+    );
+}

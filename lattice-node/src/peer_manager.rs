@@ -290,6 +290,11 @@ impl PeerProvider for PeerManager {
     }
 
     fn can_connect(&self, peer: &PubKey) -> bool {
+        if let Ok(guard) = self.bootstrap_peers.lock() {
+            if guard.contains(peer) {
+                return true;
+            }
+        }
         matches!(
             self.get_peer_status(peer),
             Some(PeerStatus::Active | PeerStatus::Dormant)
