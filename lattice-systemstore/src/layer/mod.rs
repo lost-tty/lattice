@@ -84,26 +84,25 @@ impl<S> SystemLayer<S> {
 // This eliminates the duplicated transaction ceremony: one `begin_write →
 // verify_and_update_tip → mutate → commit → notify` for everything.
 
-/// Result of a unified apply: the optional updates to notify after commit.
-enum ApplyResult<U> {
+/// Result of a unified apply: the optional events to dispatch after commit.
+enum ApplyResult<E> {
     /// Op was a no-op (idempotent duplicate or empty envelope).
     Skipped,
-    /// SystemOp applied — carry the events for post-commit notification.
+    /// SystemOp applied — carry the events for post-commit dispatch.
     System(Vec<SystemEvent>),
-    /// AppData applied — carry the updates for post-commit notification.
-    AppData(U),
+    /// AppData applied — carry the events for post-commit dispatch.
+    AppData(Vec<E>),
 }
 
 impl<S: StateLogic> SystemLayer<S> {
     /// Unified transaction: decode envelope, verify chain, route to correct table,
-    /// mutate, and commit. Returns the updates (if any) for post-commit
-    /// notification.
+    /// mutate, and commit. Returns events (if any) for post-commit dispatch.
     fn apply_unified(
         &self,
         op: &Op,
         dag: &dyn lattice_model::DagQueries,
         universal: UniversalOp,
-    ) -> Result<ApplyResult<S::Updates>, StateDbError> {
+    ) -> Result<ApplyResult<S::Event>, StateDbError> {
         let write_txn = self.backend.db().begin_write()?;
 
         // Verify chain integrity (idempotence check)
@@ -149,9 +148,9 @@ impl<S: StateLogic> SystemLayer<S> {
                 };
                 let app_dag = ScopedDag { inner: dag, scope: DagScope::AppData };
                 let mut table = write_txn.open_table(TABLE_DATA)?;
-                let updates = self.inner.apply(&mut table, &new_op, &app_dag)?;
+                let events = self.inner.apply(&mut table, &new_op, &app_dag)?;
                 drop(table); // Release borrow before commit
-                ApplyResult::AppData(updates)
+                ApplyResult::AppData(events)
             }
             None => ApplyResult::Skipped,
         };
@@ -179,7 +178,7 @@ impl<S: StateLogic> StateMachine for SystemLayer<S> {
 
         // Notify watchers after commit
         match result {
-            ApplyResult::AppData(updates) => self.inner.notify(updates),
+            ApplyResult::AppData(events) => self.inner.notify(events),
             ApplyResult::System(events) => self.system.notify(events),
             ApplyResult::Skipped => {}
         }

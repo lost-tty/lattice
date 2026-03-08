@@ -41,7 +41,7 @@ use tokio::sync::broadcast;
 /// the intention log managed by the replication layer.
 pub struct KvState {
     db: ScopedDb,
-    watcher_tx: broadcast::Sender<WatchEvent>,
+    event_tx: broadcast::Sender<WatchEvent>,
 }
 
 impl std::fmt::Debug for KvState {
@@ -53,7 +53,7 @@ impl std::fmt::Debug for KvState {
 impl KvState {
     /// Subscribe to state changes.
     pub fn subscribe(&self) -> broadcast::Receiver<WatchEvent> {
-        self.watcher_tx.subscribe()
+        self.event_tx.subscribe()
     }
 
     /// Get the materialized LWW value for a key.
@@ -166,15 +166,15 @@ impl KvState {
 // ==================== StateLogic trait implementation ====================
 
 impl StateLogic for KvState {
-    type Updates = Vec<(Vec<u8>, Option<Vec<u8>>)>;
+    type Event = WatchEvent;
 
     fn store_type() -> &'static str {
         lattice_model::STORE_TYPE_KVSTORE
     }
 
     fn create(db: ScopedDb) -> Self {
-        let (watcher_tx, _) = broadcast::channel(1024);
-        Self { db, watcher_tx }
+        let (event_tx, _) = broadcast::channel(1024);
+        Self { db, event_tx }
     }
 
     fn apply(
@@ -182,12 +182,12 @@ impl StateLogic for KvState {
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn lattice_model::DagQueries,
-    ) -> Result<Self::Updates, StateDbError> {
+    ) -> Result<Vec<Self::Event>, StateDbError> {
         // Decode payload
         let kv_payload = KvPayload::decode(op.info.payload.as_ref())?;
 
         let mut kvt = lattice_kvtable::KVTable::new(table);
-        let mut updates: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        let mut events: Vec<WatchEvent> = Vec::new();
 
         // Apply KV operations (in reverse order for "last op wins" within batch)
         for kv_op in kv_payload.ops.iter().rev() {
@@ -198,7 +198,11 @@ impl StateLogic for KvState {
                 };
                 match kvt.apply_head(key, &op.info, op.causal_deps, value, tombstone, dag) {
                     Ok(Some(winner)) => {
-                        updates.push((key.clone(), winner));
+                        let kind = match winner {
+                            Some(v) => WatchEventKind::Update { value: v },
+                            None => WatchEventKind::Delete,
+                        };
+                        events.push(WatchEvent { key: key.clone(), kind });
                     }
                     Ok(None) => {} // idempotent skip
                     Err(e) => return Err(e).into_state_err(),
@@ -206,18 +210,11 @@ impl StateLogic for KvState {
             }
         }
 
-        Ok(updates)
+        Ok(events)
     }
 
-    /// Notify watchers of changes.
-    fn notify(&self, updates: Self::Updates) {
-        for (key, value) in updates {
-            let kind = match value {
-                Some(v) => WatchEventKind::Update { value: v },
-                None => WatchEventKind::Delete,
-            };
-            let _ = self.watcher_tx.send(WatchEvent { key, kind });
-        }
+    fn event_sender(&self) -> &broadcast::Sender<Self::Event> {
+        &self.event_tx
     }
 }
 
@@ -370,7 +367,8 @@ mod payload_summary {
 
 // Implement StreamProvider for KvState - enables blanket StreamReflectable on handles
 use lattice_store_base::{
-    BoxByteStream, StreamDescriptor, StreamError, StreamHandler, StreamProvider, Subscriber,
+    event_stream, BoxByteStream, StreamDescriptor, StreamError, StreamHandler, StreamProvider,
+    Subscriber,
 };
 
 struct KvSubscriber;
@@ -401,7 +399,6 @@ impl StreamProvider for KvState {
 
 impl KvState {
     /// Subscribe to key changes matching a regex pattern.
-    /// Subscribe to key changes matching a regex pattern.
     pub fn subscribe_watch<'a>(
         &'a self,
         params: &'a [u8],
@@ -410,47 +407,28 @@ impl KvState {
         Box::pin(async move {
             use prost::Message;
 
-            // Decode WatchParams to get pattern
             let watch_params = crate::proto::WatchParams::decode(params.as_slice())
                 .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
-            let pattern = watch_params.pattern;
-
-            // Compile regex for filtering
-            let re = Regex::new(&pattern)
+            let re = Regex::new(&watch_params.pattern)
                 .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
 
-            // Subscribe to state's broadcast channel
-            let mut state_rx = self.subscribe();
-
-            // Use async_stream for cleaner async handling
-            let stream = async_stream::stream! {
-                loop {
-                    match state_rx.recv().await {
-                        Ok(event) => {
-                            if !re.is_match(&event.key) { continue; }
-
-                            let kind = match event.kind {
-                                WatchEventKind::Update { value } => {
-                                    Some(crate::proto::watch_event_proto::Kind::Value(value))
-                                }
-                                WatchEventKind::Delete => {
-                                    Some(crate::proto::watch_event_proto::Kind::Deleted(true))
-                                }
-                            };
-
-                            let proto_event = crate::proto::WatchEventProto { key: event.key.clone(), kind };
-                            let mut buf = Vec::new();
-                            if proto_event.encode(&mut buf).is_ok() {
-                                yield buf;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    }
+            Ok(event_stream(self.subscribe(), move |event: WatchEvent| {
+                if !re.is_match(&event.key) {
+                    return None;
                 }
-            };
-
-            Ok(Box::pin(stream) as BoxByteStream)
+                let kind = match event.kind {
+                    WatchEventKind::Update { value } => {
+                        Some(crate::proto::watch_event_proto::Kind::Value(value))
+                    }
+                    WatchEventKind::Delete => {
+                        Some(crate::proto::watch_event_proto::Kind::Deleted(true))
+                    }
+                };
+                let proto_event = crate::proto::WatchEventProto { key: event.key.clone(), kind };
+                let mut buf = Vec::new();
+                proto_event.encode(&mut buf).ok()?;
+                Some(buf)
+            }))
         })
     }
 }

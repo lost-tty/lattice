@@ -11,8 +11,8 @@ mod introspection;
 pub mod invoke;
 
 pub use introspection::{
-    BoxByteStream, CommandDispatcher, FieldFormat, Introspectable, StreamDescriptor, StreamError,
-    StreamReflectable,
+    event_stream, BoxByteStream, CommandDispatcher, FieldFormat, Introspectable, StreamDescriptor,
+    StreamError, StreamReflectable,
 };
 
 pub use handle::{CommandHandler, StateProvider, StreamHandler, StreamProvider, Subscriber};

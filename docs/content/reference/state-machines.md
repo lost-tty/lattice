@@ -37,7 +37,7 @@ The core trait. Your state machine decodes payloads and mutates a redb table.
 
 ```rust
 pub trait StateLogic: Send + Sync {
-    type Updates;
+    type Event;
 
     fn store_type() -> &'static str where Self: Sized;
     fn create(db: ScopedDb) -> Self where Self: Sized;
@@ -46,8 +46,8 @@ pub trait StateLogic: Send + Sync {
         table: &mut Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn DagQueries,
-    ) -> Result<Self::Updates, StateDbError>;
-    fn notify(&self, updates: Self::Updates);
+    ) -> Result<Vec<Self::Event>, StateDbError>;
+    fn notify(&self, events: Vec<Self::Event>);
 }
 ```
 
@@ -68,7 +68,7 @@ fn create(db: ScopedDb) -> Self {
 
 ### apply()
 
-Called inside a write transaction with `TABLE_DATA` already open. Decode `op.info.payload`, update the table, return whatever your watchers need.
+Called inside a write transaction with `TABLE_DATA` already open. Decode `op.info.payload`, update the table, and return events for watchers.
 
 ```rust
 fn apply(
@@ -76,10 +76,10 @@ fn apply(
     table: &mut Table<&[u8], &[u8]>,
     op: &Op,
     dag: &dyn DagQueries,
-) -> Result<Self::Updates, StateDbError> {
+) -> Result<Vec<Self::Event>, StateDbError> {
     let payload = MyPayload::decode(op.info.payload.as_ref())?;
     table.insert(payload.key.as_bytes(), payload.value.as_bytes())?;
-    Ok(vec![(payload.key, payload.value)])
+    Ok(vec![MyEvent::Updated { key: payload.key, value: payload.value }])
 }
 ```
 
@@ -99,19 +99,19 @@ The `dag` parameter lets you query the intention DAG. Useful for conflict resolu
 
 ### notify()
 
-Called after the transaction commits with the `Updates` returned by `apply()`. This is where you send events to watchers via a broadcast channel.
+Called after the transaction commits with the events returned by `apply()`. Send them to your broadcast channel here.
 
 ```rust
-fn notify(&self, updates: Self::Updates) {
-    for (key, value) in updates {
-        let _ = self.event_tx.send(WatchEvent { key, value });
+fn notify(&self, events: Vec<Self::Event>) {
+    for event in events {
+        let _ = self.event_tx.send(event);
     }
 }
 ```
 
-The reason `apply()` and `notify()` are separate: `apply()` runs inside a write transaction that could still fail after it returns (e.g., commit error). If `apply()` sent events directly, watchers could observe state that was never committed. By returning updates as data and letting the framework call `notify()` after a successful commit, watchers only see committed state.
+Every state machine's `notify()` looks like this: iterate events, send to channel. The reason it exists as a separate method: `apply()` runs inside a write transaction that could still fail after it returns (e.g., commit error). By returning events as data and letting the framework call `notify()` after a successful commit, watchers only see committed state.
 
-If your state machine has no watchers, use `type Updates = ()` and leave `notify()` empty.
+If your state machine has no watchers, use `type Event = ()` and leave `notify()` empty.
 
 ## CommandHandler
 

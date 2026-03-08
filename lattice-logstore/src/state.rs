@@ -145,7 +145,7 @@ impl LogState {
 }
 
 impl StateLogic for LogState {
-    type Updates = Vec<u8>;
+    type Event = LogEvent;
 
     fn store_type() -> &'static str {
         lattice_model::STORE_TYPE_LOGSTORE
@@ -161,7 +161,7 @@ impl StateLogic for LogState {
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         _dag: &dyn lattice_model::DagQueries,
-    ) -> Result<Self::Updates, StateDbError> {
+    ) -> Result<Vec<Self::Event>, StateDbError> {
         // Validate payload
         if op.info.payload.is_empty() {
             return Err(StateDbError::Conversion("Empty payload".into()));
@@ -182,12 +182,11 @@ impl StateLogic for LogState {
         }
         table.insert(key.as_slice(), value.as_slice())?;
 
-        Ok(op.info.payload.to_vec())
+        Ok(vec![LogEvent { content: op.info.payload.to_vec() }])
     }
 
-    /// Notify watchers of new entry.
-    fn notify(&self, content: Self::Updates) {
-        let _ = self.event_tx.send(LogEvent { content });
+    fn event_sender(&self) -> &broadcast::Sender<Self::Event> {
+        &self.event_tx
     }
 }
 
@@ -249,7 +248,8 @@ impl lattice_store_base::Introspectable for LogState {
 
 // Implement StreamProvider for LogState - enables blanket StreamReflectable on handles
 use lattice_store_base::{
-    BoxByteStream, StreamDescriptor, StreamError, StreamHandler, StreamProvider, Subscriber,
+    event_stream, BoxByteStream, StreamDescriptor, StreamError, StreamHandler, StreamProvider,
+    Subscriber,
 };
 
 struct LogSubscriber;
@@ -287,31 +287,12 @@ impl LogState {
         use prost::Message;
 
         Box::pin(async move {
-            // Subscribe to state's broadcast channel
-            let mut state_rx = self.subscribe();
-
-            // Create stream that converts events to proto and serializes
-            let stream = async_stream::stream! {
-                loop {
-                    match state_rx.recv().await {
-                        Ok(event) => {
-                            // Convert to proto LogEvent
-                            let proto_event = crate::proto::LogEvent {
-                                content: event.content,
-                            };
-
-                            // Serialize to bytes
-                            let mut buf = Vec::new();
-                            proto_event.encode(&mut buf).ok();
-                            yield buf;
-                        }
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            };
-
-            Ok(Box::pin(stream) as BoxByteStream)
+            Ok(event_stream(self.subscribe(), |event: LogEvent| {
+                let proto_event = crate::proto::LogEvent { content: event.content };
+                let mut buf = Vec::new();
+                proto_event.encode(&mut buf).ok()?;
+                Some(buf)
+            }))
         })
     }
 }

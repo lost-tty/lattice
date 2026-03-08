@@ -117,6 +117,32 @@ impl std::error::Error for StreamError {}
 /// Type alias for a boxed byte stream (serialized proto events).
 pub type BoxByteStream = Pin<Box<dyn futures_core::Stream<Item = Vec<u8>> + Send + 'static>>;
 
+/// Create a `BoxByteStream` from a broadcast receiver and an encode function.
+///
+/// Handles `Lagged` (skip) and `Closed` (stop) automatically. The encode
+/// function transforms each domain event into proto bytes. Return `None`
+/// to skip an event (e.g., filtered out).
+pub fn event_stream<E, F>(mut rx: tokio::sync::broadcast::Receiver<E>, encode: F) -> BoxByteStream
+where
+    E: Clone + Send + 'static,
+    F: Fn(E) -> Option<Vec<u8>> + Send + 'static,
+{
+    let stream = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if let Some(bytes) = encode(event) {
+                        yield bytes;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Box::pin(stream)
+}
+
 /// A state machine that can expose event streams.
 ///
 /// Implemented by handles (e.g., `KvHandle`, `LogHandle`) to describe

@@ -120,14 +120,14 @@ impl SystemState {
 // ==================== StateLogic Implementation ====================
 
 impl StateLogic for SystemState {
-    type Updates = Vec<SystemEvent>;
+    type Event = SystemEvent;
 
     fn store_type() -> &'static str {
         "core:system"
     }
 
     fn create(db: ScopedDb) -> Self {
-        let (event_tx, _) = broadcast::channel(256);
+        let (event_tx, _) = broadcast::channel(1024);
         Self { db, event_tx }
     }
 
@@ -136,17 +136,15 @@ impl StateLogic for SystemState {
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn lattice_model::DagQueries,
-    ) -> Result<Self::Updates, StateDbError> {
+    ) -> Result<Vec<Self::Event>, StateDbError> {
         let sys_op = SystemOp::decode(op.info.payload.as_ref())?;
         let mut events = Vec::new();
         apply_system_op(table, sys_op, op, dag, &mut events)?;
         Ok(events)
     }
 
-    fn notify(&self, updates: Self::Updates) {
-        for event in updates {
-            let _ = self.event_tx.send(event);
-        }
+    fn event_sender(&self) -> &broadcast::Sender<Self::Event> {
+        &self.event_tx
     }
 }
 

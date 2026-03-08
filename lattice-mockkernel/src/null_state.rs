@@ -12,6 +12,7 @@ use lattice_storage::{ScopedDb, StateDbError, StateLogic};
 use lattice_store_base::{CommandHandler, Introspectable, StreamHandler, StreamProvider};
 use once_cell::sync::Lazy;
 use prost_reflect::{DescriptorPool, DynamicMessage, ServiceDescriptor};
+use tokio::sync::broadcast;
 
 /// Store type constant for NullState, analogous to `STORE_TYPE_KVSTORE`.
 pub const STORE_TYPE_NULLSTORE: &str = "core:nullstore";
@@ -39,24 +40,28 @@ static NULL_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
 
 /// A state machine that does nothing.
 ///
-/// `apply` is a no-op — it silently accepts every operation without touching
-/// the redb table. Chain tip tracking and `applied_chaintips` are handled by
+/// `apply` is a no-op that accepts every operation without touching
+/// the redb table. Chain tip tracking is handled by
 /// `SystemLayer<NullState>` which owns the backend.
-pub struct NullState;
+pub struct NullState {
+    _db: ScopedDb,
+    event_tx: broadcast::Sender<()>,
+}
 
 // ---------------------------------------------------------------------------
 // StateLogic — no-op apply
 // ---------------------------------------------------------------------------
 
 impl StateLogic for NullState {
-    type Updates = ();
+    type Event = ();
 
     fn store_type() -> &'static str {
         STORE_TYPE_NULLSTORE
     }
 
-    fn create(_db: ScopedDb) -> Self {
-        Self
+    fn create(db: ScopedDb) -> Self {
+        let (event_tx, _) = broadcast::channel(1024);
+        Self { _db: db, event_tx }
     }
 
     fn apply(
@@ -64,11 +69,13 @@ impl StateLogic for NullState {
         _table: &mut redb::Table<&[u8], &[u8]>,
         _op: &Op,
         _dag: &dyn lattice_model::DagQueries,
-    ) -> Result<Self::Updates, StateDbError> {
-        Ok(())
+    ) -> Result<Vec<Self::Event>, StateDbError> {
+        Ok(vec![])
     }
 
-    fn notify(&self, _updates: Self::Updates) {}
+    fn event_sender(&self) -> &broadcast::Sender<Self::Event> {
+        &self.event_tx
+    }
 }
 
 // ---------------------------------------------------------------------------

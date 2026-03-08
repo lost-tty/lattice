@@ -239,17 +239,26 @@ mod tests {
     use lattice_model::{Op, Uuid};
     use lattice_storage::{ScopedDb, StateBackend, StateDbError, StateLogic, StorageConfig, TABLE_DATA, TABLE_SYSTEM};
 
-    struct MockLogic;
+    struct MockLogic {
+        event_tx: tokio::sync::broadcast::Sender<()>,
+    }
+
+    impl MockLogic {
+        fn new() -> Self {
+            let (event_tx, _) = tokio::sync::broadcast::channel(1);
+            Self { event_tx }
+        }
+    }
 
     impl StateLogic for MockLogic {
-        type Updates = ();
+        type Event = ();
 
         fn store_type() -> &'static str {
             "test:mock"
         }
 
         fn create(_scoped: ScopedDb) -> Self {
-            MockLogic
+            MockLogic::new()
         }
 
         fn apply(
@@ -257,11 +266,13 @@ mod tests {
             _table: &mut redb::Table<&[u8], &[u8]>,
             _op: &Op,
             _dag: &dyn lattice_model::DagQueries,
-        ) -> Result<(), StateDbError> {
-            Ok(())
+        ) -> Result<Vec<Self::Event>, StateDbError> {
+            Ok(vec![])
         }
 
-        fn notify(&self, _updates: ()) {}
+        fn event_sender(&self) -> &tokio::sync::broadcast::Sender<Self::Event> {
+            &self.event_tx
+        }
     }
 
     #[test]

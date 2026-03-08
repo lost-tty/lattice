@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::broadcast;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -690,9 +691,9 @@ impl<'a, R: Read> Read for HashingReader<'a, R> {
 /// `SystemLayer` owns the write transaction and calls `apply()` with a
 /// pre-opened `&mut redb::Table` scoped to the domain crate's table.
 /// Domain crates decode the payload, update the table, and return
-/// notification data for watchers.
+/// events for watchers.
 pub trait StateLogic: Send + Sync {
-    type Updates;
+    type Event: Clone + Send;
 
     /// Returns the store type identifier (e.g., "core:kvstore").
     fn store_type() -> &'static str
@@ -707,14 +708,22 @@ pub trait StateLogic: Send + Sync {
     /// Decode payload and apply mutations to the table.
     ///
     /// Called by `SystemLayer` inside an open write transaction.
-    /// Returning `Err` stalls the author's chain.
+    /// Returns events to be dispatched to watchers after commit.
     fn apply(
         &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn DagQueries,
-    ) -> Result<Self::Updates, StateDbError>;
+    ) -> Result<Vec<Self::Event>, StateDbError>;
 
-    /// Notify watchers of changes after the transaction commits.
-    fn notify(&self, updates: Self::Updates);
+    /// Returns the broadcast sender for dispatching events to watchers.
+    fn event_sender(&self) -> &broadcast::Sender<Self::Event>;
+
+    /// Dispatch events to watchers after the transaction commits.
+    fn notify(&self, events: Vec<Self::Event>) {
+        let sender = self.event_sender();
+        for event in events {
+            let _ = sender.send(event);
+        }
+    }
 }
