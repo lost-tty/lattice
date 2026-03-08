@@ -9,6 +9,10 @@ license.workspace = true
 name = "lattice"
 path = "src/main.rs"
 
+[features]
+default = []
+web = ["lattice-runtime/web", "dep:lattice-web"]
+
 [dependencies]
 lattice-runtime = { workspace = true }
 rustyline-async = "0.4"
@@ -33,3 +37,4 @@ bs58 = { version = "0.5", features = ["check"] }
 unicode-width = "0.1"
 anyhow = "1.0.100"
 terminal_size = "0.4.3"
+lattice-web = { workspace = true, optional = true }

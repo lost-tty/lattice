@@ -1,5 +1,9 @@
 //! Generated Protobuf definitions for Lattice
 
+/// Raw bytes of the FileDescriptorSet for all lattice-proto protos.
+pub const FILE_DESCRIPTOR_SET: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/lattice_descriptor.bin"));
+
 pub mod storage {
     include!(concat!(env!("OUT_DIR"), "/lattice.storage.rs"));
 

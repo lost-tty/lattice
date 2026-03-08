@@ -145,6 +145,10 @@ struct CliArgs {
     /// Run Node in-process (standalone mode)
     #[arg(short, long)]
     embedded: bool,
+
+    /// Start web UI on the given port (embedded mode only)
+    #[arg(long)]
+    web: Option<u16>,
 }
 
 #[tokio::main]
@@ -153,7 +157,7 @@ async fn main() {
     let args = CliArgs::parse();
 
     if args.embedded {
-        run_embedded_mode().await;
+        run_embedded_mode(args.web).await;
     } else {
         run_daemon_mode().await;
     }
@@ -215,7 +219,7 @@ async fn run_daemon_mode() {
 }
 
 /// Embedded mode: run Node in-process
-async fn run_embedded_mode() {
+async fn run_embedded_mode(web_port: Option<u16>) {
     let initial_prompt = make_prompt(None);
 
     let (rl, writer) = match Readline::new(initial_prompt) {
@@ -263,11 +267,29 @@ async fn run_embedded_mode() {
     );
 
     // Start runtime (Node + NetworkService + backend)
-    let runtime = match lattice_runtime::Runtime::builder()
-        .with_core_stores()
-        .build()
-        .await
-    {
+    let builder = lattice_runtime::Runtime::builder().with_core_stores();
+
+    #[cfg(feature = "web")]
+    let builder = if let Some(port) = web_port {
+        let _ = writeln!(
+            &mut writer.clone(),
+            "Web UI enabled on {}",
+            lattice_web::web_url(port)
+        );
+        builder.with_web(port)
+    } else {
+        builder
+    };
+
+    #[cfg(not(feature = "web"))]
+    if web_port.is_some() {
+        let _ = writeln!(
+            &mut writer.clone(),
+            "Warning: --web flag ignored, compile with --features web"
+        );
+    }
+
+    let runtime = match builder.build().await {
         Ok(r) => r,
         Err(e) => {
             let _ = writeln!(&mut writer.clone(), "Failed to start: {}", e);

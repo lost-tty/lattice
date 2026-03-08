@@ -10,12 +10,13 @@ use tokio::task::JoinHandle;
 /// Type alias for opener factory closures (matches NodeBuilder's signature).
 type OpenerFactory = Box<dyn FnOnce() -> Box<dyn StoreOpener> + Send>;
 
-/// A running Lattice runtime with Node, network, and optional RPC server.
+/// A running Lattice runtime with Node, network, and optional RPC/Web servers.
 pub struct Runtime {
     node: Arc<Node>,
     mesh_service: Arc<NetworkService>,
     backend: Arc<dyn LatticeBackend>,
     rpc_handle: Option<JoinHandle<()>>,
+    web_handle: Option<JoinHandle<()>>,
 }
 
 impl Runtime {
@@ -41,6 +42,11 @@ impl Runtime {
             handle.abort();
         }
 
+        // Abort web server if running
+        if let Some(handle) = &self.web_handle {
+            handle.abort();
+        }
+
         // Shutdown mesh service
         self.mesh_service
             .shutdown()
@@ -55,6 +61,8 @@ impl Runtime {
 pub struct RuntimeBuilder {
     data_dir: Option<PathBuf>,
     with_rpc: bool,
+    #[cfg(feature = "web")]
+    web_port: Option<u16>,
     name: Option<String>,
     opener_factories: Vec<(String, OpenerFactory)>,
 }
@@ -64,6 +72,8 @@ impl RuntimeBuilder {
         Self {
             data_dir: None,
             with_rpc: false,
+            #[cfg(feature = "web")]
+            web_port: None,
             name: None,
             opener_factories: Vec::new(),
         }
@@ -77,6 +87,24 @@ impl RuntimeBuilder {
     /// Enable RPC server (for daemon mode).
     pub fn with_rpc(mut self) -> Self {
         self.with_rpc = true;
+        self
+    }
+
+    /// Enable the web UI server on the given port.
+    ///
+    /// Starts an HTTP server with a WebSocket endpoint that tunnels gRPC calls
+    /// and serves a browser-based UI mirroring the CLI functionality.
+    ///
+    /// # Example
+    /// ```ignore
+    /// Runtime::builder()
+    ///     .with_core_stores()
+    ///     .with_web(8080)
+    ///     .build().await
+    /// ```
+    #[cfg(feature = "web")]
+    pub fn with_web(mut self, port: u16) -> Self {
+        self.web_port = Some(port);
         self
     }
 
@@ -185,11 +213,27 @@ impl RuntimeBuilder {
             None
         };
 
+        // Start web server if requested
+        #[cfg(feature = "web")]
+        let web_handle = if let Some(port) = self.web_port {
+            let web_server = lattice_web::WebServer::new(backend.clone(), port);
+            Some(tokio::spawn(async move {
+                if let Err(e) = web_server.run().await {
+                    tracing::error!("Web server error: {}", e);
+                }
+            }))
+        } else {
+            None
+        };
+        #[cfg(not(feature = "web"))]
+        let web_handle: Option<JoinHandle<()>> = None;
+
         Ok(Runtime {
             node,
             mesh_service,
             backend,
             rpc_handle,
+            web_handle,
         })
     }
 }
