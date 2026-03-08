@@ -369,48 +369,12 @@ mod tests {
     use lattice_model::dag_queries::NullDag;
     use lattice_model::hlc::HLC;
     use lattice_model::{Hash, Op, PubKey, Uuid};
-    use lattice_storage::{ScopedDb, StateBackend, StorageConfig, TABLE_DATA};
+    use lattice_mockkernel::TestHarness;
+    use lattice_storage::StorageConfig;
+
+    type LogHarness = TestHarness<LogState>;
 
     static NULL_DAG: NullDag = NullDag;
-
-    struct TestHarness {
-        backend: StateBackend,
-        ctx: StateContext<LogEvent>,
-        store: LogState,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let backend =
-                StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-            let ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_DATA));
-            let store = LogState::new(ctx.clone());
-            Self { backend, ctx, store }
-        }
-
-        fn open(id: Uuid, config: &StorageConfig) -> Self {
-            let backend = StateBackend::open(id, config, None, 0).unwrap();
-            let ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_DATA));
-            let store = LogState::new(ctx.clone());
-            Self { backend, ctx, store }
-        }
-
-        fn apply(
-            &self,
-            op: &Op,
-            dag: &dyn lattice_model::DagQueries,
-        ) -> Result<(), StateDbError> {
-            let write_txn = self.backend.db().begin_write()?;
-            {
-                let mut table = write_txn.open_table(TABLE_DATA)?;
-                let events = LogState::apply(&mut table, op, dag)?;
-                drop(table);
-                write_txn.commit()?;
-                self.ctx.notify(events);
-            }
-            Ok(())
-        }
-    }
 
     #[test]
     fn test_persistence_roundtrip() {
@@ -419,7 +383,7 @@ mod tests {
         let author = PubKey::from([1u8; 32]);
         let id = Uuid::new_v4();
         let config = StorageConfig::File(dir.path().to_path_buf());
-        let h = TestHarness::open(id, &config);
+        let h = LogHarness::open(id, &config);
 
         let op = Op {
             info: lattice_model::IntentionInfo {
@@ -441,14 +405,14 @@ mod tests {
         drop(h);
 
         // Re-open with SAME ID
-        let h2 = TestHarness::open(id, &config);
+        let h2 = LogHarness::open(id, &config);
         assert_eq!(h2.store.read(None).len(), 1);
         assert_eq!(h2.store.read(None)[0].content, b"hello world");
     }
 
     #[test]
     fn test_ordering() {
-        let h = TestHarness::new();
+        let h = LogHarness::new();
 
         let author1 = PubKey::from([1u8; 32]);
         let author2 = PubKey::from([2u8; 32]);
@@ -519,7 +483,7 @@ mod tests {
     fn test_snapshot_restore() {
         let store_id = Uuid::new_v4();
 
-        let h1 = TestHarness::open(store_id, &StorageConfig::InMemory);
+        let h1 = LogHarness::open(store_id, &StorageConfig::InMemory);
 
         let author = PubKey::from([1u8; 32]);
         let start_hlc = HLC::now();
@@ -540,7 +504,7 @@ mod tests {
         h1.backend.snapshot(&mut snapshot_bytes).unwrap();
 
         // Restore to fresh state with SAME store ID (restore validates ID)
-        let h2 = TestHarness::open(store_id, &StorageConfig::InMemory);
+        let h2 = LogHarness::open(store_id, &StorageConfig::InMemory);
         h2.backend
             .restore(&mut std::io::Cursor::new(snapshot_bytes))
             .unwrap();

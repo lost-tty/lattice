@@ -706,6 +706,9 @@ mod tests {
             .with_opener(STORE_TYPE_LOGSTORE, || {
                 direct_opener::<TestLogState>()
             })
+            .with_opener(STORE_TYPE_NULLSTORE, || {
+                direct_opener::<TestNullState>()
+            })
     }
 
     #[tokio::test]
@@ -862,7 +865,7 @@ mod tests {
                 .build()
                 .expect("create node");
             store_id = node
-                .create_store(None, None, STORE_TYPE_KVSTORE)
+                .create_store(None, None, STORE_TYPE_NULLSTORE)
                 .await
                 .expect("create_mesh");
             node.shutdown().await; // Explicit shutdown to release DB

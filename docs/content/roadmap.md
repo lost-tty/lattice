@@ -28,17 +28,27 @@ title: "Roadmap"
 
 Test cleanup, dependency review.
 
-### 17A: Test Review & NullStore Migration
-- [ ] Review all integration tests — replace `KvStore` with `NullStore` wherever the test does not exercise KV-specific logic (chain rules, sync compliance, actor lifecycle, etc.).
-- [ ] Unify `test_node_builder` and `file_node_builder` helpers into a single shared builder (see Technical Debt).
-- [ ] Scope domain crate tests closer — add generic `TestHarness<S: StateLogic>` to `lattice-storage` (behind `test-support` feature), replace duplicated harnesses in `lattice-kvstore` and `lattice-logstore` unit tests. Internal `#[cfg(test)]` tests already call `StateLogic::apply` directly (correct); integration tests in `tests/` go through `SystemLayer` (correct). Only the boilerplate needs dedup.
-- [ ] Move `lattice-kvstore/tests/sync_compliance.rs` to `lattice-systemstore/tests/` — tests chain rules, snapshot/restore, convergence via `SystemLayer`, not KV-specific logic. Use `NullState` where possible, keep `KvState` only for tests that need real merge behavior.
+- [ ] `store status` should show projection cursor
+- [ ] Bug on start: ERROR startup projection failed: State error: Backend error: Projection cursor xxx not found in witness content index store_id=yyy (needs testcase)
+
+### 17A: Test Infrastructure Unification
+- [ ] **Unify `test_node_builder`**: 6 copies across 5 files, each registering different opener sets. Consolidate into a single configurable builder in `lattice-mockkernel` (e.g., `TestNodeBuilder::new().with_kv().with_log().with_null().in_memory().build(data_dir)`). Current locations: `lattice-node/src/node.rs`, `lattice-node/tests/store_manager_test.rs`, `lattice-node/tests/multi_author_test.rs`, `lattice-net/tests/common/mod.rs`, `lattice-net/tests/gap_fill_integration.rs`, `lattice-net-iroh/tests/iroh_integration_test.rs`.
+- [ ] **Unify `TestHarness`**: two identical structs in `lattice-kvstore/src/state.rs` and `lattice-logstore/src/state.rs` that manage `StateBackend` + `StateContext` + manual write transactions. Extract a generic `TestHarness<S: StateLogic>` into `lattice-mockkernel` (or `lattice-storage` behind a `test-support` feature).
+- [ ] **Unify `TestStore`/`TestLogStore`**: `lattice-kvstore/tests/common/mod.rs` and `lattice-logstore/tests/common/mod.rs` are near-identical (`SystemLayer<S>` + `MockWriter<S>`). Extract a generic `TestStore<S: StateLogic>` into `lattice-mockkernel`.
+- [ ] **Unify `TestCtx`**: two identical copies in `lattice-node/tests/store_manager_test.rs` and `lattice-node/tests/multi_author_test.rs` (`TempDir` + `Node`). Merge into shared `tests/common/`.
+- [ ] **Replace mock state machines with `NullState`**: 6 mock `StateMachine`/`StateLogic` impls across 5 files (`MockStateMachine` x2 in kernel, `MockState` in net, `MockLogic` in systemstore, `TestStateMachine` in kernel). Most are no-op or minimal tracking. Replace with `NullState` where possible; for the kernel actor tests that track applied ops, consider adding an optional callback to `NullState` or keeping a single `TrackingState` in `lattice-mockkernel`.
+- [ ] **Deduplicate `MockProvider`**: 3 copies of `NodeProviderExt` mocks across `lattice-net/src/network/service_tests.rs`, `lattice-net-iroh/tests/iroh_backend_test.rs`, `lattice-net-iroh/tests/mock_provider_test.rs`. Extract to `lattice-mockkernel` or a shared test module.
+- [ ] **Deduplicate helper functions**: `wrap_app_data` (3 copies), `put_kv`/`wait_for_key` (3+ copies), `temp_data_dir` (2 copies), `create_test_op` (2 copies). Move to `lattice-mockkernel` or appropriate `tests/common/`.
+
+### 17B: Test Scope Review
+- [ ] Review all integration tests in `lattice-net` and `lattice-kvstore`. Replace `KvState` with `NullState` wherever the test does not exercise KV-specific logic.
+- [ ] Move `lattice-kvstore/tests/sync_compliance.rs` to `lattice-systemstore/tests/`. Tests chain rules, snapshot/restore, convergence via `SystemLayer`, not KV-specific logic. Use `NullState` where possible, keep `KvState` only for tests that need real merge behavior.
 - [ ] Audit test coverage gaps exposed by the migration.
 
-### 17B: Proto Definition Audit
+### 17C: Proto Definition Audit
 - [ ] Audit `lattice-proto`: identify proto definitions that are only consumed by a single crate. Move those definitions into the consuming crate's own proto files. If all definitions can be relocated, remove `lattice-proto` entirely.
 
-### 17C: Crate Dependency Graph Review
+### 17D: Crate Dependency Graph Review
 - [ ] Review the dependency graph between workspace crates. Identify unnecessary or circular dependencies, overly broad re-exports, and crates that pull in more than they need. Clean up after M13 and M16 reshuffling.
 
 ---
@@ -211,8 +221,8 @@ Run the kernel on the RP2350.
 
 ## Technical Debt
 
-- [ ] **Unify test node builders**: Find all `test_node_builder` and `file_node_builder` helpers across tests and consolidate into a single shared builder.
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
+- [ ] **REGRESSION**: `node set-name` creates two intentions with the same op per store. `Node::set_name` calls `publish_name_to()` for each active store, which each creates a `PeerOp::SetName` intention via `SystemBatch`. Investigate whether duplicate submissions are happening (e.g., store list contains duplicates, or the call is invoked twice).
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
 - [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
 - [ ] **DAG Reachability Index**: `DagQueries` methods (`find_lca`, `is_ancestor`, `get_path`) use naive BFS. For large DAGs, add generation numbers (prune impossible ancestors by depth) or bloom filters (compact ancestor summaries) for O(log N) reachability. Not needed until BFS becomes a bottleneck.

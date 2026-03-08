@@ -646,54 +646,19 @@ impl KvState {
 mod tests {
     use super::*;
     use crate::proto::Operation;
-    use lattice_model::dag_queries::{HashMapDag, NullDag};
+    use lattice_model::dag_queries::NullDag;
     use lattice_model::hlc::HLC;
-    use lattice_model::{PubKey, Uuid};
-    use lattice_storage::{ScopedDb, StateBackend, StateContext, StorageConfig, TABLE_DATA};
+    use lattice_model::PubKey;
+    use lattice_mockkernel::TestHarness;
+
+    type KvHarness = TestHarness<KvState>;
 
     static NULL_DAG: NullDag = NullDag;
-
-    struct TestHarness {
-        backend: StateBackend,
-        ctx: StateContext<WatchEvent>,
-        store: KvState,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let backend =
-                StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-            let ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_DATA));
-            let store = KvState::new(ctx.clone());
-            Self { backend, ctx, store }
-        }
-
-        /// Open a write transaction, apply the op via StateLogic, and commit.
-        fn apply(
-            &self,
-            op: &Op,
-            dag: &dyn lattice_model::DagQueries,
-        ) -> Result<(), StateDbError> {
-            let write_txn = self.backend.db().begin_write()?;
-            {
-                let mut table = write_txn.open_table(TABLE_DATA)?;
-                let events = KvState::apply(&mut table, op, dag)?;
-                drop(table);
-                write_txn.commit()?;
-                self.ctx.notify(events);
-            }
-            Ok(())
-        }
-    }
-
-    fn new_test_harness() -> TestHarness {
-        TestHarness::new()
-    }
 
     /// Test that StateLogic::apply works correctly for put operations
     #[test]
     fn test_state_logic_apply_put() {
-        let h = new_test_harness();
+        let h = KvHarness::new();
 
         // Create an Op with a Put payload
         let key = b"test/key";
@@ -729,131 +694,6 @@ mod tests {
         assert_eq!(h.store.head_hashes(key).unwrap(), vec![op_hash]);
     }
 
-    /// Test that multiple puts to same key creates proper head list
-    #[test]
-    fn test_concurrent_puts() {
-        let h = new_test_harness();
-        let dag = HashMapDag::new();
-
-        let key = b"shared/key";
-
-        // First put from author A
-        let author_a = PubKey::from([10u8; 32]);
-        let hash_a = Hash::from([11u8; 32]);
-        let op_a = make_put_op(key, b"value_a", hash_a, author_a, &[], Hash::ZERO);
-        dag.record(&op_a);
-        h.apply(&op_a, &dag).unwrap();
-
-        // Second put from author B (concurrent - no deps)
-        let author_b = PubKey::from([20u8; 32]);
-        let hash_b = Hash::from([21u8; 32]);
-        let op_b = make_put_op(key, b"value_b", hash_b, author_b, &[], Hash::ZERO);
-        dag.record(&op_b);
-        h.apply(&op_b, &dag).unwrap();
-
-        // Should have 2 concurrent heads
-        assert_eq!(
-            h.store.head_hashes(key).unwrap().len(),
-            2,
-            "Expected 2 concurrent heads"
-        );
-
-        // Third put that supersedes both (has both as deps)
-        let author_c = PubKey::from([30u8; 32]);
-        let hash_c = Hash::from([31u8; 32]);
-        let deps = vec![hash_a, hash_b];
-        let op_c = make_put_op(key, b"merged", hash_c, author_c, &deps, Hash::ZERO);
-        dag.record(&op_c);
-        h.apply(&op_c, &dag).unwrap();
-
-        // Should now have only 1 head (the merge)
-        assert_eq!(h.store.head_hashes(key).unwrap(), vec![hash_c]);
-        assert_eq!(h.store.get(key).unwrap(), Some(b"merged".to_vec()));
-    }
-
-    /// Test delete operation via StateLogic trait
-    #[test]
-    fn test_apply_delete() {
-        let h = new_test_harness();
-
-        let key = b"to/delete";
-
-        // First put a value
-        let author = PubKey::from([5u8; 32]);
-        let put_hash = Hash::from([6u8; 32]);
-        let put_op = make_put_op(key, b"exists", put_hash, author, &[], Hash::ZERO);
-        h.apply(&put_op, &NULL_DAG).unwrap();
-
-        // Verify it exists
-        assert_eq!(h.store.get(key).unwrap(), Some(b"exists".to_vec()));
-
-        // Now delete it
-        let del_hash = Hash::from([7u8; 32]);
-        let del_op = make_delete_op(key, del_hash, author, &[put_hash], put_hash);
-        h.apply(&del_op, &NULL_DAG).unwrap();
-
-        // Should be deleted (tombstone → get returns None)
-        assert_eq!(h.store.get(key).unwrap(), None);
-        assert_eq!(
-            h.store.head_hashes(key).unwrap().len(),
-            1,
-            "Tombstone head should still exist"
-        );
-    }
-
-    // Helper to create a Put Op
-    fn make_put_op(
-        key: &[u8],
-        value: &[u8],
-        hash: Hash,
-        author: PubKey,
-        deps: &[Hash],
-        prev_hash: Hash,
-    ) -> Op<'static> {
-        let payload = KvPayload {
-            ops: vec![Operation::put(key, value)],
-        };
-        let payload_bytes = payload.encode_to_vec();
-        let deps_static: &'static [Hash] = Box::leak(deps.to_vec().into_boxed_slice());
-
-        Op {
-            info: lattice_model::IntentionInfo {
-                hash,
-                payload: std::borrow::Cow::Owned(payload_bytes),
-                timestamp: HLC::now(),
-                author,
-            },
-            causal_deps: deps_static,
-            prev_hash,
-        }
-    }
-
-    // Helper to create a Delete Op
-    fn make_delete_op(
-        key: &[u8],
-        hash: Hash,
-        author: PubKey,
-        deps: &[Hash],
-        prev_hash: Hash,
-    ) -> Op<'static> {
-        let payload = KvPayload {
-            ops: vec![Operation::delete(key)],
-        };
-        let payload_bytes = payload.encode_to_vec();
-        let deps_static: &'static [Hash] = Box::leak(deps.to_vec().into_boxed_slice());
-
-        Op {
-            info: lattice_model::IntentionInfo {
-                hash,
-                payload: std::borrow::Cow::Owned(payload_bytes),
-                timestamp: HLC::now(),
-                author,
-            },
-            causal_deps: deps_static,
-            prev_hash,
-        }
-    }
-
     // Helper to create an Op with multiple ops in payload (for testing reverse iteration)
     fn make_multi_op(
         ops: Vec<Operation>,
@@ -881,7 +721,7 @@ mod tests {
     /// Test that apply_op with duplicate keys in payload uses last-wins (reverse iteration)
     #[test]
     fn test_apply_op_duplicate_keys_last_wins() {
-        let h = new_test_harness();
+        let h = KvHarness::new();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -904,7 +744,7 @@ mod tests {
     /// Test that apply_op with put then delete on same key results in deletion
     #[test]
     fn test_apply_op_put_then_delete_same_key() {
-        let h = new_test_harness();
+        let h = KvHarness::new();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -926,7 +766,7 @@ mod tests {
     /// Test that apply_op with delete then put on same key results in value
     #[test]
     fn test_apply_op_delete_then_put_same_key() {
-        let h = new_test_harness();
+        let h = KvHarness::new();
 
         let key = b"test/key";
         let author = PubKey::from([1u8; 32]);
@@ -949,7 +789,7 @@ mod tests {
     /// This ensures deterministic replay - once signed, always apply.
     #[test]
     fn test_apply_op_empty_key_allowed() {
-        let h = new_test_harness();
+        let h = KvHarness::new();
 
         let author = PubKey::from([1u8; 32]);
         let hash = Hash::from([2u8; 32]);

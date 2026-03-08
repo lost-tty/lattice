@@ -22,5 +22,7 @@ futures-util = { workspace = true }
 hex.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-stream = { workspace = true, features = ["sync"] }
+
 [dev-dependencies]
+lattice-mockkernel = { workspace = true }
 tempfile = "3"

@@ -29,6 +29,9 @@ fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
         .with_opener(STORE_TYPE_KVSTORE, || {
             direct_opener::<TestKvState>()
         })
+        .with_opener(STORE_TYPE_NULLSTORE, || {
+            direct_opener::<TestNullState>()
+        })
 }
 
 /// Shared test context — keeps tempdir alive and provides access to node + store_manager.
@@ -239,7 +242,7 @@ async fn test_synced_store_declaration_auto_opened() {
     let sm = node.store_manager();
 
     let root_id = node
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
 
@@ -252,7 +255,7 @@ async fn test_synced_store_declaration_auto_opened() {
         .add_child(
             foreign_store_id,
             "foreign-store".to_string(),
-            STORE_TYPE_KVSTORE,
+            STORE_TYPE_NULLSTORE,
         )
         .set_child_status(
             foreign_store_id,
@@ -288,11 +291,11 @@ async fn test_stores_opened_on_startup() {
             .build()
             .unwrap();
         root_id = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .unwrap();
         child_id = node
-            .create_store(Some(root_id), None, STORE_TYPE_KVSTORE)
+            .create_store(Some(root_id), None, STORE_TYPE_NULLSTORE)
             .await
             .unwrap();
         wait_for_open(node.store_manager(), child_id).await;

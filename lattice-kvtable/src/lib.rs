@@ -538,4 +538,559 @@ mod tests {
         assert_eq!(value, None);
         assert!(!conflicted);
     }
+
+    #[test]
+    fn kvtable_get_missing_key() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let kvt = KVTable::new(&mut table);
+            assert_eq!(kvt.get(b"nope").unwrap(), None);
+        }
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn kvtable_heads() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            // Missing key returns empty
+            assert!(kvt.heads(b"nope").unwrap().is_empty());
+
+            // After apply, returns the head hash
+            let info = test_info();
+            kvt.apply_head(b"key", &info, &[], b"val".to_vec(), false, &NullDag)
+                .unwrap();
+            assert_eq!(kvt.heads(b"key").unwrap(), vec![info.hash]);
+        }
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn inspect_missing_key() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            txn.open_table(TEST_TABLE).unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        let result = ro.inspect(b"nope").unwrap();
+        assert!(!result.exists);
+        assert_eq!(result.value, None);
+        assert!(!result.tombstone);
+        assert!(!result.conflicted);
+        assert!(result.heads.is_empty());
+    }
+
+    #[test]
+    fn iter_all_entries() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            let info_a = IntentionInfo {
+                hash: Hash::from([1u8; 32]),
+                timestamp: lattice_model::hlc::HLC::new(1, 0),
+                author: PubKey::from([0xAA; 32]),
+                payload: std::borrow::Cow::Borrowed(&[]),
+            };
+            let info_b = IntentionInfo {
+                hash: Hash::from([2u8; 32]),
+                timestamp: lattice_model::hlc::HLC::new(2, 0),
+                author: PubKey::from([0xAA; 32]),
+                payload: std::borrow::Cow::Borrowed(&[]),
+            };
+
+            kvt.apply_head(b"a", &info_a, &[], b"va".to_vec(), false, &NullDag)
+                .unwrap();
+            kvt.apply_head(b"b", &info_b, &[], b"vb".to_vec(), false, &NullDag)
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        let entries: Vec<_> = ro.iter().unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, b"a");
+        assert_eq!(entries[0].1, Some(b"va".to_vec()));
+        assert!(!entries[0].2);
+        assert_eq!(entries[1].0, b"b");
+        assert_eq!(entries[1].1, Some(b"vb".to_vec()));
+        assert!(!entries[1].2);
+    }
+
+    #[test]
+    fn get_with_conflict_tombstone() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+
+        let info1 = IntentionInfo {
+            hash: Hash::from([1u8; 32]),
+            timestamp: lattice_model::hlc::HLC::new(1, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+        let info2 = IntentionInfo {
+            hash: Hash::from([2u8; 32]),
+            timestamp: lattice_model::hlc::HLC::new(2, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            // Put a value, then delete it (tombstone supersedes via causal dep)
+            kvt.apply_head(b"key", &info1, &[], b"val".to_vec(), false, &NullDag)
+                .unwrap();
+            kvt.apply_head(b"key", &info2, &[info1.hash], vec![], true, &NullDag)
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        let (value, conflicted) = ro.get_with_conflict(b"key").unwrap();
+        assert_eq!(value, None, "Tombstone should return None");
+        assert!(!conflicted, "Single head after causal subsumption");
+    }
+
+    #[test]
+    fn iter_with_tombstone() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+
+        let info1 = IntentionInfo {
+            hash: Hash::from([1u8; 32]),
+            timestamp: lattice_model::hlc::HLC::new(1, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+        let info2 = IntentionInfo {
+            hash: Hash::from([2u8; 32]),
+            timestamp: lattice_model::hlc::HLC::new(2, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            // Live entry
+            kvt.apply_head(b"alive", &info1, &[], b"val".to_vec(), false, &NullDag)
+                .unwrap();
+            // Tombstone entry
+            kvt.apply_head(b"dead", &info2, &[], vec![], true, &NullDag)
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        let entries: Vec<_> = ro.iter().unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(entries.len(), 2);
+        // "alive" < "dead" lexicographically
+        assert_eq!(entries[0].0, b"alive");
+        assert_eq!(entries[0].1, Some(b"val".to_vec()));
+        assert_eq!(entries[1].0, b"dead");
+        assert_eq!(entries[1].1, None, "Tombstone should yield None");
+    }
+
+    #[test]
+    fn inspect_value_and_tombstone() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            let info1 = IntentionInfo {
+                hash: Hash::from([1u8; 32]),
+                timestamp: lattice_model::hlc::HLC::new(1, 0),
+                author: PubKey::from([0xAA; 32]),
+                payload: std::borrow::Cow::Borrowed(&[]),
+            };
+            let info2 = IntentionInfo {
+                hash: Hash::from([2u8; 32]),
+                timestamp: lattice_model::hlc::HLC::new(2, 0),
+                author: PubKey::from([0xAA; 32]),
+                payload: std::borrow::Cow::Borrowed(&[]),
+            };
+
+            kvt.apply_head(b"live", &info1, &[], b"val".to_vec(), false, &NullDag)
+                .unwrap();
+            kvt.apply_head(b"dead", &info2, &[], vec![], true, &NullDag)
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        let live = ro.inspect(b"live").unwrap();
+        assert!(live.exists);
+        assert_eq!(live.value, Some(b"val".to_vec()));
+        assert!(!live.tombstone);
+
+        let dead = ro.inspect(b"dead").unwrap();
+        assert!(dead.exists);
+        assert_eq!(dead.value, None);
+        assert!(dead.tombstone);
+    }
+
+    #[test]
+    fn readonly_get_and_heads_and_range() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            let info = test_info();
+            kvt.apply_head(b"a", &info, &[], b"va".to_vec(), false, &NullDag)
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        assert_eq!(ro.get(b"a").unwrap(), Some(b"va".to_vec()));
+        assert_eq!(ro.get(b"nope").unwrap(), None);
+        assert_eq!(ro.heads(b"a").unwrap(), vec![test_info().hash]);
+        assert!(ro.heads(b"nope").unwrap().is_empty());
+
+        let range: Vec<_> = ro
+            .range::<&[u8]>(..)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(range.len(), 1);
+        assert_eq!(range[0].0, b"a");
+        assert_eq!(range[0].1, Some(b"va".to_vec()));
+    }
+
+    #[test]
+    fn apply_idempotent_and_loser_branch() {
+        use lattice_model::dag_queries::HashMapDag;
+        use lattice_model::state_machine::Op;
+
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let dag = HashMapDag::new();
+
+        let info1 = IntentionInfo {
+            hash: Hash::from([1u8; 32]),
+            timestamp: lattice_model::hlc::HLC::new(2, 0),
+            author: PubKey::from([0xBB; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+        let info2 = IntentionInfo {
+            hash: Hash::from([2u8; 32]),
+            timestamp: lattice_model::hlc::HLC::new(1, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            // First apply
+            kvt.apply_head(b"key", &info1, &[], b"v1".to_vec(), false, &NullDag)
+                .unwrap();
+
+            // Idempotent re-apply returns None
+            let dup = kvt
+                .apply_head(b"key", &info1, &[], b"v1".to_vec(), false, &NullDag)
+                .unwrap();
+            assert_eq!(dup, None, "Duplicate should be idempotent");
+
+            // Record info1 in DAG for LWW comparison
+            let empty_deps: Vec<Hash> = vec![];
+            dag.record(&Op {
+                info: info1.clone(),
+                causal_deps: &empty_deps,
+                prev_hash: Hash::ZERO,
+            });
+
+            // info2 has lower HLC, so it loses
+            let result = kvt
+                .apply_head(b"key", &info2, &[], b"v2".to_vec(), false, &dag)
+                .unwrap();
+            // Current winner stays, value returned is still v1
+            assert_eq!(result, Some(Some(b"v1".to_vec())));
+        }
+        txn.commit().unwrap();
+    }
+
+    // Apply two concurrent heads in both orders; verify identical winner and head set.
+    #[test]
+    fn convergence_order_independent() {
+        use lattice_model::dag_queries::HashMapDag;
+        use lattice_model::state_machine::Op;
+
+        let info_a = IntentionInfo {
+            hash: Hash::from([1u8; 32]),
+            timestamp: HLC::new(1, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+        let info_b = IntentionInfo {
+            hash: Hash::from([2u8; 32]),
+            timestamp: HLC::new(1, 0),
+            author: PubKey::from([0xBB; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+
+        let empty_deps: Vec<Hash> = vec![];
+        let op_a = Op {
+            info: info_a.clone(),
+            causal_deps: &empty_deps,
+            prev_hash: Hash::ZERO,
+        };
+        let op_b = Op {
+            info: info_b.clone(),
+            causal_deps: &empty_deps,
+            prev_hash: Hash::ZERO,
+        };
+
+        // Order 1: A then B
+        let dag1 = HashMapDag::new();
+        let db1 = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn1 = db1.begin_write().unwrap();
+        {
+            let mut table = txn1.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+            kvt.apply_head(b"k", &info_a, &[], b"vA".to_vec(), false, &NullDag)
+                .unwrap();
+            dag1.record(&op_a);
+            kvt.apply_head(b"k", &info_b, &[], b"vB".to_vec(), false, &dag1)
+                .unwrap();
+        }
+        txn1.commit().unwrap();
+
+        // Order 2: B then A
+        let dag2 = HashMapDag::new();
+        let db2 = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+        let txn2 = db2.begin_write().unwrap();
+        {
+            let mut table = txn2.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+            kvt.apply_head(b"k", &info_b, &[], b"vB".to_vec(), false, &NullDag)
+                .unwrap();
+            dag2.record(&op_b);
+            kvt.apply_head(b"k", &info_a, &[], b"vA".to_vec(), false, &dag2)
+                .unwrap();
+        }
+        txn2.commit().unwrap();
+
+        let r1 = db1.begin_read().unwrap();
+        let t1 = r1.open_table(TEST_TABLE).unwrap();
+        let ro1 = ReadOnlyKVTable::new(t1);
+
+        let r2 = db2.begin_read().unwrap();
+        let t2 = r2.open_table(TEST_TABLE).unwrap();
+        let ro2 = ReadOnlyKVTable::new(t2);
+
+        let (val1, c1) = ro1.get_with_conflict(b"k").unwrap();
+        let (val2, c2) = ro2.get_with_conflict(b"k").unwrap();
+        assert_eq!(
+            val1, val2,
+            "LWW winner must be the same regardless of apply order"
+        );
+        assert_eq!(c1, c2);
+
+        let mut heads1 = ro1.heads(b"k").unwrap();
+        let mut heads2 = ro2.heads(b"k").unwrap();
+        heads1.sort();
+        heads2.sort();
+        assert_eq!(
+            heads1, heads2,
+            "Head sets must match regardless of apply order"
+        );
+    }
+
+    // Applying a head whose causal_deps include an existing head removes the old head.
+    #[test]
+    fn causal_supersession_replaces_head() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+
+        let hash1 = Hash::from([1u8; 32]);
+        let hash2 = Hash::from([2u8; 32]);
+
+        let info1 = IntentionInfo {
+            hash: hash1,
+            timestamp: HLC::new(1, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+        let info2 = IntentionInfo {
+            hash: hash2,
+            timestamp: HLC::new(2, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            kvt.apply_head(b"key", &info1, &[], b"v1".to_vec(), false, &NullDag)
+                .unwrap();
+
+            // Second head causally supersedes the first
+            kvt.apply_head(b"key", &info2, &[hash1], b"v2".to_vec(), false, &NullDag)
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        let heads = ro.heads(b"key").unwrap();
+        assert_eq!(heads, vec![hash2], "Old head should be superseded");
+
+        let (val, conflicted) = ro.get_with_conflict(b"key").unwrap();
+        assert_eq!(val, Some(b"v2".to_vec()));
+        assert!(
+            !conflicted,
+            "Single head after supersession should not be conflicted"
+        );
+    }
+
+    // Causal supersession with a tombstone: delete that deps on a put removes the put head.
+    #[test]
+    fn causal_supersession_delete() {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+
+        let put_hash = Hash::from([1u8; 32]);
+        let del_hash = Hash::from([2u8; 32]);
+
+        let put_info = IntentionInfo {
+            hash: put_hash,
+            timestamp: HLC::new(1, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+        let del_info = IntentionInfo {
+            hash: del_hash,
+            timestamp: HLC::new(2, 0),
+            author: PubKey::from([0xAA; 32]),
+            payload: std::borrow::Cow::Borrowed(&[]),
+        };
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            let mut kvt = KVTable::new(&mut table);
+
+            kvt.apply_head(b"key", &put_info, &[], b"val".to_vec(), false, &NullDag)
+                .unwrap();
+
+            // Delete causally depends on the put
+            kvt.apply_head(b"key", &del_info, &[put_hash], vec![], true, &NullDag)
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        assert_eq!(
+            ro.get(b"key").unwrap(),
+            None,
+            "Tombstone should hide the value"
+        );
+        let heads = ro.heads(b"key").unwrap();
+        assert_eq!(heads, vec![del_hash], "Only tombstone head should remain");
+    }
+
+    #[test]
+    fn inspect_no_kind() {
+        // A proto::Value with a head but no kind set (malformed/corrupt data).
+        // inspect() should return exists=true, value=None, tombstone=false.
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .unwrap();
+
+        let hash = Hash::from([1u8; 32]);
+        let raw = proto::Value {
+            kind: None,
+            heads: vec![hash.as_bytes().to_vec()],
+        };
+        let encoded = raw.encode_to_vec();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TEST_TABLE).unwrap();
+            table
+                .insert(b"broken".as_slice(), encoded.as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        let rtx = db.begin_read().unwrap();
+        let table = rtx.open_table(TEST_TABLE).unwrap();
+        let ro = ReadOnlyKVTable::new(table);
+
+        let result = ro.inspect(b"broken").unwrap();
+        assert!(result.exists);
+        assert_eq!(result.value, None);
+        assert!(!result.tombstone);
+        assert!(!result.conflicted);
+        assert_eq!(result.heads, vec![hash]);
+    }
 }

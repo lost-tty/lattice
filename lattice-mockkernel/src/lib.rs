@@ -7,7 +7,9 @@
 //!   that only need the kernel (intentions, sync, gossip) without any real store.
 
 mod null_state;
+pub mod harness;
 
+pub use harness::{TestHarness, TestStore};
 pub use null_state::{NullState, STORE_TYPE_NULLSTORE};
 
 use futures_util::StreamExt;
@@ -23,6 +25,17 @@ use prost::Message;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+
+/// Wrap raw app-data bytes in a `UniversalOp::AppData` protobuf envelope.
+///
+/// Test helpers that build `Op` values need the payload wrapped in this
+/// envelope before it reaches `SystemLayer::apply`.
+pub fn wrap_app_data(raw: Vec<u8>) -> Vec<u8> {
+    let envelope = lattice_proto::storage::UniversalOp {
+        op: Some(lattice_proto::storage::universal_op::Op::AppData(raw)),
+    };
+    envelope.encode_to_vec()
+}
 
 static NULL_DAG: NullDag = NullDag;
 
