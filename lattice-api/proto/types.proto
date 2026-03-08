@@ -255,8 +255,7 @@ message AuthorStateRequest {
 
 message AuthorState {
   bytes public_key = 1;
-  uint64 seq = 2;
-  bytes hash = 3;
+  bytes hash = 2;
 }
 
 message AuthorStateResponse {

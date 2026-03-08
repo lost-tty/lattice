@@ -451,7 +451,6 @@ impl LatticeBackend for InProcessBackend {
                 .into_iter()
                 .map(|(author, hash)| AuthorState {
                     public_key: author.to_vec(),
-                    seq: 0, // seq no longer used in intention model
                     hash: hash.to_vec(),
                 })
                 .collect())
