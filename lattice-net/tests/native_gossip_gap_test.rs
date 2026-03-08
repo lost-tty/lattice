@@ -31,10 +31,7 @@ async fn assert_key_exists(handle: &Arc<dyn lattice_node::StoreHandle>, key: &[u
     tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
         loop {
             let dispatcher = handle.as_dispatcher();
-            let req = GetRequest {
-                key: key.to_vec(),
-                verbose: false,
-            };
+            let req = GetRequest { key: key.to_vec() };
             let resp: GetResponse = invoke_command::<_, GetResponse>(&*dispatcher, "Get", req)
                 .await
                 .expect("Get failed");
@@ -155,7 +152,6 @@ async fn test_native_gossip_gap_recovery() {
     let dispatcher = handle_b.as_dispatcher();
     let req = GetRequest {
         key: b"key1".to_vec(),
-        verbose: false,
     };
     let resp: GetResponse = invoke_command::<_, GetResponse>(&*dispatcher, "Get", req)
         .await

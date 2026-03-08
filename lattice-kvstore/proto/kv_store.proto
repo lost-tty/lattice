@@ -34,7 +34,6 @@ message PutResponse {
 
 message GetRequest {
     bytes key = 1;
-    bool verbose = 2;
 }
 
 message GetResponse {
@@ -66,7 +65,6 @@ message DeleteResponse {
 
 message ListRequest {
     bytes prefix = 1;
-    bool verbose = 2;
 }
 
 message ListResponse {

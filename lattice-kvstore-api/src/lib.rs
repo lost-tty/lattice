@@ -222,10 +222,7 @@ impl<T: CommandDispatcher + StreamReflectable + ?Sized> KvStoreExt for T {
         >,
     > {
         Box::pin(async move {
-            let req = GetRequest {
-                key,
-                verbose: false,
-            };
+            let req = GetRequest { key };
             let resp: GetResponse = invoke_command(self, "Get", req).await?;
             Ok(GetResult {
                 value: resp.value,
@@ -280,10 +277,7 @@ impl<T: CommandDispatcher + StreamReflectable + ?Sized> KvStoreExt for T {
         >,
     > {
         Box::pin(async move {
-            let req = ListRequest {
-                prefix: vec![],
-                verbose: false,
-            };
+            let req = ListRequest { prefix: vec![] };
             let resp: ListResponse = invoke_command(self, "List", req).await?;
             Ok(resp.items)
         })
@@ -300,10 +294,7 @@ impl<T: CommandDispatcher + StreamReflectable + ?Sized> KvStoreExt for T {
         >,
     > {
         Box::pin(async move {
-            let req = ListRequest {
-                prefix,
-                verbose: false,
-            };
+            let req = ListRequest { prefix };
             let resp: ListResponse = invoke_command(self, "List", req).await?;
             Ok(resp.items)
         })

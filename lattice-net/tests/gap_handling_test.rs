@@ -25,10 +25,7 @@ async fn put_kv(handle: &Arc<dyn StoreHandle>, key: Vec<u8>, value: Vec<u8>) -> 
 // Helper to assert key exists (no waiting/timers)
 async fn assert_key_exists(handle: &Arc<dyn StoreHandle>, key: &[u8]) {
     let dispatcher = handle.as_dispatcher();
-    let req = GetRequest {
-        key: key.to_vec(),
-        verbose: false,
-    };
+    let req = GetRequest { key: key.to_vec() };
     let resp: GetResponse = invoke_command::<_, GetResponse>(&*dispatcher, "Get", req)
         .await
         .expect("Get failed");
@@ -45,7 +42,6 @@ async fn wait_for_key(handle: &Arc<dyn StoreHandle>, key: &[u8]) {
         loop {
             let req = GetRequest {
                 key: key.to_vec(),
-                verbose: false,
             };
             let resp: GetResponse =
                 invoke_command::<_, GetResponse>(&*handle.as_dispatcher(), "Get", req)
@@ -364,7 +360,7 @@ async fn test_network_healing_via_alternative_peer() {
     // C got H2, B did not.
     wait_for_key(&handle_c, b"key2").await;
     {
-        let req = GetRequest { key: b"key2".to_vec(), verbose: false };
+        let req = GetRequest { key: b"key2".to_vec() };
         let resp: GetResponse =
             invoke_command::<_, GetResponse>(&*handle_b.as_dispatcher(), "Get", req)
                 .await
