@@ -181,6 +181,13 @@ impl StoreManager {
         }
     }
 
+    pub fn registered_types(&self) -> Vec<String> {
+        let openers = self.openers.read().unwrap_or_else(|e| e.into_inner());
+        let mut types: Vec<String> = openers.keys().cloned().collect();
+        types.sort();
+        types
+    }
+
     // ==================== Store Opening ====================
 
     /// Open a store by ID and type using the registered opener.

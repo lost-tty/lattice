@@ -89,6 +89,10 @@ impl LatticeBackend for InProcessBackend {
         self.node.node_id().to_vec()
     }
 
+    fn store_types(&self) -> AsyncResult<'_, Vec<String>> {
+        Box::pin(async move { Ok(self.node.store_manager().registered_types()) })
+    }
+
     fn node_meta(&self) -> AsyncResult<'_, Vec<SExpr>> {
         Box::pin(async move {
             let meta = self.node.meta();

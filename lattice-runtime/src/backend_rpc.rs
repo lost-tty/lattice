@@ -58,6 +58,14 @@ impl LatticeBackend for RpcBackend {
         self.node_id.clone()
     }
 
+    fn store_types(&self) -> AsyncResult<'_, Vec<String>> {
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client.node.list_store_types(Empty {}).await?;
+            Ok(resp.into_inner().store_types)
+        })
+    }
+
     fn node_meta(&self) -> AsyncResult<'_, Vec<lattice_model::SExpr>> {
         Box::pin(async move {
             Err(BackendApiError::NotSupported("node meta not available over RPC").into())

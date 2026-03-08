@@ -3,7 +3,7 @@
 use crate::backend::Backend;
 use crate::proto::node_service_server::NodeService;
 use crate::proto::NodeEvent as NodeEventMessage;
-use crate::proto::{Empty, NodeStatus, SetNameRequest};
+use crate::proto::{Empty, NodeStatus, SetNameRequest, StoreTypeList};
 use crate::IntoStatus;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -26,6 +26,16 @@ impl NodeService for NodeServiceImpl {
             .await
             .map(Response::new)
             .into_status()
+    }
+
+    async fn list_store_types(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<StoreTypeList>, Status> {
+        let types = self.backend.store_types().await.into_status()?;
+        Ok(Response::new(StoreTypeList {
+            store_types: types,
+        }))
     }
 
     async fn set_name(&self, request: Request<SetNameRequest>) -> Result<Response<Empty>, Status> {

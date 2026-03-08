@@ -23,6 +23,10 @@ message SetNameRequest {
   string name = 1;
 }
 
+message StoreTypeList {
+  repeated string store_types = 1;
+}
+
 // ============================================================================
 // Event Types
 // ============================================================================

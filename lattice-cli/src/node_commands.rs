@@ -19,6 +19,9 @@ pub async fn cmd_status(backend: &dyn LatticeBackend, writer: Writer) -> CmdResu
                 let _ = writeln!(w, "Data:     {}", status.data_path);
             }
             let _ = writeln!(w, "Root stores: {}", status.mesh_count);
+            if let Ok(types) = backend.store_types().await {
+                let _ = writeln!(w, "Store types: {}", types.join(", "));
+            }
         }
         Err(e) => {
             let _ = writeln!(w, "Error: {}", e);

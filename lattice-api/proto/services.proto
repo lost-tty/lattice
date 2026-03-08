@@ -11,6 +11,7 @@ import "types.proto";
 service NodeService {
   rpc GetStatus(Empty) returns (NodeStatus);
   rpc SetName(SetNameRequest) returns (Empty);
+  rpc ListStoreTypes(Empty) returns (StoreTypeList);
   rpc Subscribe(Empty) returns (stream NodeEvent);
 }
 
