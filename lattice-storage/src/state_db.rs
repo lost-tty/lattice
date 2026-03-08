@@ -688,9 +688,9 @@ impl<'a, R: Read> Read for HashingReader<'a, R> {
 
 /// Bundles a scoped database handle with a broadcast channel for events.
 ///
-/// Every state machine holds a `StateContext<E>` instead of separate
-/// `ScopedDb` + `broadcast::Sender<E>` fields. Provides `subscribe()` for
-/// streaming and `notify()` for post-commit event dispatch.
+/// State machines receive a `StateContext` for reads and subscriptions.
+/// `SystemLayer` holds a clone and uses it to call `notify()` after commit.
+#[derive(Clone)]
 pub struct StateContext<E: Clone + Send> {
     db: ScopedDb,
     event_tx: broadcast::Sender<E>,
@@ -722,10 +722,11 @@ impl<E: Clone + Send> StateContext<E> {
 
 /// Domain crate interface for state machines.
 ///
-/// `SystemLayer` owns the write transaction and calls `apply()` with a
-/// pre-opened `&mut redb::Table` scoped to the domain crate's table.
-/// Domain crates decode the payload, update the table, and return
-/// events for watchers.
+/// A pure stateless interface: `apply()` is a static function that takes a
+/// writable table, an operation, and the DAG, and returns events. The state
+/// machine does not hold a database handle or event channel. `SystemLayer`
+/// owns the `StateContext` and calls `apply()` / `notify()` on behalf of
+/// the state machine.
 pub trait StateLogic: Send + Sync {
     type Event: Clone + Send;
 
@@ -734,17 +735,15 @@ pub trait StateLogic: Send + Sync {
     where
         Self: Sized;
 
-    /// Access the state context (scoped DB + event channel).
-    fn context(&self) -> &StateContext<Self::Event>;
-
     /// Decode payload and apply mutations to the table.
     ///
     /// Called by `SystemLayer` inside an open write transaction.
     /// Returns events to be dispatched to watchers after commit.
     fn apply(
-        &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn DagQueries,
-    ) -> Result<Vec<Self::Event>, StateDbError>;
+    ) -> Result<Vec<Self::Event>, StateDbError>
+    where
+        Self: Sized;
 }

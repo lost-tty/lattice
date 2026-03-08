@@ -22,7 +22,7 @@ A state machine is a struct that implements these traits:
 
 | Trait | Purpose |
 | :---- | :------ |
-| `StateLogic` | Core logic: decode payloads, update state, notify watchers |
+| `StateLogic` | Core logic: decode payloads, update state, emit events |
 | `CommandHandler` | Client API: validate input, submit intentions, handle reads |
 | `Introspectable` | Schema discovery for CLI and bindings |
 | `StreamProvider` | Reactive subscription streams |
@@ -46,30 +46,28 @@ impl<E: Clone + Send> StateContext<E> {
 }
 ```
 
-The `ScopedDb` inside is a read-only handle scoped to a single redb table. For application state machines this is `TABLE_DATA`. Use it for queries outside the apply path (e.g., `get`, `list`, `scan`). You cannot access other tables.
+The `ScopedDb` inside is a read-only handle scoped to the application data table. Use it for queries outside the apply path (e.g., `get`, `list`, `scan`). You cannot access other tables.
 
-`notify()` dispatches events to watchers after the framework commits the transaction. `apply()` returns events as data; the framework calls `context().notify(events)` only after a successful commit. Watchers only see committed state.
+`notify()` dispatches events to watchers. `apply()` returns events as data; the framework calls `notify()` only after a successful commit. Watchers only see committed state.
 
 ## StateLogic
 
-The core trait. Your state machine decodes payloads and mutates a redb table.
+The core trait. A pure stateless interface: both functions are static. The state machine does not hold a database handle or event channel for apply purposes. `SystemLayer` owns the `StateContext` and calls `apply()` / `notify()` on behalf of the state machine.
 
 ```rust
 pub trait StateLogic: Send + Sync {
     type Event: Clone + Send;
 
     fn store_type() -> &'static str where Self: Sized;
-    fn context(&self) -> &StateContext<Self::Event>;
     fn apply(
-        &self,
         table: &mut Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn DagQueries,
-    ) -> Result<Vec<Self::Event>, StateDbError>;
+    ) -> Result<Vec<Self::Event>, StateDbError> where Self: Sized;
 }
 ```
 
-State machines also implement `From<StateContext<E>>` so the framework can construct them generically.
+State machines also implement `From<StateContext<E>>` so the framework can construct them generically. The `StateContext` is used for reads and subscriptions in `CommandHandler` and `StreamProvider`, not in `apply()`.
 
 ### Minimal example
 
@@ -89,10 +87,7 @@ impl StateLogic for CounterState {
 
     fn store_type() -> &'static str { "myapp:counter" }
 
-    fn context(&self) -> &StateContext<Self::Event> { &self.ctx }
-
     fn apply(
-        &self,
         table: &mut Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn DagQueries,
@@ -110,7 +105,7 @@ Returns a unique identifier for your store type (e.g., `"core:kvstore"`, `"myapp
 
 ### apply()
 
-Called inside a write transaction with `TABLE_DATA` already open. Decode `op.info.payload`, update the table, and return events for watchers.
+A static function called inside a write transaction with the data table already open. Decode `op.info.payload`, update the table, and return events for watchers. The framework dispatches returned events via `StateContext::notify()` after the transaction commits.
 
 The `Op` contains:
 - `info.hash`: intention hash (unique ID)

@@ -7,7 +7,6 @@
 //! intentions (via `SystemBatch`) and verify convergence (via `table_fingerprint`
 //! / `intention_count`) without pulling in kvstore or any real store crate.
 
-use lattice_model::Op;
 use lattice_storage::{StateContext, StateDbError, StateLogic};
 use lattice_store_base::{CommandHandler, Introspectable, StreamHandler, StreamProvider};
 use once_cell::sync::Lazy;
@@ -42,19 +41,17 @@ static NULL_SERVICE_DESCRIPTOR: Lazy<ServiceDescriptor> = Lazy::new(|| {
 /// `apply` is a no-op that accepts every operation without touching
 /// the redb table. Chain tip tracking is handled by
 /// `SystemLayer<NullState>` which owns the backend.
-pub struct NullState {
-    ctx: StateContext<()>,
+pub struct NullState;
+
+impl From<StateContext<()>> for NullState {
+    fn from(_ctx: StateContext<()>) -> Self {
+        Self
+    }
 }
 
 // ---------------------------------------------------------------------------
 // StateLogic — no-op apply
 // ---------------------------------------------------------------------------
-
-impl From<StateContext<()>> for NullState {
-    fn from(ctx: StateContext<()>) -> Self {
-        Self { ctx }
-    }
-}
 
 impl StateLogic for NullState {
     type Event = ();
@@ -63,14 +60,9 @@ impl StateLogic for NullState {
         STORE_TYPE_NULLSTORE
     }
 
-    fn context(&self) -> &StateContext<Self::Event> {
-        &self.ctx
-    }
-
     fn apply(
-        &self,
         _table: &mut redb::Table<&[u8], &[u8]>,
-        _op: &Op,
+        _op: &lattice_model::Op,
         _dag: &dyn lattice_model::DagQueries,
     ) -> Result<Vec<Self::Event>, StateDbError> {
         Ok(vec![])

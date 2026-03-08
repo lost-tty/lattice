@@ -27,9 +27,11 @@ impl TestStore {
             .expect("failed to open backend");
         let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
         let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
-        let inner = KvState::from(StateContext::new(app_scoped));
-        let system = SystemState::from(StateContext::new(sys_scoped));
-        let state = Arc::new(SystemLayer::new(backend, inner, system));
+        let app_ctx = StateContext::new(app_scoped);
+        let sys_ctx = StateContext::new(sys_scoped);
+        let inner = KvState::new(app_ctx.clone());
+        let system = SystemState::new(sys_ctx.clone());
+        let state = Arc::new(SystemLayer::new(backend, inner, system, app_ctx, sys_ctx));
         let writer = MockWriter::new(state.clone());
 
         Self { state, writer }

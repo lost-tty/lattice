@@ -13,14 +13,19 @@ use lattice_proto::storage::{
 use lattice_storage::{StateContext, StateDbError, StateLogic};
 use prost::Message;
 
-/// System store: reads and writes to `TABLE_SYSTEM` in a redb database.
+/// System store: reads from `TABLE_SYSTEM` in a redb database.
 ///
-/// Holds a `StateContext` for reads (scoped to `TABLE_SYSTEM`) and a broadcast
-/// channel for emitting `SystemEvent`s after commit.
-///
-/// Parallel to `KvState` and `LogState` — all three implement `StateLogic`.
+/// Holds a `StateContext` for reads and event subscriptions. The `StateLogic`
+/// trait impl is purely static; `SystemLayer` owns the authoritative context
+/// and calls `notify()` after commit.
 pub struct SystemState {
     ctx: StateContext<SystemEvent>,
+}
+
+impl SystemState {
+    pub fn new(ctx: StateContext<SystemEvent>) -> Self {
+        Self { ctx }
+    }
 }
 
 impl SystemState {
@@ -117,12 +122,6 @@ impl SystemState {
 
 // ==================== StateLogic Implementation ====================
 
-impl From<StateContext<SystemEvent>> for SystemState {
-    fn from(ctx: StateContext<SystemEvent>) -> Self {
-        Self { ctx }
-    }
-}
-
 impl StateLogic for SystemState {
     type Event = SystemEvent;
 
@@ -130,12 +129,7 @@ impl StateLogic for SystemState {
         "core:system"
     }
 
-    fn context(&self) -> &StateContext<Self::Event> {
-        &self.ctx
-    }
-
     fn apply(
-        &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn lattice_model::DagQueries,

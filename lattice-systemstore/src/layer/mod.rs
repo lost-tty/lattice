@@ -26,34 +26,48 @@ pub enum SystemLayerError {
 /// A wrapper layer that adds SystemStore capabilities to any state machine.
 ///
 /// Owns the `StateBackend` (database, chain tips, metadata), the `SystemState`
-/// (system table logic + event broadcast), and the inner app-data state machine.
+/// (system table reads), and the inner app-data state machine.
+///
+/// Also owns the `StateContext` for both app-data and system events, which it
+/// uses to call `notify()` after commit. The state machines themselves hold
+/// clones for reads and subscriptions; the trait is purely static.
 ///
 /// Implements the "Y-Adapter" pattern:
-/// - Intercepts `SystemOp`s and applies them to `TABLE_SYSTEM` via `SystemState`.
+/// - Intercepts `SystemOp`s and applies them to `TABLE_SYSTEM`.
 /// - Delegates `AppData` ops to the inner state machine's `TABLE_DATA`.
 /// - Owns the single write transaction for both paths.
-pub struct SystemLayer<S> {
+pub struct SystemLayer<S: StateLogic> {
     backend: StateBackend,
     inner: S,
     system: SystemState,
+    app_ctx: StateContext<S::Event>,
+    sys_ctx: StateContext<SystemEvent>,
 }
 
-impl<S: Clone> Clone for SystemLayer<S> {
+impl<S: StateLogic + Clone> Clone for SystemLayer<S> {
     fn clone(&self) -> Self {
-        // SystemState doesn't derive Clone — create a fresh one sharing the same DB.
-        let system_scoped = ScopedDb::new(self.backend.db_shared(), TABLE_SYSTEM);
-        let system = SystemState::from(StateContext::new(system_scoped));
+        let sys_ctx = StateContext::new(ScopedDb::new(self.backend.db_shared(), TABLE_SYSTEM));
+        let system = SystemState::new(sys_ctx.clone());
+        let app_ctx = StateContext::new(ScopedDb::new(self.backend.db_shared(), TABLE_DATA));
         Self {
             backend: self.backend.clone(),
             inner: self.inner.clone(),
             system,
+            app_ctx,
+            sys_ctx,
         }
     }
 }
 
-impl<S> SystemLayer<S> {
-    pub fn new(backend: StateBackend, inner: S, system: SystemState) -> Self {
-        Self { backend, inner, system }
+impl<S: StateLogic> SystemLayer<S> {
+    pub fn new(
+        backend: StateBackend,
+        inner: S,
+        system: SystemState,
+        app_ctx: StateContext<S::Event>,
+        sys_ctx: StateContext<SystemEvent>,
+    ) -> Self {
+        Self { backend, inner, system, app_ctx, sys_ctx }
     }
 
     /// Access the inner app-data state machine.
@@ -130,7 +144,7 @@ impl<S: StateLogic> SystemLayer<S> {
                     prev_hash: op.prev_hash,
                 };
                 let mut table = write_txn.open_table(TABLE_SYSTEM)?;
-                let events = self.system.apply(&mut table, &sys_op_view, &sys_dag)?;
+                let events = SystemState::apply(&mut table, &sys_op_view, &sys_dag)?;
                 drop(table);
                 ApplyResult::System(events)
             }
@@ -147,7 +161,7 @@ impl<S: StateLogic> SystemLayer<S> {
                 };
                 let app_dag = ScopedDag { inner: dag, scope: DagScope::AppData };
                 let mut table = write_txn.open_table(TABLE_DATA)?;
-                let events = self.inner.apply(&mut table, &new_op, &app_dag)?;
+                let events = S::apply(&mut table, &new_op, &app_dag)?;
                 drop(table); // Release borrow before commit
                 ApplyResult::AppData(events)
             }
@@ -177,8 +191,8 @@ impl<S: StateLogic> StateMachine for SystemLayer<S> {
 
         // Notify watchers after commit
         match result {
-            ApplyResult::AppData(events) => self.inner.context().notify(events),
-            ApplyResult::System(events) => self.system.context().notify(events),
+            ApplyResult::AppData(events) => self.app_ctx.notify(events),
+            ApplyResult::System(events) => self.sys_ctx.notify(events),
             ApplyResult::Skipped => {}
         }
 
@@ -214,11 +228,11 @@ impl<S: StateLogic + From<StateContext<S::Event>> + 'static> Openable for System
         };
         let backend =
             StateBackend::open(id, config, expected_type, expected_version).map_err(|e| e.to_string())?;
-        let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-        let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
-        let inner = S::from(StateContext::new(app_scoped));
-        let system = SystemState::from(StateContext::new(sys_scoped));
-        Ok(Self::new(backend, inner, system))
+        let app_ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_DATA));
+        let sys_ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_SYSTEM));
+        let inner = S::from(app_ctx.clone());
+        let system = SystemState::new(sys_ctx.clone());
+        Ok(Self::new(backend, inner, system, app_ctx, sys_ctx))
     }
 }
 
@@ -245,7 +259,7 @@ impl StateWriter for WrappingWriter<'_> {
     }
 }
 
-impl<S: CommandHandler + Send + Sync> CommandHandler for SystemLayer<S> {
+impl<S: StateLogic + CommandHandler + Send + Sync> CommandHandler for SystemLayer<S> {
     fn handle_command<'a>(
         &'a self,
         writer: &'a dyn StateWriter,
@@ -271,7 +285,7 @@ impl<S: CommandHandler + Send + Sync> CommandHandler for SystemLayer<S> {
     }
 }
 
-impl<S: StreamProvider + 'static + Sync> StreamProvider for SystemLayer<S> {
+impl<S: StateLogic + StreamProvider + 'static + Sync> StreamProvider for SystemLayer<S> {
     fn stream_handlers(&self) -> Vec<StreamHandler<Self>> {
         self.inner
             .stream_handlers()
@@ -290,7 +304,7 @@ struct SystemLayerSubscriber {
     inner_descriptor_name: String,
 }
 
-impl<S: StreamProvider + 'static + Sync> Subscriber<SystemLayer<S>> for SystemLayerSubscriber {
+impl<S: StateLogic + StreamProvider + 'static + Sync> Subscriber<SystemLayer<S>> for SystemLayerSubscriber {
     fn subscribe<'a>(
         &'a self,
         state: &'a SystemLayer<S>,

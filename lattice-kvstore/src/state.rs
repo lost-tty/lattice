@@ -47,7 +47,17 @@ impl std::fmt::Debug for KvState {
     }
 }
 
+impl From<StateContext<WatchEvent>> for KvState {
+    fn from(ctx: StateContext<WatchEvent>) -> Self {
+        Self::new(ctx)
+    }
+}
+
 impl KvState {
+    pub fn new(ctx: StateContext<WatchEvent>) -> Self {
+        Self { ctx }
+    }
+
     /// Subscribe to state changes.
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<WatchEvent> {
         self.ctx.subscribe()
@@ -162,12 +172,6 @@ impl KvState {
 
 // ==================== StateLogic trait implementation ====================
 
-impl From<StateContext<WatchEvent>> for KvState {
-    fn from(ctx: StateContext<WatchEvent>) -> Self {
-        Self { ctx }
-    }
-}
-
 impl StateLogic for KvState {
     type Event = WatchEvent;
 
@@ -175,12 +179,7 @@ impl StateLogic for KvState {
         lattice_model::STORE_TYPE_KVSTORE
     }
 
-    fn context(&self) -> &StateContext<Self::Event> {
-        &self.ctx
-    }
-
     fn apply(
-        &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn lattice_model::DagQueries,
@@ -650,12 +649,13 @@ mod tests {
     use lattice_model::dag_queries::{HashMapDag, NullDag};
     use lattice_model::hlc::HLC;
     use lattice_model::{PubKey, Uuid};
-    use lattice_storage::{ScopedDb, StateBackend, StorageConfig, TABLE_DATA};
+    use lattice_storage::{ScopedDb, StateBackend, StateContext, StorageConfig, TABLE_DATA};
 
     static NULL_DAG: NullDag = NullDag;
 
     struct TestHarness {
         backend: StateBackend,
+        ctx: StateContext<WatchEvent>,
         store: KvState,
     }
 
@@ -663,9 +663,9 @@ mod tests {
         fn new() -> Self {
             let backend =
                 StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-            let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-            let store = KvState::from(StateContext::new(scoped));
-            Self { backend, store }
+            let ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_DATA));
+            let store = KvState::new(ctx.clone());
+            Self { backend, ctx, store }
         }
 
         /// Open a write transaction, apply the op via StateLogic, and commit.
@@ -677,10 +677,10 @@ mod tests {
             let write_txn = self.backend.db().begin_write()?;
             {
                 let mut table = write_txn.open_table(TABLE_DATA)?;
-                let events = self.store.apply(&mut table, op, dag)?;
+                let events = KvState::apply(&mut table, op, dag)?;
                 drop(table);
                 write_txn.commit()?;
-                self.store.ctx.notify(events);
+                self.ctx.notify(events);
             }
             Ok(())
         }

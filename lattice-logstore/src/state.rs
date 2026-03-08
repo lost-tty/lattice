@@ -40,9 +40,17 @@ impl std::fmt::Debug for LogState {
     }
 }
 
-// ==================== Openable Implementation ====================
+impl From<StateContext<LogEvent>> for LogState {
+    fn from(ctx: StateContext<LogEvent>) -> Self {
+        Self::new(ctx)
+    }
+}
 
 impl LogState {
+    pub fn new(ctx: StateContext<LogEvent>) -> Self {
+        Self { ctx }
+    }
+
     /// Subscribe to log entry events
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<LogEvent> {
         self.ctx.subscribe()
@@ -142,12 +150,6 @@ impl LogState {
     }
 }
 
-impl From<StateContext<LogEvent>> for LogState {
-    fn from(ctx: StateContext<LogEvent>) -> Self {
-        Self { ctx }
-    }
-}
-
 impl StateLogic for LogState {
     type Event = LogEvent;
 
@@ -155,12 +157,7 @@ impl StateLogic for LogState {
         lattice_model::STORE_TYPE_LOGSTORE
     }
 
-    fn context(&self) -> &StateContext<Self::Event> {
-        &self.ctx
-    }
-
     fn apply(
-        &self,
         table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         _dag: &dyn lattice_model::DagQueries,
@@ -378,6 +375,7 @@ mod tests {
 
     struct TestHarness {
         backend: StateBackend,
+        ctx: StateContext<LogEvent>,
         store: LogState,
     }
 
@@ -385,16 +383,16 @@ mod tests {
         fn new() -> Self {
             let backend =
                 StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-            let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-            let store = LogState::from(StateContext::new(scoped));
-            Self { backend, store }
+            let ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_DATA));
+            let store = LogState::new(ctx.clone());
+            Self { backend, ctx, store }
         }
 
         fn open(id: Uuid, config: &StorageConfig) -> Self {
             let backend = StateBackend::open(id, config, None, 0).unwrap();
-            let scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-            let store = LogState::from(StateContext::new(scoped));
-            Self { backend, store }
+            let ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_DATA));
+            let store = LogState::new(ctx.clone());
+            Self { backend, ctx, store }
         }
 
         fn apply(
@@ -405,10 +403,10 @@ mod tests {
             let write_txn = self.backend.db().begin_write()?;
             {
                 let mut table = write_txn.open_table(TABLE_DATA)?;
-                let events = self.store.apply(&mut table, op, dag)?;
+                let events = LogState::apply(&mut table, op, dag)?;
                 drop(table);
                 write_txn.commit()?;
-                self.store.ctx.notify(events);
+                self.ctx.notify(events);
             }
             Ok(())
         }

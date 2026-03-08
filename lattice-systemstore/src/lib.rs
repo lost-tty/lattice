@@ -239,8 +239,12 @@ mod tests {
     use lattice_model::{Op, Uuid};
     use lattice_storage::{ScopedDb, StateBackend, StateContext, StateDbError, StateLogic, StorageConfig, TABLE_DATA, TABLE_SYSTEM};
 
-    struct MockLogic {
-        ctx: StateContext<()>,
+    struct MockLogic;
+
+    impl From<StateContext<()>> for MockLogic {
+        fn from(_ctx: StateContext<()>) -> Self {
+            Self
+        }
     }
 
     impl StateLogic for MockLogic {
@@ -250,12 +254,7 @@ mod tests {
             "test:mock"
         }
 
-        fn context(&self) -> &StateContext<Self::Event> {
-            &self.ctx
-        }
-
         fn apply(
-            &self,
             _table: &mut redb::Table<&[u8], &[u8]>,
             _op: &Op,
             _dag: &dyn lattice_model::DagQueries,
@@ -269,11 +268,11 @@ mod tests {
         fn takes_system_reader<T: super::SystemReader>(_t: &T) {}
 
         let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-        let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-        let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
-        let logic = MockLogic { ctx: StateContext::new(app_scoped) };
-        let system = SystemState::from(StateContext::new(sys_scoped));
-        let system_store = SystemLayer::new(backend, logic, system);
+        let app_ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_DATA));
+        let sys_ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_SYSTEM));
+        let logic = MockLogic;
+        let system = SystemState::new(sys_ctx.clone());
+        let system_store = SystemLayer::new(backend, logic, system, app_ctx, sys_ctx);
 
         takes_system_reader(&system_store);
     }

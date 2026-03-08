@@ -24,20 +24,20 @@ fn wrap_app_data(raw: Vec<u8>) -> Vec<u8> {
 
 fn new_test_store() -> SystemLayer<KvState> {
     let backend = StateBackend::open(Uuid::new_v4(), &StorageConfig::InMemory, None, 0).unwrap();
-    let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-    let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
-    let inner = KvState::from(StateContext::new(app_scoped));
-    let system = SystemState::from(StateContext::new(sys_scoped));
-    SystemLayer::new(backend, inner, system)
+    let app_ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_DATA));
+    let sys_ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_SYSTEM));
+    let inner = KvState::new(app_ctx.clone());
+    let system = SystemState::new(sys_ctx.clone());
+    SystemLayer::new(backend, inner, system, app_ctx, sys_ctx)
 }
 
 fn open_test_store(id: Uuid, config: &StorageConfig) -> SystemLayer<KvState> {
     let backend = StateBackend::open(id, config, None, 0).unwrap();
-    let app_scoped = ScopedDb::new(backend.db_shared(), TABLE_DATA);
-    let sys_scoped = ScopedDb::new(backend.db_shared(), TABLE_SYSTEM);
-    let inner = KvState::from(StateContext::new(app_scoped));
-    let system = SystemState::from(StateContext::new(sys_scoped));
-    SystemLayer::new(backend, inner, system)
+    let app_ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_DATA));
+    let sys_ctx = StateContext::new(ScopedDb::new(backend.db_shared(), TABLE_SYSTEM));
+    let inner = KvState::new(app_ctx.clone());
+    let system = SystemState::new(sys_ctx.clone());
+    SystemLayer::new(backend, inner, system, app_ctx, sys_ctx)
 }
 
 fn create_test_op(
