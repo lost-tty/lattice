@@ -5,8 +5,7 @@
 use crate::backend::{Backend, ExecError};
 use crate::proto::{
     dynamic_store_service_server::DynamicStoreService, DescriptorResponse, ErrorCode, ExecRequest,
-    ExecResponse, MethodInfo as ProtoMethodInfo, MethodList, StoreEvent, StoreId, StreamDescriptor,
-    StreamList, SubscribeRequest,
+    ExecResponse, MethodList, StoreEvent, StoreId, StreamDescriptor, StreamList, SubscribeRequest,
 };
 use crate::IntoStatus;
 use tokio_stream::wrappers::ReceiverStream;
@@ -102,24 +101,7 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
             .store_list_methods(store_id)
             .await
             .map(|methods| {
-                let methods = methods
-                    .into_iter()
-                    .map(|m| {
-                        let kind = match m.kind {
-                            lattice_store_base::MethodKind::Query => {
-                                crate::proto::MethodKind::Query as i32
-                            }
-                            lattice_store_base::MethodKind::Command => {
-                                crate::proto::MethodKind::Command as i32
-                            }
-                        };
-                        ProtoMethodInfo {
-                            name: m.name,
-                            description: m.description,
-                            kind,
-                        }
-                    })
-                    .collect();
+                let methods = methods.into_iter().map(Into::into).collect();
                 Response::new(MethodList { methods })
             })
             .into_status()

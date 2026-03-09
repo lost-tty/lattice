@@ -208,6 +208,45 @@ impl From<proto::WitnessLogEntry> for lattice_model::weaver::WitnessEntry {
     }
 }
 
+impl From<lattice_store_base::MethodKind> for proto::MethodKind {
+    fn from(kind: lattice_store_base::MethodKind) -> Self {
+        match kind {
+            lattice_store_base::MethodKind::Command => proto::MethodKind::Command,
+            lattice_store_base::MethodKind::Query => proto::MethodKind::Query,
+        }
+    }
+}
+
+impl From<proto::MethodKind> for lattice_store_base::MethodKind {
+    fn from(kind: proto::MethodKind) -> Self {
+        match kind {
+            proto::MethodKind::Command => lattice_store_base::MethodKind::Command,
+            proto::MethodKind::Query => lattice_store_base::MethodKind::Query,
+        }
+    }
+}
+
+impl From<backend::MethodInfo> for proto::MethodInfo {
+    fn from(m: backend::MethodInfo) -> Self {
+        proto::MethodInfo {
+            name: m.name,
+            description: m.description,
+            kind: proto::MethodKind::from(m.kind) as i32,
+        }
+    }
+}
+
+impl From<proto::MethodInfo> for backend::MethodInfo {
+    fn from(m: proto::MethodInfo) -> Self {
+        let kind = m.kind().into();
+        backend::MethodInfo {
+            name: m.name,
+            description: m.description,
+            kind,
+        }
+    }
+}
+
 pub mod backend;
 
 /// Extension trait to convert `Result<T, BackendError>` into `Result<T, tonic::Status>`.
