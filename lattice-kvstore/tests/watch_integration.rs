@@ -10,7 +10,7 @@ async fn test_watch_basic_functionality() {
     let store = TestStore::new();
     let key = b"watch_me";
 
-    let mut stream = store.watch("watch_me").await.expect("watch failed");
+    let mut stream = store.watch(b"watch_me").await.expect("watch failed");
 
     store.put(key.to_vec(), b"val1".to_vec()).await.unwrap();
 
@@ -37,7 +37,7 @@ async fn test_watch_gap_race() {
     });
 
     sleep(Duration::from_millis(10)).await;
-    let mut stream = store.watch("race_.*").await.expect("watch failed");
+    let mut stream = store.watch(b"race_").await.expect("watch failed");
 
     let mut received_count = 0;
 
@@ -66,33 +66,11 @@ async fn test_watch_gap_race() {
 }
 
 #[tokio::test]
-async fn test_watch_invalid_regex() {
-    let store = TestStore::new();
-
-    // Attempt to watch with invalid regex "["
-    let result = store.watch("[").await;
-
-    assert!(result.is_err(), "Expected error for invalid regex");
-
-    // Verify error message if possible to catch exact regex failure
-    let err = match result {
-        Ok(_) => panic!("Expected error for invalid regex"),
-        Err(e) => e,
-    };
-    // Invalid regex should produce InvalidParams
-    assert!(
-        err.downcast_ref::<lattice_store_base::StreamError>()
-            .is_some_and(|e| matches!(e, lattice_store_base::StreamError::InvalidParams(_))),
-        "Expected StreamError::InvalidParams, got: {}",
-        err
-    );
-}
-
-#[tokio::test]
 async fn test_watch_binary_key_safety() {
     let store = TestStore::new();
 
-    let mut stream = store.watch(".*").await.expect("watch failed");
+    // Empty prefix matches all keys
+    let mut stream = store.watch(b"").await.expect("watch failed");
 
     let key = vec![0xFF, 0xFE, 0x00, 0x10]; // Not valid UTF-8
     let val = b"val_bin".to_vec();
@@ -112,8 +90,8 @@ async fn test_malformed_replication_entry() {
     let store = TestStore::new();
     let key = b"robust_key";
 
-    // 1. Subscribe
-    let mut stream = store.watch(".*").await.expect("watch failed");
+    // 1. Subscribe with empty prefix (match all)
+    let mut stream = store.watch(b"").await.expect("watch failed");
 
     // 2. Put valid value
     store.put(key.to_vec(), b"v1".to_vec()).await.unwrap();
@@ -156,36 +134,30 @@ async fn test_malformed_replication_entry() {
 }
 
 #[tokio::test]
-async fn test_watch_complex_regex() {
+async fn test_watch_prefix_filtering() {
     let store = TestStore::new();
 
-    // anchors and character classes
-    let mut stream = store.watch(r"^user/[a-z]+$").await.expect("watch failed");
+    // Watch only keys under "user/" prefix
+    let mut stream = store.watch(b"user/").await.expect("watch failed");
 
     store
         .put(b"user/alice".to_vec(), b"v1".to_vec())
         .await
         .unwrap();
     store
-        .put(b"user/123".to_vec(), b"v2".to_vec())
+        .put(b"admin/alice".to_vec(), b"v2".to_vec())
         .await
         .unwrap(); // Should not match
     store
-        .put(b"admin/alice".to_vec(), b"v3".to_vec())
-        .await
-        .unwrap(); // Should not match
-    store
-        .put(b"user/bob".to_vec(), b"v4".to_vec())
+        .put(b"user/bob".to_vec(), b"v3".to_vec())
         .await
         .unwrap();
-
-    // Expect partial matches
 
     // 1. user/alice
     let event = stream.next().await.unwrap().unwrap();
     assert_eq!(event.key, b"user/alice");
 
-    // 2. user/bob (skipping user/123 and admin/alice)
+    // 2. user/bob (skipping admin/alice)
     let event = stream.next().await.unwrap().unwrap();
     assert_eq!(event.key, b"user/bob");
 }
@@ -195,8 +167,8 @@ async fn test_watch_multiple_watchers() {
     let store = TestStore::new();
     let key = b"shared_key";
 
-    let mut s1 = store.watch(".*").await.unwrap();
-    let mut s2 = store.watch(".*").await.unwrap();
+    let mut s1 = store.watch(b"").await.unwrap();
+    let mut s2 = store.watch(b"").await.unwrap();
 
     store.put(key.to_vec(), b"val".to_vec()).await.unwrap();
 

@@ -90,7 +90,7 @@ async fn test_subscribe_stream_tombstone_should_not_resurrect() {
     let store = TestStore::new();
     let key = b"resurrect_test";
 
-    let mut stream = store.watch("resurrect_test").await.expect("watch failed");
+    let mut stream = store.watch(b"resurrect_test").await.expect("watch failed");
 
     // 2. Put
     store

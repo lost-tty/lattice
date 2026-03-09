@@ -13,14 +13,14 @@ pub use lattice_kvstore::{WatchEvent, WatchEventKind};
 /// Error when creating a watcher
 #[derive(Debug)]
 pub enum WatchError {
-    InvalidRegex(String),
+    InvalidParams(String),
     Storage(String),
 }
 
 impl std::fmt::Display for WatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WatchError::InvalidRegex(s) => write!(f, "Invalid regex: {}", s),
+            WatchError::InvalidParams(s) => write!(f, "Invalid params: {}", s),
             WatchError::Storage(s) => write!(f, "Storage error: {}", s),
         }
     }
@@ -164,10 +164,10 @@ pub trait KvStoreExt: CommandDispatcher + StreamReflectable {
         >,
     >;
 
-    /// Watch for changes matching a pattern via stream subscription
+    /// Watch for changes matching a key prefix via stream subscription
     fn watch(
         &self,
-        pattern: &str,
+        prefix: &[u8],
     ) -> Pin<
         Box<
             dyn Future<
@@ -366,7 +366,7 @@ impl<T: CommandDispatcher + StreamReflectable + ?Sized> KvStoreExt for T {
 
     fn watch(
         &self,
-        pattern: &str,
+        prefix: &[u8],
     ) -> Pin<
         Box<
             dyn Future<
@@ -388,10 +388,10 @@ impl<T: CommandDispatcher + StreamReflectable + ?Sized> KvStoreExt for T {
         >,
     > {
         use prost::Message;
-        let str_pattern = pattern.to_string();
+        let prefix = prefix.to_vec();
         Box::pin(async move {
             let params = WatchParams {
-                pattern: str_pattern,
+                prefix,
             };
             let params_bytes = params.encode_to_vec();
 

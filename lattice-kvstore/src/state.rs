@@ -33,7 +33,6 @@ use lattice_model::{Hash, Op};
 use lattice_store_base::{FieldFormat, Introspectable};
 use prost::Message;
 use prost_reflect::DescriptorPool;
-use regex::bytes::Regex;
 /// Persistent state for KV with DAG conflict resolution.
 ///
 /// This is a derived materialized view - the actual source of truth is
@@ -130,13 +129,12 @@ impl KvState {
         ro.heads(key).into_state_err()
     }
 
-    /// Scan keys with optional prefix and regex filter.
+    /// Scan keys by prefix.
     /// Calls visitor for each matching entry with the LWW-resolved value and conflict status.
     /// Visitor returns Ok(true) to continue, Ok(false) to stop.
     pub fn scan<F>(
         &self,
         prefix: &[u8],
-        regex: Option<Regex>,
         mut visitor: F,
     ) -> Result<(), StateDbError>
     where
@@ -155,12 +153,6 @@ impl KvState {
 
             if !key.starts_with(prefix) {
                 break;
-            }
-
-            if let Some(re) = &regex {
-                if !re.is_match(&key) {
-                    continue;
-                }
             }
 
             if !visitor(key, value, conflicted)? {
@@ -402,7 +394,7 @@ impl StreamProvider for KvState {
         vec![StreamHandler {
             descriptor: StreamDescriptor {
                 name: "watch".to_string(),
-                description: "Subscribe to key changes matching a regex pattern".to_string(),
+                description: "Subscribe to key changes matching a prefix".to_string(),
                 param_schema: Some("lattice.kv.WatchParams".to_string()),
                 event_schema: Some("lattice.kv.WatchEventProto".to_string()),
             },
@@ -412,7 +404,7 @@ impl StreamProvider for KvState {
 }
 
 impl KvState {
-    /// Subscribe to key changes matching a regex pattern.
+    /// Subscribe to key changes matching a prefix.
     pub fn subscribe_watch<'a>(
         &'a self,
         params: &'a [u8],
@@ -423,11 +415,10 @@ impl KvState {
 
             let watch_params = crate::proto::WatchParams::decode(params.as_slice())
                 .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
-            let re = Regex::new(&watch_params.pattern)
-                .map_err(|e| StreamError::InvalidParams(e.to_string()))?;
+            let prefix = watch_params.prefix;
 
             Ok(event_stream(self.subscribe(), move |event: WatchEvent| {
-                if !re.is_match(&event.key) {
+                if !event.key.starts_with(&prefix) {
                     return None;
                 }
                 let kind = match event.kind {
@@ -615,7 +606,7 @@ impl KvState {
         let mut items = Vec::new();
         let prefix = req.prefix;
 
-        self.scan(&prefix, None, |key, value, conflicted| {
+        self.scan(&prefix, |key, value, conflicted| {
             if let Some(val) = value {
                 items.push(crate::proto::KeyValuePair {
                     key,

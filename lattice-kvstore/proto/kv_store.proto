@@ -103,7 +103,7 @@ message KvPayload {
 
 // Parameters for the Watch stream
 message WatchParams {
-    string pattern = 1;  // Regex pattern to filter keys
+    bytes prefix = 1;  // Key prefix to filter events
 }
 
 // Wire format for watch events
