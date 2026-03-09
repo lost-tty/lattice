@@ -7,7 +7,11 @@
 
 use lattice_kernel::OpenedStore;
 use lattice_mockkernel::NullState;
-use lattice_model::{NodeIdentity, Op, StateMachine, StorageConfig, StoreIdentity, StoreMeta};
+use lattice_model::types::Hash;
+use lattice_model::{
+    NodeIdentity, Op, StateMachine, StorageConfig, StoreIdentity,
+    StoreMeta,
+};
 use lattice_store_base::{
     CommandDispatcher, CommandHandler, Introspectable, MethodKind, MethodMeta,
 };
@@ -92,6 +96,7 @@ impl CommandHandler for DispatchTestState {
 
     fn handle_query<'a>(
         &'a self,
+        dag: &'a dyn lattice_model::DagQueries,
         method_name: &'a str,
         _request: DynamicMessage,
     ) -> std::pin::Pin<
@@ -103,7 +108,11 @@ impl CommandHandler for DispatchTestState {
         >,
     > {
         let name = method_name.to_string();
-        Box::pin(async move { Err(format!("query:{name}").into()) })
+        // Probe DAG to verify it's wired up: count reachable intentions
+        let dag_working = dag.get_intention(&Hash::ZERO).is_err();
+        Box::pin(async move {
+            Err(format!("query:{name}:dag_available={dag_working}").into())
+        })
     }
 }
 
@@ -129,7 +138,7 @@ async fn test_query_routed_to_handle_query() {
 
     let request = make_dummy_request(&state);
     let err = handle.dispatch("TestQuery", request).await.unwrap_err();
-    assert_eq!(err.to_string(), "query:TestQuery");
+    assert_eq!(err.to_string(), "query:TestQuery:dag_available=true");
 
     handle.close().await;
 }

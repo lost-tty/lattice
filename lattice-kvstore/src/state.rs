@@ -512,6 +512,7 @@ impl CommandHandler for KvState {
 
     fn handle_query<'a>(
         &'a self,
+        _dag: &'a dyn lattice_model::DagQueries,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
     ) -> Pin<

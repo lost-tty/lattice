@@ -286,6 +286,7 @@ impl<S: StateLogic + CommandHandler + Send + Sync> CommandHandler for SystemLaye
 
     fn handle_query<'a>(
         &'a self,
+        dag: &'a dyn lattice_model::DagQueries,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
     ) -> Pin<
@@ -299,8 +300,9 @@ impl<S: StateLogic + CommandHandler + Send + Sync> CommandHandler for SystemLaye
                 + 'a,
         >,
     > {
+        let scoped = ScopedDag { inner: dag, scope: DagScope::AppData };
         Box::pin(async move {
-            self.inner.handle_query(method_name, request).await
+            self.inner.handle_query(&scoped, method_name, request).await
         })
     }
 }
@@ -362,6 +364,7 @@ mod tests {
     use lattice_model::dag_queries::HashMapDag;
     use lattice_model::{DagQueries, HLC};
     use lattice_proto::storage::SystemOp as ProtoSystemOp;
+    use lattice_store_base::{Introspectable, MethodKind, MethodMeta};
 
     /// Build a UniversalOp::AppData envelope around `inner` bytes.
     fn wrap_app_data(inner: &[u8]) -> Vec<u8> {
@@ -459,6 +462,110 @@ mod tests {
         };
         dag.record(&op);
         hash
+    }
+
+    #[tokio::test]
+    async fn handle_query_receives_scoped_dag() {
+
+        // A minimal state whose handle_query calls dag.get_intention()
+        // and returns the payload as a hex-encoded error so the test can inspect it.
+        struct DagProbeState;
+
+        impl StateLogic for DagProbeState {
+            type Event = ();
+            fn store_type() -> &'static str { "test:dagprobe" }
+            fn apply(
+                _table: &mut redb::Table<&[u8], &[u8]>,
+                _op: &Op,
+                _dag: &dyn DagQueries,
+            ) -> Result<Vec<()>, StateDbError> {
+                Ok(vec![])
+            }
+        }
+
+        impl From<lattice_storage::StateContext<()>> for DagProbeState {
+            fn from(_: lattice_storage::StateContext<()>) -> Self { Self }
+        }
+
+        impl Introspectable for DagProbeState {
+            fn service_descriptor(&self) -> prost_reflect::ServiceDescriptor {
+                lattice_mockkernel::NullState.service_descriptor()
+            }
+            fn decode_payload(
+                &self, _: &[u8],
+            ) -> Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
+                unimplemented!()
+            }
+            fn method_meta(&self) -> std::collections::HashMap<String, MethodMeta> {
+                let mut m = std::collections::HashMap::new();
+                m.insert("Probe".into(), MethodMeta {
+                    description: String::new(),
+                    kind: MethodKind::Query,
+                });
+                m
+            }
+        }
+
+        impl CommandHandler for DagProbeState {
+            fn handle_command<'a>(
+                &'a self, _: &'a dyn lattice_model::StateWriter, _: &'a str,
+                _: prost_reflect::DynamicMessage,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+                Box::pin(async { Err("not a command".into()) })
+            }
+
+            fn handle_query<'a>(
+                &'a self,
+                dag: &'a dyn DagQueries,
+                _method_name: &'a str,
+                _request: prost_reflect::DynamicMessage,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<prost_reflect::DynamicMessage, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+                Box::pin(async move {
+                    let hash = Hash::from([1u8; 32]);
+                    let info = dag.get_intention(&hash)?;
+                    Err(format!("payload:{}", hex::encode(info.payload.as_ref())).into())
+                })
+            }
+        }
+
+        // Set up a HashMapDag with a UniversalOp::AppData-wrapped intention
+        let app_bytes = b"scoped-test-data";
+        let dag = HashMapDag::new();
+        let hash = record_intention(&dag, &wrap_app_data(app_bytes));
+        assert_eq!(hash, Hash::from([1u8; 32]));
+
+        // Build SystemLayer<DagProbeState>
+        let store_id = uuid::Uuid::new_v4();
+        let backend = lattice_storage::StateBackend::open(
+            store_id,
+            &lattice_storage::StorageConfig::InMemory,
+            None,
+            0,
+        ).unwrap();
+        let app_ctx = lattice_storage::StateContext::new(
+            lattice_storage::ScopedDb::new(backend.db_shared(), lattice_storage::TABLE_DATA),
+        );
+        let sys_ctx = lattice_storage::StateContext::new(
+            lattice_storage::ScopedDb::new(backend.db_shared(), lattice_storage::TABLE_SYSTEM),
+        );
+        let inner = DagProbeState;
+        // Grab descriptor before moving inner into SystemLayer
+        let desc = inner.service_descriptor();
+        let pool = desc.parent_pool();
+        let system = crate::SystemState::new(sys_ctx.clone());
+        let layer = SystemLayer::new(backend, inner, system, app_ctx, sys_ctx);
+
+        // Create a dummy request message (handler ignores it)
+        let dummy_msg = prost_reflect::DynamicMessage::new(
+            pool.all_messages().next().unwrap()
+        );
+
+        // SystemLayer should scope the DAG, unwrapping UniversalOp envelopes
+        let err = layer.handle_query(&dag, "Probe", dummy_msg).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("payload:{}", hex::encode(app_bytes)),
+        );
     }
 
     #[test]

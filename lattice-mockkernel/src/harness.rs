@@ -14,6 +14,7 @@ use lattice_storage::{
     ScopedDb, StateBackend, StateContext, StateDbError, StateLogic, StorageConfig, TABLE_DATA,
     TABLE_SYSTEM,
 };
+use lattice_model::NullDag;
 use lattice_store_base::{
     CommandDispatcher, CommandHandler, Introspectable, MethodKind, StateProvider,
 };
@@ -139,7 +140,11 @@ where
     > {
         let meta = self.state.app_state().method_meta();
         match meta.get(method_name).map(|m| m.kind) {
-            Some(MethodKind::Query) => self.state.app_state().handle_query(method_name, request),
+            Some(MethodKind::Query) => {
+                self.state
+                    .app_state()
+                    .handle_query(&NullDag, method_name, request)
+            }
             Some(MethodKind::Command) => {
                 self.state
                     .app_state()

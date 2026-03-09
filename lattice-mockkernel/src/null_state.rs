@@ -120,6 +120,7 @@ impl CommandHandler for NullState {
 
     fn handle_query<'a>(
         &'a self,
+        _dag: &'a dyn lattice_model::DagQueries,
         method_name: &'a str,
         _request: DynamicMessage,
     ) -> std::pin::Pin<

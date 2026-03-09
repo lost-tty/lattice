@@ -26,3 +26,4 @@ tokio-stream = { workspace = true, features = ["sync"] }
 [dev-dependencies]
 lattice-mockkernel = { workspace = true }
 tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt"] }

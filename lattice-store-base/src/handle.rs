@@ -67,7 +67,7 @@ where
 // CommandHandler Trait - State-level command routing
 // =============================================================================
 
-use lattice_model::StateWriter;
+use lattice_model::{DagQueries, StateWriter};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -86,7 +86,7 @@ use std::pin::Pin;
 ///             _ => Err("Unknown command")
 ///         }
 ///     }
-///     fn handle_query(&self, method, request) {
+///     fn handle_query(&self, dag, method, request) {
 ///         match method {
 ///             "Get" => self.handle_get(request),
 ///             _ => Err("Unknown query")
@@ -114,6 +114,7 @@ pub trait CommandHandler: Send + Sync {
 
     fn handle_query<'a>(
         &'a self,
+        dag: &'a dyn DagQueries,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
     ) -> Pin<
@@ -156,6 +157,7 @@ where
 
     fn handle_query<'a>(
         &'a self,
+        dag: &'a dyn DagQueries,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
     ) -> Pin<
@@ -169,7 +171,7 @@ where
                 + 'a,
         >,
     > {
-        (**self).handle_query(method_name, request)
+        (**self).handle_query(dag, method_name, request)
     }
 }
 

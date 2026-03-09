@@ -117,7 +117,7 @@ impl std::error::Error for ReplicationControllerError {}
 pub struct ReplicationController<S: StateMachine> {
     store_id: Uuid,
     state: std::sync::Arc<S>,
-    intention_store: std::sync::Arc<std::sync::RwLock<IntentionStore>>,
+    intention_store: std::sync::Arc<tokio::sync::RwLock<IntentionStore>>,
     node_identity: NodeIdentity,
 
     rx: mpsc::Receiver<ReplicationControllerCmd>,
@@ -130,7 +130,7 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
     pub fn new(
         store_id: Uuid,
         state: std::sync::Arc<S>,
-        intention_store: std::sync::Arc<std::sync::RwLock<IntentionStore>>,
+        intention_store: std::sync::Arc<tokio::sync::RwLock<IntentionStore>>,
         node_identity: NodeIdentity,
         rx: mpsc::Receiver<ReplicationControllerCmd>,
         intention_tx: broadcast::Sender<SignedIntention>,
@@ -149,7 +149,7 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
     pub async fn run(mut self, shutdown_token: tokio_util::sync::CancellationToken) {
         // Project any unapplied witness log entries from a previous session
         {
-            let store = self.intention_store.read().expect("Lock poisoned");
+            let store = self.intention_store.read().await;
             match self.project_new_entries(&store) {
                 Ok(0) => {}
                 Ok(n) => info!(store_id = %self.store_id, entries = n, "startup projection"),
@@ -167,7 +167,7 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                         Some(ReplicationControllerCmd::Shutdown) => {
                             break;
                         }
-                        Some(cmd) => self.handle_command(cmd),
+                        Some(cmd) => self.handle_command(cmd).await,
                         None => {
                             break;
                         }
@@ -177,17 +177,17 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
         }
     }
 
-    fn handle_command(&mut self, cmd: ReplicationControllerCmd) {
+    async fn handle_command(&mut self, cmd: ReplicationControllerCmd) {
         match cmd {
             ReplicationControllerCmd::AuthorTips { resp } => {
-                let store = self.intention_store.read().expect("Lock poisoned");
+                let store = self.intention_store.read().await;
                 let result = Ok(store.all_author_tips().clone());
                 let _ = resp.send(result);
             }
 
             ReplicationControllerCmd::IngestBatch { intentions, resp } => {
                 let store_arc = self.intention_store.clone();
-                let mut store = store_arc.write().expect("Lock poisoned");
+                let mut store = store_arc.write().await;
 
                 let result =
                     self.apply_ingested_batch(&mut store, intentions)
@@ -206,7 +206,7 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 resp,
             } => {
                 let store_arc = self.intention_store.clone();
-                let mut store = store_arc.write().expect("Lock poisoned");
+                let mut store = store_arc.write().await;
 
                 let result = self
                     .apply_witnessed_batch(&mut store, witness_records, intentions, peer_id)
@@ -220,7 +220,7 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 let _ = resp.send(result);
             }
             ReplicationControllerCmd::FetchIntentions { hashes, resp } => {
-                let store = self.intention_store.read().expect("Lock poisoned");
+                let store = self.intention_store.read().await;
                 let result = hashes
                     .iter()
                     .map(|h| store.get(h))
@@ -230,7 +230,7 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 let _ = resp.send(result);
             }
             ReplicationControllerCmd::FetchIntentionsByPrefix { prefix, resp } => {
-                let store = self.intention_store.read().expect("Lock poisoned");
+                let store = self.intention_store.read().await;
                 let result = store
                     .get_by_prefix(&prefix)
                     .map_err(StateError::from);
@@ -242,7 +242,7 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 resp,
             } => {
                 let store_arc = self.intention_store.clone();
-                let mut store = store_arc.write().expect("Lock poisoned");
+                let mut store = store_arc.write().await;
 
                 let result = self
                     .create_and_commit_local_intention(&mut store, payload, causal_deps)
@@ -255,33 +255,33 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 let _ = resp.send(result);
             }
             ReplicationControllerCmd::IntentionCount { resp } => {
-                let store = self.intention_store.read().expect("Lock poisoned");
+                let store = self.intention_store.read().await;
                 let count = store.intention_count().unwrap_or(0);
                 let _ = resp.send(count);
             }
             ReplicationControllerCmd::WitnessCount { resp } => {
-                let store = self.intention_store.read().expect("Lock poisoned");
+                let store = self.intention_store.read().await;
                 let count = store.witness_count().unwrap_or(0);
                 let _ = resp.send(count);
             }
             ReplicationControllerCmd::WitnessLog { resp } => {
-                let store = self.intention_store.read().expect("Lock poisoned");
+                let store = self.intention_store.read().await;
                 let log = store.witness_log().unwrap_or_default();
                 let _ = resp.send(log);
             }
             ReplicationControllerCmd::FloatingIntentions { resp } => {
-                let store = self.intention_store.read().expect("Lock poisoned");
+                let store = self.intention_store.read().await;
                 let floating = store.floating().unwrap_or_default();
                 let _ = resp.send(floating);
             }
             ReplicationControllerCmd::InspectBranch { heads, resp } => {
-                let store = self.intention_store.read().expect("Lock poisoned");
+                let store = self.intention_store.read().await;
                 let result = lattice_model::inspect_branches(&*store, &heads)
                     .map_err(|e| StateError::Backend(e.to_string()));
                 let _ = resp.send(result);
             }
             ReplicationControllerCmd::ProjectionStatus { resp } => {
-                let store = self.intention_store.read().expect("Lock poisoned");
+                let store = self.intention_store.read().await;
                 let (head_seq, head_hash) = store.witness_head();
                 let cursor = self
                     .state

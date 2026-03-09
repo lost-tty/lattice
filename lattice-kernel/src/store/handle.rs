@@ -105,7 +105,12 @@ impl<S: StateMachine + CommandHandler + Introspectable + Send + Sync + 'static> 
     > {
         let meta = self.state().method_meta();
         match meta.get(method_name).map(|m| m.kind) {
-            Some(MethodKind::Query) => self.state().handle_query(method_name, request),
+            Some(MethodKind::Query) => {
+                Box::pin(async move {
+                    let guard = self.intention_store.read().await;
+                    self.state().handle_query(&*guard, method_name, request).await
+                })
+            }
             Some(MethodKind::Command) => self.state().handle_command(self, method_name, request),
             None => {
                 let name = method_name.to_string();
@@ -129,7 +134,7 @@ pub struct Store<S> {
     tx: mpsc::Sender<ReplicationControllerCmd>,
     intention_tx: broadcast::Sender<SignedIntention>,
     shutdown_token: CancellationToken,
-    intention_store: std::sync::Arc<std::sync::RwLock<IntentionStore>>,
+    intention_store: Arc<tokio::sync::RwLock<IntentionStore>>,
     local_system_event_tx: broadcast::Sender<SystemEvent>,
 }
 
@@ -160,7 +165,7 @@ impl<S> std::fmt::Debug for Store<S> {
 pub struct OpenedStore<S> {
     store_id: Uuid,
     state: Arc<S>,
-    intention_store: Option<Arc<std::sync::RwLock<IntentionStore>>>,
+    intention_store: Option<Arc<tokio::sync::RwLock<IntentionStore>>>,
 }
 
 impl<S: StateMachine + StoreIdentity + 'static> OpenedStore<S> {
@@ -174,7 +179,7 @@ impl<S: StateMachine + StoreIdentity + 'static> OpenedStore<S> {
         Ok(Self {
             store_id,
             state,
-            intention_store: Some(Arc::new(std::sync::RwLock::new(intention_store))),
+            intention_store: Some(Arc::new(tokio::sync::RwLock::new(intention_store))),
         })
     }
 
@@ -743,23 +748,14 @@ impl<S: StateMachine + Send + Sync + 'static> StoreEventSource for Store<S> {
     }
 }
 
-/// Helper to run a read operation on the intention store in a blocking task
-fn run_store_read<F, R>(
-    store: Arc<std::sync::RwLock<IntentionStore>>,
+/// Helper to run a read operation on the intention store
+async fn run_store_read<F, R>(
+    store: Arc<tokio::sync::RwLock<IntentionStore>>,
     f: F,
-) -> Pin<Box<dyn Future<Output = Result<R, StoreError>> + Send>>
+) -> Result<R, StoreError>
 where
-    F: FnOnce(&IntentionStore) -> Result<R, crate::weaver::intention_store::IntentionStoreError>
-        + Send
-        + 'static,
-    R: Send + 'static,
+    F: FnOnce(&IntentionStore) -> Result<R, crate::weaver::intention_store::IntentionStoreError>,
 {
-    Box::pin(async move {
-        tokio::task::spawn_blocking(move || {
-            let guard = store.read().expect("Lock poisoned");
-            f(&guard).map_err(|e| StoreError::Store(StateError::Backend(e.to_string())))
-        })
-        .await
-        .map_err(|_| StoreError::ChannelClosed)?
-    })
+    let guard = store.read().await;
+    f(&guard).map_err(|e| StoreError::Store(StateError::Backend(e.to_string())))
 }
