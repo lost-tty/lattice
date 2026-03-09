@@ -87,6 +87,6 @@ async function init() {
   } catch (e) {
     console.error('[boot] FATAL:', e);
     document.getElementById('app').innerHTML =
-      `<div class="card" style="margin:2rem"><p style="color:var(--red)">Failed to load proto definitions: ${e.message}</p><p>Try refreshing the page.</p></div>`;
+      `<div class="card boot-error"><p class="text-error">Failed to load proto definitions: ${e.message}</p><p>Try refreshing the page.</p></div>`;
   }
 })();

@@ -86,27 +86,16 @@ async function loadDebugIntentions(storeId) {
     return html`<${DebugNav} /><div class="empty-state">No intentions</div>`;
   }
 
-  const intentionHashes = [];
-  for (const w of entries) {
-    if (w.content && w.content.length > 0) {
-      try {
-        const wc = T.WitnessContent.decode(w.content);
-        if (wc.intention_hash && wc.intention_hash.length > 0) {
-          const h = hex(wc.intention_hash);
-          if (!intentionHashes.includes(h)) intentionHashes.push(h);
-        }
-      } catch (e) { /* skip */ }
-    }
-  }
+  const intentionHashes = extractIntentionHashes(entries);
 
   if (intentionHashes.length === 0) {
     return html`<${DebugNav} /><div class="empty-state">No intention hashes found in witness log</div>`;
   }
 
   const rows = [];
-  for (const h of intentionHashes) {
+  for (const { hex: h, bytes: hashBytes } of intentionHashes) {
     try {
-      const resp = await API.store.GetIntention({ store_id: storeId, hash_prefix: Helpers.bytesFromHex(h.slice(0, 8)) });
+      const resp = await API.store.GetIntention({ store_id: storeId, hash_prefix: hashBytes.slice(0, 4) });
       if (!resp.intention) continue;
       rows.push({ intention: resp.intention, ops: resp.ops || [] });
     } catch (e) {
@@ -126,7 +115,7 @@ async function loadDebugIntentions(storeId) {
             <td class="mono">${hex(r.intention.author)}</td>
             <td class="mono">${hex(r.intention.store_prev) || '-'}</td>
             <td>${r.intention.timestamp ? fmtTime(r.intention.timestamp.wall_time) : '-'}</td>
-            <td class="mono" style="white-space:pre-wrap">${fmtOps(r.ops)}</td>
+            <td class="mono pre-wrap">${fmtOps(r.ops)}</td>
           </tr>
         `
       )}
@@ -157,7 +146,7 @@ async function loadDebugFloating(storeId) {
             `;
           })}
         </table>
-        <div class="muted" style="margin-top:8px">${floating.length} floating intention${floating.length !== 1 ? 's' : ''}</div>
+        <div class="muted table-count">${floating.length} floating intention${floating.length !== 1 ? 's' : ''}</div>
       `
     }
   `;
@@ -193,7 +182,7 @@ function IntentionDetail({ intention, ops, hexStr, error }) {
         <div class="k">Store Prev</div><div class="v mono">${hex(i.store_prev) || '-'}</div>
         <div class="k">Condition</div><div class="v mono">${condStr}</div>
         <div class="k">Signature</div><div class="v mono">${hex(i.signature) || '-'}</div>
-        <div class="k">Ops</div><div class="v mono" style="white-space:pre-wrap">${fmtOps(ops)}</div>
+        <div class="k">Ops</div><div class="v mono pre-wrap">${fmtOps(ops)}</div>
       </div>
     </div>
   `;

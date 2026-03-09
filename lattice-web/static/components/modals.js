@@ -1,3 +1,13 @@
+function ModalActions({ onSubmit, label, danger }) {
+  const cls = danger ? 'btn btn-danger' : 'btn btn-primary';
+  return html`
+    <div class="modal-actions">
+      <button class="btn" onClick=${S.closeModal}>Cancel</button>
+      ${onSubmit ? html`<button class=${cls} onClick=${onSubmit}>${label}</button>` : null}
+    </div>
+  `;
+}
+
 function ModalContainer() {
   const modal = S.modal.value;
   if (!modal) return html`<div id="modal-container"></div>`;
@@ -69,10 +79,7 @@ function CreateStoreModal({ parentId }) {
     <select ref=${typeRef}>
       ${types.map(t => html`<option value=${t}>${t}</option>`)}
     </select>
-    <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Cancel</button>
-      <button class="btn btn-primary" onClick=${submit}>Create</button>
-    </div>
+    <${ModalActions} onSubmit=${submit} label="Create" />
   `;
 }
 
@@ -95,10 +102,7 @@ function JoinStoreModal() {
     <h2>Join Store</h2>
     <label>Invite token</label>
     <input ref=${inputRef} placeholder="Paste invite token" autofocus />
-    <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Cancel</button>
-      <button class="btn btn-primary" onClick=${submit}>Join</button>
-    </div>
+    <${ModalActions} onSubmit=${submit} label="Join" />
   `;
 }
 
@@ -120,10 +124,7 @@ function RenameModal({ storeId }) {
     <h2>Rename Store</h2>
     <label>New name</label>
     <input ref=${inputRef} placeholder="Enter a name" autofocus />
-    <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Cancel</button>
-      <button class="btn btn-primary" onClick=${submit}>Rename</button>
-    </div>
+    <${ModalActions} onSubmit=${submit} label="Rename" />
   `;
 }
 
@@ -151,10 +152,7 @@ function DeleteModal({ storeId }) {
     <p>Are you sure you want to archive store ${uuid}?</p>
     <label>Parent store UUID (the store that owns this child)</label>
     <input ref=${inputRef} placeholder="Parent UUID or prefix" autofocus />
-    <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Cancel</button>
-      <button class="btn btn-danger" onClick=${submit}>Delete</button>
-    </div>
+    <${ModalActions} onSubmit=${submit} label="Delete" danger />
   `;
 }
 
@@ -164,9 +162,7 @@ function InviteModal({ token }) {
     <p>Share this token with a peer to invite them.</p>
     <label>Token</label>
     <input value=${token} readonly onClick=${(e) => e.target.select()} />
-    <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Close</button>
-    </div>
+    <${ModalActions} />
   `;
 }
 
@@ -210,40 +206,24 @@ function ExecRawModal({ name, storeId }) {
     const hexStr = inputRef.current?.value?.trim() || '';
     let payloadBytes = new Uint8Array(0);
     if (hexStr) payloadBytes = Helpers.bytesFromHex(hexStr);
-    S.closeModal();
-    try {
-      const result = await execStore(storeId, name, payloadBytes);
-      await showExecResult(name, result, storeId);
-    } catch (e) { S.setPanelOverride({ type: 'execError', method: name, message: e.message }); }
+    await runExecAndShow(storeId, name, payloadBytes);
   };
 
   return html`
     <h2>Execute: ${name}</h2>
     <label>Payload (raw bytes, hex-encoded)</label>
     <input ref=${inputRef} placeholder="hex bytes" autofocus />
-    <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Cancel</button>
-      <button class="btn btn-primary" onClick=${submit}>Execute</button>
-    </div>
+    <${ModalActions} onSubmit=${submit} label="Execute" />
   `;
 }
 
 function ExecNoArgsModal({ name, storeId }) {
-  const submit = async () => {
-    S.closeModal();
-    try {
-      const result = await execStore(storeId, name, new Uint8Array(0));
-      await showExecResult(name, result, storeId);
-    } catch (e) { S.setPanelOverride({ type: 'execError', method: name, message: e.message }); }
-  };
+  const submit = () => runExecAndShow(storeId, name, new Uint8Array(0));
 
   return html`
     <h2>Execute: ${name}</h2>
     <p>This method takes no arguments.</p>
-    <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Cancel</button>
-      <button class="btn btn-primary" onClick=${submit}>Execute</button>
-    </div>
+    <${ModalActions} onSubmit=${submit} label="Execute" />
   `;
 }
 
@@ -251,19 +231,9 @@ function ExecFieldsModal({ name, storeId, inputType }) {
   const formRef = useRef(null);
 
   const submit = async () => {
-    const values = {};
-    if (formRef.current) {
-      for (const el of formRef.current.querySelectorAll('[data-field]')) {
-        const val = el.value;
-        if (val !== '' && val !== undefined) values[el.dataset.field] = val;
-      }
-    }
+    const values = collectFormFields(formRef);
     const payloadBytes = Schema.encodeMessage(inputType, values);
-    S.closeModal();
-    try {
-      const result = await execStore(storeId, name, payloadBytes);
-      await showExecResult(name, result, storeId);
-    } catch (e) { S.setPanelOverride({ type: 'execError', method: name, message: e.message }); }
+    await runExecAndShow(storeId, name, payloadBytes);
   };
 
   return html`
@@ -273,10 +243,7 @@ function ExecFieldsModal({ name, storeId, inputType }) {
         html`<${FieldInput} field=${field} cssClass="exec-field" autofocus=${i === 0} />`
       )}
     </div>
-    <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Cancel</button>
-      <button class="btn btn-primary" onClick=${submit}>Execute</button>
-    </div>
+    <${ModalActions} onSubmit=${submit} label="Execute" />
   `;
 }
 
@@ -287,12 +254,7 @@ function SubscribeModal({ streamName, storeId, paramType, eventSchema }) {
     let params = new Uint8Array(0);
     if (paramType && formRef.current) {
       try {
-        const values = {};
-        for (const el of formRef.current.querySelectorAll('[data-field]')) {
-          const val = el.value;
-          if (val !== '' && val !== undefined) values[el.dataset.field] = val;
-        }
-        params = Schema.encodeMessage(paramType, values);
+        params = Schema.encodeMessage(paramType, collectFormFields(formRef));
       } catch (e) { /* encode failed */ }
     }
     S.closeModal();
@@ -306,10 +268,7 @@ function SubscribeModal({ streamName, storeId, paramType, eventSchema }) {
         html`<${FieldInput} field=${field} cssClass="stream-field" autofocus=${i === 0} />`
       ) : null}
     </div>
-    <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Cancel</button>
-      <button class="btn btn-primary" onClick=${submit}>Subscribe</button>
-    </div>
+    <${ModalActions} onSubmit=${submit} label="Subscribe" />
   `;
 }
 
@@ -334,9 +293,6 @@ function InspectIntentionModal() {
     <h2>Inspect Intention</h2>
     <label>Hash prefix (hex)</label>
     <input ref=${inputRef} placeholder="e.g. a1b2c3" autofocus />
-    <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Cancel</button>
-      <button class="btn btn-primary" onClick=${submit}>Inspect</button>
-    </div>
+    <${ModalActions} onSubmit=${submit} label="Inspect" />
   `;
 }

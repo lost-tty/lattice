@@ -28,7 +28,7 @@ function DetailsView({ uuid, details, meta, peerStrategy, storeId }) {
       <button class="btn btn-danger" onClick=${() => S.showModal('delete', { storeId })}>Delete</button>
     </div>
     ${stalled ? html`
-      <div class="card" style="border-color:var(--yellow)">
+      <div class="card card-warning">
         <span class="badge badge-yellow">stalled</span>
         ${' '}Applied seq ${appliedSeq} is behind witness head seq ${headSeq} (${headSeq - appliedSeq} behind)
       </div>

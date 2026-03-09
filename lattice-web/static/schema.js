@@ -34,10 +34,6 @@ const Schema = (() => {
     return schema;
   }
 
-  function invalidate(storeIdBytes) {
-    cache.delete(Helpers.uuidFromBytes(storeIdBytes));
-  }
-
   // Encode a message from field name → string value map.
   // Uses the protobufjs type to handle proper encoding.
   function encodeMessage(msgType, values) {
@@ -125,11 +121,7 @@ const Schema = (() => {
 
     // bytes
     if (field.type === 'bytes') {
-      if (val instanceof Uint8Array) {
-        const text = new TextDecoder().decode(val);
-        if (/^[\x20-\x7e\n\r\t]*$/.test(text) && text.length > 0) return text;
-        return Helpers.hexFromBytes(val);
-      }
+      if (val instanceof Uint8Array) return Helpers.displayBytes(val) || Helpers.hexFromBytes(val);
       return String(val);
     }
 
@@ -169,6 +161,16 @@ const Schema = (() => {
     return field.type;
   }
 
-  return { getSchema, invalidate, encodeMessage, decodeMessage,
-           formatFields, formatDecoded, fieldTypeName, coerceFieldValue };
+  // Describe a message type's fields as [{name, typeName}].
+  function describeFields(root, typeName) {
+    try {
+      const t = root.lookupType(typeName);
+      if (t && t.fieldsArray.length > 0)
+        return t.fieldsArray.map(f => ({ name: f.name, typeName: fieldTypeName(f) }));
+    } catch (e) { /* type not found */ }
+    return null;
+  }
+
+  return { getSchema, encodeMessage, decodeMessage,
+           formatFields, formatDecoded, fieldTypeName, describeFields };
 })();

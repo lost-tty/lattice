@@ -35,8 +35,8 @@ function decodeSystemValue(key, value) {
 
     // "child/*" or "*/name" → raw UTF-8
     if (key.startsWith('child/') || key.endsWith('/name')) {
-      const text = new TextDecoder().decode(value);
-      if (/^[\x20-\x7e]*$/.test(text)) return text + ' (0x' + hexStr + ')';
+      const text = Helpers.displayBytes(value);
+      if (text) return text + ' (0x' + hexStr + ')';
     }
 
     // "strategy" → peer strategy oneof
@@ -49,38 +49,19 @@ function decodeSystemValue(key, value) {
   return '0x' + hexStr;
 }
 
-// Decode a protobuf message with a single string field at tag 1.
-function decodeTag1String(buf) {
+// Decode a single field at tag 1 from a protobuf buffer.
+function decodeTag1(buf, wireType, readFn) {
   const r = protobuf.Reader.create(buf);
   while (r.pos < r.len) {
     const tag = r.uint32();
-    if ((tag >>> 3) === 1 && (tag & 7) === 2) return r.string();
+    if ((tag >>> 3) === 1 && (tag & 7) === wireType) return readFn(r);
     r.skipType(tag & 7);
   }
   return null;
 }
-
-// Decode a protobuf message with a single varint field at tag 1.
-function decodeTag1Varint(buf) {
-  const r = protobuf.Reader.create(buf);
-  while (r.pos < r.len) {
-    const tag = r.uint32();
-    if ((tag >>> 3) === 1 && (tag & 7) === 0) return r.uint64();
-    r.skipType(tag & 7);
-  }
-  return null;
-}
-
-// Decode a protobuf message with a single bytes field at tag 1.
-function decodeTag1Bytes(buf) {
-  const r = protobuf.Reader.create(buf);
-  while (r.pos < r.len) {
-    const tag = r.uint32();
-    if ((tag >>> 3) === 1 && (tag & 7) === 2) return r.bytes();
-    r.skipType(tag & 7);
-  }
-  return null;
-}
+const decodeTag1String = buf => decodeTag1(buf, 2, r => r.string());
+const decodeTag1Varint = buf => decodeTag1(buf, 0, r => r.uint64());
+const decodeTag1Bytes  = buf => decodeTag1(buf, 2, r => r.bytes());
 
 // Decode the PeerStrategy oneof (tags 1=Independent, 2=Inherited, 3=Snapshot).
 function decodeStrategy(buf) {

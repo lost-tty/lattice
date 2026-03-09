@@ -66,8 +66,7 @@ function doSubscribe(storeId, streamName, params, eventSchemaName) {
 
     if (!display) {
       const raw = eventPayload instanceof Uint8Array ? eventPayload : new Uint8Array(0);
-      const text = new TextDecoder().decode(raw);
-      display = /^[\x20-\x7e\n\r\t]*$/.test(text) && text.length > 0 ? text : hex(raw);
+      display = Helpers.displayBytes(raw) || hex(raw);
     }
 
     const events = [...(S.subscriptions.value.get(subId)?.events || []), { time: Date.now(), display }];
@@ -94,11 +93,20 @@ function doUnsubscribe(subId) {
   S.toast(`Unsubscribed from '${sub.streamName}'`, 'ok');
 }
 
-// Exec result display — generates HTML for the panel override.
+// Execute a store method and display the result in the panel override.
+async function runExecAndShow(storeId, name, payloadBytes) {
+  S.closeModal();
+  try {
+    const result = await execStore(storeId, name, payloadBytes);
+    await showExecResult(name, result, storeId);
+  } catch (e) { S.setPanelOverride({ type: 'execError', method: name, message: e.message }); }
+}
+
+// Exec result display — builds a Preact vnode for the panel override.
 async function showExecResult(method, resultBytes, storeId) {
   const schema = await Schema.getSchema(storeId);
   const methodDesc = schema?.service?.methods[method];
-  let body = '';
+  let body = null;
 
   if (methodDesc) {
     try {
@@ -106,11 +114,11 @@ async function showExecResult(method, resultBytes, storeId) {
       const obj = Schema.decodeMessage(outputType, resultBytes);
       const fields = Schema.formatFields(outputType, obj);
       if (fields.length > 0) {
-        body = tryRenderTable(fields) || '';
+        body = tryRenderTable(fields);
         if (!body) {
-          body = '<div class="kv">' + fields.map(f => {
-            return `<div class="k">${f.name}</div><div class="v mono">${fmtFieldValue(f)}</div>`;
-          }).join('') + '</div>';
+          body = html`<div class="kv">${fields.map(f => html`
+            <div class="k">${f.name}</div><div class="v mono">${fmtFieldValue(f)}</div>
+          `)}</div>`;
         }
       }
     } catch (e) { /* decode failed */ }
@@ -118,14 +126,9 @@ async function showExecResult(method, resultBytes, storeId) {
 
   if (!body) {
     if (!resultBytes || resultBytes.length === 0) {
-      body = '<p class="muted">Empty response</p>';
+      body = html`<p class="muted">Empty response</p>`;
     } else {
-      const text = new TextDecoder().decode(resultBytes);
-      if (/^[\x20-\x7e\n\r\t]*$/.test(text) && text.length > 0) {
-        body = `<pre class="mono">${text}</pre>`;
-      } else {
-        body = `<pre class="mono">${hex(resultBytes)}</pre>`;
-      }
+      body = html`<pre class="mono">${Helpers.displayBytes(resultBytes)}</pre>`;
     }
   }
 

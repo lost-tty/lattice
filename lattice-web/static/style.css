@@ -530,3 +530,27 @@ pre {
 .history-label:hover {
   background: var(--surface);
 }
+
+/* Utility classes (extracted from inline styles) */
+
+.field-type { color: var(--muted); }
+.section-heading { margin-bottom: 0.6rem; }
+.mt-section { margin-top: 1.2rem; }
+.card-compact { padding: 16px 20px; }
+.card-row { display: flex; align-items: center; justify-content: space-between; }
+.card-warning { border-color: var(--yellow); }
+.mono-medium { font-weight: 500; }
+.ml-desc { margin-left: 12px; }
+.ml-xs { margin-left: 8px; }
+.param-list { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+.param-type { font-size: var(--sm); }
+.btn-group { display: flex; gap: 0.5rem; }
+.text-error { color: var(--red); }
+.loading-state { color: var(--muted); padding: 20px; }
+.placeholder-text { padding: 0.4rem 0; }
+.table-count { margin-top: 8px; }
+.pre-wrap { white-space: pre-wrap; }
+.sidebar-section { padding: 0.8rem 1rem 0.3rem; }
+.sub-header { margin-bottom: 0.6rem; }
+.boot-error { margin: 2rem; }
+.store-item { margin-left: calc(var(--depth, 0) * 16px); }

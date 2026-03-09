@@ -1,7 +1,7 @@
 // Shared helpers and Preact imports for all components.
 // Every component file uses these globals.
 
-const { html, Fragment, useState, useEffect, useRef, useMemo, useCallback } = P;
+const { html, Fragment, useState, useEffect, useRef } = P;
 
 function hex(bytes) {
   return bytes ? Helpers.hexFromBytes(bytes) : '';
@@ -22,6 +22,7 @@ function fmtFieldValue(fld) {
 
 // Detect tabular data: a single repeated message field where all items
 // share the same field names. Mirrors the CLI's table detection.
+// Returns a Preact vnode (or null).
 function tryRenderTable(fields) {
   function findRepeatedMessages(fs) {
     if (fs.length === 1 && fs[0].type === 'repeated' && Array.isArray(fs[0].value)) {
@@ -45,21 +46,19 @@ function tryRenderTable(fields) {
     }
   }
 
-  const ths = headers.map(h => `<th>${h}</th>`).join('');
-  const trs = rows.map(row => {
-    const tds = row.map(f => `<td class="mono">${fmtFieldValue(f)}</td>`).join('');
-    return `<tr>${tds}</tr>`;
-  }).join('');
-
-  return `<table><tr>${ths}</tr>${trs}</table>
-    <div class="muted" style="margin-top:8px">${rows.length} item${rows.length !== 1 ? 's' : ''}</div>`;
+  return html`
+    <table>
+      <tr>${headers.map(h => html`<th>${h}</th>`)}</tr>
+      ${rows.map(row => html`
+        <tr>${row.map(f => html`<td class="mono">${fmtFieldValue(f)}</td>`)}</tr>
+      `)}
+    </table>
+    <div class="muted table-count">${rows.length} item${rows.length !== 1 ? 's' : ''}</div>
+  `;
 }
 
 // Build SExpr-like objects for fmtSExpr (mirrors protobufjs oneof shape).
 function sexprSym(s)    { return { value: 'symbol', symbol: s }; }
-function sexprStr(s)    { return { value: 'str', str: s }; }
-function sexprRaw(b)    { return { value: 'raw', raw: b }; }
-function sexprNum(n)    { return { value: 'num', num: n }; }
 function sexprList(items) { return { value: 'list', list: { items } }; }
 
 // Render a proto SExpr (from GetIntentionResponse.ops) as a colored Preact vnode.
@@ -109,6 +108,36 @@ function fmtOps(ops) {
   );
 }
 
+// Extract unique intention hashes from witness log entries.
+// Returns [{ hex, bytes }] — deduped, order-preserving.
+function extractIntentionHashes(entries) {
+  const seen = new Set();
+  const result = [];
+  for (const w of entries) {
+    if (!w.content || w.content.length === 0) continue;
+    try {
+      const wc = T.WitnessContent.decode(w.content);
+      if (wc.intention_hash && wc.intention_hash.length > 0) {
+        const h = hex(wc.intention_hash);
+        if (!seen.has(h)) { seen.add(h); result.push({ hex: h, bytes: wc.intention_hash }); }
+      }
+    } catch (e) { /* skip */ }
+  }
+  return result;
+}
+
+// Collect form field values from [data-field] elements.
+function collectFormFields(formRef) {
+  const values = {};
+  if (formRef.current) {
+    for (const el of formRef.current.querySelectorAll('[data-field]')) {
+      const val = el.value;
+      if (val !== '' && val !== undefined) values[el.dataset.field] = val;
+    }
+  }
+  return values;
+}
+
 // Reusable form field input for protobufjs message types.
 function FieldInput({ field, cssClass, autofocus }) {
   const resolved = field.resolve();
@@ -116,7 +145,7 @@ function FieldInput({ field, cssClass, autofocus }) {
 
   if (resolved.resolvedType instanceof protobuf.Enum) {
     return html`
-      <label>${field.name} <span style="color:var(--muted)">(${typeName})</span></label>
+      <label>${field.name} <span class="field-type">(${typeName})</span></label>
       <select class=${cssClass} data-field=${field.name} autofocus=${autofocus}>
         ${Object.entries(resolved.resolvedType.values).map(([name, num]) =>
           html`<option value=${num}>${name}</option>`
@@ -127,7 +156,7 @@ function FieldInput({ field, cssClass, autofocus }) {
 
   if (field.type === 'bool') {
     return html`
-      <label>${field.name} <span style="color:var(--muted)">(${typeName})</span></label>
+      <label>${field.name} <span class="field-type">(${typeName})</span></label>
       <select class=${cssClass} data-field=${field.name} autofocus=${autofocus}>
         <option value="">false</option>
         <option value="true">true</option>
@@ -137,7 +166,7 @@ function FieldInput({ field, cssClass, autofocus }) {
 
   const placeholder = field.type === 'bytes' ? 'text (or 0x... for hex)' : typeName;
   return html`
-    <label>${field.name} <span style="color:var(--muted)">(${typeName})</span></label>
+    <label>${field.name} <span class="field-type">(${typeName})</span></label>
     <input class=${cssClass} data-field=${field.name} placeholder=${placeholder} autofocus=${autofocus} />
   `;
 }

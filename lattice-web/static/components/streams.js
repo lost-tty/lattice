@@ -20,11 +20,11 @@ function StreamsView({ streams, storeId }) {
 
   return html`
     ${streams.length > 0 ? html`
-      <h3 style="margin-bottom:0.6rem">Available Streams</h3>
+      <h3 class="section-heading">Available Streams</h3>
       ${streams.map(s => html`<${StreamCard} stream=${s} storeId=${storeId} />`)}
     ` : null}
     ${activeSubs.length > 0 ? html`
-      <h3 style="margin:${streams.length > 0 ? '1.2rem' : '0'} 0 0.6rem">Active Subscriptions</h3>
+      <h3 class="section-heading${streams.length > 0 ? ' mt-section' : ''}">Active Subscriptions</h3>
       ${activeSubs.map(sub => html`<${SubscriptionCard} sub=${sub} />`)}
     ` : null}
   `;
@@ -39,31 +39,27 @@ function StreamCard({ stream, storeId }) {
       try {
         const schema = await Schema.getSchema(storeId);
         if (schema?.root) {
-          const paramType = schema.root.lookupType(stream.param_schema);
-          if (paramType && paramType.fieldsArray.length > 0) {
-            setParams(paramType.fieldsArray.map(f => ({
-              name: f.name, typeName: Schema.fieldTypeName(f),
-            })));
-          }
+          const fields = Schema.describeFields(schema.root, stream.param_schema);
+          if (fields) setParams(fields);
         }
       } catch (e) { /* type not found */ }
     })();
   }, [stream.param_schema, storeId]);
 
   return html`
-    <div class="card" style="padding:16px 20px">
-      <div style="display:flex;align-items:center;justify-content:space-between">
+    <div class="card card-compact">
+      <div class="card-row">
         <div>
-          <span class="mono" style="font-weight:500">${stream.name}</span>
-          <span class="muted" style="margin-left:12px">${stream.description}</span>
+          <span class="mono mono-medium">${stream.name}</span>
+          <span class="muted ml-desc">${stream.description}</span>
         </div>
         <button class="btn btn-primary" onClick=${() => showSubscribeStream(storeId, stream)}>Subscribe</button>
       </div>
       ${params ? html`
-        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <div class="param-list">
           ${params.map(p => html`
             <span class="badge badge-blue">${p.name}</span>
-            <span class="muted" style="font-size:12px">${p.typeName}</span>
+            <span class="muted param-type">${p.typeName}</span>
           `)}
         </div>
       ` : null}
@@ -80,21 +76,21 @@ function SubscriptionCard({ sub }) {
 
   return html`
     <div class="card stream-sub">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">
+      <div class="card-row sub-header">
         <div>
-          <span class="mono" style="font-weight:500">${sub.streamName}</span>
-          <span class="badge badge-green" style="margin-left:8px">
+          <span class="mono mono-medium">${sub.streamName}</span>
+          <span class="badge badge-green ml-xs">
             ${sub.events.length} event${sub.events.length !== 1 ? 's' : ''}
           </span>
         </div>
-        <div style="display:flex;gap:0.5rem">
+        <div class="btn-group">
           <button class="btn" onClick=${() => clearSubEvents(sub.id)}>Clear</button>
           <button class="btn btn-danger" onClick=${() => doUnsubscribe(sub.id)}>Unsubscribe</button>
         </div>
       </div>
       <div class="stream-events" ref=${eventsRef}>
         ${sub.events.length === 0
-          ? html`<div class="muted" style="padding:0.4rem 0">Waiting for events...</div>`
+          ? html`<div class="muted placeholder-text">Waiting for events...</div>`
           : sub.events.map(ev => html`
               <div class="stream-event">
                 <span class="muted">${new Date(ev.time).toLocaleTimeString()}</span>

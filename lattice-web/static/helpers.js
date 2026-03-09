@@ -48,5 +48,13 @@ const Helpers = (() => {
     return `oklch(${L} ${C} ${hue.toFixed(1)})`;
   }
 
-  return { uuidFromBytes, uuidToBytes, hexFromBytes, bytesFromHex, pubkeyShort, colorFromHex };
+  // Display a Uint8Array as printable text (if ASCII) or hex.
+  function displayBytes(u8) {
+    if (!u8 || u8.length === 0) return '';
+    const text = new TextDecoder().decode(u8);
+    if (/^[\x20-\x7e\n\r\t]*$/.test(text) && text.length > 0) return text;
+    return hexFromBytes(u8);
+  }
+
+  return { uuidFromBytes, uuidToBytes, hexFromBytes, bytesFromHex, pubkeyShort, colorFromHex, displayBytes };
 })();

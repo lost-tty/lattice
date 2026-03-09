@@ -76,11 +76,11 @@ function AsyncPanel() {
   }, [sid, tab, dv]);
 
   if (error) {
-    return html`<div class="card"><div style="color:var(--red)">Error: ${error}</div></div>`;
+    return html`<div class="card"><div class="text-error">Error: ${error}</div></div>`;
   }
 
   if (!content) {
-    return html`<div style="color:var(--muted);padding:20px">Loading...</div>`;
+    return html`<div class="loading-state">Loading...</div>`;
   }
 
   return content;
@@ -94,7 +94,7 @@ function PanelOverride({ override }) {
       </div>
       <div class="card">
         <h3>${override.method}</h3>
-        <div dangerouslySetInnerHTML=${{ __html: override.body }} />
+        ${override.body}
       </div>
     `;
   }

@@ -33,26 +33,11 @@ async function fetchHistoryLayout(storeId) {
   if (entries.length === 0) return null;
 
   // Collect unique intention hashes from witness log
-  const seen = new Set();
-  const intentionHashes = [];
-  for (const w of entries) {
-    if (!w.content || w.content.length === 0) continue;
-    try {
-      const wc = T.WitnessContent.decode(w.content);
-      if (wc.intention_hash && wc.intention_hash.length > 0) {
-        const h = hex(wc.intention_hash);
-        if (!seen.has(h)) {
-          seen.add(h);
-          intentionHashes.push(wc.intention_hash);
-        }
-      }
-    } catch (e) { /* skip */ }
-  }
-
+  const intentionHashes = extractIntentionHashes(entries);
   if (intentionHashes.length === 0) return null;
 
   // Fetch all intentions in parallel
-  const results = await Promise.all(intentionHashes.map(async (hashBytes) => {
+  const results = await Promise.all(intentionHashes.map(async ({ bytes: hashBytes }) => {
     try {
       return await API.store.GetIntention({
         store_id: storeId,

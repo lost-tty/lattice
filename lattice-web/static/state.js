@@ -5,7 +5,7 @@
 // re-render when the value changes. No manual pub/sub or hooks needed.
 // ============================================================================
 
-const { signal, computed, batch } = preactSignals;
+const { signal, batch } = preactSignals;
 
 const S = (() => {
   // --- Signals ---
