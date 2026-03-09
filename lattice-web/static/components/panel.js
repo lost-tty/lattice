@@ -1,4 +1,4 @@
-const TABS = ['details', 'peers', 'methods', 'streams', 'debug', 'system'];
+const TABS = ['details', 'peers', 'methods', 'streams', 'history', 'debug', 'system'];
 
 function TabBar() {
   const activeStoreId = S.activeStoreId.value;
@@ -62,6 +62,7 @@ function AsyncPanel() {
           case 'peers': result = await loadPeers(sid); break;
           case 'methods': result = await loadMethods(sid); break;
           case 'streams': result = await loadStreams(sid); break;
+          case 'history': result = await loadHistory(sid); break;
           case 'debug': result = await loadDebug(sid, dv); break;
           case 'system': result = await loadSystem(sid); break;
         }

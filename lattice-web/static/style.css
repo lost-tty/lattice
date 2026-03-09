@@ -475,3 +475,43 @@ pre {
 .stream-event:last-child {
   border-bottom: none;
 }
+
+/* History graph */
+
+.history-view {
+  font-size: var(--sm);
+}
+
+.history-container {
+  overflow-x: auto;
+}
+
+.history-graph {
+  pointer-events: none;
+}
+
+.history-label {
+  min-height: 28px;
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+  border-radius: var(--r);
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.6;
+}
+
+.history-author {
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--r);
+  font-weight: 500;
+  color: var(--author-color);
+  background: color-mix(in oklch, var(--author-color) 15%, transparent);
+}
+
+.history-ops {
+  font-family: var(--mono);
+}
+
+.history-label:hover {
+  background: var(--surface);
+}

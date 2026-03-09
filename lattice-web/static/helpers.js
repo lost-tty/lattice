@@ -30,5 +30,21 @@ const Helpers = (() => {
     return hexFromBytes(u8);
   }
 
-  return { uuidFromBytes, uuidToBytes, hexFromBytes, bytesFromHex, pubkeyShort };
+  // Derive a unique oklch color from a hex string (pubkey, hash, etc).
+  // Golden angle hue + two lightness/chroma tiers for max distinction.
+  function colorFromHex(h) {
+    let h1 = 0, h2 = 0;
+    for (let i = 0; i < 16 && i < h.length; i += 2) {
+      const b = parseInt(h.slice(i, i + 2), 16) || 0;
+      h1 = (h1 * 31 + b) >>> 0;
+      h2 = (h2 * 17 + b) >>> 0;
+    }
+    const hue = (h1 * 137.508) % 360;
+    const tier = (h2 >>> 4) & 1;
+    const L = tier ? 0.75 : 0.65;
+    const C = tier ? 0.18 : 0.25;
+    return `oklch(${L} ${C} ${hue.toFixed(1)})`;
+  }
+
+  return { uuidFromBytes, uuidToBytes, hexFromBytes, bytesFromHex, pubkeyShort, colorFromHex };
 })();

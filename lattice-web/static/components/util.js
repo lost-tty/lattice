@@ -55,6 +55,13 @@ function tryRenderTable(fields) {
     <div class="muted" style="margin-top:8px">${rows.length} item${rows.length !== 1 ? 's' : ''}</div>`;
 }
 
+// Build SExpr-like objects for fmtSExpr (mirrors protobufjs oneof shape).
+function sexprSym(s)    { return { value: 'symbol', symbol: s }; }
+function sexprStr(s)    { return { value: 'str', str: s }; }
+function sexprRaw(b)    { return { value: 'raw', raw: b }; }
+function sexprNum(n)    { return { value: 'num', num: n }; }
+function sexprList(items) { return { value: 'list', list: { items } }; }
+
 // Render a proto SExpr (from GetIntentionResponse.ops) as a colored Preact vnode.
 // SExpr uses oneof "value" with variants: symbol, str, raw, num, list.
 // protobufjs decode() sets defaults on all fields, so we must check the
@@ -76,6 +83,22 @@ function fmtSExpr(sexpr) {
     }
     default: return '';
   }
+}
+
+// Pretty-print an SExpr with indentation. Lists containing sub-lists get
+// each child on its own line. Rendered inside a white-space:pre-wrap container.
+// Returns vnodes with \n and space characters for structure.
+function fmtSExprPretty(sexpr, depth) {
+  if (!sexpr) return '';
+  depth = depth || 0;
+  if (sexpr.value !== 'list') return fmtSExpr(sexpr);
+  const items = sexpr.list.items || [];
+  if (items.length === 0) return html`<span class="sexpr-paren">()</span>`;
+  const hasSubLists = items.length > 2 && items.some(i => i.value === 'list');
+  if (!hasSubLists) return fmtSExpr(sexpr);
+  const indent = '  '.repeat(depth + 1);
+  return html`<span class="sexpr-paren">(</span>${fmtSExpr(items[0])}${items.slice(1).map(child =>
+    html`${'\n' + indent}${fmtSExprPretty(child, depth + 1)}`)}<span class="sexpr-paren">)</span>`;
 }
 
 // Render an array of SExpr ops as Preact vnodes, one per line.
