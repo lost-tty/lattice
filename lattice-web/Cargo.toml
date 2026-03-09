@@ -1,0 +1,27 @@
+[package]
+name = "lattice-web"
+description = "Web interface for Lattice - WebSocket/gRPC tunnel and browser UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-api = { workspace = true }
+lattice-proto = { workspace = true }
+
+axum = { version = "0.8", features = ["ws"] }
+tokio = { workspace = true, features = ["full"] }
+tonic = "0.14"
+prost = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+rust-embed = "8"
+mime_guess = "2"
+http = "1"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[build-dependencies]
+prost-build = { workspace = true }
