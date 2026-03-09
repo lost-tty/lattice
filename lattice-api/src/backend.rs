@@ -35,8 +35,15 @@ pub struct IntentionDetail {
     pub ops: Vec<SExpr>,
 }
 
+/// Method descriptor returned by `store_list_methods()`.
+pub struct MethodInfo {
+    pub name: String,
+    pub description: String,
+    pub kind: MethodKind,
+}
+
 // Re-export model types needed by backends
-pub use lattice_store_base::{BoxByteStream, StreamDescriptor};
+pub use lattice_store_base::{BoxByteStream, MethodKind, StreamDescriptor};
 
 // ==================== Error Types ====================
 
@@ -151,7 +158,7 @@ pub trait LatticeBackend: Send + Sync {
     fn store_exec(&self, store_id: Uuid, method: &str, payload: &[u8]) -> AsyncResult<'_, Vec<u8>>;
     /// Get store's descriptor bytes and service name for client-side reflection
     fn store_get_descriptor(&self, store_id: Uuid) -> AsyncResult<'_, (Vec<u8>, String)>;
-    fn store_list_methods(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, String)>>;
+    fn store_list_methods(&self, store_id: Uuid) -> AsyncResult<'_, Vec<MethodInfo>>;
 
     // ---- Stream operations ----
     /// List available streams for a store

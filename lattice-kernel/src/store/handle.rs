@@ -64,7 +64,9 @@ impl<S: StateMachine + Send + Sync + 'static> RegistryEntry for Store<S> {
 // Store Handle Traits
 // =============================================================================
 
-use lattice_store_base::{CommandDispatcher, CommandHandler, Introspectable, StateProvider};
+use lattice_store_base::{
+    CommandDispatcher, CommandHandler, Introspectable, MethodKind, StateProvider,
+};
 use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
@@ -101,7 +103,17 @@ impl<S: StateMachine + CommandHandler + Introspectable + Send + Sync + 'static> 
                 + 'a,
         >,
     > {
-        self.state().handle_command(self, method_name, request)
+        let meta = self.state().method_meta();
+        match meta.get(method_name).map(|m| m.kind) {
+            Some(MethodKind::Query) => self.state().handle_query(method_name, request),
+            Some(MethodKind::Command) => self.state().handle_command(self, method_name, request),
+            None => {
+                let name = method_name.to_string();
+                Box::pin(async move {
+                    Err(format!("Unknown method: {name}").into())
+                })
+            }
+        }
     }
 }
 

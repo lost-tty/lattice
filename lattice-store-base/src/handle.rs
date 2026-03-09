@@ -5,7 +5,7 @@
 //! - `CommandHandler` trait for state-level command routing (takes a writer parameter)
 //! - `StreamProvider` trait for stream handlers
 
-use crate::{FieldFormat, Introspectable};
+use crate::{FieldFormat, Introspectable, MethodMeta};
 use std::collections::HashMap;
 
 // =============================================================================
@@ -47,8 +47,8 @@ where
         self.state().decode_payload(payload)
     }
 
-    fn command_docs(&self) -> HashMap<String, String> {
-        self.state().command_docs()
+    fn method_meta(&self) -> HashMap<String, MethodMeta> {
+        self.state().method_meta()
     }
 
     fn field_formats(&self) -> HashMap<String, FieldFormat> {
@@ -71,36 +71,49 @@ use lattice_model::StateWriter;
 use std::future::Future;
 use std::pin::Pin;
 
-/// Trait for state types that can handle commands.
+/// Trait for state types that can handle commands and queries.
 ///
-/// This trait enables state implementations (KvState, LogState) to handle
-/// commands with an injected writer for mutations. Distinct from `CommandDispatcher`
-/// which is the handle-level trait that owns the writer.
+/// The framework routes methods to the correct handler based on `method_meta()`.
+/// Command handlers receive a `StateWriter` for mutations. Query handlers have
+/// no writer — they physically cannot create intentions.
 ///
 /// # Example
 /// ```ignore
 /// impl CommandHandler for KvState {
-///     fn handle_command<'a>(
-///         &'a self,
-///         writer: &'a dyn StateWriter,
-///         method: &'a str,
-///         request: DynamicMessage,
-///     ) -> Pin<Box<dyn Future<Output = Result<DynamicMessage, _>> + Send + 'a>> {
-///         Box::pin(async move {
-///             match method {
-///                 "Get" => self.handle_get(request),
-///                 "Put" => self.handle_put(writer, request),
-///                 _ => Err("Unknown method".into())
-///             }
-///         })
+///     fn handle_command(&self, writer, method, request) {
+///         match method {
+///             "Put" => self.handle_put(writer, request),
+///             _ => Err("Unknown command")
+///         }
+///     }
+///     fn handle_query(&self, method, request) {
+///         match method {
+///             "Get" => self.handle_get(request),
+///             _ => Err("Unknown query")
+///         }
 ///     }
 /// }
 /// ```
 pub trait CommandHandler: Send + Sync {
-    /// Handle a command, using the provided writer for mutations.
     fn handle_command<'a>(
         &'a self,
         writer: &'a dyn StateWriter,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    >;
+
+    fn handle_query<'a>(
+        &'a self,
         method_name: &'a str,
         request: prost_reflect::DynamicMessage,
     ) -> Pin<
@@ -139,6 +152,24 @@ where
         >,
     > {
         (**self).handle_command(writer, method_name, request)
+    }
+
+    fn handle_query<'a>(
+        &'a self,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        (**self).handle_query(method_name, request)
     }
 }
 

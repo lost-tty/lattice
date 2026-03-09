@@ -119,8 +119,8 @@ impl Introspectable for dyn StoreHandle {
         self.as_dispatcher().decode_payload(payload)
     }
 
-    fn command_docs(&self) -> std::collections::HashMap<String, String> {
-        self.as_dispatcher().command_docs()
+    fn method_meta(&self) -> std::collections::HashMap<String, lattice_store_base::MethodMeta> {
+        self.as_dispatcher().method_meta()
     }
 
     fn field_formats(&self) -> std::collections::HashMap<String, lattice_store_base::FieldFormat> {

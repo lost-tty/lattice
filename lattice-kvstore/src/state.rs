@@ -7,6 +7,7 @@
 //! `proto::Value { oneof kind { value | tombstone }, heads[] }` via `KVTable`.
 
 use lattice_storage::{StateContext, StateDbError, StateLogic};
+use lattice_store_base::{MethodKind, MethodMeta};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -251,17 +252,33 @@ impl Introspectable for KvState {
         Ok(dynamic)
     }
 
-    fn command_docs(&self) -> std::collections::HashMap<String, String> {
-        let mut docs = std::collections::HashMap::new();
-        docs.insert("Put".to_string(), "Store a key-value pair".to_string());
-        docs.insert("Get".to_string(), "Get value for key".to_string());
-        docs.insert("Delete".to_string(), "Delete a key".to_string());
-        docs.insert("List".to_string(), "List keys by prefix".to_string());
-        docs.insert(
-            "Inspect".to_string(),
-            "Inspect a key: value, conflict status, and head hashes".to_string(),
-        );
-        docs
+    fn method_meta(&self) -> std::collections::HashMap<String, MethodMeta> {
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("Put".into(), MethodMeta {
+            description: "Store a key-value pair".into(),
+            kind: MethodKind::Command,
+        });
+        meta.insert("Get".into(), MethodMeta {
+            description: "Get value for key".into(),
+            kind: MethodKind::Query,
+        });
+        meta.insert("Delete".into(), MethodMeta {
+            description: "Delete a key".into(),
+            kind: MethodKind::Command,
+        });
+        meta.insert("List".into(), MethodMeta {
+            description: "List keys by prefix".into(),
+            kind: MethodKind::Query,
+        });
+        meta.insert("Batch".into(), MethodMeta {
+            description: "Atomic batch of puts and deletes".into(),
+            kind: MethodKind::Command,
+        });
+        meta.insert("Inspect".into(), MethodMeta {
+            description: "Inspect a key: value, conflict status, and head hashes".into(),
+            kind: MethodKind::Query,
+        });
+        meta
     }
 
     fn field_formats(&self) -> std::collections::HashMap<String, FieldFormat> {
@@ -482,23 +499,46 @@ impl CommandHandler for KvState {
                     })
                     .await
                 }
-                "Get" => {
-                    dispatch_method(method_name, request, desc, |req| self.handle_get(req)).await
-                }
-                "List" => {
-                    dispatch_method(method_name, request, desc, |req| self.handle_list(req)).await
-                }
                 "Batch" => {
                     dispatch_method(method_name, request, desc, |req| {
                         self.handle_batch(writer, req)
                     })
                     .await
                 }
+                _ => Err(format!("Unknown command: {}", method_name).into()),
+            }
+        })
+    }
+
+    fn handle_query<'a>(
+        &'a self,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let desc = self.service_descriptor();
+        Box::pin(async move {
+            match method_name {
+                "Get" => {
+                    dispatch_method(method_name, request, desc, |req| self.handle_get(req)).await
+                }
+                "List" => {
+                    dispatch_method(method_name, request, desc, |req| self.handle_list(req)).await
+                }
                 "Inspect" => {
                     dispatch_method(method_name, request, desc, |req| self.handle_inspect(req))
                         .await
                 }
-                _ => Err(format!("Unknown method: {}", method_name).into()),
+                _ => Err(format!("Unknown query: {}", method_name).into()),
             }
         })
     }

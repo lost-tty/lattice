@@ -595,19 +595,27 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_list_methods(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, String)>> {
+    fn store_list_methods(&self, store_id: Uuid) -> AsyncResult<'_, Vec<MethodInfo>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let dispatcher = store.as_dispatcher();
             let service = dispatcher.service_descriptor();
-            let docs = dispatcher.command_docs();
+            let meta = dispatcher.method_meta();
 
             Ok(service
                 .methods()
                 .map(|m| {
                     let name = m.name().to_string();
-                    let desc = docs.get(&name).cloned().unwrap_or_default();
-                    (name, desc)
+                    let m_meta = meta.get(&name);
+                    MethodInfo {
+                        description: m_meta
+                            .map(|mm| mm.description.clone())
+                            .unwrap_or_default(),
+                        kind: m_meta
+                            .map(|mm| mm.kind)
+                            .unwrap_or(MethodKind::Command),
+                        name,
+                    }
                 })
                 .collect())
         })

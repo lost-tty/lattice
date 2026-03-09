@@ -17,6 +17,8 @@ pub use lattice_api::backend::{
     IntentionDetail,
     JoinFailedEvent,
     LatticeBackend,
+    MethodInfo,
+    MethodKind,
     NodeEvent,
     // Event wrapper types
     StoreReadyEvent,

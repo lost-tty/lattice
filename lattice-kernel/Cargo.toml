@@ -30,6 +30,7 @@ async-stream = "0.3.6"
 tracing = { workspace = true }
 
 [dev-dependencies]
+lattice-mockkernel = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "rt-multi-thread"] }
 tokio-test = { workspace = true }
 tempfile = "3"

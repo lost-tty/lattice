@@ -1370,6 +1370,7 @@ fn format_kind_full(kind: prost_reflect::Kind) -> String {
 struct HelpItem {
     name: String,
     description: String,
+    kind: Option<lattice_runtime::MethodKind>,
     section: &'static str,
     fields: Vec<(String, String)>, // (wrapped_name, type)
 }
@@ -1420,10 +1421,10 @@ impl HelpContext {
         let pool = DescriptorPool::decode(descriptor_bytes.as_slice()).ok()?;
         let service = pool.get_service_by_name(&service_name)?;
 
-        let descriptions: HashMap<String, String> = backend
+        let method_info: HashMap<String, lattice_runtime::MethodInfo> = backend
             .store_list_methods(store_id)
             .await
-            .map(|m| m.into_iter().collect())
+            .map(|m| m.into_iter().map(|mi| (mi.name.clone(), mi)).collect())
             .unwrap_or_default();
 
         let operations = service
@@ -1434,9 +1435,11 @@ impl HelpContext {
                     .fields()
                     .map(|f| (format!("<{}>", f.name()), format_kind_full(f.kind())))
                     .collect();
+                let info = method_info.get(m.name());
                 HelpItem {
                     name: m.name().to_string(),
-                    description: descriptions.get(m.name()).cloned().unwrap_or_default(),
+                    description: info.map(|i| i.description.clone()).unwrap_or_default(),
+                    kind: info.map(|i| i.kind),
                     section: "Arguments",
                     fields,
                 }
@@ -1463,6 +1466,7 @@ impl HelpContext {
                 HelpItem {
                     name: s.name,
                     description: s.description,
+                    kind: None,
                     section: "Parameters",
                     fields,
                 }
@@ -1500,7 +1504,7 @@ pub async fn format_dynamic_help(backend: &dyn LatticeBackend, store_id: Uuid) -
         return String::new();
     };
 
-    fn format_section(output: &mut String, header: &str, items: &[HelpItem]) {
+    fn format_section(output: &mut String, header: &str, items: &[&HelpItem]) {
         use std::fmt::Write;
         if !items.is_empty() {
             let _ = writeln!(output, "\n{}:", header);
@@ -1511,8 +1515,16 @@ pub async fn format_dynamic_help(backend: &dyn LatticeBackend, store_id: Uuid) -
     }
 
     let mut output = String::new();
-    format_section(&mut output, "Store Operations", &ctx.operations);
-    format_section(&mut output, "Store Streams", &ctx.streams);
+    let commands: Vec<_> = ctx.operations.iter()
+        .filter(|i| i.kind != Some(lattice_runtime::MethodKind::Query))
+        .collect();
+    let queries: Vec<_> = ctx.operations.iter()
+        .filter(|i| i.kind == Some(lattice_runtime::MethodKind::Query))
+        .collect();
+    let streams: Vec<_> = ctx.streams.iter().collect();
+    format_section(&mut output, "Commands", &commands);
+    format_section(&mut output, "Queries", &queries);
+    format_section(&mut output, "Streams", &streams);
     output
 }
 

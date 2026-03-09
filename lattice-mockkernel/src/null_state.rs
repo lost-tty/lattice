@@ -117,6 +117,24 @@ impl CommandHandler for NullState {
             Err(format!("NullState does not handle commands (got '{name}')").into())
         })
     }
+
+    fn handle_query<'a>(
+        &'a self,
+        method_name: &'a str,
+        _request: DynamicMessage,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<DynamicMessage, Box<dyn std::error::Error + Send + Sync>>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let name = method_name.to_string();
+        Box::pin(async move {
+            Err(format!("NullState does not handle queries (got '{name}')").into())
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

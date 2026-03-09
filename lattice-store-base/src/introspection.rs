@@ -17,6 +17,18 @@ pub enum FieldFormat {
     // Future: Base64, Timestamp, etc.
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodKind {
+    Command,
+    Query,
+}
+
+#[derive(Debug, Clone)]
+pub struct MethodMeta {
+    pub description: String,
+    pub kind: MethodKind,
+}
+
 /// A state machine that can describe its capabilities via gRPC reflection.
 ///
 /// Implemented by state machines (e.g., `KvState`) to expose their schema
@@ -33,10 +45,7 @@ pub trait Introspectable: Send + Sync {
         payload: &[u8],
     ) -> Result<DynamicMessage, Box<dyn Error + Send + Sync>>;
 
-    /// Returns a map of command names to human-readable descriptions.
-    ///
-    /// Used by the generic CLI to provide help output for dynamic commands.
-    fn command_docs(&self) -> std::collections::HashMap<String, String> {
+    fn method_meta(&self) -> std::collections::HashMap<String, MethodMeta> {
         std::collections::HashMap::new()
     }
 
@@ -182,8 +191,8 @@ impl<T: Introspectable + ?Sized> Introspectable for std::sync::Arc<T> {
         (**self).decode_payload(payload)
     }
 
-    fn command_docs(&self) -> std::collections::HashMap<String, String> {
-        (**self).command_docs()
+    fn method_meta(&self) -> std::collections::HashMap<String, MethodMeta> {
+        (**self).method_meta()
     }
 
     fn field_formats(&self) -> std::collections::HashMap<String, FieldFormat> {

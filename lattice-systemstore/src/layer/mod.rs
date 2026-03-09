@@ -283,6 +283,26 @@ impl<S: StateLogic + CommandHandler + Send + Sync> CommandHandler for SystemLaye
                 .await
         })
     }
+
+    fn handle_query<'a>(
+        &'a self,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.inner.handle_query(method_name, request).await
+        })
+    }
 }
 
 impl<S: StateLogic + StreamProvider + 'static + Sync> StreamProvider for SystemLayer<S> {

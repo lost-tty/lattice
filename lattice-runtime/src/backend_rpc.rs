@@ -464,7 +464,7 @@ impl LatticeBackend for RpcBackend {
         })
     }
 
-    fn store_list_methods(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, String)>> {
+    fn store_list_methods(&self, store_id: Uuid) -> AsyncResult<'_, Vec<MethodInfo>> {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client
@@ -477,7 +477,17 @@ impl LatticeBackend for RpcBackend {
                 .into_inner()
                 .methods
                 .into_iter()
-                .map(|m| (m.name, m.description))
+                .map(|m| {
+                    let kind = match m.kind() {
+                        lattice_api::proto::MethodKind::Query => MethodKind::Query,
+                        _ => MethodKind::Command,
+                    };
+                    MethodInfo {
+                        name: m.name,
+                        description: m.description,
+                        kind,
+                    }
+                })
                 .collect())
         })
     }

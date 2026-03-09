@@ -4,6 +4,7 @@
 //! Key: (HLC, Author) for globally consistent causal ordering.
 
 use lattice_model::{Op, PubKey, SExpr};
+use lattice_store_base::{MethodKind, MethodMeta};
 
 use redb::{ReadableTable, ReadableTableMetadata};
 
@@ -211,17 +212,17 @@ impl lattice_store_base::Introspectable for LogState {
         Ok(msg)
     }
 
-    fn command_docs(&self) -> std::collections::HashMap<String, String> {
-        let mut docs = std::collections::HashMap::new();
-        docs.insert(
-            "Append".to_string(),
-            "Append a message to the log".to_string(),
-        );
-        docs.insert(
-            "Read".to_string(),
-            "Read log entries (tail option for last N)".to_string(),
-        );
-        docs
+    fn method_meta(&self) -> std::collections::HashMap<String, MethodMeta> {
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("Append".into(), MethodMeta {
+            description: "Append a message to the log".into(),
+            kind: MethodKind::Command,
+        });
+        meta.insert("Read".into(), MethodMeta {
+            description: "Read log entries (tail option for last N)".into(),
+            kind: MethodKind::Query,
+        });
+        meta
     }
 
     fn field_formats(&self) -> std::collections::HashMap<String, lattice_store_base::FieldFormat> {
@@ -328,10 +329,33 @@ impl CommandHandler for LogState {
                     })
                     .await
                 }
+                _ => Err(format!("Unknown command: {}", method_name).into()),
+            }
+        })
+    }
+
+    fn handle_query<'a>(
+        &'a self,
+        method_name: &'a str,
+        request: prost_reflect::DynamicMessage,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        prost_reflect::DynamicMessage,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let desc = crate::LOG_SERVICE_DESCRIPTOR.clone();
+        Box::pin(async move {
+            match method_name {
                 "Read" => {
                     dispatch_method(method_name, request, desc, |req| self.handle_read(req)).await
                 }
-                _ => Err(format!("Unknown method: {}", method_name).into()),
+                _ => Err(format!("Unknown query: {}", method_name).into()),
             }
         })
     }

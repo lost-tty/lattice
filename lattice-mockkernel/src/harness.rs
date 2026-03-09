@@ -14,7 +14,9 @@ use lattice_storage::{
     ScopedDb, StateBackend, StateContext, StateDbError, StateLogic, StorageConfig, TABLE_DATA,
     TABLE_SYSTEM,
 };
-use lattice_store_base::{CommandDispatcher, CommandHandler, Introspectable, StateProvider};
+use lattice_store_base::{
+    CommandDispatcher, CommandHandler, Introspectable, MethodKind, StateProvider,
+};
 use lattice_systemstore::{SystemLayer, SystemState};
 use prost_reflect::DynamicMessage;
 use std::future::Future;
@@ -135,8 +137,20 @@ where
                 + 'a,
         >,
     > {
-        self.state
-            .app_state()
-            .handle_command(&self.writer, method_name, request)
+        let meta = self.state.app_state().method_meta();
+        match meta.get(method_name).map(|m| m.kind) {
+            Some(MethodKind::Query) => self.state.app_state().handle_query(method_name, request),
+            Some(MethodKind::Command) => {
+                self.state
+                    .app_state()
+                    .handle_command(&self.writer, method_name, request)
+            }
+            None => {
+                let name = method_name.to_string();
+                Box::pin(async move {
+                    Err(format!("Unknown method: {name}").into())
+                })
+            }
+        }
     }
 }
