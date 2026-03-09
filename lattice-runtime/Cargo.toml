@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["core-stores"]
+default = ["core-stores", "web"]
 core-stores = ["dep:lattice-kvstore", "dep:lattice-logstore"]
 web = ["dep:lattice-web"]
 

@@ -10,7 +10,7 @@ name = "latticed"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["web"]
 web = ["lattice-runtime/web"]
 
 [dependencies]
