@@ -31,9 +31,6 @@ futures-core = "0.3"
 tokio-stream = "0.1"
 
 [dev-dependencies]
-lattice-kvstore-api = { workspace = true }
-lattice-logstore = { workspace = true }
-lattice-kvstore = { workspace = true }
 lattice-mockkernel = { workspace = true }
 lattice-proto = { workspace = true }
 tokio-test = { workspace = true }

@@ -41,8 +41,8 @@ Test cleanup, dependency review.
 - [x] **Deduplicate helper functions**: `wrap_app_data` (3 copies), `put_kv`/`wait_for_key` (3+ copies), `temp_data_dir` (2 copies), `create_test_op` (2 copies). Move to `lattice-mockkernel` or appropriate `tests/common/`.
 
 ### 17B: Test Scope Review
-- [ ] Review all integration tests in `lattice-net` and `lattice-kvstore`. Replace `KvState` with `NullState` wherever the test does not exercise KV-specific logic.
-- [ ] Move `lattice-kvstore/tests/sync_compliance.rs` to `lattice-systemstore/tests/`. Tests chain rules, snapshot/restore, convergence via `SystemLayer`, not KV-specific logic. Use `NullState` where possible, keep `KvState` only for tests that need real merge behavior.
+- [x] Review all integration tests in `lattice-net` and `lattice-kvstore`. Replace `KvState` with `NullState` wherever the test does not exercise KV-specific logic.
+- [x] Move `lattice-kvstore/tests/sync_compliance.rs` to `lattice-systemstore/tests/`. Tests chain rules, snapshot/restore, convergence via `SystemLayer`, not KV-specific logic. Use `NullState` where possible, keep `KvState` only for tests that need real merge behavior. *(File does not exist — no action needed.)*
 - [ ] Audit test coverage gaps exposed by the migration.
 
 ### 17C: Proto Definition Audit

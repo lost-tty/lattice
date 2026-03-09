@@ -678,13 +678,9 @@ impl NodeProviderExt for Node {
 mod tests {
     use super::*;
     use crate::direct_opener;
-    use lattice_kvstore_api::KvStoreExt;
     use lattice_mockkernel::STORE_TYPE_NULLSTORE;
     use lattice_model::types::PubKey;
-    use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
 
-    type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
-    type TestLogState = lattice_systemstore::SystemLayer<lattice_logstore::LogState>;
     type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>;
 
     // Note: lattice-node unit tests cannot use TestNodeBuilder from lattice-mockkernel
@@ -694,15 +690,11 @@ mod tests {
     fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
         NodeBuilder::new(data_dir)
             .in_memory()
-            .with_opener(STORE_TYPE_KVSTORE, || direct_opener::<TestKvState>())
-            .with_opener(STORE_TYPE_LOGSTORE, || direct_opener::<TestLogState>())
             .with_opener(STORE_TYPE_NULLSTORE, || direct_opener::<TestNullState>())
     }
 
     fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
         NodeBuilder::new(data_dir)
-            .with_opener(STORE_TYPE_KVSTORE, || direct_opener::<TestKvState>())
-            .with_opener(STORE_TYPE_LOGSTORE, || direct_opener::<TestLogState>())
             .with_opener(STORE_TYPE_NULLSTORE, || direct_opener::<TestNullState>())
     }
 
@@ -717,7 +709,7 @@ mod tests {
 
         assert!(node.info().stores.is_empty());
         let store_id = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .expect("Failed to create store");
 
@@ -731,16 +723,10 @@ mod tests {
             .collect();
         assert!(stores.contains(&store_id));
 
-        let store = node
+        let _store = node
             .store_manager()
-            .open(store_id, STORE_TYPE_KVSTORE)
+            .open(store_id, STORE_TYPE_NULLSTORE)
             .expect("Failed to open store");
-        store
-            .put(b"/key".to_vec(), b"value".to_vec())
-            .await
-            .expect("put failed");
-        let val = store.get(b"/key".to_vec()).await.expect("get failed");
-        assert_eq!(val.value, Some(b"value".to_vec()));
 
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -754,33 +740,32 @@ mod tests {
             .build()
             .expect("Failed to create node");
 
-        let store_a = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+        let id_a = node
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .expect("create A");
-        let store_b = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+        let id_b = node
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .expect("create B");
 
+        assert_ne!(id_a, id_b, "stores should have distinct IDs");
+
         let store_a = node
             .store_manager()
-            .open(store_a, STORE_TYPE_KVSTORE)
+            .open(id_a, STORE_TYPE_NULLSTORE)
             .expect("open A");
-        store_a
-            .put(b"/key".to_vec(), b"from A".to_vec())
-            .await
-            .expect("put A");
-
         let store_b = node
             .store_manager()
-            .open(store_b, STORE_TYPE_KVSTORE)
+            .open(id_b, STORE_TYPE_NULLSTORE)
             .expect("open B");
-        let val_b = store_b.get(b"/key".to_vec()).await.expect("B get");
-        assert_eq!(val_b.value, None);
 
-        let val_a = store_a.get(b"/key".to_vec()).await.expect("A get");
-        assert_eq!(val_a.value, Some(b"from A".to_vec()));
+        // Both stores are independently functional (system intentions from creation)
+        let count_a = store_a.as_inspector().intention_count().await;
+        let count_b = store_b.as_inspector().intention_count().await;
+        assert!(count_a > 0, "store A should have system intentions");
+        assert!(count_b > 0, "store B should have system intentions");
+        assert_eq!(count_a, count_b, "both stores should start with same setup");
 
         let _ = std::fs::remove_dir_all(data_dir.base());
     }
@@ -1005,12 +990,12 @@ mod tests {
                 .expect("create node B"),
         );
 
-        // Step 1: Node A creates mesh
+        // Step 1: Node A creates store
         let store_id = node_a
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
-            .expect("A create_mesh");
-        let store_a = node_a.store_manager().get_handle(&store_id).unwrap();
+            .expect("A create store");
+        let _store_a = node_a.store_manager().get_handle(&store_id).unwrap();
 
         // Step 2: A creates invite token for B
         let token_string = node_a
@@ -1036,35 +1021,14 @@ mod tests {
         assert_eq!(acceptance.store_id, invite.store_id);
 
         // Step 5: B completes join (simulates receiving JoinResponse with store_type)
-        let store_b = node_b
+        let _store_b = node_b
             .complete_join(invite.store_id, &acceptance.store_type, vec![])
             .await
             .expect("B join");
 
-        // Verify B has the same store ID
-        // Note: complete_join returns same ID, but store inner ID might be different if it's a new instance locally?
-        // No, store ID (UUID) is global.
-
-        // Step 6: A writes data
-        store_a
-            .put(b"/key".to_vec(), b"from A".to_vec())
-            .await
-            .expect("A put");
-
-        // Step 7: B writes data independently
-        store_b
-            .put(b"/key".to_vec(), b"from B".to_vec())
-            .await
-            .expect("B put");
-
-        // Each store has its own local state (not synced yet)
-        let a_val = store_a.get(b"/key".to_vec()).await.expect("A get");
-        let b_val = store_b.get(b"/key".to_vec()).await.expect("B get");
-
-        // A sees "from A" (its own write wins locally)
-        assert_eq!(a_val.value, Some(b"from A".to_vec()));
-        // B sees "from B" (its own write wins locally)
-        assert_eq!(b_val.value, Some(b"from B".to_vec()));
+        // Verify both nodes have the store open
+        assert!(node_a.store_manager().get_handle(&store_id).is_some());
+        assert!(node_b.store_manager().get_handle(&store_id).is_some());
 
         // Cleanup
         let _ = std::fs::remove_dir_all(data_dir_a.base());

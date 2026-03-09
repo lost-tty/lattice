@@ -1,24 +1,18 @@
 mod common;
 
 use common::{wait_for_close, wait_for_open, TestCtx};
-use lattice_kvstore_api::KvStoreExt;
 use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::NodeIdentity;
 use lattice_model::Uuid;
-use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_node::data_dir::DataDir;
 use lattice_node::{direct_opener, NodeBuilder};
 use std::time::Duration;
 
-type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
-
 /// File-backed node builder for tests that need persistence across restarts.
 fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
-    NodeBuilder::new(data_dir)
-        .with_opener(STORE_TYPE_NULLSTORE, || {
-            direct_opener::<lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>>()
-        })
-        .with_opener(STORE_TYPE_KVSTORE, || direct_opener::<TestKvState>())
+    NodeBuilder::new(data_dir).with_opener(STORE_TYPE_NULLSTORE, || {
+        direct_opener::<lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>>()
+    })
 }
 
 // ==================== Store Lifecycle ====================
@@ -775,32 +769,23 @@ async fn test_state_db_recovery() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
 
-    // Phase 1: Create store, write data, shutdown
+    // Phase 1: Create store, record intention count, shutdown
     let store_id;
+    let original_intention_count;
     {
         let node = file_node_builder(DataDir::new(data_dir.base()))
             .build()
             .unwrap();
         store_id = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .unwrap();
         let handle = node.store_manager().get_handle(&store_id).unwrap();
-        handle
-            .put(b"/key".to_vec(), b"value".to_vec())
-            .await
-            .unwrap();
-        // Wait for the intention to be witnessed and projected
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if handle.as_inspector().witness_count().await >= 2 {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("Timed out waiting for witness");
+        original_intention_count = handle.as_inspector().intention_count().await;
+        assert!(
+            original_intention_count > 0,
+            "store creation should produce system intentions"
+        );
         node.shutdown().await;
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -827,11 +812,10 @@ async fn test_state_db_recovery() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let handle = node.store_manager().get_handle(&store_id).unwrap();
-    let result = handle.get(b"/key".to_vec()).await.unwrap();
+    let recovered_count = handle.as_inspector().intention_count().await;
     assert_eq!(
-        result.value,
-        Some(b"value".to_vec()),
-        "State should be recovered from witness log"
+        recovered_count, original_intention_count,
+        "intention count should match after state.db recovery"
     );
 }
 
@@ -847,7 +831,7 @@ async fn test_open_existing_resolves_type_from_meta() {
             .build()
             .unwrap();
         store_id = node
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .unwrap();
         node.shutdown().await;
@@ -868,12 +852,12 @@ async fn test_open_existing_resolves_type_from_meta() {
 
     // Verify meta.db has the type before opening
     let meta_record = node.meta().get_store(store_id).unwrap().unwrap();
-    assert_eq!(meta_record.store_type, STORE_TYPE_KVSTORE);
+    assert_eq!(meta_record.store_type, STORE_TYPE_NULLSTORE);
 
     // open_existing should resolve type from meta.db and return it
     let (handle, resolved_type) = node.store_manager().open_existing(store_id).unwrap();
-    assert_eq!(resolved_type, STORE_TYPE_KVSTORE);
-    assert_eq!(handle.store_type(), STORE_TYPE_KVSTORE);
+    assert_eq!(resolved_type, STORE_TYPE_NULLSTORE);
+    assert_eq!(handle.store_type(), STORE_TYPE_NULLSTORE);
 }
 
 // ==================== Duplicate Intention Regression ====================
