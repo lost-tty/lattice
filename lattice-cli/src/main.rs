@@ -271,11 +271,6 @@ async fn run_embedded_mode(web_port: Option<u16>) {
 
     #[cfg(feature = "web")]
     let builder = if let Some(port) = web_port {
-        let _ = writeln!(
-            &mut writer.clone(),
-            "Web UI enabled on {}",
-            lattice_web::web_url(port)
-        );
         builder.with_web(port)
     } else {
         builder

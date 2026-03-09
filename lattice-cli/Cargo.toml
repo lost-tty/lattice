@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-web = ["lattice-runtime/web", "dep:lattice-web"]
+web = ["lattice-runtime/web"]
 
 [dependencies]
 lattice-runtime = { workspace = true }
@@ -37,4 +37,3 @@ bs58 = { version = "0.5", features = ["check"] }
 unicode-width = "0.1"
 anyhow = "1.0.100"
 terminal_size = "0.4.3"
-lattice-web = { workspace = true, optional = true }

@@ -217,6 +217,7 @@ impl RuntimeBuilder {
         #[cfg(feature = "web")]
         let web_handle = if let Some(port) = self.web_port {
             let web_server = lattice_web::WebServer::new(backend.clone(), port);
+            tracing::info!("Web UI enabled on {}", web_server.url());
             Some(tokio::spawn(async move {
                 if let Err(e) = web_server.run().await {
                     tracing::error!("Web server error: {}", e);

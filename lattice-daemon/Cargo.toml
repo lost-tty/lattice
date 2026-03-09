@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-web = ["lattice-runtime/web", "dep:lattice-web"]
+web = ["lattice-runtime/web"]
 
 [dependencies]
 lattice-runtime = { workspace = true }
@@ -21,4 +21,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = { workspace = true }
 clap = { workspace = true }
 anyhow = "1"
-lattice-web = { workspace = true, optional = true }

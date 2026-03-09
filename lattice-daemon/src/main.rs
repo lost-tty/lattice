@@ -32,7 +32,6 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "web")]
     let builder = if let Some(port) = args.web {
-        tracing::info!("Web UI enabled on {}", lattice_web::web_url(port));
         builder.with_web(port)
     } else {
         builder
