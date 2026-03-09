@@ -182,15 +182,13 @@ fn drain_grpc_frames(
 }
 
 /// Check HTTP headers (or trailers) for a non-OK grpc-status.
+/// Uses tonic's `Status::from_header_map` which handles percent-decoding
+/// of `grpc-message` per the gRPC HTTP/2 spec.
 fn check_grpc_status(headers: &http::HeaderMap) -> Option<String> {
-    let status = headers.get("grpc-status")?;
-    let code = status.to_str().unwrap_or("0");
-    if code == "0" {
+    let status = tonic::Status::from_header_map(headers)?;
+    if status.code() == tonic::Code::Ok {
         return None;
     }
-    let msg = headers
-        .get("grpc-message")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    Some(if msg.is_empty() { format!("gRPC error {code}") } else { msg.to_string() })
+    let msg = status.message();
+    Some(if msg.is_empty() { format!("gRPC error {:?}", status.code()) } else { msg.to_string() })
 }
