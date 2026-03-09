@@ -12,7 +12,7 @@ fn create_test_op(
     prev_hash: Hash,
     deps: &[Hash],
 ) -> Op<'static> {
-    let payload = wrap_app_data(b"ignored".to_vec());
+    let payload = wrap_app_data(b"ignored");
     let deps_leaked = Box::leak(deps.to_vec().into_boxed_slice());
     Op {
         info: lattice_model::IntentionInfo {

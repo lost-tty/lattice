@@ -6,45 +6,11 @@
 #[cfg(test)]
 mod tests {
     use lattice_kernel::OpenedStore;
-    use lattice_model::{types::Hash, NodeIdentity, Op, StateMachine, StateWriter, StoreIdentity, StoreMeta};
-    use lattice_model::StorageConfig;
-    use std::sync::{Arc, RwLock};
+    use lattice_mockkernel::TrackingStateMachine;
+    use lattice_model::types::Hash;
+    use lattice_model::{NodeIdentity, StateWriter, StorageConfig};
+    use std::sync::Arc;
     use uuid::Uuid;
-
-    struct TestStateMachine {
-        applied: Arc<RwLock<Vec<Hash>>>,
-    }
-
-    impl TestStateMachine {
-        fn new() -> Self {
-            Self {
-                applied: Arc::new(RwLock::new(Vec::new())),
-            }
-        }
-    }
-
-    impl StateMachine for TestStateMachine {
-        type Error = std::io::Error;
-
-        fn store_type() -> &'static str {
-            "test:corruption"
-        }
-
-        fn apply(
-            &self,
-            op: &Op<'_>,
-            _dag: &dyn lattice_model::DagQueries,
-        ) -> Result<(), Self::Error> {
-            self.applied.write().unwrap().push(op.id());
-            Ok(())
-        }
-    }
-
-    impl StoreIdentity for TestStateMachine {
-        fn store_meta(&self) -> StoreMeta {
-            StoreMeta::default()
-        }
-    }
 
     /// Test that corrupting the redb database file is detected on reopen.
     #[tokio::test]
@@ -56,7 +22,7 @@ mod tests {
 
         // Phase 1: Create store and write data
         {
-            let state = Arc::new(TestStateMachine::new());
+            let state = Arc::new(TrackingStateMachine::new());
             let config = StorageConfig::File(store_dir.clone());
             let opened =
                 OpenedStore::new(store_id, &config, state).unwrap();
@@ -86,7 +52,7 @@ mod tests {
         }
 
         // Phase 3: Reopen — redb should detect corruption
-        let state = Arc::new(TestStateMachine::new());
+        let state = Arc::new(TrackingStateMachine::new());
         let config = StorageConfig::File(store_dir);
         let result = OpenedStore::new(store_id, &config, state.clone());
 
@@ -103,15 +69,15 @@ mod tests {
                 println!(
                     "Store opened after corruption (redb repaired). Authors: {}, Applied: {}",
                     tips.len(),
-                    state.applied.read().unwrap().len()
+                    state.applied_ops().len()
                 );
                 handle.close().await;
             }
         }
 
         // Critical invariant: no garbage was applied to state
-        let applied = state.applied.read().unwrap();
-        for hash in applied.iter() {
+        let applied = state.applied_ops();
+        for hash in &applied {
             assert_ne!(*hash, Hash::ZERO, "ZERO hash should never be applied");
         }
     }
@@ -126,7 +92,7 @@ mod tests {
 
         // Phase 1: Create and populate store
         {
-            let state = Arc::new(TestStateMachine::new());
+            let state = Arc::new(TrackingStateMachine::new());
             let config = StorageConfig::File(store_dir.clone());
             let opened =
                 OpenedStore::new(store_id, &config, state).unwrap();
@@ -142,7 +108,7 @@ mod tests {
         std::fs::remove_file(&db_path).unwrap();
 
         // Phase 3: Reopen — should start fresh
-        let state = Arc::new(TestStateMachine::new());
+        let state = Arc::new(TrackingStateMachine::new());
         let config = StorageConfig::File(store_dir);
         let opened = OpenedStore::new(store_id, &config, state.clone())
             .expect("Should create fresh store when db is missing");
@@ -152,7 +118,7 @@ mod tests {
         let tips = handle.author_tips().await.unwrap();
         assert!(tips.is_empty(), "Fresh store should have no author tips");
         assert!(
-            state.applied.read().unwrap().is_empty(),
+            state.applied_ops().is_empty(),
             "Fresh store should have no applied entries"
         );
 

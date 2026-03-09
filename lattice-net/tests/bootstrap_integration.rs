@@ -1,39 +1,16 @@
 use lattice_kernel::store::{OpenedStore, Store};
 use lattice_kernel::SyncProvider;
+use lattice_mockkernel::NullStateMachine;
 use lattice_model::StateWriter;
-use lattice_model::{NodeIdentity, StateMachine, StoreIdentity, StoreMeta};
+use lattice_model::{NodeIdentity, StorageConfig, Uuid};
 
 use futures_util::StreamExt;
 use lattice_kernel::proto::weaver::WitnessContent;
-use lattice_model::Uuid;
-use lattice_model::StorageConfig;
 use prost::Message;
 use std::sync::Arc;
 
-// Mock State Machine
-#[derive(Clone, Default, Debug)]
-struct MockState;
-impl StateMachine for MockState {
-    type Error = lattice_kernel::StateError;
-    fn store_type() -> &'static str {
-        "test:mock"
-    }
-    fn apply(
-        &self,
-        _op: &lattice_model::Op,
-        _dag: &dyn lattice_model::DagQueries,
-    ) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-impl StoreIdentity for MockState {
-    fn store_meta(&self) -> StoreMeta {
-        StoreMeta::default()
-    }
-}
-
-async fn create_store(id: Uuid, identity: NodeIdentity) -> Arc<Store<MockState>> {
-    let state = Arc::new(MockState);
+async fn create_store(id: Uuid, identity: NodeIdentity) -> Arc<Store<NullStateMachine>> {
+    let state = Arc::new(NullStateMachine);
     let config = StorageConfig::InMemory;
     let opened = OpenedStore::new(id, &config, state).unwrap();
     let (handle, _info, runner) = opened.into_handle(identity).unwrap();

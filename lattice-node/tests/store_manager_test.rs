@@ -1,20 +1,16 @@
+mod common;
+
+use common::{wait_for_close, wait_for_open, TestCtx};
 use lattice_kvstore_api::KvStoreExt;
 use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::NodeIdentity;
 use lattice_model::Uuid;
 use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_node::data_dir::DataDir;
-use lattice_node::{direct_opener, Node, NodeBuilder};
-use std::sync::Arc;
+use lattice_node::{direct_opener, NodeBuilder};
 use std::time::Duration;
 
 type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
-
-// ==================== Test Helpers ====================
-
-fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
-    lattice_mockkernel::test_node_builder(data_dir)
-}
 
 /// File-backed node builder for tests that need persistence across restarts.
 fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
@@ -23,55 +19,6 @@ fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
             direct_opener::<lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>>()
         })
         .with_opener(STORE_TYPE_KVSTORE, || direct_opener::<TestKvState>())
-}
-
-/// Shared test context — keeps tempdir alive and provides access to node + store_manager.
-struct TestCtx {
-    _tmp: tempfile::TempDir,
-    node: Node,
-}
-
-impl TestCtx {
-    fn new() -> Self {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = DataDir::new(tmp.path().to_path_buf());
-        let node = test_node_builder(DataDir::new(data_dir.base()))
-            .build()
-            .unwrap();
-        Self { _tmp: tmp, node }
-    }
-
-    fn sm(&self) -> &Arc<lattice_node::StoreManager> {
-        self.node.store_manager()
-    }
-}
-
-/// Poll until a store appears in the manager.
-async fn wait_for_open(sm: &lattice_node::StoreManager, id: lattice_model::Uuid) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if sm.store_ids().contains(&id) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("Timed out waiting for store {} to open", id));
-}
-
-/// Poll until a store disappears from the manager.
-async fn wait_for_close(sm: &lattice_node::StoreManager, id: lattice_model::Uuid) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if !sm.store_ids().contains(&id) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("Timed out waiting for store {} to close", id));
 }
 
 // ==================== Store Lifecycle ====================

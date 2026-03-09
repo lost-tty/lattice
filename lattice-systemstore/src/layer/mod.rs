@@ -361,18 +361,11 @@ impl<S: StateLogic> lattice_store_base::StateProvider for SystemLayer<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_mockkernel::wrap_app_data;
     use lattice_model::dag_queries::HashMapDag;
     use lattice_model::{DagQueries, HLC};
     use lattice_proto::storage::SystemOp as ProtoSystemOp;
     use lattice_store_base::{Introspectable, MethodKind, MethodMeta};
-
-    /// Build a UniversalOp::AppData envelope around `inner` bytes.
-    fn wrap_app_data(inner: &[u8]) -> Vec<u8> {
-        UniversalOp {
-            op: Some(universal_op::Op::AppData(inner.to_vec())),
-        }
-        .encode_to_vec()
-    }
 
     /// Build a UniversalOp::System envelope around a no-op SystemOp.
     fn wrap_system_op() -> Vec<u8> {

@@ -1,41 +1,21 @@
 use lattice_kernel::{OpenedStore, Store, SyncProvider};
+use lattice_mockkernel::NullStateMachine;
 use lattice_model::{
     hlc::HLC,
     types::{Hash, PubKey},
     weaver::{Condition, Intention, SignedIntention},
-    NodeIdentity, Op, StateMachine, StoreIdentity, StoreMeta,
+    NodeIdentity,
 };
 use prost::Message;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
-#[derive(Clone, Default)]
-struct MockStateMachine;
-
-impl StateMachine for MockStateMachine {
-    type Error = std::io::Error;
-
-    fn store_type() -> &'static str {
-        "test:mock"
-    }
-
-    fn apply(&self, _op: &Op, _dag: &dyn lattice_model::DagQueries) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-impl StoreIdentity for MockStateMachine {
-    fn store_meta(&self) -> StoreMeta {
-        StoreMeta::default()
-    }
-}
-
 #[tokio::test]
 async fn test_scan_witness_log_streaming() -> Result<(), Box<dyn std::error::Error>> {
     // Create store
     let store_id = Uuid::new_v4();
-    let state = Arc::new(MockStateMachine::default());
+    let state = Arc::new(NullStateMachine::default());
     let identity = NodeIdentity::generate();
 
     // Open store in memory
@@ -81,7 +61,7 @@ async fn test_scan_witness_log_streaming() -> Result<(), Box<dyn std::error::Err
     assert_eq!(count, 10, "Should have 10 witness entries");
 
     // Test Streaming: limit 5, start from seq 1 (genesis)
-    let mut stream = <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, 1, 5);
+    let mut stream = <Store<NullStateMachine> as SyncProvider>::scan_witness_log(&handle, 1, 5);
     let mut entries = Vec::new();
     while let Some(res) = stream.next().await {
         entries.push(res.expect("stream error"));
@@ -93,7 +73,7 @@ async fn test_scan_witness_log_streaming() -> Result<(), Box<dyn std::error::Err
     // Page 2: start from seq after last entry
     let next_seq = entries.last().unwrap().seq + 1;
     let mut stream =
-        <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, next_seq, 5);
+        <Store<NullStateMachine> as SyncProvider>::scan_witness_log(&handle, next_seq, 5);
 
     let mut entries_page2 = Vec::new();
     while let Some(res) = stream.next().await {
@@ -119,7 +99,7 @@ async fn test_scan_witness_log_streaming() -> Result<(), Box<dyn std::error::Err
     // Page 3: should be empty (all 10 consumed)
     let next_seq = entries_page2.last().unwrap().seq + 1;
     let mut stream =
-        <Store<MockStateMachine> as SyncProvider>::scan_witness_log(&handle, next_seq, 5);
+        <Store<NullStateMachine> as SyncProvider>::scan_witness_log(&handle, next_seq, 5);
 
     let mut entries_empty = Vec::new();
     while let Some(res) = stream.next().await {

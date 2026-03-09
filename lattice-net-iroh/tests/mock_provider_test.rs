@@ -1,88 +1,9 @@
 //! Integration test: verify that lattice-net-iroh components can construct
 //! a full NetworkService with a mock NodeProviderExt (no real Node needed).
 
-use async_trait::async_trait;
-use lattice_model::PeerProvider;
-use lattice_model::{
-    types::PubKey, JoinAcceptanceInfo, NodeProvider, NodeProviderAsync, NodeProviderError,
-    UserEvent, Uuid,
-};
-use lattice_net_types::{NetworkStore, NetworkStoreRegistry, NodeProviderExt};
+use lattice_mockkernel::MockProvider;
+use lattice_net_types::NodeProviderExt;
 use std::sync::Arc;
-
-// ---- Mock Provider ----
-
-struct MockProvider {
-    pubkey: PubKey,
-}
-
-impl NodeProvider for MockProvider {
-    fn node_id(&self) -> PubKey {
-        self.pubkey
-    }
-    fn emit_user_event(&self, _e: UserEvent) {}
-}
-
-#[async_trait]
-impl NodeProviderAsync for MockProvider {
-    async fn process_join_response(
-        &self,
-        _store_id: Uuid,
-        _store_type: &str,
-        _via_peer: PubKey,
-    ) -> Result<(), NodeProviderError> {
-        Ok(())
-    }
-    async fn accept_join(
-        &self,
-        _peer: PubKey,
-        _store_id: Uuid,
-        _secret: &[u8],
-    ) -> Result<JoinAcceptanceInfo, NodeProviderError> {
-        Err(NodeProviderError::Join("Mock".into()))
-    }
-}
-
-impl PeerProvider for MockProvider {
-    fn can_join(&self, _peer: &PubKey) -> bool {
-        true
-    }
-    fn can_connect(&self, _peer: &PubKey) -> bool {
-        true
-    }
-    fn can_accept_entry(&self, _author: &PubKey) -> bool {
-        true
-    }
-    fn list_acceptable_authors(&self) -> Vec<PubKey> {
-        vec![]
-    }
-    fn subscribe_peer_events(&self) -> lattice_model::PeerEventStream {
-        Box::pin(futures_util::stream::empty())
-    }
-    fn list_peers(&self) -> Vec<lattice_model::GossipPeer> {
-        vec![]
-    }
-}
-
-struct MockRegistry;
-
-impl NetworkStoreRegistry for MockRegistry {
-    fn get_network_store(&self, _id: &Uuid) -> Option<NetworkStore> {
-        None
-    }
-    fn list_store_ids(&self) -> Vec<Uuid> {
-        vec![]
-    }
-}
-
-impl NodeProviderExt for MockProvider {
-    fn store_registry(&self) -> Arc<dyn NetworkStoreRegistry> {
-        Arc::new(MockRegistry)
-    }
-    fn get_peer_provider(&self, _store_id: &Uuid) -> Option<Arc<dyn PeerProvider>> {
-        None
-    }
-}
 
 // ---- Test ----
 
@@ -90,7 +11,7 @@ impl NodeProviderExt for MockProvider {
 async fn test_iroh_stack_with_mock_provider() {
     let identity = lattice_model::NodeIdentity::generate();
     let pubkey = identity.public_key();
-    let provider: Arc<dyn NodeProviderExt> = Arc::new(MockProvider { pubkey });
+    let provider: Arc<dyn NodeProviderExt> = Arc::new(MockProvider::new(pubkey));
 
     let (_net_tx, net_rx) = tokio::sync::broadcast::channel(64);
 

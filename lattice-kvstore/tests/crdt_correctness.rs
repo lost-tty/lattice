@@ -25,7 +25,7 @@ fn create_test_op(
 ) -> Op<'static> {
     let kv_op = Operation::put(key, value);
     let raw = KvPayload { ops: vec![kv_op] }.encode_to_vec();
-    let payload = wrap_app_data(raw);
+    let payload = wrap_app_data(&raw);
 
     let deps_leaked = Box::leak(deps.to_vec().into_boxed_slice());
 
@@ -51,7 +51,7 @@ fn create_delete_op(
 ) -> Op<'static> {
     let kv_op = Operation::delete(key);
     let raw = KvPayload { ops: vec![kv_op] }.encode_to_vec();
-    let payload = wrap_app_data(raw);
+    let payload = wrap_app_data(&raw);
 
     let deps_leaked = Box::leak(deps.to_vec().into_boxed_slice());
 

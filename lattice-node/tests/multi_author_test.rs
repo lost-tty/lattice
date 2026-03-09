@@ -1,30 +1,12 @@
+mod common;
+
+use common::TestCtx;
 use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::Uuid;
-use lattice_node::data_dir::DataDir;
-use lattice_node::{Node, PeerManager, StoreHandle};
+use lattice_node::{PeerManager, StoreHandle};
 use prost::Message;
 use std::sync::Arc;
 use std::time::Duration;
-
-struct TestCtx {
-    _tmp: tempfile::TempDir,
-    node: Node,
-}
-
-impl TestCtx {
-    fn new() -> Self {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = DataDir::new(tmp.path().to_path_buf());
-        let node = lattice_mockkernel::test_node_builder(DataDir::new(data_dir.base()))
-            .build()
-            .unwrap();
-        Self { _tmp: tmp, node }
-    }
-
-    fn sm(&self) -> &Arc<lattice_node::StoreManager> {
-        self.node.store_manager()
-    }
-}
 
 // Open a store as a replica (initially empty) without network join
 async fn open_replica(ctx: &TestCtx, store_id: Uuid, store_type: &str) -> Arc<dyn StoreHandle> {

@@ -6,11 +6,15 @@
 //! - `NullState` — a minimal state machine with no application logic, for tests
 //!   that only need the kernel (intentions, sync, gossip) without any real store.
 
+mod mock_provider;
+mod mock_state_machine;
 mod null_state;
 mod test_node;
 pub mod harness;
 
 pub use harness::{TestHarness, TestStore};
+pub use mock_provider::{EmptyRegistry, MockProvider};
+pub use mock_state_machine::{NullStateMachine, TrackingStateMachine};
 pub use null_state::{NullState, STORE_TYPE_NULLSTORE};
 pub use test_node::test_node_builder;
 
@@ -32,9 +36,9 @@ use tokio::sync::broadcast;
 ///
 /// Test helpers that build `Op` values need the payload wrapped in this
 /// envelope before it reaches `SystemLayer::apply`.
-pub fn wrap_app_data(raw: Vec<u8>) -> Vec<u8> {
+pub fn wrap_app_data(raw: &[u8]) -> Vec<u8> {
     let envelope = lattice_proto::storage::UniversalOp {
-        op: Some(lattice_proto::storage::universal_op::Op::AppData(raw)),
+        op: Some(lattice_proto::storage::universal_op::Op::AppData(raw.to_vec())),
     };
     envelope.encode_to_vec()
 }
