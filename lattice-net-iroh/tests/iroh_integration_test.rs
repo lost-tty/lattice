@@ -9,11 +9,9 @@
 use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_net_iroh::IrohBackend;
 use lattice_net_types::GossipLayer;
-use lattice_node::{direct_opener, Invite, Node, NodeBuilder, NodeEvent};
+use lattice_node::{Invite, Node, NodeBuilder, NodeEvent};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
-
-type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>;
 
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -28,11 +26,7 @@ fn temp_data_dir(name: &str) -> lattice_node::DataDir {
 }
 
 fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
-    NodeBuilder::new(data_dir)
-        .in_memory()
-        .with_opener(STORE_TYPE_NULLSTORE, || {
-            direct_opener::<TestNullState>()
-        })
+    lattice_mockkernel::test_node_builder(data_dir)
 }
 
 /// Build a node with net_tx wired up.

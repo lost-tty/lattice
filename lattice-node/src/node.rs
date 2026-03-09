@@ -687,33 +687,23 @@ mod tests {
     type TestLogState = lattice_systemstore::SystemLayer<lattice_logstore::LogState>;
     type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>;
 
-    /// Helper to create node builder with openers registered (in-memory storage).
+    // Note: lattice-node unit tests cannot use TestNodeBuilder from lattice-mockkernel
+    // because mockkernel depends on lattice-node, which would cause duplicate crate
+    // compilation in unit test context. Integration tests (tests/*.rs) can use it fine.
+
     fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
         NodeBuilder::new(data_dir)
             .in_memory()
-            .with_opener(STORE_TYPE_KVSTORE, || {
-                direct_opener::<TestKvState>()
-            })
-            .with_opener(STORE_TYPE_LOGSTORE, || {
-                direct_opener::<TestLogState>()
-            })
-            .with_opener(STORE_TYPE_NULLSTORE, || {
-                direct_opener::<TestNullState>()
-            })
+            .with_opener(STORE_TYPE_KVSTORE, || direct_opener::<TestKvState>())
+            .with_opener(STORE_TYPE_LOGSTORE, || direct_opener::<TestLogState>())
+            .with_opener(STORE_TYPE_NULLSTORE, || direct_opener::<TestNullState>())
     }
 
-    /// File-backed node builder for tests that need persistence across restarts.
     fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
         NodeBuilder::new(data_dir)
-            .with_opener(STORE_TYPE_KVSTORE, || {
-                direct_opener::<TestKvState>()
-            })
-            .with_opener(STORE_TYPE_LOGSTORE, || {
-                direct_opener::<TestLogState>()
-            })
-            .with_opener(STORE_TYPE_NULLSTORE, || {
-                direct_opener::<TestNullState>()
-            })
+            .with_opener(STORE_TYPE_KVSTORE, || direct_opener::<TestKvState>())
+            .with_opener(STORE_TYPE_LOGSTORE, || direct_opener::<TestLogState>())
+            .with_opener(STORE_TYPE_NULLSTORE, || direct_opener::<TestNullState>())
     }
 
     #[tokio::test]

@@ -2,21 +2,18 @@
 
 mod common;
 
-use lattice_kvstore::KvState;
 use lattice_kvstore_api::KvStoreExt;
 use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network;
 use lattice_net_sim::{ChannelNetwork, ChannelTransport};
 use lattice_node::{direct_opener, Invite, NodeBuilder};
-use lattice_systemstore::SystemLayer;
 use std::sync::Arc;
 
+type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
+
 fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
-    NodeBuilder::new(data_dir)
-        .in_memory()
-        .with_opener(STORE_TYPE_KVSTORE, || {
-            direct_opener::<SystemLayer<KvState>>()
-        })
+    lattice_mockkernel::test_node_builder(data_dir)
+        .with_opener(STORE_TYPE_KVSTORE, || direct_opener::<TestKvState>())
 }
 
 /// Integration test: Explicit sync during gap filling.

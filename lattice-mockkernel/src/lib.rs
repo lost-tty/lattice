@@ -7,10 +7,12 @@
 //!   that only need the kernel (intentions, sync, gossip) without any real store.
 
 mod null_state;
+mod test_node;
 pub mod harness;
 
 pub use harness::{TestHarness, TestStore};
 pub use null_state::{NullState, STORE_TYPE_NULLSTORE};
+pub use test_node::test_node_builder;
 
 use futures_util::StreamExt;
 use lattice_model::dag_queries::NullDag;

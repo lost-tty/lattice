@@ -1,22 +1,10 @@
 use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::Uuid;
 use lattice_node::data_dir::DataDir;
-use lattice_node::{direct_opener, Node, NodeBuilder, PeerManager, StoreHandle};
+use lattice_node::{Node, PeerManager, StoreHandle};
 use prost::Message;
 use std::sync::Arc;
-use std::time::Duration; // For decode
-
-// ==================== Test Helpers ====================
-
-type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>;
-
-fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
-    NodeBuilder::new(data_dir)
-        .in_memory()
-        .with_opener(STORE_TYPE_NULLSTORE, || {
-            direct_opener::<TestNullState>()
-        })
-}
+use std::time::Duration;
 
 struct TestCtx {
     _tmp: tempfile::TempDir,
@@ -27,7 +15,7 @@ impl TestCtx {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path().to_path_buf());
-        let node = test_node_builder(DataDir::new(data_dir.base()))
+        let node = lattice_mockkernel::test_node_builder(DataDir::new(data_dir.base()))
             .build()
             .unwrap();
         Self { _tmp: tmp, node }

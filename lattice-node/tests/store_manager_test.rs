@@ -8,30 +8,21 @@ use lattice_node::{direct_opener, Node, NodeBuilder};
 use std::sync::Arc;
 use std::time::Duration;
 
+type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
+
 // ==================== Test Helpers ====================
 
-type TestNullState = lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>;
-
-/// Helper to create a node with NullState opener (in-memory storage).
 fn test_node_builder(data_dir: DataDir) -> NodeBuilder {
-    NodeBuilder::new(data_dir)
-        .in_memory()
-        .with_opener(STORE_TYPE_NULLSTORE, || {
-            direct_opener::<TestNullState>()
-        })
+    lattice_mockkernel::test_node_builder(data_dir)
 }
-
-type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
 
 /// File-backed node builder for tests that need persistence across restarts.
 fn file_node_builder(data_dir: DataDir) -> NodeBuilder {
     NodeBuilder::new(data_dir)
-        .with_opener(STORE_TYPE_KVSTORE, || {
-            direct_opener::<TestKvState>()
-        })
         .with_opener(STORE_TYPE_NULLSTORE, || {
-            direct_opener::<TestNullState>()
+            direct_opener::<lattice_systemstore::SystemLayer<lattice_mockkernel::NullState>>()
         })
+        .with_opener(STORE_TYPE_KVSTORE, || direct_opener::<TestKvState>())
 }
 
 /// Shared test context — keeps tempdir alive and provides access to node + store_manager.
