@@ -6,7 +6,6 @@
 mod common;
 
 use common::TestPair;
-use lattice_kvstore_api::KvStoreExt;
 
 #[tokio::test]
 async fn test_channel_one_way_sync() {
@@ -19,12 +18,7 @@ async fn test_channel_one_way_sync() {
     } = TestPair::new("ch_oneway_a", "ch_oneway_b").await;
 
     // A writes data
-    for i in 0..10 {
-        store_a
-            .put(format!("/key/{}", i).into_bytes(), b"val".to_vec())
-            .await
-            .expect("put");
-    }
+    common::write_entries(&store_a, 10).await;
 
     // B syncs from A
     let a_pubkey = node_a.node_id();
@@ -34,14 +28,7 @@ async fn test_channel_one_way_sync() {
         .expect("sync");
 
     // Verify B has data
-
-    for i in 0..10 {
-        let val = store_b
-            .get(format!("/key/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(val.value, Some(b"val".to_vec()), "B missing item {}", i);
-    }
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 #[tokio::test]
@@ -54,35 +41,19 @@ async fn test_channel_bidirectional_sync() {
         ..
     } = TestPair::new("ch_bi_a", "ch_bi_b").await;
 
-    // A has item X, B has item Y
-    store_a
-        .put(b"/a/x".to_vec(), b"val_x".to_vec())
-        .await
-        .expect("put a");
-    store_b
-        .put(b"/b/y".to_vec(), b"val_y".to_vec())
-        .await
-        .expect("put b");
+    // A has data, B has data
+    common::write_entries(&store_a, 1).await;
+    common::write_entries(&store_b, 1).await;
 
-    // Sync is symmetric: Negentropy reconciliation exchanges items in both directions.
+    // Sync is symmetric
     let a_pubkey = node_a.node_id();
     server_b
         .sync_with_peer_by_id(store_a.id(), a_pubkey, &[])
         .await
         .expect("sync b<-a");
 
-    // B should have A's data
-    assert_eq!(
-        store_b.get(b"/a/x".to_vec()).await.unwrap().value,
-        Some(b"val_x".to_vec()),
-        "B missing A's data"
-    );
-    // A should have B's data (symmetric sync)
-    assert_eq!(
-        store_a.get(b"/b/y".to_vec()).await.unwrap().value,
-        Some(b"val_y".to_vec()),
-        "A missing B's data"
-    );
+    // Both sides should converge
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 #[tokio::test]
@@ -96,15 +67,7 @@ async fn test_channel_large_sync() {
     } = TestPair::new("ch_large_a", "ch_large_b").await;
 
     // A has 50 items (exceeds LEAF_THRESHOLD of 32)
-    for i in 0..50 {
-        store_a
-            .put(
-                format!("/key/{}", i).into_bytes(),
-                format!("val_{}", i).into_bytes(),
-            )
-            .await
-            .expect("put");
-    }
+    common::write_entries(&store_a, 50).await;
 
     let a_pubkey = node_a.node_id();
     server_b
@@ -113,16 +76,5 @@ async fn test_channel_large_sync() {
         .expect("sync");
 
     // Verify B has all data
-    for i in 0..50 {
-        let val = store_b
-            .get(format!("/key/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(
-            val.value,
-            Some(format!("val_{}", i).into_bytes()),
-            "B missing item {}",
-            i
-        );
-    }
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }

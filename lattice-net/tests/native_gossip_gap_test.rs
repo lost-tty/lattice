@@ -6,49 +6,11 @@
 
 mod common;
 
-use lattice_kvstore::proto::{GetRequest, GetResponse, PutRequest, PutResponse};
-use lattice_model::types::Hash;
-use lattice_model::STORE_TYPE_KVSTORE;
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_net::network;
 use lattice_net_sim::{BroadcastGossip, ChannelNetwork, ChannelTransport, GossipNetwork};
 use lattice_node::Invite;
-use lattice_store_base::invoke_command;
 use std::sync::Arc;
-
-// Helper to submit via dispatcher
-async fn put_kv(handle: &Arc<dyn lattice_node::StoreHandle>, key: Vec<u8>, value: Vec<u8>) -> Hash {
-    let req = PutRequest { key, value };
-    let resp: PutResponse = invoke_command(&*handle.as_dispatcher(), "Put", req)
-        .await
-        .expect("put failed");
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&resp.hash);
-    Hash::from(hash)
-}
-
-// Helper to assert key exists
-async fn assert_key_exists(handle: &Arc<dyn lattice_node::StoreHandle>, key: &[u8]) {
-    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
-        loop {
-            let dispatcher = handle.as_dispatcher();
-            let req = GetRequest { key: key.to_vec() };
-            let resp: GetResponse = invoke_command::<_, GetResponse>(&*dispatcher, "Get", req)
-                .await
-                .expect("Get failed");
-            if resp.value.is_some() {
-                return;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "Key {:?} missing in store after timeout",
-            String::from_utf8_lossy(key)
-        )
-    });
-}
 
 #[tokio::test]
 async fn test_native_gossip_gap_recovery() {
@@ -95,7 +57,7 @@ async fn test_native_gossip_gap_recovery() {
 
     // 2. Node A creates the store
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store a");
     let handle_a = node_a
@@ -129,15 +91,22 @@ async fn test_native_gossip_gap_recovery() {
     .expect("gossip subscription did not establish on both nodes");
 
     // 4. Initial write: H0
-    put_kv(&handle_a, b"key0".to_vec(), vec![]).await;
-    assert_key_exists(&handle_b, b"key0").await;
+    lattice_mockkernel::null_write(&*handle_a.as_dispatcher(), b"h0").await;
+    common::wait_for_fingerprint_match(&handle_a, &handle_b).await;
+
+    // Record B's fingerprint after H0 for gap verification later
+    let fp_after_h0 = handle_b
+        .as_sync_provider()
+        .table_fingerprint()
+        .await
+        .expect("fingerprint");
 
     // 5. INJECT DROP: Tell B's gossip simulator to drop the very next message it receives
     tracing::info!("--- INJECTING PACKET DROP ---");
     gossip_b.drop_next_incoming_message();
 
     // 6. Write H1 - B will receive this but drop it
-    let _h1 = put_kv(&handle_a, b"key1".to_vec(), vec![]).await;
+    lattice_mockkernel::null_write(&*handle_a.as_dispatcher(), b"h1").await;
 
     // Wait for gossip_b to receive and drop the message
     tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
@@ -148,33 +117,23 @@ async fn test_native_gossip_gap_recovery() {
     .await
     .expect("gossip_b did not consume the pending drop");
 
-    // VERIFY GAP: B should NOT have H1
-    let dispatcher = handle_b.as_dispatcher();
-    let req = GetRequest {
-        key: b"key1".to_vec(),
-    };
-    let resp: GetResponse = invoke_command::<_, GetResponse>(&*dispatcher, "Get", req)
+    // VERIFY GAP: B's fingerprint should still match its post-H0 state
+    let fp_b_now = handle_b
+        .as_sync_provider()
+        .table_fingerprint()
         .await
-        .expect("Get failed");
-    assert!(
-        resp.value.is_none(),
-        "B should NOT have key1 because the message was dropped!"
+        .expect("fingerprint");
+    assert_eq!(
+        fp_b_now, fp_after_h0,
+        "B should NOT have H1 because the message was dropped!"
     );
 
     // 7. Write H2 - B will receive this, see the gap (missing H1), and trigger handle_missing_dep
     tracing::info!("--- WRITING H2 (TRIGGERING GAP) ---");
-    let _h2 = put_kv(&handle_a, b"key2".to_vec(), vec![]).await;
+    lattice_mockkernel::null_write(&*handle_a.as_dispatcher(), b"h2").await;
 
-    // 8. Verification
-    // Thanks to the gap handling logic in NetworkService, B should:
-    // a) Attempt to ingest H2
-    // b) Get IngestResult::MissingDeps(H1)
-    // c) Call handle_missing_dep
-    // d) Connect to A via ChannelTransport (RPC) and fetch H1 + H2
-    // e) Successfully ingest them
-
-    assert_key_exists(&handle_b, b"key1").await;
-    assert_key_exists(&handle_b, b"key2").await;
+    // 8. Verification — B should recover H1 and H2 via gap recovery
+    common::wait_for_fingerprint_match(&handle_a, &handle_b).await;
 
     tracing::info!("Native gap recovery successful - both messages exist on Node B!");
 }

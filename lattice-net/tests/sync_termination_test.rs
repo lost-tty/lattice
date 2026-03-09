@@ -16,7 +16,6 @@
 mod common;
 
 use common::TestPair;
-use lattice_kvstore_api::KvStoreExt;
 
 /// Regression test for the fan-out bug.
 ///
@@ -38,15 +37,7 @@ async fn test_fanout_single_split_all_items_synced() {
         ..
     } = TestPair::new("fanout1_a", "fanout1_b").await;
 
-    for i in 0..COUNT {
-        store_a
-            .put(
-                format!("/item/{}", i).into_bytes(),
-                format!("v{}", i).into_bytes(),
-            )
-            .await
-            .expect("put");
-    }
+    common::write_entries(&store_a, COUNT).await;
 
     let a_pk = node_a.node_id();
     server_b
@@ -54,18 +45,7 @@ async fn test_fanout_single_split_all_items_synced() {
         .await
         .expect("sync");
 
-    for i in 0..COUNT {
-        let val = store_b
-            .get(format!("/item/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(
-            val.value,
-            Some(format!("v{}", i).into_bytes()),
-            "B missing item {} after fan-out sync",
-            i
-        );
-    }
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 #[tokio::test]
@@ -80,15 +60,7 @@ async fn test_fanout_deep_recursion_all_items_synced() {
         ..
     } = TestPair::new("fanout2_a", "fanout2_b").await;
 
-    for i in 0..COUNT {
-        store_a
-            .put(
-                format!("/deep/{}", i).into_bytes(),
-                format!("d{}", i).into_bytes(),
-            )
-            .await
-            .expect("put");
-    }
+    common::write_entries(&store_a, COUNT).await;
 
     let a_pk = node_a.node_id();
     server_b
@@ -96,18 +68,7 @@ async fn test_fanout_deep_recursion_all_items_synced() {
         .await
         .expect("sync");
 
-    for i in 0..COUNT {
-        let val = store_b
-            .get(format!("/deep/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(
-            val.value,
-            Some(format!("d{}", i).into_bytes()),
-            "B missing item {} after deep fan-out sync",
-            i
-        );
-    }
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 /// Regression test for bidirectional fan-out.
@@ -126,18 +87,8 @@ async fn test_fanout_bidirectional_both_sides_complete() {
         ..
     } = TestPair::new("fanout_bi_a", "fanout_bi_b").await;
 
-    for i in 0..COUNT {
-        store_a
-            .put(format!("/a/{}", i).into_bytes(), b"from_a".to_vec())
-            .await
-            .expect("put a");
-    }
-    for i in 0..COUNT {
-        store_b
-            .put(format!("/b/{}", i).into_bytes(), b"from_b".to_vec())
-            .await
-            .expect("put b");
-    }
+    common::write_entries(&store_a, COUNT).await;
+    common::write_entries(&store_b, COUNT).await;
 
     let a_pk = node_a.node_id();
     server_b
@@ -145,33 +96,7 @@ async fn test_fanout_bidirectional_both_sides_complete() {
         .await
         .expect("sync");
 
-    // A should have all of B's items
-    for i in 0..COUNT {
-        let val = store_a
-            .get(format!("/b/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(
-            val.value,
-            Some(b"from_b".to_vec()),
-            "A missing B's item {}",
-            i
-        );
-    }
-
-    // B should have all of A's items
-    for i in 0..COUNT {
-        let val = store_b
-            .get(format!("/a/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(
-            val.value,
-            Some(b"from_a".to_vec()),
-            "B missing A's item {}",
-            i
-        );
-    }
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 /// Test that a peer dropping the stream before SyncDone is an error.

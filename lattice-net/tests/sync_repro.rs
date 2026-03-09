@@ -1,7 +1,10 @@
 mod common;
 
 use common::TestPair;
-use lattice_kvstore_api::KvStoreExt;
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
+use lattice_net::network;
+use lattice_net_sim::{ChannelNetwork, ChannelTransport};
+use lattice_node::Invite;
 
 #[tokio::test]
 async fn test_one_way_sync() {
@@ -13,32 +16,17 @@ async fn test_one_way_sync() {
         ..
     } = TestPair::new("oneway_a", "oneway_b").await;
 
-    // A has data, B is empty
-    for i in 0..10 {
-        store_a
-            .put(format!("/key/{}", i).into_bytes(), b"val".to_vec())
-            .await
-            .expect("put");
-    }
+    common::write_entries(&store_a, 10).await;
 
-    // Explicitly sync B -> A (pull from A)
     let peer_a = node_a.node_id();
     let store_id = store_a.id();
 
-    // Pass empty authors to rely on implicit inference
     server_b
         .sync_with_peer_by_id(store_id, peer_a, &[])
         .await
         .expect("sync");
 
-    // Verify B has data
-    for i in 0..10 {
-        let val = store_b
-            .get(format!("/key/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(val.value, Some(b"val".to_vec()), "B missing item {}", i);
-    }
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 #[tokio::test]
@@ -51,19 +39,9 @@ async fn test_bidirectional_sync() {
         ..
     } = TestPair::new("bi_a", "bi_b").await;
 
-    // A has Item X
-    store_a
-        .put(b"/a/x".to_vec(), b"val_x".to_vec())
-        .await
-        .expect("put a");
+    common::write_entries(&store_a, 1).await;
+    common::write_entries(&store_b, 1).await;
 
-    // B has Item Y
-    store_b
-        .put(b"/b/y".to_vec(), b"val_y".to_vec())
-        .await
-        .expect("put b");
-
-    // Explicitly sync B -> A (B initiates)
     let peer_a = node_a.node_id();
     let store_id = store_a.id();
 
@@ -72,21 +50,7 @@ async fn test_bidirectional_sync() {
         .await
         .expect("sync");
 
-    // Verification
-    // B should have A's item (Pull worked)
-    assert_eq!(
-        store_b.get(b"/a/x".to_vec()).await.unwrap().value,
-        Some(b"val_x".to_vec()),
-        "B missing A's data"
-    );
-
-    // A should have B's item (Push worked? OR Negentropy symmetric sync worked?)
-    // If this fails, then sync is NOT symmetric in one pass.
-    assert_eq!(
-        store_a.get(b"/b/y".to_vec()).await.unwrap().value,
-        Some(b"val_y".to_vec()),
-        "A missing B's data (Symmetric Sync Failed)"
-    );
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 #[tokio::test]
@@ -99,16 +63,7 @@ async fn test_large_sync() {
         ..
     } = TestPair::new("large_repro_a", "large_repro_b").await;
 
-    // A has 50 items (exceeds LEAF_THRESHOLD of 32)
-    for i in 0..50 {
-        store_a
-            .put(
-                format!("/key/{}", i).into_bytes(),
-                format!("val_{}", i).into_bytes(),
-            )
-            .await
-            .expect("put");
-    }
+    common::write_entries(&store_a, 50).await;
 
     let peer_a = node_a.node_id();
     let store_id = store_a.id();
@@ -118,28 +73,11 @@ async fn test_large_sync() {
         .await
         .expect("sync");
 
-    // Verify B has data
-    for i in 0..50 {
-        let val = store_b
-            .get(format!("/key/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(
-            val.value,
-            Some(format!("val_{}", i).into_bytes()),
-            "B missing item {}",
-            i
-        );
-    }
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 #[tokio::test]
 async fn test_partition_repro() {
-    use lattice_model::STORE_TYPE_KVSTORE;
-    use lattice_net::network;
-    use lattice_net_sim::{ChannelNetwork, ChannelTransport};
-    use lattice_node::Invite;
-
     let node_a = common::build_node("part_repro_a");
     let node_b = common::build_node("part_repro_b");
 
@@ -160,7 +98,7 @@ async fn test_partition_repro() {
     server_b.set_global_gossip_enabled(false);
 
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store a");
     let store_a = node_a
@@ -179,45 +117,21 @@ async fn test_partition_repro() {
         .await
         .expect("B join A");
 
-    // Phase 1: Common data
+    // Phase 1: Both sides write
+    let disp_a = store_a.as_dispatcher();
+    let disp_b = store_b.as_dispatcher();
     for i in 0..50 {
-        store_a
-            .put(
-                format!("/common/{}", i).into_bytes(),
-                b"val_common".to_vec(),
-            )
-            .await
-            .expect("put a");
-        store_b
-            .put(
-                format!("/common/{}", i).into_bytes(),
-                b"val_common".to_vec(),
-            )
-            .await
-            .expect("put b");
+        lattice_mockkernel::null_write(&*disp_a, format!("common_a_{}", i).as_bytes()).await;
+        lattice_mockkernel::null_write(&*disp_b, format!("common_b_{}", i).as_bytes()).await;
     }
 
     // Phase 2: A has new data
     for i in 0..50 {
-        store_a
-            .put(format!("/new/{}", i).into_bytes(), b"val_new".to_vec())
-            .await
-            .expect("put a");
+        lattice_mockkernel::null_write(&*disp_a, format!("new_{}", i).as_bytes()).await;
     }
 
-    // VERIFY: Ensure B does NOT have the data yet
-    // Since gossip is disabled globally, B should effectively be isolated from push updates
-    for i in 0..50 {
-        let val = store_b
-            .get(format!("/new/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert!(
-            val.value.is_none(),
-            "B received data via gossip even though disabled! Item {}",
-            i
-        );
-    }
+    // VERIFY: B does not have A's new data yet (gossip disabled, no sync)
+    common::assert_fingerprints_differ(&store_a, &store_b).await;
 
     let peer_a = node_a.node_id();
     server_b
@@ -225,12 +139,6 @@ async fn test_partition_repro() {
         .await
         .expect("sync");
 
-    // Verify B has new data
-    for i in 0..50 {
-        let val = store_b
-            .get(format!("/new/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(val.value, Some(b"val_new".to_vec()), "B missing new item {}", i);
-    }
+    // Verify B has all data
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }

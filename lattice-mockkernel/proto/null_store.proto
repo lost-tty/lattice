@@ -1,12 +1,18 @@
 syntax = "proto3";
 package lattice.null;
 
-// Minimal service definition for NullState introspection.
-// NullState never dispatches commands; this exists only to satisfy
-// the Introspectable trait bound.
-service NullStore {}
+// Minimal service definition for NullState.
+service NullStore {
+    // Submit an intention with arbitrary payload.
+    // The state machine ignores the content; this just creates an intention
+    // so tests can exercise sync/gossip without pulling in kvstore.
+    rpc Write(WriteRequest) returns (WriteResponse);
+}
 
-// Opaque payload wrapper — NullState ignores the content.
-message NullPayload {
+message WriteRequest {
     bytes data = 1;
+}
+
+message WriteResponse {
+    bytes hash = 1;
 }

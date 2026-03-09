@@ -10,8 +10,10 @@
 mod common;
 
 use common::TestPair;
-use lattice_kvstore_api::KvStoreExt;
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
+use lattice_net::network;
 use lattice_net_sim::{ChannelNetwork, ChannelTransport};
+use lattice_node::Invite;
 use std::sync::Arc;
 use tokio::sync::Barrier;
 
@@ -29,14 +31,9 @@ async fn test_large_dataset_sync() {
 
     const COUNT: usize = 100;
 
+    let disp = store_a.as_dispatcher();
     for i in 0..COUNT {
-        store_a
-            .put(
-                format!("/key/{}", i).into_bytes(),
-                format!("val_{}", i).into_bytes(),
-            )
-            .await
-            .expect("put");
+        lattice_mockkernel::null_write(&*disp, format!("val_{}", i).as_bytes()).await;
         if i % 500 == 0 {
             tokio::task::yield_now().await;
         }
@@ -50,12 +47,7 @@ async fn test_large_dataset_sync() {
         results.len()
     );
 
-    for i in 0..COUNT {
-        let key = format!("/key/{}", i).into_bytes();
-        let expected_val = format!("val_{}", i).into_bytes();
-        let val = store_b.get(key).await.expect("get");
-        assert_eq!(val.value, Some(expected_val), "Mismatch at index {}", i);
-    }
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 #[tokio::test]
@@ -68,35 +60,18 @@ async fn test_bidirectional_sync() {
         ..
     } = TestPair::new("bi_a", "bi_b").await;
 
+    let disp_a = store_a.as_dispatcher();
     for i in 0..COUNT {
-        store_a
-            .put(format!("/a/{}", i).into_bytes(), b"val_a".to_vec())
-            .await
-            .expect("put a");
+        lattice_mockkernel::null_write(&*disp_a, format!("a_{}", i).as_bytes()).await;
     }
+    let disp_b = store_b.as_dispatcher();
     for i in 0..COUNT {
-        store_b
-            .put(format!("/b/{}", i).into_bytes(), b"val_b".to_vec())
-            .await
-            .expect("put b");
+        lattice_mockkernel::null_write(&*disp_b, format!("b_{}", i).as_bytes()).await;
     }
 
     server_b.sync_all_by_id(store_b.id()).await.expect("sync");
 
-    for i in 0..COUNT {
-        let val = store_a
-            .get(format!("/b/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(val.value, Some(b"val_b".to_vec()), "A missing B's data at {}", i);
-    }
-    for i in 0..COUNT {
-        let val = store_b
-            .get(format!("/a/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(val.value, Some(b"val_a".to_vec()), "B missing A's data at {}", i);
-    }
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 #[tokio::test]
@@ -115,25 +90,20 @@ async fn test_interleaved_modifications() {
 
     let pk_a = node_a.node_id();
 
+    let disp = store_a.as_dispatcher();
     for i in 0..COUNT {
-        store_a
-            .put(format!("/init/{}", i).into_bytes(), b"val".to_vec())
-            .await
-            .expect("put init");
+        lattice_mockkernel::null_write(&*disp, format!("init_{}", i).as_bytes()).await;
     }
 
     let barrier = Arc::new(Barrier::new(2));
 
-    let store_a_clone = store_a.clone();
+    let store_a_disp = store_a.as_dispatcher();
     let barrier_write = barrier.clone();
 
     let bg_write = tokio::spawn(async move {
         barrier_write.wait().await;
         for i in 0..COUNT {
-            store_a_clone
-                .put(format!("/live/{}", i).into_bytes(), b"val".to_vec())
-                .await
-                .expect("put live");
+            lattice_mockkernel::null_write(&*store_a_disp, format!("live_{}", i).as_bytes()).await;
             tokio::task::yield_now().await;
         }
     });
@@ -157,28 +127,11 @@ async fn test_interleaved_modifications() {
         .await
         .expect("final sync");
 
-    for i in 0..COUNT {
-        let val = store_b
-            .get(format!("/live/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(val.value, Some(b"val".to_vec()), "Missing live data at {}", i);
-    }
-    for i in 0..COUNT {
-        let val = store_b
-            .get(format!("/init/{}", i).into_bytes())
-            .await
-            .expect("get");
-        assert_eq!(val.value, Some(b"val".to_vec()), "Missing init data at {}", i);
-    }
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 #[tokio::test]
 async fn test_partition_recovery() {
-    use lattice_model::STORE_TYPE_KVSTORE;
-    use lattice_net::network;
-    use lattice_node::Invite;
-
     const COUNT: usize = 10;
     let net = ChannelNetwork::new();
 
@@ -215,7 +168,7 @@ async fn test_partition_recovery() {
     let c_pubkey = node_c.node_id();
 
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store");
     let store_a = node_a
@@ -247,39 +200,28 @@ async fn test_partition_recovery() {
         .await
         .expect("join c");
 
-    store_a
-        .put(b"shared_key".to_vec(), b"shared_val".to_vec())
-        .await
-        .expect("put");
+    // A writes shared data
+    lattice_mockkernel::null_write(&*store_a.as_dispatcher(), b"shared").await;
+
     server_b.sync_all_by_id(store_id).await.expect("sync b");
     server_c.sync_all_by_id(store_id).await.expect("sync c");
-    assert_eq!(
-        store_b.get(b"shared_key".to_vec()).await.unwrap().value,
-        Some(b"shared_val".to_vec())
-    );
-    assert_eq!(
-        store_c.get(b"shared_key".to_vec()).await.unwrap().value,
-        Some(b"shared_val".to_vec())
-    );
+
+    // Verify all three converged
+    common::assert_fingerprints_match(&store_a, &store_b).await;
+    common::assert_fingerprints_match(&store_a, &store_c).await;
 
     // === Phase 2: Partition ===
     drop(server_a);
     drop(server_b);
     drop(server_c);
 
+    let disp_a = store_a.as_dispatcher();
+    let disp_b = store_b.as_dispatcher();
+    let disp_c = store_c.as_dispatcher();
     for i in 0..COUNT {
-        store_a
-            .put(format!("/a/{}", i).into_bytes(), b"val_a".to_vec())
-            .await
-            .expect("put a");
-        store_b
-            .put(format!("/b/{}", i).into_bytes(), b"val_b".to_vec())
-            .await
-            .expect("put b");
-        store_c
-            .put(format!("/c/{}", i).into_bytes(), b"val_c".to_vec())
-            .await
-            .expect("put c");
+        lattice_mockkernel::null_write(&*disp_a, format!("a_{}", i).as_bytes()).await;
+        lattice_mockkernel::null_write(&*disp_b, format!("b_{}", i).as_bytes()).await;
+        lattice_mockkernel::null_write(&*disp_c, format!("c_{}", i).as_bytes()).await;
     }
 
     // === Phase 3: Reconnect ===
@@ -331,47 +273,7 @@ async fn test_partition_recovery() {
         .await
         .expect("sync c-b");
 
-    // === Phase 4: Validation ===
-    for i in 0..COUNT {
-        assert_eq!(
-            store_a.get(format!("/b/{}", i).into_bytes()).await.unwrap().value,
-            Some(b"val_b".to_vec()),
-            "A missing B {}",
-            i
-        );
-        assert_eq!(
-            store_a.get(format!("/c/{}", i).into_bytes()).await.unwrap().value,
-            Some(b"val_c".to_vec()),
-            "A missing C {}",
-            i
-        );
-    }
-    for i in 0..COUNT {
-        assert_eq!(
-            store_b.get(format!("/a/{}", i).into_bytes()).await.unwrap().value,
-            Some(b"val_a".to_vec()),
-            "B missing A {}",
-            i
-        );
-        assert_eq!(
-            store_b.get(format!("/c/{}", i).into_bytes()).await.unwrap().value,
-            Some(b"val_c".to_vec()),
-            "B missing C {}",
-            i
-        );
-    }
-    for i in 0..COUNT {
-        assert_eq!(
-            store_c.get(format!("/a/{}", i).into_bytes()).await.unwrap().value,
-            Some(b"val_a".to_vec()),
-            "C missing A {}",
-            i
-        );
-        assert_eq!(
-            store_c.get(format!("/b/{}", i).into_bytes()).await.unwrap().value,
-            Some(b"val_b".to_vec()),
-            "C missing B {}",
-            i
-        );
-    }
+    // === Phase 4: Validation — all three should have converged ===
+    common::assert_fingerprints_match(&store_a, &store_b).await;
+    common::assert_fingerprints_match(&store_a, &store_c).await;
 }

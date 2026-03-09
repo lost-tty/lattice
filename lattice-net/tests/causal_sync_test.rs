@@ -2,14 +2,13 @@ mod common;
 
 use futures_util::StreamExt;
 use lattice_kernel::proto::weaver::WitnessContent;
-use lattice_kvstore_api::KvStoreExt;
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::Uuid;
-use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network;
 use lattice_net_sim::{ChannelNetwork, ChannelTransport};
 use lattice_node::{Invite, NodeEvent};
 use prost::Message;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{timeout, Duration};
 
 #[tokio::test]
 async fn test_sync_preserves_causal_order_in_witness_log() {
@@ -33,27 +32,18 @@ async fn test_sync_preserves_causal_order_in_witness_log() {
         node_b.subscribe_net_events(),
     );
 
-    // Create Root Store on A
+    // Create Root Store on A (NullState)
     let root_id = node_a
-        .create_store(None, Some("root".into()), STORE_TYPE_KVSTORE)
+        .create_store(None, Some("root".into()), STORE_TYPE_NULLSTORE)
         .await
         .unwrap();
     let root_handle_a = node_a.store_manager().get_handle(&root_id).unwrap();
 
-    // Let's use `put` to create a natural chain.
-    // They are guaranteed to be sequentially causally linked within the same store IF written to the SAME key.
-    root_handle_a
-        .put(b"key1".to_vec(), b"val1".to_vec())
-        .await
-        .unwrap();
-    root_handle_a
-        .put(b"key1".to_vec(), b"val2".to_vec())
-        .await
-        .unwrap();
-    root_handle_a
-        .put(b"key1".to_vec(), b"val3".to_vec())
-        .await
-        .unwrap();
+    // Submit three intentions to create a sequential causal chain.
+    let disp = root_handle_a.as_dispatcher();
+    lattice_mockkernel::null_write(&*disp, b"val1").await;
+    lattice_mockkernel::null_write(&*disp, b"val2").await;
+    lattice_mockkernel::null_write(&*disp, b"val3").await;
 
     // Get the witness log from A
     let a_provider = root_handle_a.as_sync_provider();
@@ -108,26 +98,8 @@ async fn test_sync_preserves_causal_order_in_witness_log() {
     .await
     .expect("Failed to get root handle on Node B");
 
-    // Wait for Sync
-    timeout(Duration::from_secs(10), async {
-        loop {
-            let root_a_fp = a_provider
-                .table_fingerprint()
-                .await
-                .expect("Failed to get Node A fingerprint");
-            let root_b_fp = root_handle_b
-                .as_sync_provider()
-                .table_fingerprint()
-                .await
-                .expect("Failed to get Node B fingerprint");
-            if root_a_fp == root_b_fp {
-                break;
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("Node B failed to sync (fingerprint mismatch)");
+    // Wait for Sync (fingerprint convergence)
+    common::wait_for_fingerprint_match(&root_handle_a, &root_handle_b).await;
 
     // 3. Verify Witness Log on Node B matches the causal order
     let b_provider = root_handle_b.as_sync_provider();

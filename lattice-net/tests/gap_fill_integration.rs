@@ -2,19 +2,11 @@
 
 mod common;
 
-use lattice_kvstore_api::KvStoreExt;
-use lattice_model::STORE_TYPE_KVSTORE;
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_net::network;
 use lattice_net_sim::{ChannelNetwork, ChannelTransport};
-use lattice_node::{direct_opener, Invite, NodeBuilder};
+use lattice_node::Invite;
 use std::sync::Arc;
-
-type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
-
-fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
-    lattice_mockkernel::test_node_builder(data_dir)
-        .with_opener(STORE_TYPE_KVSTORE, || direct_opener::<TestKvState>())
-}
 
 /// Integration test: Explicit sync during gap filling.
 /// Tests that sync_all correctly syncs missing entries via RPC pull.
@@ -27,8 +19,16 @@ async fn test_explicit_sync() {
     let data_a = common::temp_data_dir("author_sync_a2");
     let data_b = common::temp_data_dir("author_sync_b2");
 
-    let node_a = Arc::new(test_node_builder(data_a.clone()).build().expect("node a"));
-    let node_b = Arc::new(test_node_builder(data_b.clone()).build().expect("node b"));
+    let node_a = Arc::new(
+        lattice_mockkernel::test_node_builder(data_a.clone())
+            .build()
+            .expect("node a"),
+    );
+    let node_b = Arc::new(
+        lattice_mockkernel::test_node_builder(data_b.clone())
+            .build()
+            .expect("node b"),
+    );
 
     let net = ChannelNetwork::new();
     let transport_a = ChannelTransport::new(node_a.node_id(), &net).await;
@@ -53,7 +53,7 @@ async fn test_explicit_sync() {
 
     // Node A creates root store and invite token
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store a");
     let store_a = node_a
@@ -76,32 +76,20 @@ async fn test_explicit_sync() {
         .expect("B should successfully join A's store");
 
     // A writes entries AFTER B joined
-    lattice_kvstore_api::KvStoreExt::put(&store_a, b"/data".to_vec(), b"test".to_vec())
-        .await
-        .expect("put");
+    lattice_mockkernel::null_write(&*store_a.as_dispatcher(), b"test_data").await;
 
-    // Verify gap exists (B doesn't have A's data yet - gossip wouldn't have propagated)
-    assert!(
-        store_b
-            .get(b"/data".to_vec())
-            .await
-            .ok()
-            .and_then(|r| r.value)
-            .is_none(),
-        "B should not have data before sync"
-    );
+    // Verify gap exists (fingerprints differ)
+    common::assert_fingerprints_differ(&store_a, &store_b).await;
 
     // B syncs (synchronous RPC pull)
-    // Verifying `sync_all` works with gossip disabled (explicit pull) is sufficient for this integration test.
     let results = server_b
         .sync_all_by_id(store_b.id())
         .await
         .expect("sync all");
     tracing::info!("Sync results: {} peers", results.len());
 
-    // Verify entry arrived after sync - no sleep needed, proves RPC pull worked
-    let val = store_b.get(b"/data".to_vec()).await.expect("get");
-    assert_eq!(val.value, Some(b"test".to_vec()));
+    // Verify entry arrived after sync — fingerprints match
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 
     let _ = std::fs::remove_dir_all(data_a.base());
     let _ = std::fs::remove_dir_all(data_b.base());
@@ -113,8 +101,16 @@ async fn test_sync_multiple_entries() {
     let data_a = common::temp_data_dir("multi_sync_a");
     let data_b = common::temp_data_dir("multi_sync_b");
 
-    let node_a = Arc::new(test_node_builder(data_a.clone()).build().expect("node a"));
-    let node_b = Arc::new(test_node_builder(data_b.clone()).build().expect("node b"));
+    let node_a = Arc::new(
+        lattice_mockkernel::test_node_builder(data_a.clone())
+            .build()
+            .expect("node a"),
+    );
+    let node_b = Arc::new(
+        lattice_mockkernel::test_node_builder(data_b.clone())
+            .build()
+            .expect("node b"),
+    );
 
     let net = ChannelNetwork::new();
     let transport_a = ChannelTransport::new(node_a.node_id(), &net).await;
@@ -133,15 +129,14 @@ async fn test_sync_multiple_entries() {
         lattice_net_sim::SimBackend::new(transport_b, node_b.clone(), None),
         event_rx_b,
     );
-    // Disable auto-sync to ensure no background sync happens
+    // Disable auto-sync and gossip
     server_a.set_auto_sync_enabled(false);
     server_b.set_auto_sync_enabled(false);
-    // Disable gossip to ensure no background propagation happens
     server_a.set_global_gossip_enabled(false);
     server_b.set_global_gossip_enabled(false);
 
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store a");
     let store_a = node_a
@@ -163,37 +158,16 @@ async fn test_sync_multiple_entries() {
         .expect("B should successfully join A's store");
 
     // A writes multiple entries AFTER B joined
-    for i in 1..=5 {
-        lattice_kvstore_api::KvStoreExt::put(
-            &store_a,
-            format!("/key{}", i).into_bytes(),
-            format!("value{}", i).into_bytes(),
-        )
-        .await
-        .expect("put");
-    }
+    common::write_entries(&store_a, 5).await;
 
-    // Verify gap exists (B doesn't have A's data yet - gossip wouldn't have propagated)
-    assert!(
-        store_b
-            .get(b"/key1".to_vec())
-            .await
-            .ok()
-            .and_then(|r| r.value)
-            .is_none(),
-        "B should not have data before sync"
-    );
+    // Verify gap exists
+    common::assert_fingerprints_differ(&store_a, &store_b).await;
 
-    // B syncs to get the new entries (synchronous RPC pull)
+    // B syncs to get the new entries
     let _results = server_b.sync_all_by_id(store_b.id()).await.expect("sync");
 
-    // Verify all entries synced - no sleep needed, proves RPC pull worked
-    for i in 1..=5 {
-        let key = format!("/key{}", i);
-        let expected = format!("value{}", i);
-        let val = store_b.get(key.as_bytes().to_vec()).await.expect("get");
-        assert_eq!(val.value, Some(expected.into_bytes()), "key{} should sync", i);
-    }
+    // Verify all entries synced
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 
     let _ = std::fs::remove_dir_all(data_a.base());
     let _ = std::fs::remove_dir_all(data_b.base());

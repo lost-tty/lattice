@@ -83,27 +83,39 @@ impl Introspectable for NullState {
         payload: &[u8],
     ) -> Result<DynamicMessage, Box<dyn std::error::Error + Send + Sync>> {
         let msg_desc = DESCRIPTOR_POOL
-            .get_message_by_name("lattice.null.NullPayload")
-            .ok_or("NullPayload not in descriptor pool")?;
+            .get_message_by_name("lattice.null.WriteRequest")
+            .ok_or("WriteRequest not in descriptor pool")?;
         let mut dynamic = DynamicMessage::new(msg_desc);
-        // Best-effort decode; if the payload isn't actually NullPayload that's fine —
+        // Best-effort decode; if the payload isn't actually WriteRequest that's fine —
         // tests don't inspect decoded payloads.
         use prost::Message;
         let _ = dynamic.merge(payload);
         Ok(dynamic)
     }
+
+    fn method_meta(&self) -> std::collections::HashMap<String, lattice_store_base::MethodMeta> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "Write".to_string(),
+            lattice_store_base::MethodMeta {
+                description: "Submit an intention with arbitrary payload".to_string(),
+                kind: lattice_store_base::MethodKind::Command,
+            },
+        );
+        map
+    }
 }
 
 // ---------------------------------------------------------------------------
-// CommandHandler — reject everything; tests use SystemBatch, not commands
+// CommandHandler — Write submits via StateWriter; queries rejected
 // ---------------------------------------------------------------------------
 
 impl CommandHandler for NullState {
     fn handle_command<'a>(
         &'a self,
-        _writer: &'a dyn lattice_model::StateWriter,
+        writer: &'a dyn lattice_model::StateWriter,
         method_name: &'a str,
-        _request: DynamicMessage,
+        request: DynamicMessage,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
@@ -114,7 +126,29 @@ impl CommandHandler for NullState {
     > {
         let name = method_name.to_string();
         Box::pin(async move {
-            Err(format!("NullState does not handle commands (got '{name}')").into())
+            match name.as_str() {
+                "Write" => {
+                    let data: Vec<u8> = request
+                        .get_field_by_name("data")
+                        .and_then(|v| match v.into_owned() {
+                            prost_reflect::Value::Bytes(b) => Some(b.to_vec()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    let payload = crate::wrap_app_data(&data);
+                    let hash = writer
+                        .submit(payload, vec![])
+                        .await
+                        .map_err(|e| format!("submit failed: {e:?}"))?;
+                    let resp_desc = DESCRIPTOR_POOL
+                        .get_message_by_name("lattice.null.WriteResponse")
+                        .ok_or("WriteResponse not in descriptor pool")?;
+                    let mut resp = DynamicMessage::new(resp_desc);
+                    resp.set_field_by_name("hash", prost_reflect::Value::Bytes(hash.as_bytes().to_vec().into()));
+                    Ok(resp)
+                }
+                _ => Err(format!("NullState does not handle command '{name}'").into()),
+            }
         })
     }
 

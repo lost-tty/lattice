@@ -1,7 +1,6 @@
 mod common;
 
 use common::TestPair;
-use lattice_kvstore_api::KvStoreExt;
 use lattice_model::types::Hash;
 use lattice_net::LatticeNetError;
 
@@ -22,18 +21,10 @@ async fn test_chain_fetch_linear_gap() {
     } = TestPair::new("chain_linear_a", "chain_linear_b").await;
 
     // A creates a chain of 10 items
-    let mut hashes = Vec::new();
-    for i in 0..10 {
-        let h = store_a
-            .put(format!("/item/{}", i).into_bytes(), b"val".to_vec())
-            .await
-            .unwrap();
-        hashes.push(h);
-    }
+    let hashes = common::write_entries(&store_a, 10).await;
 
     // Transfer 0..=4 to B so B has 'since' (hashes[4])
     for i in 0..=4 {
-        // Since authors differ if setup_pair uses different nodes, we must sync the exact signed intentions.
         let intentions = store_a
             .as_sync_provider()
             .fetch_intentions(vec![hashes[i]])
@@ -57,23 +48,14 @@ async fn test_chain_fetch_linear_gap() {
     let count = result.unwrap();
     assert_eq!(count, 5, "Should have fetched 5 items (5,6,7,8,9)");
 
-    // Verify B has the data
-    for i in 5..10 {
-        let val = store_b
-            .get(format!("/item/{}", i).into_bytes())
-            .await
-            .unwrap()
-            .value;
-        assert_eq!(val, Some(b"val".to_vec()), "B missing item {}", i);
-    }
+    // Verify B converged with A
+    common::assert_fingerprints_match(&store_a, &store_b).await;
 }
 
 #[tokio::test]
 async fn test_chain_fetch_invalid_since() {
     // -----------------------------------------------------------------------
     // SCENARIO 2: Invalid Since (None) -> Should Fail
-    // fetch_chain requires a non-zero since hash (gap fill only).
-    // New authors should use sync protocol.
     // -----------------------------------------------------------------------
     let TestPair {
         node_a,
@@ -83,18 +65,9 @@ async fn test_chain_fetch_invalid_since() {
         ..
     } = TestPair::new("chain_inv_a", "chain_inv_b").await;
 
-    let mut hashes = Vec::new();
-    for i in 0..5 {
-        let h = store_a
-            .put(format!("/item/{}", i).into_bytes(), b"val".to_vec())
-            .await
-            .unwrap();
-        hashes.push(h);
-    }
-
+    let hashes = common::write_entries(&store_a, 5).await;
     let target = hashes[4];
 
-    // Request with since=None
     let result = server_b
         .fetch_chain(store_b.id(), node_a.node_id(), target, None)
         .await;
@@ -102,7 +75,6 @@ async fn test_chain_fetch_invalid_since() {
     match result {
         Ok(_) => panic!("fetch_chain should fail when since is None"),
         Err(e) => {
-            // Server rejects the request; client sees Protocol or Sync error
             assert!(
                 matches!(e, LatticeNetError::Protocol(_) | LatticeNetError::Sync(_) | LatticeNetError::Io(_)),
                 "Expected Protocol/Sync/Io error, got: {:?}",
@@ -116,10 +88,6 @@ async fn test_chain_fetch_invalid_since() {
 async fn test_chain_fetch_fork_detect() {
     // -----------------------------------------------------------------------
     // SCENARIO 3: Fork Detection (Mismatch)
-    // A has [0, 1, 2, 3, 4] (Chain X)
-    // B thinks it has [0, 1, 2, 3', 4'] (Chain Y - fork at 2)
-    // B requests fetch_chain(Hash(4 of X), since=Hash(3' of Y)).
-    // A should fail to find 3' in history of 4.
     // -----------------------------------------------------------------------
     let TestPair {
         node_a,
@@ -129,27 +97,15 @@ async fn test_chain_fetch_fork_detect() {
         ..
     } = TestPair::new("chain_fork_a", "chain_fork_b").await;
 
-    // A creates Chain X: 0->1->2->3->4
-    let mut hashes_a = Vec::new();
-    for i in 0..5 {
-        let h = store_a
-            .put(format!("/item/{}", i).into_bytes(), b"val_a".to_vec())
-            .await
-            .unwrap();
-        hashes_a.push(h);
-    }
+    let hashes_a = common::write_entries(&store_a, 5).await;
 
-    // Simulate B having a "fake" history or just a random hash as `since`.
     let fake_since = Hash::from([0xAA; 32]);
     let target = hashes_a[4];
 
-    // B requests fetch_chain(target=4, since=fake_since)
     let result = server_b
         .fetch_chain(store_b.id(), node_a.node_id(), target, Some(fake_since))
         .await;
 
-    // Expectation: walk_back_until should fail because it never finds `fake_since` before hitting Genesis.
-    // The server should return an error, and the client sees Protocol or Sync error.
     match result {
         Ok(_) => panic!("Should have failed because since was not found"),
         Err(e) => {
@@ -166,11 +122,6 @@ async fn test_chain_fetch_fork_detect() {
 async fn test_chain_fetch_limit_exceeded() {
     // -----------------------------------------------------------------------
     // SCENARIO 4: Limit Exceeded
-    // A has [0..40]. B matches A at [0].
-    // B requests fetch_chain(Hash(39), since=Hash(0)). Gap is 39 items.
-    // Limit is 32.
-    // Expectation: Failure. We strictly require finding 'since'.
-    // If the gap is too large, we fallback to full sync.
     // -----------------------------------------------------------------------
     let TestPair {
         node_a,
@@ -180,17 +131,10 @@ async fn test_chain_fetch_limit_exceeded() {
         ..
     } = TestPair::new("chain_lim_a", "chain_lim_b").await;
 
-    let mut hashes = Vec::new();
-    for i in 0..40 {
-        let h = store_a
-            .put(format!("/item/{}", i).into_bytes(), b"val".to_vec())
-            .await
-            .unwrap();
-        hashes.push(h);
-    }
+    let hashes = common::write_entries(&store_a, 40).await;
 
-    let target = hashes[39]; // Index 39 is the 40th item
-    let since = hashes[0]; // Index 0 is the 1st item
+    let target = hashes[39];
+    let since = hashes[0];
 
     let result = server_b
         .fetch_chain(store_b.id(), node_a.node_id(), target, Some(since))
@@ -212,9 +156,6 @@ async fn test_chain_fetch_limit_exceeded() {
 async fn test_chain_fetch_future_since() {
     // -----------------------------------------------------------------------
     // SCENARIO 5: Future Since (Since is descendant of Target)
-    // A has [0, 1, 2, 3, 4].
-    // B requests fetch_chain(Hash(2), since=Hash(4)).
-    // Expectation: Failure. walk_back_until(2) will hit Genesis without finding 4.
     // -----------------------------------------------------------------------
     let TestPair {
         node_a,
@@ -224,14 +165,7 @@ async fn test_chain_fetch_future_since() {
         ..
     } = TestPair::new("chain_fut_a", "chain_fut_b").await;
 
-    let mut hashes = Vec::new();
-    for i in 0..5 {
-        let h = store_a
-            .put(format!("/item/{}", i).into_bytes(), b"val".to_vec())
-            .await
-            .unwrap();
-        hashes.push(h);
-    }
+    let hashes = common::write_entries(&store_a, 5).await;
 
     let target = hashes[2];
     let since = hashes[4];

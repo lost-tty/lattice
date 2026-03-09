@@ -5,37 +5,13 @@
 
 mod common;
 
-use lattice_kvstore_api::KvStoreExt;
-use lattice_model::STORE_TYPE_KVSTORE;
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_net::network;
 use lattice_net_sim::{BroadcastGossip, ChannelNetwork, ChannelTransport, GossipNetwork};
-use lattice_node::{Invite, NodeEvent, StoreHandle};
+use lattice_node::{Invite, NodeEvent};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-
-async fn wait_for_entry(store: &Arc<dyn StoreHandle>, key: &[u8], expected: &[u8]) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Ok(result) = store.get(key.to_vec()).await {
-                if let Some(val) = result.value {
-                    if val == expected {
-                        return;
-                    }
-                }
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "timed out waiting for key {:?} = {:?}",
-            String::from_utf8_lossy(key),
-            String::from_utf8_lossy(expected),
-        )
-    });
-}
 
 /// Test gossip propagation via BroadcastGossip:
 /// - A creates a store, B joins via invite
@@ -70,7 +46,7 @@ async fn test_broadcast_gossip_bidirectional() {
 
     // A creates store
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store");
     let store_a = node_a
@@ -110,18 +86,12 @@ async fn test_broadcast_gossip_bidirectional() {
     .expect("B should have store");
 
     // === Test A → B direction (gossip, no sync) ===
-    store_a
-        .put(b"/from_a".to_vec(), b"hello from A".to_vec())
-        .await
-        .expect("put from A");
-    wait_for_entry(&store_b, b"/from_a", b"hello from A").await;
+    lattice_mockkernel::null_write(&*store_a.as_dispatcher(), b"from_a").await;
+    common::wait_for_fingerprint_match(&store_a, &store_b).await;
 
     // === Test B → A direction (gossip, no sync) ===
-    store_b
-        .put(b"/from_b".to_vec(), b"hello from B".to_vec())
-        .await
-        .expect("put from B");
-    wait_for_entry(&store_a, b"/from_b", b"hello from B").await;
+    lattice_mockkernel::null_write(&*store_b.as_dispatcher(), b"from_b").await;
+    common::wait_for_fingerprint_match(&store_a, &store_b).await;
 }
 
 /// Test dynamic gossip peer joining:
@@ -146,7 +116,7 @@ async fn test_dynamic_peer_joining_via_gossip() {
     );
 
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store");
     let store_a = node_a
@@ -155,11 +125,7 @@ async fn test_dynamic_peer_joining_via_gossip() {
         .expect("get store a");
 
     // A writes BEFORE B exists — this should NOT be received via gossip
-    // (B doesn't exist yet, so no gossip subscriber)
-    store_a
-        .put(b"/early".to_vec(), b"before B".to_vec())
-        .await
-        .expect("early put");
+    lattice_mockkernel::null_write(&*store_a.as_dispatcher(), b"early").await;
 
     // === Phase 2: Node B joins later ===
     let node_b = common::build_node("dyn_gossip_b");
@@ -218,16 +184,10 @@ async fn test_dynamic_peer_joining_via_gossip() {
     .expect("gossip subscription did not establish on both nodes");
 
     // === Phase 3: A writes AFTER B joined — B should receive via gossip ===
-    store_a
-        .put(b"/after_join".to_vec(), b"after B joined".to_vec())
-        .await
-        .expect("put after join");
-    wait_for_entry(&store_b, b"/after_join", b"after B joined").await;
+    lattice_mockkernel::null_write(&*store_a.as_dispatcher(), b"after_join").await;
+    common::wait_for_fingerprint_match(&store_a, &store_b).await;
 
     // Also verify B → A works
-    store_b
-        .put(b"/from_late_b".to_vec(), b"hello from late B".to_vec())
-        .await
-        .expect("put from B");
-    wait_for_entry(&store_a, b"/from_late_b", b"hello from late B").await;
+    lattice_mockkernel::null_write(&*store_b.as_dispatcher(), b"from_late_b").await;
+    common::wait_for_fingerprint_match(&store_a, &store_b).await;
 }

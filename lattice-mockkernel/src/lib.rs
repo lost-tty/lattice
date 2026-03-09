@@ -18,6 +18,32 @@ pub use mock_state_machine::{NullStateMachine, TrackingStateMachine};
 pub use null_state::{NullState, STORE_TYPE_NULLSTORE};
 pub use test_node::test_node_builder;
 
+/// Generated prost types for NullState proto (WriteRequest, WriteResponse).
+pub mod proto {
+    include!(concat!(env!("OUT_DIR"), "/lattice.null.rs"));
+}
+
+/// Submit an intention through a NullState store via its CommandDispatcher.
+///
+/// This calls the `Write` RPC defined in `null_store.proto`, which delegates
+/// to `StateWriter::submit` inside `NullState::handle_command`.
+/// Returns the intention hash.
+pub async fn null_write(
+    dispatcher: &dyn lattice_store_base::CommandDispatcher,
+    data: &[u8],
+) -> lattice_model::types::Hash {
+    let req = proto::WriteRequest {
+        data: data.to_vec(),
+    };
+    let resp: proto::WriteResponse =
+        lattice_store_base::invoke_command(dispatcher, "Write", req)
+            .await
+            .expect("null_write failed");
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&resp.hash);
+    lattice_model::types::Hash::from(hash)
+}
+
 use futures_util::StreamExt;
 use lattice_model::dag_queries::NullDag;
 use lattice_model::hlc::HLC;

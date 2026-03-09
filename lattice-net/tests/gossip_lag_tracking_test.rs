@@ -5,8 +5,7 @@
 
 mod common;
 
-use lattice_kvstore_api::KvStoreExt;
-use lattice_model::STORE_TYPE_KVSTORE;
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_net::network::{self, GossipLagStats};
 use lattice_net_sim::{BroadcastGossip, ChannelNetwork, ChannelTransport, GossipNetwork};
 use lattice_node::{Invite, NodeEvent};
@@ -105,9 +104,9 @@ async fn test_gossip_stats_tracked_on_successful_broadcast() {
         event_rx_b,
     );
 
-    // A creates store
+    // A creates store (NullState)
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store");
     let store_a = node_a
@@ -157,14 +156,9 @@ async fn test_gossip_stats_tracked_on_successful_broadcast() {
     .expect("gossip subscription did not establish on server_a");
 
     // Write items via A — they should be gossiped successfully
+    let disp = store_a.as_dispatcher();
     for i in 0..5 {
-        store_a
-            .put(
-                format!("/key_{}", i).into_bytes(),
-                format!("val_{}", i).into_bytes(),
-            )
-            .await
-            .expect("put");
+        lattice_mockkernel::null_write(&*disp, format!("val_{}", i).as_bytes()).await;
     }
 
     // Poll until stats entry appears (strict: must exist within timeout)
@@ -216,9 +210,9 @@ async fn test_gossip_stats_consistent_under_burst_writes() {
         event_rx_a,
     );
 
-    // A creates store
+    // A creates store (NullState)
     let store_id = node_a
-        .create_store(None, None, STORE_TYPE_KVSTORE)
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
         .await
         .expect("create store");
     let store_a = node_a
@@ -239,11 +233,9 @@ async fn test_gossip_stats_consistent_under_burst_writes() {
     .expect("gossip subscription did not establish on server_a");
 
     // Blast writes (channel capacity is 64)
+    let disp = store_a.as_dispatcher();
     for i in 0..200u8 {
-        store_a
-            .put(format!("/burst_{:04}", i).into_bytes(), vec![i; 64])
-            .await
-            .expect("put");
+        lattice_mockkernel::null_write(&*disp, &[i; 64]).await;
     }
 
     // Poll until stats entry appears (strict: must exist within timeout)
@@ -253,7 +245,6 @@ async fn test_gossip_stats_consistent_under_burst_writes() {
                 let stats = server_a.gossip_stats().read().await;
                 if let Some(entry) = stats.get(&store_id) {
                     let s = entry.lock().unwrap();
-                    // Wait until the forwarder has finished draining
                     return (s.total_drops, s.broadcast_since_last_drop, s.needs_sync());
                 }
                 drop(stats);

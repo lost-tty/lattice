@@ -27,15 +27,10 @@ async-trait = "0.1"
 [dev-dependencies]
 tokio-test = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-lattice-kvstore = { workspace = true }
-lattice-kvstore-api = { workspace = true }
-lattice-logstore = { workspace = true }
-lattice-storage = { workspace = true }
-lattice-store-base = { workspace = true }
-lattice-systemstore = { workspace = true }
 lattice-node = { workspace = true }
 rand = { workspace = true }
 lattice-kernel = { workspace = true }
 lattice-mockkernel = { workspace = true }
 lattice-net-sim = { path = "../lattice-net-sim" }
 ed25519-dalek = { workspace = true }
+lattice-net-types = { workspace = true }

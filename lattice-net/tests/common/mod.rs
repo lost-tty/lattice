@@ -3,15 +3,13 @@
 #![allow(dead_code)]
 //! Shared test utilities for lattice-net integration tests.
 
+use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::types::PubKey;
-use lattice_model::STORE_TYPE_KVSTORE;
 use lattice_net::network;
 use lattice_net_sim::{ChannelNetwork, ChannelTransport};
-use lattice_node::{direct_opener, Invite, Node, NodeBuilder, NodeEvent, StoreHandle, Uuid};
+use lattice_node::{Invite, Node, NodeEvent, StoreHandle, Uuid};
 use std::sync::Arc;
 use tokio::time::Duration;
-
-type TestKvState = lattice_systemstore::SystemLayer<lattice_kvstore::KvState>;
 
 /// Create a temp data directory with a unique path to avoid collisions
 /// between concurrent test binaries.
@@ -22,16 +20,10 @@ pub fn temp_data_dir(name: &str) -> lattice_node::DataDir {
     lattice_node::DataDir::new(path)
 }
 
-/// Create a NodeBuilder with KV and NullState openers registered (in-memory storage).
-pub fn test_node_builder(data_dir: lattice_node::DataDir) -> NodeBuilder {
-    lattice_mockkernel::test_node_builder(data_dir)
-        .with_opener(STORE_TYPE_KVSTORE, || direct_opener::<TestKvState>())
-}
-
-/// Build a node from a name (creates temp dir + builder).
+/// Build a node from a name (creates temp dir + builder with NullState).
 pub fn build_node(name: &str) -> Arc<Node> {
     Arc::new(
-        test_node_builder(temp_data_dir(name))
+        lattice_mockkernel::test_node_builder(temp_data_dir(name))
             .build()
             .expect("build node"),
     )
@@ -68,7 +60,84 @@ pub async fn join_store_via_event(
     }
 }
 
-/// Two connected nodes with a shared KV store. Gossip disabled, auto-sync enabled.
+/// Submit `count` intentions via NullState Write command and return their hashes.
+pub async fn write_entries(
+    handle: &Arc<dyn StoreHandle>,
+    count: usize,
+) -> Vec<lattice_model::types::Hash> {
+    let dispatcher = handle.as_dispatcher();
+    let mut hashes = Vec::with_capacity(count);
+    for i in 0..count {
+        let hash = lattice_mockkernel::null_write(&*dispatcher, format!("e{}", i).as_bytes()).await;
+        hashes.push(hash);
+    }
+    hashes
+}
+
+/// Poll until two stores have matching table fingerprints (within timeout).
+pub async fn wait_for_fingerprint_match(
+    store_a: &Arc<dyn StoreHandle>,
+    store_b: &Arc<dyn StoreHandle>,
+) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let fp_a = store_a
+                .as_sync_provider()
+                .table_fingerprint()
+                .await
+                .expect("fingerprint a");
+            let fp_b = store_b
+                .as_sync_provider()
+                .table_fingerprint()
+                .await
+                .expect("fingerprint b");
+            if fp_a == fp_b {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("fingerprints did not converge");
+}
+
+/// Assert that two stores have matching table fingerprints (no waiting).
+pub async fn assert_fingerprints_match(
+    store_a: &Arc<dyn StoreHandle>,
+    store_b: &Arc<dyn StoreHandle>,
+) {
+    let fp_a = store_a
+        .as_sync_provider()
+        .table_fingerprint()
+        .await
+        .expect("fingerprint a");
+    let fp_b = store_b
+        .as_sync_provider()
+        .table_fingerprint()
+        .await
+        .expect("fingerprint b");
+    assert_eq!(fp_a, fp_b, "store fingerprints diverged");
+}
+
+/// Assert that two stores have different table fingerprints.
+pub async fn assert_fingerprints_differ(
+    store_a: &Arc<dyn StoreHandle>,
+    store_b: &Arc<dyn StoreHandle>,
+) {
+    let fp_a = store_a
+        .as_sync_provider()
+        .table_fingerprint()
+        .await
+        .expect("fingerprint a");
+    let fp_b = store_b
+        .as_sync_provider()
+        .table_fingerprint()
+        .await
+        .expect("fingerprint b");
+    assert_ne!(fp_a, fp_b, "store fingerprints should differ");
+}
+
+/// Two connected nodes with a shared NullState store. Gossip disabled, auto-sync enabled.
 pub struct TestPair {
     pub node_a: Arc<Node>,
     pub node_b: Arc<Node>,
@@ -80,7 +149,7 @@ pub struct TestPair {
 }
 
 impl TestPair {
-    /// Create a pair of nodes connected via ChannelTransport with a shared KV store.
+    /// Create a pair of nodes connected via ChannelTransport with a shared NullState store.
     pub async fn new(name_a: &str, name_b: &str) -> Self {
         let node_a = build_node(name_a);
         let node_b = build_node(name_b);
@@ -104,7 +173,7 @@ impl TestPair {
         );
 
         let store_id = node_a
-            .create_store(None, None, STORE_TYPE_KVSTORE)
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
             .await
             .expect("create store");
         let store_a = node_a
