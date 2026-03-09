@@ -162,6 +162,9 @@ async fn test_partition_recovery() {
     server_a.set_global_gossip_enabled(false);
     server_b.set_global_gossip_enabled(false);
     server_c.set_global_gossip_enabled(false);
+    server_a.set_auto_sync_enabled(false);
+    server_b.set_auto_sync_enabled(false);
+    server_c.set_auto_sync_enabled(false);
 
     let a_pubkey = node_a.node_id();
     let b_pubkey = node_b.node_id();
@@ -203,8 +206,10 @@ async fn test_partition_recovery() {
     // A writes shared data
     lattice_mockkernel::null_write(&*store_a.as_dispatcher(), b"shared").await;
 
+    // Collect B's and C's items at A, then distribute back.
     server_b.sync_all_by_id(store_id).await.expect("sync b");
     server_c.sync_all_by_id(store_id).await.expect("sync c");
+    server_a.sync_all_by_id(store_id).await.expect("sync a");
 
     // Verify all three converged
     common::assert_fingerprints_match(&store_a, &store_b).await;
