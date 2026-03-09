@@ -22,7 +22,9 @@ const Helpers = (() => {
   }
 
   function bytesFromHex(hex) {
-    return new Uint8Array(hex.match(/.{1,2}/g).map(h => parseInt(h, 16)));
+    if (!hex) return new Uint8Array(0);
+    const m = hex.match(/.{1,2}/g);
+    return m ? new Uint8Array(m.map(h => parseInt(h, 16))) : new Uint8Array(0);
   }
 
   function pubkeyShort(u8) {

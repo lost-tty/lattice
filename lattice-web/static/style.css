@@ -483,10 +483,25 @@ pre {
 }
 
 .history-container {
+  position: relative;
   overflow-x: auto;
+  opacity: var(--ready, 0);
+}
+
+.history-labels {
+  display: flex;
+  flex-direction: column;
+  margin-left: var(--graph-w);
+}
+
+.history-count {
+  margin-bottom: 0.8rem;
 }
 
 .history-graph {
+  position: absolute;
+  left: 0;
+  top: 0;
   pointer-events: none;
 }
 

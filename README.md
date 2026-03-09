@@ -32,6 +32,26 @@ Or standalone without the daemon:
 lattice --embedded
 ```
 
+## Web Interface
+
+Lattice includes a browser-based UI served directly from the node. No external dependencies, no build step — the SPA is bundled into the binary.
+
+```bash
+# With the daemon
+latticed --web 8080
+
+# Embedded mode
+lattice --embedded --web 8080
+```
+
+Then open `http://localhost:8080`. The web UI connects to the node over WebSocket and provides store management, peer operations, method execution, live subscriptions, system table inspection, and a DAG history graph.
+
+Requires the `web` feature (enabled by default):
+
+```bash
+cargo build --release --features web
+```
+
 ## Connecting Nodes
 
 ```bash

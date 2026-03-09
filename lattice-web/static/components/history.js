@@ -187,13 +187,12 @@ function HistoryGraph({ layout, authorNames }) {
 
   return html`
     <div class="history-view">
-      <div class="muted" style="margin-bottom:0.8rem">${totalRows} entries</div>
-      <div class="history-container" style="position:relative;opacity:${ready ? 1 : 0}">
-        <svg class="history-graph" width=${graphW} height=${svgH}
-             style="position:absolute;left:0;top:0">
+      <div class="history-count muted">${totalRows} entries</div>
+      <div class="history-container" style="--ready:${ready ? 1 : 0};--graph-w:${graphW}px">
+        <svg class="history-graph" width=${graphW} height=${svgH}>
           ${svgContent}
         </svg>
-        <div class="history-labels" style="margin-left:${graphW}px" ref=${labelsRef}>
+        <div class="history-labels" ref=${labelsRef}>
           ${rows.map(r => html`
             <div class="history-label" key=${r.hash}
                  onClick=${() => S.setPanelOverride({

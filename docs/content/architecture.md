@@ -53,6 +53,7 @@ Both expose runtime introspection via embedded `prost-reflect` `FileDescriptorSe
 graph TB
     subgraph "Clients"
         CLI["lattice-cli<br/>(gRPC client)"]
+        WEB["lattice-web<br/>(Browser SPA)"]
         MOBILE["lattice-bindings<br/>(UniFFI Swift/Kotlin)"]
     end
     
@@ -79,6 +80,7 @@ graph TB
     end
     
     CLI --> RPC
+    WEB -->|WebSocket tunnel| RPC
     MOBILE -->|InProcessBackend| NODE
     DAEMON --> KERNEL
     NODE --> KERNEL
@@ -119,7 +121,8 @@ For child stores discovered via the fractal hierarchy, the `RecursiveWatcher` au
 - **`lattice-api`:** gRPC services (`NodeService`, `StoreService`, `DynamicStoreService`) over Unix Domain Sockets. Domain↔DTO conversion between `lattice-model` types and Protobuf. Event streaming via `mpsc` channel bridging.
 - **`lattice-bindings`:** UniFFI bridge for Swift/Kotlin. Uses a "hidden runtime" pattern (owns a dedicated Tokio runtime). Dynamic Protobuf reflection (`prost-reflect` → `ReflectValue` enum tree) lets mobile apps discover and interact with arbitrary store schemas without recompilation.
 - **`lattice-cli`:** REPL with dual-mode backend. Dynamic command execution pipeline: fetches Protobuf descriptors at runtime, parses S-expression input, reflects into `DynamicMessage`, executes, and renders. Includes a Unicode graph renderer (Kahn's algorithm + HLC priority) for visualizing DAG history.
-- **`lattice-daemon` (`latticed`):** Thin wrapper — `Runtime::builder().with_rpc().build()`, signal handling, structured tracing.
+- **`lattice-web`:** Browser-based SPA served directly from the node. Preact + htm + Signals (no build step, no JSX transpiler). Communicates via WebSocket-tunneled gRPC — the WS tunnel routes synthetic `http::Request`s through `tonic::service::Routes`. Protobuf descriptors are served as binary `FileDescriptorSet` and converted in-browser via `protobufjs`. Features: store CRUD, peer management, dynamic method execution, live event subscriptions, system table inspection, and an SVG DAG history graph with variable-height label measurement via `ResizeObserver`.
+- **`lattice-daemon` (`latticed`):** Thin wrapper — `Runtime::builder().with_rpc().build()`, signal handling, structured tracing. Optional `--web <port>` flag enables the web UI.
 
 ## Cryptographic Primitives
 
