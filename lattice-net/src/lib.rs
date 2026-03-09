@@ -4,6 +4,7 @@
 //! - **Framing**: Length-delimited message framing
 //! - **Network**: Peer-to-peer join and sync operations
 
+pub mod convert;
 pub mod framing;
 pub mod network;
 

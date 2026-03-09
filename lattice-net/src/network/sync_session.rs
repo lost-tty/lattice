@@ -25,7 +25,7 @@ use crate::error::LatticeNetError;
 use crate::{MessageSink, MessageStream};
 use lattice_model::types::{Hash, PubKey};
 use lattice_net_types::NetworkStore;
-use lattice_proto::convert::{intention_from_proto, intentions_to_proto};
+use crate::convert::{intention_from_proto, intentions_to_proto};
 use lattice_proto::network::{
     peer_message, reconcile_message::Content as ReconcileContent, FetchIntentions,
     IntentionResponse, PeerMessage, ReconcilePayload, SyncDone,

@@ -16,7 +16,7 @@ use lattice_model::weaver::SignedIntention;
 use lattice_model::{NetEvent, PeerEvent, PeerProvider, PeerStatus, UserEvent, Uuid};
 use lattice_net_types::transport::{BiStream, Connection as TransportConnection, Transport};
 use lattice_net_types::{GossipLayer, NetworkStore, NodeProviderExt};
-use lattice_proto::convert::intention_from_proto;
+use crate::convert::intention_from_proto;
 use lattice_proto::network::{peer_message, BootstrapRequest, FetchChain, PeerMessage};
 use prost::Message;
 use std::collections::HashMap;
@@ -155,7 +155,7 @@ async fn run_gossip_ingester<T: Transport>(
 
         let intention = match gossip_msg.content {
             Some(lattice_proto::network::gossip_message::Content::Intention(proto_intention)) => {
-                match lattice_proto::convert::intention_from_proto(&proto_intention) {
+                match crate::convert::intention_from_proto(&proto_intention) {
                     Ok(i) => i,
                     Err(e) => {
                         tracing::warn!(error = %e, "Failed to convert proto intention");
@@ -196,7 +196,7 @@ async fn run_intention_forwarder(
     loop {
         match intention_rx.recv().await {
             Ok(intention) => {
-                let proto = lattice_proto::convert::intention_to_proto(&intention);
+                let proto = crate::convert::intention_to_proto(&intention);
                 let gossip_msg = lattice_proto::network::GossipMessage {
                     store_id: store_id.as_bytes().to_vec(),
                     content: Some(

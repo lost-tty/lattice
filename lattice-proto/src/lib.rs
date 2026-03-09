@@ -32,5 +32,3 @@ pub mod network {
 pub mod weaver {
     include!(concat!(env!("OUT_DIR"), "/lattice.weaver.rs"));
 }
-
-pub mod convert;

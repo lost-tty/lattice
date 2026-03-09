@@ -5,26 +5,25 @@
 
 use lattice_model::types::Signature;
 use lattice_model::weaver::{Intention, SignedIntention};
+use lattice_proto::weaver;
 
 // ==================== SignedIntention ====================
 
 /// Model → Proto (infallible)
-pub fn intention_to_proto(signed: &SignedIntention) -> crate::weaver::SignedIntention {
-    crate::weaver::SignedIntention {
+pub fn intention_to_proto(signed: &SignedIntention) -> weaver::SignedIntention {
+    weaver::SignedIntention {
         intention_borsh: signed.intention.to_borsh(),
         signature: signed.signature.0.to_vec(),
     }
 }
 
 /// Batch Model → Proto (infallible)
-pub fn intentions_to_proto(signed: &[SignedIntention]) -> Vec<crate::weaver::SignedIntention> {
+pub fn intentions_to_proto(signed: &[SignedIntention]) -> Vec<weaver::SignedIntention> {
     signed.iter().map(intention_to_proto).collect()
 }
 
 /// Proto → Model (fallible: borsh decode + signature length)
-pub fn intention_from_proto(
-    proto: &crate::weaver::SignedIntention,
-) -> Result<SignedIntention, String> {
+pub fn intention_from_proto(proto: &weaver::SignedIntention) -> Result<SignedIntention, String> {
     let intention = Intention::from_borsh(&proto.intention_borsh)
         .map_err(|e| format!("Borsh decode failed: {}", e))?;
     let sig_bytes: [u8; 64] = proto

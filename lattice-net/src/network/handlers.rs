@@ -13,7 +13,7 @@ use lattice_model::{
     Uuid,
 };
 use lattice_net_types::{NetworkStore, NodeProviderExt};
-use lattice_proto::convert::intentions_to_proto;
+use crate::convert::intentions_to_proto;
 use lattice_proto::network::{
     peer_message, BootstrapRequest, BootstrapResponse, FetchIntentions, IntentionResponse,
     JoinResponse, PeerMessage,
