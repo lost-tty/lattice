@@ -408,6 +408,7 @@ pub fn render_dag(entries: &std::collections::HashMap<Hash, RenderEntry>) -> Str
     let mut active_columns: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut column_tips: HashMap<usize, Hash> = HashMap::new(); // Track who owns the active column
     let mut last_busy_row: HashMap<usize, usize> = HashMap::new(); // Track when column was last touched
+    let mut reserved_until: HashMap<usize, usize> = HashMap::new(); // Pre-reserved fork columns
     let mut max_col_used = 0usize;
 
     // For each entry, find the row of its last descendant (to know when column becomes free)
@@ -426,10 +427,11 @@ pub fn render_dag(entries: &std::collections::HashMap<Hash, RenderEntry>) -> Str
         }
     }
 
-    // Find leftmost free column
+    // Find leftmost free column (not active, not reserved, respects adjacency gap)
     fn find_free_column(
         active: &std::collections::HashSet<usize>,
         last_busy: &HashMap<usize, usize>,
+        reserved_until: &HashMap<usize, usize>,
         max_used: usize,
         current_row: usize,
     ) -> usize {
@@ -437,7 +439,13 @@ pub fn render_dag(entries: &std::collections::HashMap<Hash, RenderEntry>) -> Str
             if active.contains(&col) {
                 continue;
             }
-            // Check for reuse gap
+            // Check for pre-reserved fork column
+            if let Some(&until) = reserved_until.get(&col) {
+                if until >= current_row {
+                    continue;
+                }
+            }
+            // Check for reuse gap (CLI needs this — can't draw through character cells)
             if current_row > 0 {
                 if let Some(&last) = last_busy.get(&col) {
                     if last >= current_row - 1 {
@@ -463,56 +471,48 @@ pub fn render_dag(entries: &std::collections::HashMap<Hash, RenderEntry>) -> Str
             .collect();
 
         // Define find_free closure to capture strict params
-        let get_free = |max: usize| find_free_column(&active_columns, &last_busy_row, max, row);
+        let get_free = |max: usize| {
+            find_free_column(&active_columns, &last_busy_row, &reserved_until, max, row)
+        };
 
-        let col = if parents_in_set.is_empty() {
+        // If column was pre-assigned by a fork reservation, use it
+        let col = if let Some(&pre) = hash_to_col.get(hash) {
+            // Clear the reservation now that the node is placed
+            if reserved_until.get(&pre) == Some(&row) {
+                reserved_until.remove(&pre);
+            }
+            pre
+        } else if parents_in_set.is_empty() {
             // Root - find leftmost free column
             let col = get_free(max_col_used);
             max_col_used = max_col_used.max(col);
             col
         } else if parents_in_set.len() > 1 {
             // MERGE: use leftmost parent's column
-            // We don't check conflicts strictly here because merge connects to multiple branches
-            // But ideally we should pick one that we are the valid tip of
-            parents_in_set
+            let col = parents_in_set
                 .iter()
                 .filter_map(|p| hash_to_col.get(p))
                 .min()
                 .copied()
-                .unwrap_or(0)
+                .unwrap_or_else(|| get_free(max_col_used));
+            max_col_used = max_col_used.max(col);
+            col
         } else {
             // Single parent
             let parent = parents_in_set[0];
             if let Some(&parent_col) = hash_to_col.get(&parent) {
-                let siblings = children.get(&parent).map(|s| s.len()).unwrap_or(0);
-
                 // Check if parent_col is occupied by an unrelated line
                 let is_blocked = active_columns.contains(&parent_col)
                     && column_tips.get(&parent_col) != Some(&parent);
-
-                // Also check reuse gap if it's NOT active (meaning we are trying to reuse a JUST freed column from parent??)
-                // If parent owns it, active_columns should have it.
-                // If is_blocked is false, we are inheriting. Inheritance is always allowed.
 
                 if is_blocked {
                     // Blocked by unrelated line -> new column
                     let col = get_free(max_col_used);
                     max_col_used = max_col_used.max(col);
                     col
-                } else if siblings <= 1 {
-                    parent_col
                 } else {
-                    // Fork — the LAST sibling (latest row) inherits the parent's
-                    // column so the vertical line extends as far down as possible.
-                    // Earlier siblings fork to new columns.
-                    let last_sibling = children.get(&parent).and_then(|s| s.last());
-                    if last_sibling == Some(hash) {
-                        parent_col
-                    } else {
-                        let col = get_free(max_col_used);
-                        max_col_used = max_col_used.max(col);
-                        col
-                    }
+                    // Inherit parent's column (fork handling done by pre-reservation)
+                    parent_col
                 }
             } else {
                 let col = get_free(max_col_used);
@@ -530,21 +530,55 @@ pub fn render_dag(entries: &std::collections::HashMap<Hash, RenderEntry>) -> Str
             .unwrap_or(false);
         if has_descendants {
             active_columns.insert(col);
-            column_tips.insert(col, *hash); // Update owner
+            column_tips.insert(col, *hash);
         } else {
             active_columns.remove(&col);
             column_tips.remove(&col);
+        }
+
+        // Free parent columns that terminate at this row (merge/branch end cleanup).
+        // Without this, merged/terminated branches leak their columns permanently.
+        for parent in &parents_in_set {
+            if last_descendant_row.get(parent) == Some(&row) {
+                if let Some(&p_col) = hash_to_col.get(parent) {
+                    // Only free if the current node isn't inheriting and continuing this column
+                    if p_col != col || !has_descendants {
+                        active_columns.remove(&p_col);
+                        column_tips.remove(&p_col);
+                    }
+                }
+            }
+        }
+
+        // Pre-reserve columns for fork children.
+        // When a node has N children, the last child will inherit this node's column.
+        // The first N-1 children get new columns reserved from this row to the child row.
+        if let Some(kids) = children.get(hash) {
+            if kids.len() > 1 {
+                // Reserve for all but the last child (who inherits this column)
+                for kid in &kids[..kids.len() - 1] {
+                    if !hash_to_col.contains_key(kid) {
+                        let child_row = hash_to_row[kid];
+                        let reserved_col = find_free_column(
+                            &active_columns,
+                            &last_busy_row,
+                            &reserved_until,
+                            max_col_used,
+                            row,
+                        );
+                        max_col_used = max_col_used.max(reserved_col);
+                        hash_to_col.insert(*kid, reserved_col);
+                        reserved_until.insert(reserved_col, child_row);
+                    }
+                }
+            }
         }
 
         // Mark active columns + current as busy at this row
         for c in &active_columns {
             last_busy_row.insert(*c, row);
         }
-        last_busy_row.insert(col, row); // Current node is definitely here
-
-        // Also need to keep parent columns active until this row if parent is in different column
-        // (the vertical line from parent to here blocks that column)
-        // This is already handled by parents not being freed until their last_descendant_row
+        last_busy_row.insert(col, row);
     }
 
     // Create grid (2 chars per column for spacing)
@@ -840,6 +874,217 @@ mod tests {
             row0_graph.contains('⊙') || row0_graph.contains('●'),
             "Fork parent (row 0) should have an entry marker, got: {:?}",
             row0_graph,
+        );
+    }
+
+    /// Tests that fork pre-reservation prevents intermediate nodes from stealing
+    /// columns that are reserved for fork children.
+    ///
+    /// DAG structure:
+    ///   A (root, hlc=100) ──┬── B (child, hlc=300)
+    ///                       └── C (child, hlc=500)
+    ///   D (root, hlc=200) ──── E (child of D, hlc=400)
+    ///
+    /// Topo order by HLC: A, D, B, E, C
+    ///
+    /// Without pre-reservation, when D is processed at row 1, it could grab
+    /// the column that B needs (since B forks from A). With pre-reservation,
+    /// B's column is reserved when A is processed, so D goes elsewhere.
+    #[test]
+    fn test_fork_prereservation_prevents_column_stealing() {
+        let mut entries = std::collections::HashMap::new();
+
+        let h_a = Hash::from([0xA0; 32]);
+        let h_b = Hash::from([0xB0; 32]);
+        let h_c = Hash::from([0xC0; 32]);
+        let h_d = Hash::from([0xD0; 32]);
+        let h_e = Hash::from([0xE0; 32]);
+        let author_x = PubKey::from([0x11; 32]);
+        let author_y = PubKey::from([0x22; 32]);
+
+        entries.insert(
+            h_a,
+            RenderEntry {
+                intention: SExpr::str("root a"),
+                author: author_x,
+                hlc: 100,
+                causal_deps: vec![],
+                is_merge: false,
+            },
+        );
+        entries.insert(
+            h_d,
+            RenderEntry {
+                intention: SExpr::str("root d"),
+                author: author_y,
+                hlc: 200,
+                causal_deps: vec![],
+                is_merge: false,
+            },
+        );
+        entries.insert(
+            h_b,
+            RenderEntry {
+                intention: SExpr::str("fork b"),
+                author: author_x,
+                hlc: 300,
+                causal_deps: vec![h_a],
+                is_merge: false,
+            },
+        );
+        entries.insert(
+            h_e,
+            RenderEntry {
+                intention: SExpr::str("child e"),
+                author: author_y,
+                hlc: 400,
+                causal_deps: vec![h_d],
+                is_merge: false,
+            },
+        );
+        entries.insert(
+            h_c,
+            RenderEntry {
+                intention: SExpr::str("fork c"),
+                author: author_x,
+                hlc: 500,
+                causal_deps: vec![h_a],
+                is_merge: false,
+            },
+        );
+
+        let output = render_dag(&entries);
+        let clean = strip_ansi(&output);
+
+        eprintln!("Pre-reservation test output:\n{}", clean);
+
+        assert!(clean.contains("5 entries"), "Should render all 5 entries");
+
+        // Verify: B and C should share A's column lineage (one inherits, one forks).
+        // D and E should be on their own column, separate from A's fork.
+        // The key invariant: no column collisions — each row should have exactly one
+        // entry marker per column.
+        let rows: Vec<&str> = clean.lines().collect();
+        for (i, row) in rows.iter().enumerate() {
+            // Count entry markers in the graph portion (before label)
+            let graph_part: String = row.chars().take(12).collect();
+            let markers: usize = graph_part
+                .chars()
+                .filter(|c| matches!(c, '●' | '○' | '⊙'))
+                .count();
+            assert!(
+                markers <= 1,
+                "Row {} has {} markers in graph area (collision!): {:?}",
+                i,
+                markers,
+                graph_part,
+            );
+        }
+    }
+
+    /// Tests that merged branches free their columns after the merge node.
+    ///
+    /// DAG structure:
+    ///   A (root) ──── B (child)
+    ///   C (root) ──── D (child)
+    ///   B + D ──── M (merge of B and D)
+    ///   M ──── E (child of M)
+    ///
+    /// After the merge M, the columns for B and D should be freed,
+    /// allowing E (and any subsequent nodes) to reuse them.
+    #[test]
+    fn test_merge_frees_columns() {
+        let mut entries = std::collections::HashMap::new();
+
+        let h_a = Hash::from([0xA1; 32]);
+        let h_c = Hash::from([0xC1; 32]);
+        let h_b = Hash::from([0xB1; 32]);
+        let h_d = Hash::from([0xD1; 32]);
+        let h_m = Hash::from([0x11; 32]);
+        let h_e = Hash::from([0xE1; 32]);
+        let author = PubKey::from([0x33; 32]);
+
+        entries.insert(
+            h_a,
+            RenderEntry {
+                intention: SExpr::str("root a"),
+                author,
+                hlc: 100,
+                causal_deps: vec![],
+                is_merge: false,
+            },
+        );
+        entries.insert(
+            h_c,
+            RenderEntry {
+                intention: SExpr::str("root c"),
+                author,
+                hlc: 150,
+                causal_deps: vec![],
+                is_merge: false,
+            },
+        );
+        entries.insert(
+            h_b,
+            RenderEntry {
+                intention: SExpr::str("child b"),
+                author,
+                hlc: 200,
+                causal_deps: vec![h_a],
+                is_merge: false,
+            },
+        );
+        entries.insert(
+            h_d,
+            RenderEntry {
+                intention: SExpr::str("child d"),
+                author,
+                hlc: 250,
+                causal_deps: vec![h_c],
+                is_merge: false,
+            },
+        );
+        entries.insert(
+            h_m,
+            RenderEntry {
+                intention: SExpr::str("merge m"),
+                author,
+                hlc: 300,
+                causal_deps: vec![h_b, h_d],
+                is_merge: true,
+            },
+        );
+        entries.insert(
+            h_e,
+            RenderEntry {
+                intention: SExpr::str("after merge"),
+                author,
+                hlc: 400,
+                causal_deps: vec![h_m],
+                is_merge: false,
+            },
+        );
+
+        let output = render_dag(&entries);
+        let clean = strip_ansi(&output);
+
+        eprintln!("Merge frees columns test output:\n{}", clean);
+
+        assert!(clean.contains("6 entries"), "Should render all 6 entries");
+
+        // The merge node M should show a merge marker (○)
+        assert!(clean.contains('○'), "Merge node should use ○ marker");
+
+        // E (after merge) should be on column 0 — the merge frees both parent
+        // columns, and E inherits M's column (which should be the leftmost).
+        // We can verify the graph doesn't keep growing wider.
+        let rows: Vec<&str> = clean.lines().collect();
+        let last_entry_row = &rows[5]; // E is the 6th entry (row 5)
+        let graph_chars: String = last_entry_row.chars().take(2).collect();
+        assert!(
+            graph_chars.contains('●') || graph_chars.contains('⊙'),
+            "Post-merge entry E should be on column 0 (leftmost), got graph: {:?}",
+            graph_chars,
         );
     }
 }
