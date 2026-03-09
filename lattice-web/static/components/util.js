@@ -55,6 +55,37 @@ function tryRenderTable(fields) {
     <div class="muted" style="margin-top:8px">${rows.length} item${rows.length !== 1 ? 's' : ''}</div>`;
 }
 
+// Render a proto SExpr (from GetIntentionResponse.ops) as a colored Preact vnode.
+// SExpr uses oneof "value" with variants: symbol, str, raw, num, list.
+// protobufjs decode() sets defaults on all fields, so we must check the
+// oneof discriminator (sexpr.value) to find the active variant.
+// Colors match the CLI scheme: symbol=blue, str=green, raw=magenta, num=yellow, parens=dimmed.
+function fmtSExpr(sexpr) {
+  if (!sexpr) return '';
+  const which = sexpr.value; // oneof discriminator: "symbol"|"str"|"raw"|"num"|"list"
+  switch (which) {
+    case 'symbol': return html`<span class="sexpr-sym">${sexpr.symbol}</span>`;
+    case 'str': return html`<span class="sexpr-str">"${sexpr.str}"</span>`;
+    case 'raw': return html`<span class="sexpr-raw">${hex(sexpr.raw)}</span>`;
+    case 'num': return html`<span class="sexpr-num">${String(sexpr.num)}</span>`;
+    case 'list': {
+      const items = (sexpr.list.items || []).map((item, i) =>
+        i > 0 ? html`${' '}${fmtSExpr(item)}` : fmtSExpr(item)
+      );
+      return html`<span class="sexpr-paren">(</span>${items}<span class="sexpr-paren">)</span>`;
+    }
+    default: return '';
+  }
+}
+
+// Render an array of SExpr ops as Preact vnodes, one per line.
+function fmtOps(ops) {
+  if (!ops || ops.length === 0) return '-';
+  return ops.map((op, i) =>
+    html`${i > 0 ? '\n' : ''}${fmtSExpr(op)}`
+  );
+}
+
 // Reusable form field input for protobufjs message types.
 function FieldInput({ field, cssClass, autofocus }) {
   const resolved = field.resolve();

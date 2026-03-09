@@ -39,6 +39,7 @@
   --green: oklch(0.68 0.16 140);
   --red: oklch(0.64 0.2 25);
   --yellow: oklch(0.76 0.17 85);
+  --magenta: oklch(0.68 0.16 320);
 
   /* --- Shadows & overlays --- */
   --shadow: oklch(0 0 0 / 0.12);
@@ -70,6 +71,7 @@
     --green: oklch(0.62 0.16 140);
     --red: oklch(0.60 0.2 25);
     --yellow: oklch(0.68 0.17 85);
+    --magenta: oklch(0.65 0.16 320);
 
     --shadow: oklch(0 0 0 / 0.50);
     --shadow-strong: oklch(0 0 0 / 0.70);
@@ -98,6 +100,13 @@ small, th, .label, .meta, .badge, .mono, label { font-size: var(--sm); }
 .muted { color: var(--muted); }
 .err { color: var(--red); }
 .ok { color: var(--green); }
+
+/* SExpr syntax coloring (matches CLI scheme) */
+.sexpr-sym { color: var(--accent); }
+.sexpr-str { color: var(--green); }
+.sexpr-raw { color: var(--magenta); }
+.sexpr-num { color: var(--yellow); }
+.sexpr-paren { color: var(--muted); }
 
 /* Layout: header | sidebar + content */
 
@@ -188,16 +197,30 @@ nav {
 nav footer {
   padding: 0.6rem;
   border-top: 1px solid var(--border);
+  display: flex;
+  gap: 0.4rem;
 }
 
 nav footer button {
-  width: 100%;
+  flex: 1;
   padding: 0.5rem;
   background: var(--accent);
   border: none;
   color: var(--on-accent);
   font: 500 1rem var(--font);
   cursor: pointer;
+  border-radius: var(--r);
+}
+
+.editable { cursor: pointer; border-bottom: 1px dashed var(--muted); }
+.editable:hover { color: var(--accent); border-color: var(--accent); }
+.inline-edit {
+  width: 100%;
+  font: inherit;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  color: var(--fg);
+  padding: 0.1rem 0.3rem;
   border-radius: var(--r);
 }
 

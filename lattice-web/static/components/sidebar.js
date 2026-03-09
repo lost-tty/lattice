@@ -1,3 +1,29 @@
+function NodeName({ name }) {
+  const [editing, setEditing] = useState(false);
+  const inputRef = useRef(null);
+
+  const save = async () => {
+    const val = inputRef.current?.value?.trim();
+    setEditing(false);
+    if (!val || val === name) return;
+    try {
+      await API.node.SetName({ name: val });
+      S.toast('Node renamed', 'ok');
+      await S.refresh();
+    } catch (e) { S.toast('Rename error: ' + e.message, 'err'); }
+  };
+
+  if (editing) {
+    return html`<input ref=${inputRef} class="inline-edit"
+      value=${name || ''} autofocus
+      onKeyDown=${(e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false); }}
+      onBlur=${save}
+    />`;
+  }
+
+  return html`<span class="editable" onClick=${() => setEditing(true)}>${name || '(unnamed)'}</span>`;
+}
+
 function Sidebar() {
   const nodeStatus = S.nodeStatus.value;
   const stores = S.stores.value;
@@ -8,7 +34,7 @@ function Sidebar() {
     <nav>
       <div id="node-info">
         <div class="label">Node</div>
-        <div class="value">${nodeStatus?.display_name || '(unnamed)'}</div>
+        <div class="value"><${NodeName} name=${nodeStatus?.display_name} /></div>
         <div class="label">ID</div>
         <div class="value mono">${nodeStatus ? Helpers.pubkeyShort(nodeStatus.public_key) : '-'}</div>
       </div>
@@ -32,6 +58,7 @@ function Sidebar() {
       </div>
       <footer>
         <button onClick=${() => S.showModal('createStore')}>New Store</button>
+        <button onClick=${() => S.showModal('joinStore')}>Join Store</button>
       </footer>
     </nav>
   `;

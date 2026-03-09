@@ -107,9 +107,8 @@ async function loadDebugIntentions(storeId) {
   for (const h of intentionHashes) {
     try {
       const resp = await API.store.GetIntention({ store_id: storeId, hash_prefix: Helpers.bytesFromHex(h.slice(0, 8)) });
-      const i = resp.intention;
-      if (!i) continue;
-      rows.push(i);
+      if (!resp.intention) continue;
+      rows.push({ intention: resp.intention, ops: resp.ops || [] });
     } catch (e) {
       rows.push({ _error: e.message, _hash: h });
     }
@@ -119,15 +118,15 @@ async function loadDebugIntentions(storeId) {
     <${DebugNav} />
     <table>
       <tr><th>Hash</th><th>Author</th><th>Store Prev</th><th>Wall Time</th><th>Ops</th></tr>
-      ${rows.map(i => i._error
-        ? html`<tr><td class="mono">${i._hash.slice(0, 16)}...</td><td colspan="4" class="muted">${i._error}</td></tr>`
+      ${rows.map(r => r._error
+        ? html`<tr><td class="mono">${r._hash.slice(0, 16)}...</td><td colspan="4" class="muted">${r._error}</td></tr>`
         : html`
           <tr>
-            <td class="mono">${hex(i.hash)}</td>
-            <td class="mono">${hex(i.author)}</td>
-            <td class="mono">${hex(i.store_prev) || '-'}</td>
-            <td>${i.timestamp ? fmtTime(i.timestamp.wall_time) : '-'}</td>
-            <td class="mono">${i.ops ? i.ops.length + 'b' : '-'}</td>
+            <td class="mono">${hex(r.intention.hash)}</td>
+            <td class="mono">${hex(r.intention.author)}</td>
+            <td class="mono">${hex(r.intention.store_prev) || '-'}</td>
+            <td>${r.intention.timestamp ? fmtTime(r.intention.timestamp.wall_time) : '-'}</td>
+            <td class="mono" style="white-space:pre-wrap">${fmtOps(r.ops)}</td>
           </tr>
         `
       )}
@@ -164,7 +163,7 @@ async function loadDebugFloating(storeId) {
   `;
 }
 
-function IntentionDetail({ intention, hexStr, error }) {
+function IntentionDetail({ intention, ops, hexStr, error }) {
   if (error) {
     return html`
       <div class="action-bar"><button class="btn" onClick=${() => S.clearPanelOverride()}>Back</button></div>
@@ -194,7 +193,7 @@ function IntentionDetail({ intention, hexStr, error }) {
         <div class="k">Store Prev</div><div class="v mono">${hex(i.store_prev) || '-'}</div>
         <div class="k">Condition</div><div class="v mono">${condStr}</div>
         <div class="k">Signature</div><div class="v mono">${hex(i.signature) || '-'}</div>
-        <div class="k">Ops Payload</div><div class="v mono">${hex(i.ops) || '-'}</div>
+        <div class="k">Ops</div><div class="v mono" style="white-space:pre-wrap">${fmtOps(ops)}</div>
       </div>
     </div>
   `;

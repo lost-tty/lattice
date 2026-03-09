@@ -16,6 +16,7 @@ function ModalContainer() {
 function ModalContent({ type, props }) {
   switch (type) {
     case 'createStore': return html`<${CreateStoreModal} />`;
+    case 'joinStore': return html`<${JoinStoreModal} />`;
     case 'rename': return html`<${RenameModal} storeId=${props.storeId} />`;
     case 'delete': return html`<${DeleteModal} storeId=${props.storeId} />`;
     case 'invite': return html`<${InviteModal} token=${props.token} />`;
@@ -66,6 +67,32 @@ function CreateStoreModal() {
     <div class="modal-actions">
       <button class="btn" onClick=${S.closeModal}>Cancel</button>
       <button class="btn btn-primary" onClick=${submit}>Create</button>
+    </div>
+  `;
+}
+
+function JoinStoreModal() {
+  const inputRef = useRef(null);
+
+  const submit = async () => {
+    const token = inputRef.current?.value?.trim();
+    if (!token) return;
+    S.closeModal();
+    try {
+      const resp = await API.store.Join({ token });
+      const uuid = resp.store_id ? Helpers.uuidFromBytes(resp.store_id) : '';
+      S.toast(`Join initiated${uuid ? ': ' + uuid : ''}`, 'ok');
+      await S.refresh();
+    } catch (e) { S.toast('Join error: ' + e.message, 'err'); }
+  };
+
+  return html`
+    <h2>Join Store</h2>
+    <label>Invite token</label>
+    <input ref=${inputRef} placeholder="Paste invite token" autofocus />
+    <div class="modal-actions">
+      <button class="btn" onClick=${S.closeModal}>Cancel</button>
+      <button class="btn btn-primary" onClick=${submit}>Join</button>
     </div>
   `;
 }
@@ -292,9 +319,9 @@ function InspectIntentionModal() {
     S.closeModal();
     try {
       const resp = await API.store.GetIntention({ store_id: activeStoreId, hash_prefix: hashBytes });
-      S.setPanelOverride({ type: 'intention', intention: resp.intention, hexStr });
+      S.setPanelOverride({ type: 'intention', intention: resp.intention, ops: resp.ops || [], hexStr });
     } catch (e) {
-      S.setPanelOverride({ type: 'intention', intention: null, hexStr, error: e.message });
+      S.setPanelOverride({ type: 'intention', intention: null, ops: [], hexStr, error: e.message });
     }
   };
 

@@ -111,7 +111,7 @@ function PanelOverride({ override }) {
   }
 
   if (override.type === 'intention') {
-    return html`<${IntentionDetail} intention=${override.intention} hexStr=${override.hexStr} error=${override.error} />`;
+    return html`<${IntentionDetail} intention=${override.intention} ops=${override.ops} hexStr=${override.hexStr} error=${override.error} />`;
   }
 
   return null;
