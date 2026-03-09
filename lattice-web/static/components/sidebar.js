@@ -57,7 +57,7 @@ function Sidebar() {
         })}
       </div>
       <footer>
-        <button onClick=${() => S.showModal('createStore')}>New Store</button>
+        <button onClick=${() => S.showModal('createStore')}>Create Root Store</button>
         <button onClick=${() => S.showModal('joinStore')}>Join Store</button>
       </footer>
     </nav>

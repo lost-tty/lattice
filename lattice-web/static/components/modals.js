@@ -15,7 +15,7 @@ function ModalContainer() {
 
 function ModalContent({ type, props }) {
   switch (type) {
-    case 'createStore': return html`<${CreateStoreModal} />`;
+    case 'createStore': return html`<${CreateStoreModal} parentId=${props?.parentId} />`;
     case 'joinStore': return html`<${JoinStoreModal} />`;
     case 'rename': return html`<${RenameModal} storeId=${props.storeId} />`;
     case 'delete': return html`<${DeleteModal} storeId=${props.storeId} />`;
@@ -27,10 +27,11 @@ function ModalContent({ type, props }) {
   }
 }
 
-function CreateStoreModal() {
+function CreateStoreModal({ parentId }) {
   const [types, setTypes] = useState(null);
   const nameRef = useRef(null);
   const typeRef = useRef(null);
+  const isChild = !!parentId;
 
   useEffect(() => {
     (async () => {
@@ -46,18 +47,22 @@ function CreateStoreModal() {
   const submit = async () => {
     const name = nameRef.current?.value || '';
     const type_ = typeRef.current?.value;
+    const req = { name, store_type: type_ };
+    if (parentId) req.parent_id = parentId;
     try {
-      await API.store.Create({ name, store_type: type_ });
+      await API.store.Create(req);
       S.closeModal();
       S.toast(`Store created: ${name || '(unnamed)'} [${type_}]`, 'ok');
       await S.refresh();
     } catch (e) { S.toast('Create error: ' + e.message, 'err'); }
   };
 
-  if (!types) return html`<h2>Create Store</h2><div class="muted">Loading...</div>`;
+  const title = isChild ? 'Create Child Store' : 'Create Root Store';
+  if (!types) return html`<h2>${title}</h2><div class="muted">Loading...</div>`;
 
   return html`
-    <h2>Create Store</h2>
+    <h2>${title}</h2>
+    ${isChild ? html`<p>Parent: <span class="mono">${Helpers.uuidFromBytes(parentId)}</span></p>` : null}
     <label>Name (optional)</label>
     <input ref=${nameRef} placeholder="my-store" autofocus />
     <label>Type</label>

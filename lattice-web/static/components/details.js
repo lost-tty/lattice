@@ -23,6 +23,7 @@ function DetailsView({ uuid, details, meta, peerStrategy, storeId }) {
     <div class="action-bar">
       <button class="btn" onClick=${() => doSync(storeId)}>Sync</button>
       <button class="btn" onClick=${() => doInvite(storeId)}>Invite Peer</button>
+      <button class="btn" onClick=${() => S.showModal('createStore', { parentId: storeId })}>Create Child Store</button>
       <button class="btn" onClick=${() => S.showModal('rename', { storeId })}>Rename</button>
       <button class="btn btn-danger" onClick=${() => S.showModal('delete', { storeId })}>Delete</button>
     </div>
