@@ -24,16 +24,6 @@ pub use store_manager::{StoreManager, StoreManagerError, StoreOpener};
 pub use store_openers::direct_opener;
 pub use token::Invite;
 
-// Re-export from lattice-kernel (replication engine)
-pub use lattice_kernel::SyncProvider;
-pub use lattice_kernel::{
-    NodeIdentity, PeerStatus, ReplicationController, ReplicationControllerCmd,
-    ReplicationControllerError, StateError, Store, StoreInfo,
-};
-
-// Re-export from lattice-net-types (network layer types)
-pub use lattice_net_types::{NetworkStore, NetworkStoreRegistry, NodeProviderExt};
-
 // Re-export from lattice-model (types)
 pub use lattice_model::Uuid;
 pub use lattice_model::{

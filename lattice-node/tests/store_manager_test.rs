@@ -2,6 +2,7 @@ mod common;
 
 use common::{wait_for_close, wait_for_open, TestCtx};
 use lattice_mockkernel::STORE_TYPE_NULLSTORE;
+use lattice_kernel::PeerStatus;
 use lattice_model::NodeIdentity;
 use lattice_model::Uuid;
 use lattice_node::data_dir::DataDir;
@@ -501,7 +502,7 @@ async fn test_revoke_peer() {
         .iter()
         .find(|p| p.pubkey == claimer)
         .expect("peer exists");
-    assert_eq!(peer.status, lattice_node::PeerStatus::Active);
+    assert_eq!(peer.status, PeerStatus::Active);
 
     // Revoke
     ctx.sm().revoke_peer(root_id, claimer).await.unwrap();
@@ -512,7 +513,7 @@ async fn test_revoke_peer() {
         .iter()
         .find(|p| p.pubkey == claimer)
         .expect("peer still exists");
-    assert_eq!(peer.status, lattice_node::PeerStatus::Revoked);
+    assert_eq!(peer.status, PeerStatus::Revoked);
 }
 
 /// After revoking a peer, they should NOT be able to re-join with a new invite
@@ -561,7 +562,7 @@ async fn test_rejoin_after_revoke() {
         .expect("peer exists");
     assert_eq!(
         peer.status,
-        lattice_node::PeerStatus::Active,
+        PeerStatus::Active,
         "Should be re-activated"
     );
 }

@@ -16,7 +16,6 @@ lattice-net = { workspace = true }
 lattice-net-iroh = { workspace = true }
 lattice-model = { workspace = true }
 lattice-store-base = { workspace = true }
-lattice-storage = { workspace = true }
 lattice-systemstore = { workspace = true }
 lattice-api = { workspace = true }
 lattice-proto = { workspace = true }

@@ -26,9 +26,6 @@ pub use lattice_model::types::{Hash, PubKey};
 pub use lattice_model::{dynamic_message_to_sexpr, dynamic_value_to_sexpr, SExpr};
 pub use lattice_store_base::FieldFormat;
 
-// Re-export store plugin types for custom store registration
-pub use lattice_node::{direct_opener, StoreOpener};
-
 // Internal re-exports (not public API)
 pub(crate) type NetworkService =
     lattice_net::network::NetworkService<lattice_net_iroh::IrohTransport>;

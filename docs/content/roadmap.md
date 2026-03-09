@@ -21,35 +21,7 @@ title: "Roadmap"
 | **M14**          | Slim Down Persistent State: `DagQueries` trait with `find_lca`/`get_path`/`is_ancestor` (causal-only BFS), `KVTable` unified state engine (shared by KvState + SystemTable), write-time LWW resolution, slim on-disk format (materialized value + intention hash pointers), `ScopedDag` wrapper, conflict detection on read (`get`/`list` return `conflicted` flag), `Inspect` command for full conflict state, branch inspection (`store debug branch`) via LCA + path traversal |
 | **M15**          | Review & cleanup: (A) typed error enums replacing ~50 `map_err` + all `String` error variants, `IntoStatus` gRPC mapping, fixed discarded `witness()` result; (B) eliminated all production sleeps (event-driven auto-sync, `Notify`-based store lookup), standardized 26 test sleeps to `tokio::time::timeout`; (C) `store_type` threaded through `JoinResponse` proto → join flow, removed `STORE_TYPE_KVSTORE` hardcodes, dropped `lattice-kvstore` dev-dep from `lattice-net-iroh`; (D) removed `sync_all` thundering-herd fallback from `handle_missing_dep` — 2-tier recovery (fetch_chain → sync_with_peer) with sequential alternative-peer fallback via acceptable authors; `ChannelNetwork::disconnect()` for partition testing |
 | **M16**          | Uniform Store Traits + Witness-First Architecture: (A) extracted `SystemState` from `SystemLayer`, unified transaction ownership, removed `PersistentState<T>`, slimmed `StateMachine` to `apply()` only; (B) `ScopedDb` for domain crates, `StateBackend` owned by `SystemLayer`, `StateFactory` folded into `StateLogic::create()`, `SystemState` implements `StateLogic`; (C) witness-first — witness log is WAL, `project_new_entries()` is single path into state machine, projection cursor tracks progress; (D) `StoreRegistry` absorbed into `StoreManager`, meta.db `STORES_TABLE` populated, recovery from persisted state; (E) bootstrap security tests (substituted intentions, invalid signatures); (F) `ProjectionStatus` stall reporting, non-blocking projection; (G) `apply_witnessed_batch` collapsed into `apply_ingested_batch`, projection cursor uses witness content hash, `scan_witness_log` takes seq; (H) updated `StateMachine` error contract for witness-first semantics; (I) deleted `StoreTypeProvider` (merged into `StateMachine`/`StateLogic`), removed `backfill_store_types` migration, removed `StoreRegistry` |
-
----
-
-## Milestone 17: Housekeeping
-
-Test cleanup, dependency review.
-
-- [x] `store status` should show projection cursor
-- [x] Bug on start: projection cursor not found in witness content index. Root cause: stores created before `TABLE_WITNESS_CONTENT_INDEX` existed had author tips (so `load_persisted_state` ran) but empty content index. Fixed: `backfill_content_index()` runs on open when the index is empty.
-
-### 17A: Test Infrastructure Unification
-- [x] **Unify `test_node_builder`**: 6 copies across 5 files, each registering different opener sets. Consolidate into a single configurable builder in `lattice-mockkernel` (e.g., `TestNodeBuilder::new().with_kv().with_log().with_null().in_memory().build(data_dir)`). Current locations: `lattice-node/src/node.rs`, `lattice-node/tests/store_manager_test.rs`, `lattice-node/tests/multi_author_test.rs`, `lattice-net/tests/common/mod.rs`, `lattice-net/tests/gap_fill_integration.rs`, `lattice-net-iroh/tests/iroh_integration_test.rs`.
-- [x] **Unify `TestHarness`**: two identical structs in `lattice-kvstore/src/state.rs` and `lattice-logstore/src/state.rs` that manage `StateBackend` + `StateContext` + manual write transactions. Extract a generic `TestHarness<S: StateLogic>` into `lattice-mockkernel` (or `lattice-storage` behind a `test-support` feature).
-- [x] **Unify `TestStore`/`TestLogStore`**: `lattice-kvstore/tests/common/mod.rs` and `lattice-logstore/tests/common/mod.rs` are near-identical (`SystemLayer<S>` + `MockWriter<S>`). Extract a generic `TestStore<S: StateLogic>` into `lattice-mockkernel`.
-- [x] **Unify `TestCtx`**: two identical copies in `lattice-node/tests/store_manager_test.rs` and `lattice-node/tests/multi_author_test.rs` (`TempDir` + `Node`). Merge into shared `tests/common/`.
-- [x] **Replace mock state machines with `NullState`**: 6 mock `StateMachine`/`StateLogic` impls across 5 files (`MockStateMachine` x2 in kernel, `MockState` in net, `MockLogic` in systemstore, `TestStateMachine` in kernel). Most are no-op or minimal tracking. Replace with `NullState` where possible; for the kernel actor tests that track applied ops, consider adding an optional callback to `NullState` or keeping a single `TrackingState` in `lattice-mockkernel`.
-- [x] **Deduplicate `MockProvider`**: 3 copies of `NodeProviderExt` mocks across `lattice-net/src/network/service_tests.rs`, `lattice-net-iroh/tests/iroh_backend_test.rs`, `lattice-net-iroh/tests/mock_provider_test.rs`. Extract to `lattice-mockkernel` or a shared test module.
-- [x] **Deduplicate helper functions**: `wrap_app_data` (3 copies), `put_kv`/`wait_for_key` (3+ copies), `temp_data_dir` (2 copies), `create_test_op` (2 copies). Move to `lattice-mockkernel` or appropriate `tests/common/`.
-
-### 17B: Test Scope Review
-- [x] Review all integration tests in `lattice-net` and `lattice-kvstore`. Replace `KvState` with `NullState` wherever the test does not exercise KV-specific logic.
-- [x] Move `lattice-kvstore/tests/sync_compliance.rs` to `lattice-systemstore/tests/`. Tests chain rules, snapshot/restore, convergence via `SystemLayer`, not KV-specific logic. Use `NullState` where possible, keep `KvState` only for tests that need real merge behavior. *(File does not exist — no action needed.)*
-- [ ] Audit test coverage gaps exposed by the migration.
-
-### 17C: Proto Definition Audit
-- [ ] Audit `lattice-proto`: identify proto definitions that are only consumed by a single crate. Move those definitions into the consuming crate's own proto files. If all definitions can be relocated, remove `lattice-proto` entirely.
-
-### 17D: Crate Dependency Graph Review
-- [ ] Review the dependency graph between workspace crates. Identify unnecessary or circular dependencies, overly broad re-exports, and crates that pull in more than they need. Clean up after M13 and M16 reshuffling.
+| **M17**          | Housekeeping: (A) test infrastructure unification — consolidated `test_node_builder`, `TestHarness`, `TestStore`, `TestCtx`, `MockProvider`, helper functions into `lattice-mockkernel`; replaced 6 mock state machines with `NullState` + `TrackingState`; (B) test scope review — replaced `KvState` with `NullState` in non-KV tests, coverage audit; (C) proto definition audit; (D) crate dependency graph review — removed dead deps and overly broad re-exports |
 
 ---
 
