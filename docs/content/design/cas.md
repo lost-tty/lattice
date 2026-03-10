@@ -1,9 +1,10 @@
 ---
 title: "Content-Addressable Store (CAS)"
 status: design
+weight: 5
 ---
 
-> **Status**: Unimplemented design (roadmap M16). Preserved for future reference.
+> **Status**: Unimplemented design (roadmap M20). Preserved for future reference.
 
 The Lattice CAS is a high-performance, **node-local** blob storage system designed to support the "Everything is a Store" philosophy. It provides the foundational "dumb pipe" storage layer, while higher-level logic (Stores) handles replication, policy, and access control.
 

@@ -1,21 +1,19 @@
 ---
 title: "Store Identity & Lifecycle"
+weight: 3
 ---
 
 > **Status**: Implemented
 
 Lattice stores must be **self-descriptive**. A store on disk should contain all the information required to identify its logic (type) and data format (schema version), allowing the node to dynamically load the correct `StoreOpener` without prior configuration.
 
-## The `meta` Table Schema
+## The Meta Table
 
-Every Lattice store (regardless of type) maintains a `meta` table in its `state.db` (Redb). This table is the "boot sector" of the store.
+Store identity and metadata currently live in a single table. See [Stores](../concepts/stores.md) for the full table reference.
 
-| Key                | Value Type        | Description                                                  |
-| :----------------- | :---------------- | :----------------------------------------------------------- |
-| `store_id`         | `[u8; 16]` (UUID) | Unique Instance ID. Validates we opened the right store.     |
-| `store_type`       | `String` (UTF-8)  | **Logical Type Identity**. Determines which Opener to use.   |
-| `schema_version`   | `u64` (LE)        | Data layout version. Managed by store logic for migrations.  |
-| `tip/<pubkey>`     | `[u8; 32]`        | Last applied Op Hash per author (Causal Checkpoint).        |
+- **`TABLE_META`** (in `state.db`): Stores `store_id`, `store_type`, `schema_version`, per-author chain tips, and the projection cursor. `peek_info()` reads from this table to resolve the opener.
+
+`log.db` currently has no meta table — store identity exists only in `state.db`. The planned 18B milestone will add `TABLE_LOG_META` to `log.db` so it is self-identifying (needed for headless replication and resolving the opener without `state.db`).
 
 ## Store Type Semantics
 
@@ -42,7 +40,7 @@ To ensure deterministic convergence in a distributed system, the interpretation 
 
 The `StoreManager` can open any store without knowing its type in advance:
 
-1. **Peek**: The manager reads `state.db/meta` to extract `(store_id, store_type, version)`. This is done via `StateBackend::peek_info()` without initializing the full store logic.
+1. **Peek**: The manager reads `state.db/TABLE_META` to extract `(store_id, store_type)`. This is done via `peek_info()` without initializing the full store logic.
 2. **Resolve**: The manager looks up `store_type` in its `registry`.
    - **Native**: Maps to registered `StoreOpener` closures.
    - **Wasm** (Future): Maps to a `WasmStoreOpener` that fetches the specific Wasm binary for that type/version.

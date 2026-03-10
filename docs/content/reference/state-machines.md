@@ -1,5 +1,6 @@
 ---
 title: "State Machine Interfaces"
+weight: 2
 ---
 
 How to implement a custom Lattice state machine.
@@ -60,7 +61,7 @@ pub trait StateLogic: Send + Sync {
 
     fn store_type() -> &'static str where Self: Sized;
     fn apply(
-        table: &mut Table<&[u8], &[u8]>,
+        table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn DagQueries,
     ) -> Result<Vec<Self::Event>, StateDbError> where Self: Sized;
@@ -88,7 +89,7 @@ impl StateLogic for CounterState {
     fn store_type() -> &'static str { "myapp:counter" }
 
     fn apply(
-        table: &mut Table<&[u8], &[u8]>,
+        table: &mut redb::Table<&[u8], &[u8]>,
         op: &Op,
         dag: &dyn DagQueries,
     ) -> Result<Vec<Self::Event>, StateDbError> {
@@ -135,8 +136,17 @@ pub trait CommandHandler: Send + Sync {
         method_name: &'a str,
         request: DynamicMessage,
     ) -> Pin<Box<dyn Future<Output = Result<DynamicMessage, ...>> + Send + 'a>>;
+
+    fn handle_query<'a>(
+        &'a self,
+        dag: &'a dyn DagQueries,
+        method_name: &'a str,
+        request: DynamicMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<DynamicMessage, ...>> + Send + 'a>>;
 }
 ```
+
+Write commands go through `handle_command`; read-only queries go through `handle_query`. The framework routes based on `method_meta()` — methods with `MethodKind::Query` are dispatched to `handle_query` (which receives `&dyn DagQueries` instead of a writer).
 
 **Write commands** (e.g., `Put`, `Delete`) use the `writer` to submit intentions:
 
@@ -167,7 +177,7 @@ async fn handle_put(
 
 The `causal_deps` parameter declares which prior operations this intention supersedes. For a key-value store, this is the set of current head hashes for the key being modified. For an append-only log, this is typically empty. Causal deps enable conflict detection: if two authors submit intentions with the same deps, both are valid but the state machine must merge them deterministically.
 
-**Read commands** (e.g., `Get`, `List`) read directly from `ScopedDb` and return the result. No intention is created. The `writer` parameter is ignored.
+**Read commands** (e.g., `Get`, `List`) are dispatched to `handle_query`, which receives a `&dyn DagQueries` instead of a writer. They read directly from `ScopedDb` and return the result. No intention is created.
 
 `CommandHandler` cannot modify the database. `ScopedDb` only opens read-only transactions, and `writer.submit()` only creates an intention. The writable table reference only exists in `StateLogic::apply()`, which the framework calls during projection.
 
@@ -179,7 +189,7 @@ Enables the CLI and language bindings to discover your schema at runtime.
 pub trait Introspectable: Send + Sync {
     fn service_descriptor(&self) -> ServiceDescriptor;
     fn decode_payload(&self, bytes: &[u8]) -> Result<DynamicMessage, ...>;
-    fn command_docs(&self) -> HashMap<String, String>;
+    fn method_meta(&self) -> HashMap<String, MethodMeta>;
     fn field_formats(&self) -> HashMap<String, FieldFormat>;
     fn summarize_payload(&self, msg: &DynamicMessage) -> Vec<SExpr>;
 }

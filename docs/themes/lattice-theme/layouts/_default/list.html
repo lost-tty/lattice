@@ -1,5 +1,5 @@
 {{ define "main" }}
-<h1>{{ .Title }}</h1>
+<h1>{{ .Title }}{{ with .Params.status }} <span class="status-badge status-{{ . }}">{{ . }}</span>{{ end }}</h1>
 <section>
     {{ .Content }}
 </section>

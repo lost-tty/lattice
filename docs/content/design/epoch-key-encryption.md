@@ -1,5 +1,6 @@
 ---
 title: "Epoch Key Encryption"
+weight: 7
 ---
 
 > **Status**: Future

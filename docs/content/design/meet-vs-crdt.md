@@ -2,6 +2,7 @@
 title: "Conflict Resolution Architecture"
 status: resolved
 resolution: "Approach A, slimmed down. State machines keep per-conflict-domain head tracking, but store only intention hashes — not duplicated values, HLC, or author metadata. Values are resolved at apply time (LWW). Conflict details (payloads, authors, timestamps) are read from the DAG on demand. Each store type defines its own conflict domains and resolution semantics. The kernel provides DAG query primitives (LCA, paths, ancestry) but does not own conflict tracking — that remains store-specific."
+weight: 1
 ---
 
 ## Definitions
@@ -27,7 +28,7 @@ The **meet** (lowest common ancestor) of two intentions <span class="math">a, b<
 
 ## System Description
 
-The platform replicates intentions across nodes. Each node applies them to a local state machine. One concrete state machine (`KvState`) maintains a **headlist** per key <span class="math">k</span>:
+The platform replicates intentions across nodes. Each node applies them to a local state machine. One concrete state machine (`KvState`) maintains a **head set** per key <span class="math">k</span> (implemented as `KVTable`):
 
 <div class="math-block">heads(k) = { h ∈ H | h wrote to k ∧ ∄ h' &gt; h that wrote to k }</div>
 

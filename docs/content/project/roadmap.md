@@ -1,5 +1,6 @@
 ---
 title: "Roadmap"
+weight: 1
 ---
 
 ## Completed
@@ -29,7 +30,7 @@ title: "Roadmap"
 
 Manage log growth on long-running nodes via stability frontier, snapshots, pruning, and finality checkpoints.
 
-> **See:** [Stability Frontier](stability-frontier.md) for the full design.
+> **See:** [Stability Frontier](../design/stability-frontier) for the full design.
 
 ### 18A: Witness-Only Sync ✅
 Negentropy set reconciliation now operates on witnessed intentions only. Floating (unwitnessed) intentions are excluded from fingerprints and range queries.
@@ -39,15 +40,37 @@ Negentropy set reconciliation now operates on witnessed intentions only. Floatin
 - [x] Floating intentions excluded from sync — received-but-unwitnessable intentions no longer pollute fingerprints
 - [x] Renamed `table_fingerprint` → `witness_fingerprint` across codebase
 
-### 18B: Epoch Indexes
+### 18B: Meta Table Separation
+Prerequisite for epoch indexes and headless replication. Separate store metadata into two tables reflecting the `log.db` / `state.db` split. `log.db` is the durable backbone that always exists; `state.db` is optional (only present when an opener is available and projection is active).
+
+Both databases retain `store_id` and `store_type` for independent identity verification — if files are moved or corrupted, each database rejects mismatches on open. `log.db` is the authoritative source (used by `peek_info()` to decide which opener to use); `state.db` uses them as a consistency check.
+
+**Rename `TABLE_META` → `TABLE_STATE_META`** (stays in `state.db`):
+- `store_id` — identity verification on open (stays, consistency check)
+- `store_type` — opener match verification (stays, consistency check)
+- `schema_version` — state machine schema version
+- `tip/{author}` — chain integrity checking during projection writes
+- `last_applied_witness` — projection cursor
+
+**New `TABLE_LOG_META`** (in `log.db`, alongside `TABLE_INTENTIONS`, `TABLE_WITNESS`, etc.):
+- [ ] `store_id` — store identity, authoritative source
+- [ ] `store_type` — store type string, authoritative source
+- [ ] `current_epoch` — local epoch cursor (new, for 18C)
+- [ ] `epoch_fingerprint/{epoch}` — per-epoch fingerprint (new, for 18C)
+- [ ] Update `StateBackend::peek_info()` to read from `log.db` instead of `state.db`
+- [ ] Migration: on startup, populate `TABLE_LOG_META` from `TABLE_META` if `log.db` lacks it
+
+This separation enables headless replication: a node can participate in sync and witnessing for a store it doesn't have an opener for. `log.db` + `TABLE_LOG_META` is self-sufficient for the replication layer. `state.db` + `TABLE_STATE_META` is only needed for projection.
+
+### 18C: Epoch Indexes
 Index infrastructure for partitioning the witnessed intention set by prune epoch. No pruning yet — just the machinery to compute epoch-aware fingerprints.
 - [ ] `TABLE_EPOCHS`: `{epoch: u32 BE}{intention_hash: 32 bytes} → ()` — existence means "this intention is below this epoch's cut"
-- [ ] Per-epoch fingerprint: modular sum of all hashes tagged in epoch N (cumulative, includes prior epochs). Persisted in `TABLE_META` as `epoch_fingerprint/{epoch} → Hash`
+- [ ] Per-epoch fingerprint: modular sum of all hashes tagged in epoch N (cumulative, includes prior epochs). Persisted in `TABLE_LOG_META` as `epoch_fingerprint/{epoch} → Hash`
 - [ ] `Hash::wrapping_sub_assign` for `effective_fingerprint = witness_fingerprint - epoch_fingerprint[epoch]`
 - [ ] Tagging walk: on receiving a `PruneCut`, walk `store_prev` chains from cut vector, insert entries into `TABLE_EPOCHS`. Epoch entries are self-contained (copy forward from prior epoch)
 - [ ] Negentropy merge-skip: iterate `TABLE_INTENTIONS` and `TABLE_EPOCHS` (at agreed epoch prefix) in parallel, skip matching hashes
 
-### 18C: PruneCut & Tip Attestations
+### 18D: PruneCut & Tip Attestations
 The protocol layer for coordinated pruning. Nodes agree on prune epochs via replicated `SystemOp`s, attest their state, and delete once safety is confirmed.
 - [ ] `SystemOp::PruneCut { epoch: u32, tips: Vec<(PubKey, Hash)> }` — proposed as a system intention, causally depends on the tip intentions it references. Per-author cut vector, monotonic epoch. Max-wins CRDT: higher epoch supersedes lower
 - [ ] `SystemOp::TipAttestation { tips: Vec<(PubKey, Hash)> }` — delta of changed author tips, causally depends on the latest `PruneCut` plus the attested tip intentions. Serves as both progress report and implicit ack of the referenced epoch
@@ -59,27 +82,27 @@ The protocol layer for coordinated pruning. Nodes agree on prune epochs via repl
 - [ ] **Stale peer return:** Node behind on epochs that connects to a node that has already deleted needs snapshot bootstrap (→ M19D)
 - [ ] **Lag metric:** Per-peer divergence from local tips, surfaced via `NodeEvent::PeerLagWarning` and `store status`
 
-### 18D: Snapshotting
+### 18E: Snapshotting
 - [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Options: tempfile-based replay (works today, heavy on I/O) or in-memory `StateBackend` variant (cleaner). **Note:** `StateMachine::snapshot()`/`restore()` were removed in M16A Step 3 — the old `StateBackend::snapshot_internal()` serialization format is deleted. M18 will design a new snapshot mechanism tailored to pruning requirements (frontier-aware, incremental, possibly stored in a separate `snapshot.db`).
 - [ ] Store snapshots in `snapshot.db` (per-store, includes `TABLE_SYSTEM` attestation state)
 - [ ] **Future optimization:** Inverse operations stored in `WitnessRecord` could allow rolling back from current state to frontier in O(head − frontier), avoiding replay. Deferred until profiling shows replay is a bottleneck.
 
-### 18D½: Store-Level Pruning Hints
+### 18E½: Store-Level Pruning Hints
 Store-defined intention metadata that guides consensus pruning. Both hints are advisory — pruning only happens once all peers have attested past the relevant intentions (standard frontier rules).
 - [ ] **Supersede hint** (`supersedes_all: true`): Intention declares it supersedes all prior state (e.g., a full snapshot-as-intention, or a state reset). Everything causally before it is safe to prune. The pruner can treat it as a new root, discarding the entire prefix. Useful for stores that periodically compact their state into a single intention.
 - [ ] **Ephemeral hint** (`ephemeral: true`): Intention declares it is unlikely to ever be a causal dependency (e.g., a key deletion in a KV store — no future operation will depend on the deleted value). Chains ending at ephemeral intentions may be pruned more aggressively — once all peers have witnessed them past the frontier, the pruner can discard them without waiting for a full snapshot cycle.
-- [ ] Wire hints through `Intention` proto field (bitflags or enum), surface in `Op` for state machines, respect in `truncate_prefix` (18C).
+- [ ] Wire hints through `Intention` proto field (bitflags or enum), surface in `Op` for state machines, respect in `truncate_prefix` (18D).
 
-### 18E: Checkpointing / Finality
+### 18F: Checkpointing / Finality
 - [ ] Periodically finalize state hash (protect against "Deep History Attacks")
 - [ ] Signed checkpoint intentions in sigchain
 - [ ] Nodes reject intentions that contradict finalized checkpoints
 
-### 18F: Hash Index Optimization ✅
+### 18G: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
 - [x] Support 100M+ intentions without excessive RAM
 
-### 18G: Advanced Sync Optimization (Future)
+### 18H: Advanced Sync Optimization (Future)
 - [ ] **Persistent Merkle Index / Range Accumulator:**
   - Avoid O(N) scans for range fingerprints (currently linear)
   - Pre-compute internal node hashes in a B-Tree or Merkle Tree structure
@@ -242,5 +265,5 @@ Run the kernel on the RP2350.
   - Tamper-evident audit export (signed Merkle bundles for external auditors)
   - Optional: External audit sink (stream to S3/SIEM)
 - **Blind Ops / Cryptographic Revealing** (research): Encrypted intention payloads revealed only to nodes possessing specific keys (Convergent Encryption or ZK proofs). Enables selective disclosure within atomic transactions.
-- **Epoch Key Encryption**: Shared symmetric key for O(1) gossip payload encryption, enabling efficient peer revocation. See [Epoch Key Encryption](design/epoch-key-encryption/) for the full design.
+- **Epoch Key Encryption**: Shared symmetric key for O(1) gossip payload encryption, enabling efficient peer revocation. See [Epoch Key Encryption](../design/epoch-key-encryption) for the full design.
 - **Blind Node Relays**: Untrusted VPS relays that sync the raw Intention DAG via Negentropy. No store keys, no Wasm. Can perform graph-based pruning using the `state_independent` flag: prune linear sub-chains below state-independent intentions at the frontier (pure graph operation, no state machine). Full nodes can also push computed snapshots to relays, making them full bootstrap sources. Two-tier pruning: relays do structural pruning (safe by construction), full nodes do semantic pruning (more compact).

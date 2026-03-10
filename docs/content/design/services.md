@@ -1,6 +1,7 @@
 ---
 title: "Service Architecture"
 status: design
+weight: 6
 ---
 
 > **Status**: Unimplemented design. Preserved for future reference. The current daemon (`latticed`) is thin and does not follow this model.
@@ -23,7 +24,7 @@ pub trait ServiceProvider {
 
 ### 2. Service Registry (Cluster Configuration)
 
-Services are declared cluster-wide in the **System Table (rootstores)** (the coordination layer). This allows coherent configuration management across the mesh.
+Services are declared cluster-wide in the **Root Store's System Table** (the coordination layer). This allows coherent configuration management across the hierarchy.
 
 **Storage Path:** `/services/{service_id}/config`
 

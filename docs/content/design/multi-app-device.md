@@ -1,5 +1,6 @@
 ---
 title: "Multi-App Device Model"
+weight: 8
 ---
 
 > **Status**: Proposal

@@ -1,6 +1,7 @@
 ---
 title: "Stability Frontier"
-status: discussion
+status: design
+weight: 10
 ---
 
 Design for tracking per-peer sync state, deriving a global stability frontier for log pruning, and surfacing per-device lag metrics to the user.
@@ -9,7 +10,7 @@ Design for tracking per-peer sync state, deriving a global stability frontier fo
 
 Lattice nodes need to know what other nodes have, per store. Two outputs derive from this:
 
-1. **Stability frontier** — the largest causally-closed set of intentions that *all* peers provably hold. Everything below this frontier is safe to prune (M18C).
+1. **Stability frontier** — the largest causally-closed set of intentions that *all* peers provably hold. Everything below this frontier is safe to prune (M18D).
 2. **Lag metric** — per-peer divergence, surfaced to the user as a durability health indicator ("1 of 3 replicas is stale — some data exists on only one device").
 
 ## Key Insight: Per-Author Chains
@@ -123,7 +124,7 @@ This surfaces as `NodeEvent::PeerLagWarning` or via `store status` in the CLI.
 
 ## Relationship to Snapshots
 
-The stability frontier defines *where* to snapshot; M18D provides the *mechanism*. New peers bootstrap from a snapshot rather than replaying the full log. The current system uses an implicit empty snapshot (genesis) — once pruning is implemented, the frontier becomes the explicit snapshot point.
+The stability frontier defines *where* to snapshot; M18E provides the *mechanism*. New peers bootstrap from a snapshot rather than replaying the full log. The current system uses an implicit empty snapshot (genesis) — once pruning is implemented, the frontier becomes the explicit snapshot point.
 
 On compaction, the latest attestation per peer is materialized into the snapshot (as part of `TABLE_SYSTEM` state). Individual attestation intentions in the pruned log are discarded — the snapshot carries the state forward. No pinning required.
 
@@ -132,8 +133,8 @@ Lifecycle: frontier advances → snapshot state at frontier (including attestati
 ## Where It Fits
 
 - `SessionTracker` — extended with `peer_tips` per store
-- Pruning (M18C) — uses the frontier for epoch-based deletion
-- Snapshots (M18D) — frontier defines the snapshot point
+- Pruning (M18D) — uses the frontier for epoch-based deletion
+- Snapshots (M18E) — frontier defines the snapshot point
 - Future: the lag metric enables durability warnings in the SwiftUI app
 
 ## Open Questions

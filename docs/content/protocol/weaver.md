@@ -41,9 +41,19 @@ struct Intention {
 The wire/storage envelope. Wraps an `Intention` with its cryptographic proof.
 
 ```rust
+// Rust in-memory representation
 struct SignedIntention {
     intention: Intention,
     signature: Sig,           // Ed25519 signature over blake3(borsh(intention))
+}
+```
+
+On the wire and in storage, the intention is carried as opaque Borsh bytes (not a decoded struct):
+
+```protobuf
+message SignedIntention {
+    bytes intention_borsh = 1;   // borsh(Intention) — canonical bytes used for hashing
+    bytes signature = 2;         // Ed25519 signature (64 bytes)
 }
 ```
 
@@ -57,7 +67,7 @@ The `Condition` enum defines the causal dependencies (DAG links) required for th
 
 ```rust
 enum Condition {
-    // V1: All listed hashes must be applied before this Intention can be applied.
+    // V1: All listed hashes must be witnessed before this Intention can be witnessed.
     V1(Vec<Hash>),
 
     // Future variants (V2+) reserved for programmable logic.
@@ -108,15 +118,15 @@ For debugging and inspection, intentions are rendered as structured S-Expression
 
 ```lisp
 (intention
-  (hash #abcdef01...)
-  (author #ed25519-pubkey)
-  (store-id #uuid-bytes)
-  (store-prev #hash-of-previous-intention)
-  (condition (v1 #dep-hash-1 #dep-hash-2))
+  (hash abcdef01...)
+  (author ed25519-pubkey-hex)
+  (store-id uuid-hex)
+  (store-prev hash-of-previous-intention)
+  (condition (v1 dep-hash-1 dep-hash-2))
   (timestamp 1234567890 :counter 0)
-  (signature #ed25519-sig)
+  (signature ed25519-sig-hex)
   (ops
-    (system (child-add #uuid "alias"))))
+    (system (child-add uuid-hex "alias"))))
 ```
 
 Application data example (KvStore):
@@ -134,17 +144,21 @@ Application data example (KvStore):
 
 ## 4. Validation Logic
 
-A Node accepts an Intention `I` if and only if:
+A Node accepts and stores an Intention `I` if:
 
 1. **Signature Valid:** `Ed25519.verify(I.author, blake3(borsh(I)), signature)` is TRUE.
-2. **Linearity Valid:** `I.store_prev` matches the current tip of `I.author`'s chain in `I.store_id` (or is `Hash::ZERO` for new authors).
-3. **Dependencies Met (for application):** For every `h` in `I.condition.V1`:
-   - `h` has been applied to the local state.
-   - If dependencies are not yet met, the Intention is stored but **floats** (unapplied) until they arrive.
+2. **Store ID Valid:** `I.store_id` matches the local store.
+
+An accepted Intention is **witnessed** (committed to the witness log) when:
+
+3. **Linearity Resolved:** `I.store_prev` matches the current tip of `I.author`'s chain in this store (or is `Hash::ZERO` for the author's first write). Until `store_prev` is available, the intention floats.
+4. **Dependencies Met:** For every `h` in `I.condition.V1`, `h` must be witnessed. If not, the intention floats until they arrive.
+
+Note: linearity is enforced at **witnessing time**, not acceptance time. An intention with an unknown `store_prev` is accepted and stored, but floats until its predecessor arrives.
 
 ### 4.1 Floating Intentions
 
-When an Intention passes signature and linearity checks but has unmet causal dependencies, it is stored in the intention store but not applied to the state machine. These are called **floating intentions**. They are automatically applied once their dependencies are met (e.g. after sync delivers the missing intentions).
+When an accepted Intention has unresolved `store_prev` or unmet causal dependencies, it is stored but not witnessed. These are called **floating intentions**. They are indexed by `store_prev` in `TABLE_FLOATING_BY_PREV` and automatically witnessed in cascade once their dependencies arrive (e.g., after sync delivers the missing intentions).
 
 ---
 
@@ -178,7 +192,7 @@ The `IntentionStore` caches `last_witness_hash` in memory for O(1) chain extensi
 
 ### 5.2 Signing and Verification
 
-Witness records use the same **content + envelope** pattern as `SignedIntention`.
+Witness records use a similar **content + envelope** pattern to `SignedIntention`, but with a different verification strictness level. Intentions use `verify_hash_strict()` (rejects small-order keys, checks canonical S), while witness records use `verify_hash()` (cofactored verification, less strict) since witness keys are under the node's own control.
 
 **Signing:** `signature = Ed25519.sign(node_key, blake3(WitnessContent.encode()))`
 

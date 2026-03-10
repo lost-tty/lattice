@@ -1,5 +1,6 @@
 ---
 title: "Research & Protocol Evolution"
+weight: 9
 ---
 
 Research areas and papers that may inform future Lattice development.

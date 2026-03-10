@@ -1,5 +1,6 @@
 ---
 title: "Simulation Harness"
+weight: 3
 ---
 
 `lattice-net-sim` provides in-memory replacements for the production Iroh networking stack so that multi-node integration tests run entirely inside a single process, with no sockets, no QUIC, and deterministic message delivery.
@@ -10,6 +11,8 @@ title: "Simulation Harness"
 
 Shared broker that routes connections between simulated nodes. Internally a `HashMap<PubKey, mpsc::Sender<ChannelConnection>>` — when node A calls `connect(&B)`, the broker looks up B's accept channel and delivers a `ChannelConnection` backed by a `tokio::io::DuplexStream`.
 
+`disconnect(pubkey)` removes a peer from the network, simulating a network partition. Used in partition-recovery tests.
+
 ```rust
 let network = ChannelNetwork::new();
 let transport_a = ChannelTransport::new(pubkey_a, &network).await;
@@ -18,7 +21,9 @@ let transport_b = ChannelTransport::new(pubkey_b, &network).await;
 
 ### `ChannelTransport`
 
-Implements the `Transport` trait. Each instance registers itself with a `ChannelNetwork` on creation. `connect()` creates a `DuplexStream` pair (64 KiB buffer) and hands one end to the peer via the broker; `accept()` blocks until an inbound connection arrives. Streams are split into `ReadHalf` / `WriteHalf` via `ChannelBiStream`, matching the QUIC bidirectional stream interface exactly.
+Implements the `Transport` trait. Each instance registers itself with a `ChannelNetwork` on creation. `connect()` establishes a `ChannelConnection` with the peer via the broker; `accept()` blocks until an inbound connection arrives. Each `open_bi()` call on a connection creates a `DuplexStream` pair (64 KiB buffer), split into `ReadHalf` / `WriteHalf` via `ChannelBiStream`, matching the QUIC bidirectional stream interface exactly.
+
+Both `connect()` and `accept()` emit `PeerConnected` network events, accessible via `network_events()` which returns a `broadcast::Receiver<NetworkEvent>`.
 
 ### `GossipNetwork`
 
@@ -36,7 +41,7 @@ Implements the `GossipLayer` trait. On `subscribe(store_id)`, it taps into the s
 
 For testing gap recovery, `drop_next_incoming_message()` sets a flag that causes exactly one inbound gossip message to be silently dropped, triggering the `MissingDep` → `FetchChain` path.
 
-`join_peers()` is a no-op — broadcast gossip is inherently all-to-all.
+`join_peers()` is a no-op — broadcast gossip is inherently all-to-all. `unsubscribe(store_id)` and `shutdown()` clean up receive tasks. `network_events()` returns a `broadcast::Receiver<NetworkEvent>` for observing gossip lifecycle events in tests.
 
 ### `SimBackend`
 

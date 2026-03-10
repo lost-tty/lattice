@@ -5,6 +5,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ if .IsHome }}{{ .Site.Title }}{{ else }}{{ .Title }} — {{ .Site.Title }}{{ end }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
     <link rel="stylesheet" href="/theme.css">
     <link rel="stylesheet" href="/syntax.css">
 </head>
@@ -18,18 +21,18 @@
             </a>
         </div>
         <ul>
-            {{ range site.Menus.main }}
-            {{ if .HasChildren }}
+            {{ range sort (union site.Home.Sections site.Home.RegularPages) "Weight" }}
+            {{ if .IsSection }}
             <li>
-                <span class="section-label">{{ .Name }}</span>
+                <span class="section-label">{{ .Title }}</span>
                 <ul>
-                    {{ range .Children }}
-                    <li><a href="{{ .URL }}" {{ if eq $.RelPermalink .URL }}class="active"{{ end }}>{{ .Name }}</a></li>
+                    {{ range .Pages.ByWeight }}
+                    <li><a href="{{ .RelPermalink }}" {{ if eq $.RelPermalink .RelPermalink }}class="active"{{ end }}>{{ .Title }}</a></li>
                     {{ end }}
                 </ul>
             </li>
             {{ else }}
-            <li><a href="{{ .URL }}" {{ if eq $.RelPermalink .URL }}class="active"{{ end }}>{{ .Name }}</a></li>
+            <li><a href="{{ .RelPermalink }}" {{ if eq $.RelPermalink .RelPermalink }}class="active"{{ end }}>{{ .Title }}</a></li>
             {{ end }}
             {{ end }}
         </ul>
@@ -37,9 +40,39 @@
     <article class="content">
         {{ block "main" . }}{{ end }}
     </article>
+    {{ if and (not .IsHome) .TableOfContents }}
+    <aside class="toc">
+        <span class="toc-title">On this page</span>
+        {{ .TableOfContents }}
+    </aside>
+    {{ end }}
     <script type="module">
         import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
         mermaid.initialize({ startOnLoad: true, theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default' });
+    </script>
+    <script>
+        (function() {
+            const toc = document.querySelector('aside.toc');
+            if (!toc) return;
+            const links = toc.querySelectorAll('a');
+            if (!links.length) return;
+            const headings = [];
+            links.forEach(a => {
+                const id = decodeURIComponent(a.getAttribute('href').slice(1));
+                const el = document.getElementById(id);
+                if (el) headings.push({ el, a });
+            });
+            function update() {
+                let current = headings[0];
+                for (const h of headings) {
+                    if (h.el.getBoundingClientRect().top <= 80) current = h;
+                }
+                links.forEach(a => a.classList.remove('active'));
+                if (current) current.a.classList.add('active');
+            }
+            window.addEventListener('scroll', update, { passive: true });
+            update();
+        })();
     </script>
 </body>
 
