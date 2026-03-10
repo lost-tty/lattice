@@ -605,12 +605,12 @@ impl<S: StateMachine + 'static> SyncProvider for Store<S> {
         })
     }
 
-    fn table_fingerprint(
+    fn witness_fingerprint(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Hash, SyncError>> + Send + '_>> {
         let store = self.intention_store.clone();
         Box::pin(async move {
-            Ok(run_store_read(store, move |guard| Ok(guard.table_fingerprint())).await?)
+            Ok(run_store_read(store, move |guard| Ok(guard.witness_fingerprint())).await?)
         })
     }
 

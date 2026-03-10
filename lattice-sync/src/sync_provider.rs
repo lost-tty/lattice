@@ -85,7 +85,7 @@ pub trait SyncProvider: Send + Sync {
         end: &Hash,
     ) -> Pin<Box<dyn Future<Output = Result<u64, SyncError>> + Send + '_>>;
 
-    /// Fingerprint (XOR sum) of intention hashes in range [start, end)
+    /// Fingerprint (XOR sum) of witnessed intention hashes in range [start, end)
     fn fingerprint_range(
         &self,
         start: &Hash,
@@ -99,8 +99,8 @@ pub trait SyncProvider: Send + Sync {
         end: &Hash,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Hash>, SyncError>> + Send + '_>>;
 
-    /// Global table fingerprint (XOR sum of all intentions)
-    fn table_fingerprint(
+    /// Global table fingerprint (XOR sum of all witnessed intentions)
+    fn witness_fingerprint(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Hash, SyncError>> + Send + '_>>;
 

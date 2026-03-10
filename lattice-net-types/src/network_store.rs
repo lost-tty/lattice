@@ -114,8 +114,8 @@ impl NetworkStore {
         self.sync.hashes_in_range(start, end).await
     }
 
-    pub async fn table_fingerprint(&self) -> Result<Hash, SyncError> {
-        self.sync.table_fingerprint().await
+    pub async fn witness_fingerprint(&self) -> Result<Hash, SyncError> {
+        self.sync.witness_fingerprint().await
     }
 
     // ==================== PeerProvider delegation ====================
@@ -159,8 +159,8 @@ impl RangeStore for NetworkStore {
         self.hashes_in_range(start, end).await
     }
 
-    async fn table_fingerprint(&self) -> Result<Hash, Self::Error> {
-        self.table_fingerprint().await
+    async fn witness_fingerprint(&self) -> Result<Hash, Self::Error> {
+        self.witness_fingerprint().await
     }
 }
 

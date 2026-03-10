@@ -31,43 +31,55 @@ Manage log growth on long-running nodes via stability frontier, snapshots, pruni
 
 > **See:** [Stability Frontier](stability-frontier.md) for the full design.
 
-### 18A: Stability Frontier & Tip Attestations
-- [ ] `SystemOp::TipAttestation { tips: Vec<(PubKey, Hash)> }` — publish changed author tips as SystemOps
-- [ ] Attestation keys in `TABLE_SYSTEM`: `attestation/{attester}/{author} → Hash` (LWW by HLC)
+### 18A: Witness-Only Sync ✅
+Negentropy set reconciliation now operates on witnessed intentions only. Floating (unwitnessed) intentions are excluded from fingerprints and range queries.
+- [x] Move Negentropy fingerprint accumulation from `insert()` to `witness()` — `witness_fingerprint` tracks witnessed intentions only
+- [x] Range queries (`fingerprint_range`, `count_range`, `hashes_in_range`) scan `TABLE_WITNESS_INDEX` instead of `TABLE_INTENTIONS`
+- [x] Verify convergence under network partitions, reordering, and bootstrap
+- [x] Floating intentions excluded from sync — received-but-unwitnessable intentions no longer pollute fingerprints
+- [x] Renamed `table_fingerprint` → `witness_fingerprint` across codebase
+
+### 18B: Epoch Indexes
+Index infrastructure for partitioning the witnessed intention set by prune epoch. No pruning yet — just the machinery to compute epoch-aware fingerprints.
+- [ ] `TABLE_EPOCHS`: `{epoch: u32 BE}{intention_hash: 32 bytes} → ()` — existence means "this intention is below this epoch's cut"
+- [ ] Per-epoch fingerprint: modular sum of all hashes tagged in epoch N (cumulative, includes prior epochs). Persisted in `TABLE_META` as `epoch_fingerprint/{epoch} → Hash`
+- [ ] `Hash::wrapping_sub_assign` for `effective_fingerprint = witness_fingerprint - epoch_fingerprint[epoch]`
+- [ ] Tagging walk: on receiving a `PruneCut`, walk `store_prev` chains from cut vector, insert entries into `TABLE_EPOCHS`. Epoch entries are self-contained (copy forward from prior epoch)
+- [ ] Negentropy merge-skip: iterate `TABLE_INTENTIONS` and `TABLE_EPOCHS` (at agreed epoch prefix) in parallel, skip matching hashes
+
+### 18C: PruneCut & Tip Attestations
+The protocol layer for coordinated pruning. Nodes agree on prune epochs via replicated `SystemOp`s, attest their state, and delete once safety is confirmed.
+- [ ] `SystemOp::PruneCut { epoch: u32, tips: Vec<(PubKey, Hash)> }` — proposed as a system intention, causally depends on the tip intentions it references. Per-author cut vector, monotonic epoch. Max-wins CRDT: higher epoch supersedes lower
+- [ ] `SystemOp::TipAttestation { tips: Vec<(PubKey, Hash)> }` — delta of changed author tips, causally depends on the latest `PruneCut` plus the attested tip intentions. Serves as both progress report and implicit ack of the referenced epoch
+- [ ] Attestation keys in `TABLE_SYSTEM`: `attestation/{author_hex}/{attester_hex} → Hash` (LWW by HLC, raw 32-byte value). Author-first key order for per-author frontier prefix scans. Filtered at query time against active peer list — no tombstoning of removed peers
 - [ ] Derive per-author frontier: `frontier[A] = min(tip[A] across all Active peers)`
 - [ ] Attestation triggers: post-sync, batch threshold, periodic heartbeat (~15 min), graceful shutdown
+- [ ] **Deletion safety:** A node deletes tagged intentions only when all active peers have emitted a `TipAttestation` causally depending on the relevant `PruneCut`. Proposer threshold with jitter to avoid multi-proposer noise
+- [ ] **Sync handshake:** Nodes exchange epoch IDs. Negentropy runs over `[agreed_epoch, ∞)`. Behind node fast-forwards epoch via the `PruneCut` intention (guaranteed receivable — causal deps ensure data is present)
+- [ ] **Stale peer return:** Node behind on epochs that connects to a node that has already deleted needs snapshot bootstrap (→ M19D)
 - [ ] **Lag metric:** Per-peer divergence from local tips, surfaced via `NodeEvent::PeerLagWarning` and `store status`
 
-### 18B: Snapshotting
+### 18D: Snapshotting
 - [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Options: tempfile-based replay (works today, heavy on I/O) or in-memory `StateBackend` variant (cleaner). **Note:** `StateMachine::snapshot()`/`restore()` were removed in M16A Step 3 — the old `StateBackend::snapshot_internal()` serialization format is deleted. M18 will design a new snapshot mechanism tailored to pruning requirements (frontier-aware, incremental, possibly stored in a separate `snapshot.db`).
 - [ ] Store snapshots in `snapshot.db` (per-store, includes `TABLE_SYSTEM` attestation state)
 - [ ] **Future optimization:** Inverse operations stored in `WitnessRecord` could allow rolling back from current state to frontier in O(head − frontier), avoiding replay. Deferred until profiling shows replay is a bottleneck.
 
-### 18C: Pruning
-- [ ] `truncate_prefix` for all intentions per author up to `frontier[A]`
-- [ ] Discard individual attestation intentions below the frontier (snapshot carries state forward)
-- [ ] Preserve intentions newer than frontier
-
-### 18C½: Store-Level Pruning Hints
+### 18D½: Store-Level Pruning Hints
 Store-defined intention metadata that guides consensus pruning. Both hints are advisory — pruning only happens once all peers have attested past the relevant intentions (standard frontier rules).
 - [ ] **Supersede hint** (`supersedes_all: true`): Intention declares it supersedes all prior state (e.g., a full snapshot-as-intention, or a state reset). Everything causally before it is safe to prune. The pruner can treat it as a new root, discarding the entire prefix. Useful for stores that periodically compact their state into a single intention.
 - [ ] **Ephemeral hint** (`ephemeral: true`): Intention declares it is unlikely to ever be a causal dependency (e.g., a key deletion in a KV store — no future operation will depend on the deleted value). Chains ending at ephemeral intentions may be pruned more aggressively — once all peers have witnessed them past the frontier, the pruner can discard them without waiting for a full snapshot cycle.
 - [ ] Wire hints through `Intention` proto field (bitflags or enum), surface in `Op` for state machines, respect in `truncate_prefix` (18C).
 
-### 18D: Checkpointing / Finality
+### 18E: Checkpointing / Finality
 - [ ] Periodically finalize state hash (protect against "Deep History Attacks")
 - [ ] Signed checkpoint intentions in sigchain
 - [ ] Nodes reject intentions that contradict finalized checkpoints
 
-### 18E: Hash Index Optimization ✅
+### 18F: Hash Index Optimization ✅
 - [x] Replace in-memory `HashSet<Hash>` with on-disk index (`TABLE_WITNESS_INDEX` in redb)
 - [x] Support 100M+ intentions without excessive RAM
 
-### 18F: Advanced Sync Optimization (Future)
-- [ ] **Modular-Add Fingerprints:** Replace XOR-based fingerprints with modular addition (mod 2^256). XOR is linear and cancels duplicates (`a ⊕ a = 0`); mod-add is strictly more robust at identical cost. Affected sites:
-  - `IntentionStore::xor_fingerprint()` / `derive_table_fingerprint()` / `fingerprint_range()` in `lattice-kernel`
-  - `SyncProvider` trait docs in `lattice-kernel/src/sync_provider.rs`
-  - Reconciler mock in `lattice-sync` tests
+### 18G: Advanced Sync Optimization (Future)
 - [ ] **Persistent Merkle Index / Range Accumulator:**
   - Avoid O(N) scans for range fingerprints (currently linear)
   - Pre-compute internal node hashes in a B-Tree or Merkle Tree structure
@@ -196,7 +208,7 @@ Run the kernel on the RP2350.
 - [ ] **REGRESSION**: Graceful reconnect after sleep/wake (may fix gossip regression)
 - [x] **REGRESSION**: `node set-name` created duplicate intentions. Root cause: child stores share parent's PeerManager, but `set_name` iterated all store IDs. Fixed: deduplicate by `Arc::as_ptr` on PeerManager.
 - [ ] **Denial of Service (DoS) via Gossip**: Implement rate limiting in GossipManager and drop messages from peers who send invalid data repeatedly.
-- [ ] **Optimize `derive_table_fingerprint`**: Currently recalculates the table fingerprint from scratch. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
+- [ ] **Optimize `derive_witness_fingerprint`**: Currently recalculates the witness fingerprint by scanning `TABLE_WITNESS_INDEX` from scratch on startup. For large datasets, this should be optimized to use incremental updates or caching to avoid O(N) recalculation.
 - [ ] **DAG Reachability Index**: `DagQueries` methods (`find_lca`, `is_ancestor`, `get_path`) use naive BFS. For large DAGs, add generation numbers (prune impossible ancestors by depth) or bloom filters (compact ancestor summaries) for O(log N) reachability. Not needed until BFS becomes a bottleneck.
 - [ ] **Swift bindings: propagate `MethodKind`**: `store_inspect()` in `lattice-bindings` builds `MethodInfo` from the proto `ServiceDescriptor` directly, bypassing `store_list_methods()`. Add a `kind` field to the bindings `MethodInfo` struct and populate it.
 - [ ] **Expose field format hints via API**: `field_formats()` (Hex, Utf8) lives on `Introspectable` but has no RPC. GUIs render all `bytes` fields as raw hex without it. Add an RPC or bundle hints into the descriptor response. Drive by actual GUI needs.

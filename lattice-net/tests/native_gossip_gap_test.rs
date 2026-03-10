@@ -97,7 +97,7 @@ async fn test_native_gossip_gap_recovery() {
     // Record B's fingerprint after H0 for gap verification later
     let fp_after_h0 = handle_b
         .as_sync_provider()
-        .table_fingerprint()
+        .witness_fingerprint()
         .await
         .expect("fingerprint");
 
@@ -120,7 +120,7 @@ async fn test_native_gossip_gap_recovery() {
     // VERIFY GAP: B's fingerprint should still match its post-H0 state
     let fp_b_now = handle_b
         .as_sync_provider()
-        .table_fingerprint()
+        .witness_fingerprint()
         .await
         .expect("fingerprint");
     assert_eq!(

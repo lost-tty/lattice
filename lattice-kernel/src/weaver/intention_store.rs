@@ -125,9 +125,9 @@ pub struct IntentionStore {
     /// `Hash::ZERO` when the witness log is empty (genesis sentinel).
     last_witness_hash: Hash,
 
-    /// XOR fingerprint of all intention hashes in TABLE_INTENTIONS.
-    /// Derived on startup, maintained incrementally on insert().
-    table_fingerprint: Hash,
+    /// XOR fingerprint of all witnessed intention hashes (from TABLE_WITNESS_INDEX).
+    /// Derived on startup, maintained incrementally on witness().
+    witness_fingerprint: Hash,
 }
 
 impl IntentionStore {
@@ -171,7 +171,7 @@ impl IntentionStore {
             author_tips: HashMap::new(),
             witness_seq: 0,
             last_witness_hash: Hash::ZERO,
-            table_fingerprint: Hash::ZERO,
+            witness_fingerprint: Hash::ZERO,
         };
 
         // Check whether all derived indexes are populated.  If any are
@@ -199,7 +199,7 @@ impl IntentionStore {
         }
 
         // Derive table fingerprint from all intention keys
-        store.derive_table_fingerprint()?;
+        store.derive_witness_fingerprint()?;
 
         Ok(store)
     }
@@ -399,9 +399,6 @@ impl IntentionStore {
         }
         write_txn.commit()?;
 
-        // Update in-memory fingerprint
-        self.xor_fingerprint(&hash);
-
         Ok(hash)
     }
 
@@ -485,6 +482,7 @@ impl IntentionStore {
         self.witness_seq = seq;
         self.last_witness_hash = new_witness_hash;
         self.author_tips.insert(intention.author, hash);
+        self.xor_fingerprint(&hash);
 
         Ok(record)
     }
@@ -539,10 +537,11 @@ impl IntentionStore {
         Ok(results)
     }
 
-    /// Derive table fingerprint by XOR-scanning all TABLE_INTENTIONS keys.
-    fn derive_table_fingerprint(&mut self) -> Result<(), IntentionStoreError> {
+    /// Derive table fingerprint by XOR-scanning all TABLE_WITNESS_INDEX keys
+    /// (witnessed intention hashes only).
+    fn derive_witness_fingerprint(&mut self) -> Result<(), IntentionStoreError> {
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let table = read_txn.open_table(TABLE_WITNESS_INDEX)?;
         let mut fp = [0u8; 32];
         for entry in table.iter()? {
             let (k, _) = entry?;
@@ -550,21 +549,21 @@ impl IntentionStore {
                 fp[i] ^= byte;
             }
         }
-        self.table_fingerprint = Hash(fp);
+        self.witness_fingerprint = Hash(fp);
         Ok(())
     }
 
     /// XOR a single hash into the running fingerprint.
     fn xor_fingerprint(&mut self, hash: &Hash) {
         for (i, byte) in hash.as_bytes().iter().enumerate() {
-            self.table_fingerprint.0[i] ^= byte;
+            self.witness_fingerprint.0[i] ^= byte;
         }
     }
 
-    /// XOR fingerprint of all stored intention hashes.
-    /// Two nodes with identical fingerprints have identical intention sets.
-    pub fn table_fingerprint(&self) -> Hash {
-        self.table_fingerprint
+    /// XOR fingerprint of all witnessed intention hashes.
+    /// Two nodes with identical fingerprints have identical witnessed intention sets.
+    pub fn witness_fingerprint(&self) -> Hash {
+        self.witness_fingerprint
     }
 
     /// Number of intentions in the store.
@@ -574,23 +573,23 @@ impl IntentionStore {
         Ok(table.len()?)
     }
 
-    // --- Negentropy range query support ---
+    // --- Negentropy range query support (witnessed intentions only) ---
 
-    /// Count intention hashes in the range [start, end).
+    /// Count witnessed intention hashes in the range [start, end).
     pub fn count_range(&self, start: &Hash, end: &Hash) -> Result<u64, IntentionStoreError> {
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let table = read_txn.open_table(TABLE_WITNESS_INDEX)?;
         let mut range = table.range(start.as_bytes().as_slice()..end.as_bytes().as_slice())?;
         range.try_fold(0u64, |acc, item| {
             item.map(|_| acc + 1).map_err(IntentionStoreError::from)
         })
     }
 
-    /// XOR fingerprint of all intention hashes in the range [start, end).
+    /// XOR fingerprint of witnessed intention hashes in the range [start, end).
     /// Returns `Hash::ZERO` for an empty range.
     pub fn fingerprint_range(&self, start: &Hash, end: &Hash) -> Result<Hash, IntentionStoreError> {
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let table = read_txn.open_table(TABLE_WITNESS_INDEX)?;
         let mut fp = [0u8; 32];
         for entry in table.range(start.as_bytes().as_slice()..end.as_bytes().as_slice())? {
             let (k, _) = entry?;
@@ -602,7 +601,7 @@ impl IntentionStore {
         Ok(Hash(fp))
     }
 
-    /// List all intention hashes in the range [start, end).
+    /// List witnessed intention hashes in the range [start, end).
     /// Intended for small leaf ranges during Negentropy reconciliation.
     /// Returns an error if the range contains more than `MAX_RANGE_HASHES` items to prevent DoS.
     pub fn hashes_in_range(
@@ -611,7 +610,7 @@ impl IntentionStore {
         end: &Hash,
     ) -> Result<Vec<Hash>, IntentionStoreError> {
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let table = read_txn.open_table(TABLE_WITNESS_INDEX)?;
         let range = table.range(start.as_bytes().as_slice()..end.as_bytes().as_slice())?;
 
         let mut results = Vec::new();
@@ -623,8 +622,8 @@ impl IntentionStore {
             let key_bytes = k.value();
             results.push(
                 Hash::try_from(key_bytes).map_err(|_| Corruption::FieldLength {
-                    table: "intentions",
-                    field: "hash_key",
+                    table: "witness_index",
+                    field: "intention_hash",
                     expected: 32,
                     actual: key_bytes.len(),
                 })?,
@@ -1930,25 +1929,32 @@ mod tests {
     #[test]
     fn range_queries_full_range() {
         let (key, pk) = make_key();
+        let signer = test_signing_key();
         let mut store = open_store_in_memory();
 
-        // Insert three intentions
+        // Insert and witness three intentions
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
-        let s1 = SignedIntention::sign(i1.clone(), &key);
-        store.insert(&s1).unwrap();
+        store
+            .insert(&SignedIntention::sign(i1.clone(), &key))
+            .unwrap();
+        store.witness(&i1, 100, &signer).unwrap();
 
         let i2 = make_intention(pk, i1.hash(), vec![2]);
-        let s2 = SignedIntention::sign(i2.clone(), &key);
-        store.insert(&s2).unwrap();
+        store
+            .insert(&SignedIntention::sign(i2.clone(), &key))
+            .unwrap();
+        store.witness(&i2, 200, &signer).unwrap();
 
         let i3 = make_intention(pk, i2.hash(), vec![3]);
-        let s3 = SignedIntention::sign(i3.clone(), &key);
-        store.insert(&s3).unwrap();
+        store
+            .insert(&SignedIntention::sign(i3.clone(), &key))
+            .unwrap();
+        store.witness(&i3, 300, &signer).unwrap();
 
         let lo = Hash([0x00; 32]);
         let hi = Hash([0xFF; 32]);
 
-        // Count covers everything
+        // Count covers all witnessed intentions
         assert_eq!(store.count_range(&lo, &hi).unwrap(), 3);
 
         // hashes_in_range returns all three, sorted
@@ -1980,21 +1986,27 @@ mod tests {
     #[test]
     fn range_queries_partial_range() {
         let (key, pk) = make_key();
+        let signer = test_signing_key();
         let mut store = open_store_in_memory();
 
-        // Insert several intentions
+        // Insert and witness several intentions
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
         store
             .insert(&SignedIntention::sign(i1.clone(), &key))
             .unwrap();
+        store.witness(&i1, 100, &signer).unwrap();
+
         let i2 = make_intention(pk, i1.hash(), vec![2]);
         store
             .insert(&SignedIntention::sign(i2.clone(), &key))
             .unwrap();
+        store.witness(&i2, 200, &signer).unwrap();
+
         let i3 = make_intention(pk, i2.hash(), vec![3]);
         store
             .insert(&SignedIntention::sign(i3.clone(), &key))
             .unwrap();
+        store.witness(&i3, 300, &signer).unwrap();
 
         // Collect and sort all hashes
         let lo = Hash([0x00; 32]);
@@ -2085,31 +2097,38 @@ mod tests {
         assert_eq!(store.fingerprint_range(&hi, &lo).unwrap(), Hash::ZERO);
     }
 
-    // --- table_fingerprint tests ---
+    // --- witness_fingerprint tests ---
 
     #[test]
-    fn table_fingerprint_empty_store() {
+    fn witness_fingerprint_empty_store() {
         let store = open_store_in_memory();
-        assert_eq!(store.table_fingerprint(), Hash::ZERO);
+        assert_eq!(store.witness_fingerprint(), Hash::ZERO);
     }
 
     #[test]
-    fn table_fingerprint_incremental() {
+    fn witness_fingerprint_incremental() {
         let (key, pk) = make_key();
+        let signer = test_signing_key();
         let mut store = open_store_in_memory();
 
-        // Insert first intention
+        // Insert and witness first intention
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
         store
             .insert(&SignedIntention::sign(i1.clone(), &key))
             .unwrap();
-        assert_eq!(store.table_fingerprint(), i1.hash());
+        // Fingerprint should still be zero (not witnessed yet)
+        assert_eq!(store.witness_fingerprint(), Hash::ZERO);
+        store.witness(&i1, 100, &signer).unwrap();
+        assert_eq!(store.witness_fingerprint(), i1.hash());
 
-        // Insert second — fingerprint is XOR of both
+        // Insert and witness second — fingerprint is XOR of both
         let i2 = make_intention(pk, i1.hash(), vec![2]);
         store
             .insert(&SignedIntention::sign(i2.clone(), &key))
             .unwrap();
+        // Still only i1 in fingerprint (i2 not witnessed yet)
+        assert_eq!(store.witness_fingerprint(), i1.hash());
+        store.witness(&i2, 200, &signer).unwrap();
 
         let mut expected = [0u8; 32];
         for (i, byte) in i1.hash().as_bytes().iter().enumerate() {
@@ -2118,48 +2137,57 @@ mod tests {
         for (i, byte) in i2.hash().as_bytes().iter().enumerate() {
             expected[i] ^= byte;
         }
-        assert_eq!(store.table_fingerprint(), Hash(expected));
+        assert_eq!(store.witness_fingerprint(), Hash(expected));
     }
 
     #[test]
-    fn table_fingerprint_duplicate_idempotent() {
+    fn witness_fingerprint_duplicate_idempotent() {
         let (key, pk) = make_key();
+        let signer = test_signing_key();
         let mut store = open_store_in_memory();
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
         let signed = SignedIntention::sign(i1.clone(), &key);
         store.insert(&signed).unwrap();
-        let fp_after_first = store.table_fingerprint();
+        store.witness(&i1, 100, &signer).unwrap();
+        let fp_after_first = store.witness_fingerprint();
+        assert_ne!(fp_after_first, Hash::ZERO);
 
         // Duplicate insert should not change the fingerprint
         store.insert(&signed).unwrap();
-        assert_eq!(store.table_fingerprint(), fp_after_first);
+        assert_eq!(store.witness_fingerprint(), fp_after_first);
     }
 
     #[test]
-    fn table_fingerprint_consistent_with_range() {
+    fn witness_fingerprint_consistent_with_range() {
         let (key, pk) = make_key();
+        let signer = test_signing_key();
         let mut store = open_store_in_memory();
 
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
         store
             .insert(&SignedIntention::sign(i1.clone(), &key))
             .unwrap();
+        store.witness(&i1, 100, &signer).unwrap();
+
         let i2 = make_intention(pk, i1.hash(), vec![2]);
         store
             .insert(&SignedIntention::sign(i2.clone(), &key))
             .unwrap();
+        store.witness(&i2, 200, &signer).unwrap();
 
         let lo = Hash([0x00; 32]);
         let hi = Hash([0xFF; 32]);
         let range_fp = store.fingerprint_range(&lo, &hi).unwrap();
-        assert_eq!(store.table_fingerprint(), range_fp);
+        assert_ne!(range_fp, Hash::ZERO);
+        assert_eq!(store.witness_fingerprint(), range_fp);
     }
 
     #[test]
-    fn table_fingerprint_survives_reopen() {
+    fn witness_fingerprint_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let (key, pk) = make_key();
+        let signer = test_signing_key();
 
         let fp_before;
         {
@@ -2168,47 +2196,54 @@ mod tests {
             store
                 .insert(&SignedIntention::sign(i1.clone(), &key))
                 .unwrap();
-            store.witness(&i1, 100, &test_signing_key()).unwrap();
+            store.witness(&i1, 100, &signer).unwrap();
+
             let i2 = make_intention(pk, i1.hash(), vec![2]);
             store
                 .insert(&SignedIntention::sign(i2.clone(), &key))
                 .unwrap();
-            // i2 is floating (not witnessed) — fingerprint still covers both
-            fp_before = store.table_fingerprint();
+            // i2 is floating (not witnessed) — fingerprint covers only i1
+            fp_before = store.witness_fingerprint();
             assert_ne!(fp_before, Hash::ZERO);
+            assert_eq!(fp_before, i1.hash());
         }
 
-        // Reopen — fingerprint is re-derived from TABLE_INTENTIONS
+        // Reopen — fingerprint is re-derived from TABLE_WITNESS_INDEX
         let store = open_store(dir.path());
-        assert_eq!(store.table_fingerprint(), fp_before);
+        assert_eq!(store.witness_fingerprint(), fp_before);
     }
 
     #[test]
-    fn table_fingerprint_divergent_stores() {
+    fn witness_fingerprint_divergent_stores() {
         let (key, pk) = make_key();
+        let signer = test_signing_key();
 
         let mut store_a = open_store_in_memory();
         let mut store_b = open_store_in_memory();
 
-        // Same first intention
+        // Same first intention — insert and witness on both
         let i1 = make_intention(pk, Hash::ZERO, vec![1]);
         let signed1 = SignedIntention::sign(i1.clone(), &key);
         store_a.insert(&signed1).unwrap();
+        store_a.witness(&i1, 100, &signer).unwrap();
         store_b.insert(&signed1).unwrap();
-        assert_eq!(store_a.table_fingerprint(), store_b.table_fingerprint());
+        store_b.witness(&i1, 100, &signer).unwrap();
+        assert_eq!(store_a.witness_fingerprint(), store_b.witness_fingerprint());
 
-        // Diverge: only store_a gets i2
+        // Diverge: only store_a witnesses i2
         let i2 = make_intention(pk, i1.hash(), vec![2]);
         store_a
             .insert(&SignedIntention::sign(i2.clone(), &key))
             .unwrap();
-        assert_ne!(store_a.table_fingerprint(), store_b.table_fingerprint());
+        store_a.witness(&i2, 200, &signer).unwrap();
+        assert_ne!(store_a.witness_fingerprint(), store_b.witness_fingerprint());
 
-        // Converge: store_b also gets i2
+        // Converge: store_b also witnesses i2
         store_b
             .insert(&SignedIntention::sign(i2.clone(), &key))
             .unwrap();
-        assert_eq!(store_a.table_fingerprint(), store_b.table_fingerprint());
+        store_b.witness(&i2, 200, &signer).unwrap();
+        assert_eq!(store_a.witness_fingerprint(), store_b.witness_fingerprint());
     }
 
     // -----------------------------------------------------------------------

@@ -4,7 +4,7 @@
 //! `SystemLayer<NullState>` owns the backend for chain tip tracking and system tables.
 //!
 //! This lets tests for sync, gossip, gap recovery, and store management create
-//! intentions (via `SystemBatch`) and verify convergence (via `table_fingerprint`
+//! intentions (via `SystemBatch`) and verify convergence (via `witness_fingerprint`
 //! / `intention_count`) without pulling in kvstore or any real store crate.
 
 use lattice_storage::{StateContext, StateDbError, StateLogic};

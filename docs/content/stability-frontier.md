@@ -9,7 +9,7 @@ Design for tracking per-peer sync state, deriving a global stability frontier fo
 
 Lattice nodes need to know what other nodes have, per store. Two outputs derive from this:
 
-1. **Stability frontier** — the largest causally-closed set of intentions that *all* peers provably hold. Everything below this frontier is safe to prune (M15B).
+1. **Stability frontier** — the largest causally-closed set of intentions that *all* peers provably hold. Everything below this frontier is safe to prune (M18C).
 2. **Lag metric** — per-peer divergence, surfaced to the user as a durability health indicator ("1 of 3 replicas is stale — some data exists on only one device").
 
 ## Key Insight: Per-Author Chains
@@ -37,13 +37,21 @@ SystemOp::TipAttestation {
 }
 ```
 
-The `SystemStore` merges these into a full per-peer view using its existing LWW-CRDT semantics. Each entry is stored as a system key:
+The `SystemStore` merges these into a materialized per-author view using its existing LWW-CRDT semantics.
+
+### Storage Format
 
 ```
-attestation/{attester}/{author} → Hash    (LWW by HLC)
+Key:   attestation/{author_hex}/{attester_hex}
+Value: Hash (32 bytes, raw)
+CRDT:  LWW by HLC (standard KVTable envelope)
 ```
 
-The full tip map for any peer is always available by reading `attestation/{peer}/*` from `TABLE_SYSTEM`. No special attestation state machine — just system keys with the merge logic that already exists.
+Keys are ordered **author-first** so that deriving `frontier[A]` is a single prefix scan over `attestation/{A}/`, collecting one row per attester. The reverse query ("what has peer X attested?") has no production use case — frontier derivation is the only consumer.
+
+Values are the raw 32-byte `Hash` of the attested tip. No protobuf wrapper — the type is fixed-size and unlikely to evolve.
+
+No special attestation state machine — just system keys with the merge logic that already exists.
 
 ### Transitive Relay
 
@@ -83,11 +91,14 @@ Once a node has built the full view from `TABLE_SYSTEM` attestation keys:
 
 ```
 For each author A:
-    frontier[A] = min tip across all peers
+    peers = active peer set from TABLE_SYSTEM (peer/{pk}/status == Active)
+    frontier[A] = min tip[A] across peers
     (verified by walking store_prev to confirm ancestry)
 
 Prunable: all intentions from each author up to frontier[A]
 ```
+
+The frontier query always filters attestation rows against the **current active peer list**. Attestation rows from removed or inactive peers are ignored — not tombstoned. They become dead weight that is eventually discarded when the log below the frontier is pruned. This means removing a stale peer immediately unblocks the frontier without requiring any attestation cleanup.
 
 The global frontier advances monotonically as peers sync.
 
@@ -112,7 +123,7 @@ This surfaces as `NodeEvent::PeerLagWarning` or via `store status` in the CLI.
 
 ## Relationship to Snapshots
 
-The stability frontier defines *where* to snapshot; M15A/M15D provide the *mechanism*. New peers bootstrap from a snapshot rather than replaying the full log. The current system uses an implicit empty snapshot (genesis) — once pruning is implemented, the frontier becomes the explicit snapshot point.
+The stability frontier defines *where* to snapshot; M18D provides the *mechanism*. New peers bootstrap from a snapshot rather than replaying the full log. The current system uses an implicit empty snapshot (genesis) — once pruning is implemented, the frontier becomes the explicit snapshot point.
 
 On compaction, the latest attestation per peer is materialized into the snapshot (as part of `TABLE_SYSTEM` state). Individual attestation intentions in the pruned log are discarded — the snapshot carries the state forward. No pinning required.
 
@@ -121,11 +132,11 @@ Lifecycle: frontier advances → snapshot state at frontier (including attestati
 ## Where It Fits
 
 - `SessionTracker` — extended with `peer_tips` per store
-- Pruning (M15C) — uses the frontier for `truncate_prefix`
-- Snapshots (M15B) — frontier defines the snapshot point
+- Pruning (M18C) — uses the frontier for epoch-based deletion
+- Snapshots (M18D) — frontier defines the snapshot point
 - Future: the lag metric enables durability warnings in the SwiftUI app
 
 ## Open Questions
 
-- **Peer state impact on frontier:** An offline or revoked peer's stale tips would permanently bottleneck the frontier. The frontier calculation likely needs to consider only `Active` peers from the `SystemStore`, but the exact policy (grace periods, revocation semantics) is to be designed separately.
+- ~~**Peer state impact on frontier:**~~ **Resolved:** The frontier is computed only over `Active` peers from `TABLE_SYSTEM`. Removing or deactivating a stale peer immediately unblocks the frontier. Attestation rows from removed peers are left in place (not tombstoned) and pruned with the log. Grace periods and automatic demotion policies are deferred to the peer lifecycle design.
 - **Author identity cardinality:** The design assumes a manageable number of authors per store (tens to low hundreds). Stores with thousands of authors would increase attestation size and frontier computation cost.

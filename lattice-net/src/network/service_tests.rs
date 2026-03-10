@@ -138,7 +138,7 @@ mod tests {
             Box::pin(async { unreachable!("stub") })
         }
 
-        fn table_fingerprint(
+        fn witness_fingerprint(
             &self,
         ) -> Pin<Box<dyn Future<Output = Result<Hash, SyncError>> + Send + '_>> {
             Box::pin(async { unreachable!("stub") })

@@ -83,12 +83,12 @@ pub async fn wait_for_fingerprint_match(
         loop {
             let fp_a = store_a
                 .as_sync_provider()
-                .table_fingerprint()
+                .witness_fingerprint()
                 .await
                 .expect("fingerprint a");
             let fp_b = store_b
                 .as_sync_provider()
-                .table_fingerprint()
+                .witness_fingerprint()
                 .await
                 .expect("fingerprint b");
             if fp_a == fp_b {
@@ -108,12 +108,12 @@ pub async fn assert_fingerprints_match(
 ) {
     let fp_a = store_a
         .as_sync_provider()
-        .table_fingerprint()
+        .witness_fingerprint()
         .await
         .expect("fingerprint a");
     let fp_b = store_b
         .as_sync_provider()
-        .table_fingerprint()
+        .witness_fingerprint()
         .await
         .expect("fingerprint b");
     assert_eq!(fp_a, fp_b, "store fingerprints diverged");
@@ -126,12 +126,12 @@ pub async fn assert_fingerprints_differ(
 ) {
     let fp_a = store_a
         .as_sync_provider()
-        .table_fingerprint()
+        .witness_fingerprint()
         .await
         .expect("fingerprint a");
     let fp_b = store_b
         .as_sync_provider()
-        .table_fingerprint()
+        .witness_fingerprint()
         .await
         .expect("fingerprint b");
     assert_ne!(fp_a, fp_b, "store fingerprints should differ");

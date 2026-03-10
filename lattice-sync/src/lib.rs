@@ -45,7 +45,7 @@ pub trait RangeStore: Sync + Send {
     async fn fingerprint_range(&self, start: &Hash, end: &Hash) -> Result<Hash, Self::Error>;
     async fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, Self::Error>;
     /// Global fingerprint of all items in the store (O(1)).
-    async fn table_fingerprint(&self) -> Result<Hash, Self::Error>;
+    async fn witness_fingerprint(&self) -> Result<Hash, Self::Error>;
 }
 
 /// Blanket impl: any `SyncProvider` automatically satisfies `RangeStore`.
@@ -65,8 +65,8 @@ impl<T: SyncProvider + ?Sized> RangeStore for T {
     async fn hashes_in_range(&self, start: &Hash, end: &Hash) -> Result<Vec<Hash>, SyncError> {
         SyncProvider::hashes_in_range(self, start, end).await
     }
-    async fn table_fingerprint(&self) -> Result<Hash, SyncError> {
-        SyncProvider::table_fingerprint(self).await
+    async fn witness_fingerprint(&self) -> Result<Hash, SyncError> {
+        SyncProvider::witness_fingerprint(self).await
     }
 }
 
@@ -124,7 +124,7 @@ impl<E: std::error::Error + 'static> std::error::Error for ReconcileError<E> {
 impl<'a, S: RangeStore> Reconciler<'a, S> {
     /// Produce the initial message to start reconciliation.
     pub async fn initiate(&self) -> Result<ReconcileMessage, S::Error> {
-        let fp = self.store.table_fingerprint().await?;
+        let fp = self.store.witness_fingerprint().await?;
         let count = self.store.count_range(&RANGE_MIN, &RANGE_MAX).await?;
         Ok(ReconcileMessage {
             content: Some(ReconcileContent::RangeFingerprint(RangeFingerprint {
@@ -409,7 +409,7 @@ mod tests {
             Ok(self.hashes.range(start..end).copied().collect())
         }
 
-        async fn table_fingerprint(&self) -> Result<Hash, Self::Error> {
+        async fn witness_fingerprint(&self) -> Result<Hash, Self::Error> {
             self.fingerprint_range(&RANGE_MIN, &RANGE_MAX).await
         }
     }
