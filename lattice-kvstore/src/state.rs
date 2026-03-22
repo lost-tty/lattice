@@ -6,6 +6,7 @@
 //! Uses redb for efficient embedded storage. Per-key state is encoded as
 //! `proto::Value { oneof kind { value | tombstone }, heads[] }` via `KVTable`.
 
+use lattice_kvtable::KvRead;
 use lattice_storage::{StateContext, StateDbError, StateLogic};
 use lattice_store_base::{MethodKind, MethodMeta};
 use std::future::Future;

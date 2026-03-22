@@ -9,5 +9,12 @@ pub const STORE_TYPE_KVSTORE: &str = "core:kvstore";
 /// Store type identifier for LogStore  
 pub const STORE_TYPE_LOGSTORE: &str = "core:logstore";
 
+/// Store type identifier for RootStore (app definitions and bundles)
+pub const STORE_TYPE_ROOTSTORE: &str = "core:rootstore";
+
 /// List of core store types
-pub const CORE_STORE_TYPES: &[&str] = &[STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE];
+pub const CORE_STORE_TYPES: &[&str] = &[
+    STORE_TYPE_KVSTORE,
+    STORE_TYPE_LOGSTORE,
+    STORE_TYPE_ROOTSTORE,
+];

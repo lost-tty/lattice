@@ -1,5 +1,12 @@
-async function loadStreams(storeId) {
-  const streams = (await API.dynamic.ListStreams({ id: storeId })).streams || [];
+import { html, useState, useEffect, useRef } from './util.js';
+import * as Helpers from '../helpers.js';
+import * as S from '../state.js';
+import * as Schema from '../schema.js';
+import { showSubscribeStream, clearSubEvents, doUnsubscribe } from './actions.js';
+import { sdk } from '../sdk.js';
+
+export async function loadStreams(storeId) {
+  const streams = (await sdk.api.dynamic.ListStreams({ id: storeId })).streams || [];
   return html`<${StreamsView} streams=${streams} storeId=${storeId} />`;
 }
 

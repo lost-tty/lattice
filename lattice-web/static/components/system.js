@@ -1,3 +1,7 @@
+import { html, hex, fmtTime } from './util.js';
+import * as Helpers from '../helpers.js';
+import { sdk, pb } from '../sdk.js';
+
 // Decode a system table value based on known key patterns.
 // Mirrors the CLI's decode_value() in store_commands.rs.
 function decodeSystemValue(key, value) {
@@ -51,7 +55,7 @@ function decodeSystemValue(key, value) {
 
 // Decode a single field at tag 1 from a protobuf buffer.
 function decodeTag1(buf, wireType, readFn) {
-  const r = protobuf.Reader.create(buf);
+  const r = pb.Reader.create(buf);
   while (r.pos < r.len) {
     const tag = r.uint32();
     if ((tag >>> 3) === 1 && (tag & 7) === wireType) return readFn(r);
@@ -65,7 +69,7 @@ const decodeTag1Bytes  = buf => decodeTag1(buf, 2, r => r.bytes());
 
 // Decode the PeerStrategy oneof (tags 1=Independent, 2=Inherited, 3=Snapshot).
 function decodeStrategy(buf) {
-  const r = protobuf.Reader.create(buf);
+  const r = pb.Reader.create(buf);
   while (r.pos < r.len) {
     const tag = r.uint32();
     const field = tag >>> 3;
@@ -82,8 +86,8 @@ function decodeStrategy(buf) {
   return null;
 }
 
-async function loadSystem(storeId) {
-  const entries = (await API.store.SystemList({ id: storeId })).entries || [];
+export async function loadSystem(storeId) {
+  const entries = (await sdk.api.store.SystemList({ id: storeId })).entries || [];
   if (entries.length === 0) {
     return html`<div class="empty-state">No system entries</div>`;
   }

@@ -248,22 +248,88 @@ impl<'a, 'txn> KVTable<'a, 'txn> {
         };
         Ok(Some(winner))
     }
+}
+
+// ---------------------------------------------------------------------------
+// KvRead — shared read interface for both KVTable and ReadOnlyKVTable
+// ---------------------------------------------------------------------------
+
+/// Read-only operations on a KV table with LWW-resolved values.
+///
+/// Implemented by both `KVTable` (mutable, write-transaction) and
+/// `ReadOnlyKVTable` (immutable, read-transaction) to avoid duplicating
+/// the get/heads/range/inspect logic.
+pub trait KvRead {
+    #[doc(hidden)]
+    fn readable_table(&self) -> &(impl ReadableTable<&'static [u8], &'static [u8]> + ?Sized);
 
     /// Get the materialized LWW value for a key.
     /// Returns `None` for missing keys or tombstone-only.
-    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
-        match self.table.get(key)? {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
+        match self.readable_table().get(key)? {
             Some(v) => Ok(decode_lww(v.value())?),
             None => Ok(None),
         }
     }
 
+    /// Get the materialized LWW value and conflict status for a key.
+    ///
+    /// Returns `(value, conflicted)` where `conflicted` is true when
+    /// `heads.len() > 1`, indicating concurrent writes exist.
+    fn get_with_conflict(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, bool), KvTableError> {
+        match self.readable_table().get(key)? {
+            Some(v) => decode_lww_with_conflict(v.value()),
+            None => Ok((None, false)),
+        }
+    }
+
     /// Return just the head hashes for a key.
-    pub fn heads(&self, key: &[u8]) -> Result<Vec<Hash>, KvTableError> {
-        match self.table.get(key)? {
+    fn heads(&self, key: &[u8]) -> Result<Vec<Hash>, KvTableError> {
+        match self.readable_table().get(key)? {
             Some(v) => decode_heads(v.value()),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// Full inspection of a key: value, tombstone status, conflict flag, and all head hashes.
+    fn inspect(&self, key: &[u8]) -> Result<InspectResult, KvTableError> {
+        match self.readable_table().get(key)? {
+            Some(v) => decode_inspect(v.value()),
+            None => Ok(InspectResult {
+                exists: false,
+                value: None,
+                tombstone: false,
+                conflicted: false,
+                heads: Vec::new(),
+            }),
+        }
+    }
+
+    /// Iterate a key range, yielding `(key_bytes, Option<value>, conflicted)`.
+    ///
+    /// Each value is LWW-resolved: `Some(bytes)` for live entries, `None` for
+    /// tombstones. Callers never see raw encoding.
+    fn range<'b, 'me, KR>(
+        &'me self,
+        range: impl RangeBounds<KR> + 'b,
+    ) -> Result<LwwRange<'me>, KvTableError>
+    where
+        KR: std::borrow::Borrow<<&'static [u8] as redb::Value>::SelfType<'b>> + 'b,
+    {
+        let inner = self.readable_table().range(range)?;
+        Ok(LwwRange { inner })
+    }
+
+    /// Iterate all entries, yielding `(key_bytes, Option<value>, conflicted)`.
+    fn iter(&self) -> Result<LwwRange<'_>, KvTableError> {
+        let inner = self.readable_table().iter()?;
+        Ok(LwwRange { inner })
+    }
+}
+
+impl KvRead for KVTable<'_, '_> {
+    fn readable_table(&self) -> &(impl ReadableTable<&'static [u8], &'static [u8]> + ?Sized) {
+        &*self.table
     }
 }
 
@@ -284,68 +350,11 @@ impl<T: ReadableTable<&'static [u8], &'static [u8]>> ReadOnlyKVTable<T> {
     pub fn new(table: T) -> Self {
         Self { table }
     }
+}
 
-    /// Get the materialized LWW value for a key.
-    /// Returns `None` for missing keys or tombstone-only.
-    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvTableError> {
-        match self.table.get(key)? {
-            Some(v) => Ok(decode_lww(v.value())?),
-            None => Ok(None),
-        }
-    }
-
-    /// Get the materialized LWW value and conflict status for a key.
-    ///
-    /// Returns `(value, conflicted)` where `conflicted` is true when `heads.len() > 1`,
-    /// indicating concurrent writes exist. Decodes once — no extra DAG query needed.
-    pub fn get_with_conflict(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, bool), KvTableError> {
-        match self.table.get(key)? {
-            Some(v) => decode_lww_with_conflict(v.value()),
-            None => Ok((None, false)),
-        }
-    }
-
-    /// Return just the head hashes for a key.
-    pub fn heads(&self, key: &[u8]) -> Result<Vec<Hash>, KvTableError> {
-        match self.table.get(key)? {
-            Some(v) => decode_heads(v.value()),
-            None => Ok(Vec::new()),
-        }
-    }
-
-    /// Full inspection of a key: value, tombstone status, conflict flag, and all head hashes.
-    pub fn inspect(&self, key: &[u8]) -> Result<InspectResult, KvTableError> {
-        match self.table.get(key)? {
-            Some(v) => decode_inspect(v.value()),
-            None => Ok(InspectResult {
-                exists: false,
-                value: None,
-                tombstone: false,
-                conflicted: false,
-                heads: Vec::new(),
-            }),
-        }
-    }
-
-    /// Iterate a key range, yielding `(key_bytes, Option<value>)` per entry.
-    ///
-    /// Each value is LWW-resolved: `Some(bytes)` for live entries, `None` for
-    /// tombstones. Callers never see raw encoding.
-    pub fn range<'b, KR>(
-        &self,
-        range: impl RangeBounds<KR> + 'b,
-    ) -> Result<LwwRange<'_>, KvTableError>
-    where
-        KR: std::borrow::Borrow<<&'static [u8] as redb::Value>::SelfType<'b>> + 'b,
-    {
-        let inner = self.table.range(range)?;
-        Ok(LwwRange { inner })
-    }
-
-    /// Iterate all entries, yielding `(key_bytes, Option<value>)` per entry.
-    pub fn iter(&self) -> Result<LwwRange<'_>, KvTableError> {
-        let inner = self.table.iter()?;
-        Ok(LwwRange { inner })
+impl<T: ReadableTable<&'static [u8], &'static [u8]>> KvRead for ReadOnlyKVTable<T> {
+    fn readable_table(&self) -> &(impl ReadableTable<&'static [u8], &'static [u8]> + ?Sized) {
+        &self.table
     }
 }
 

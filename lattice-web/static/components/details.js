@@ -1,9 +1,15 @@
-async function loadDetails(storeId) {
+import { html, hex } from './util.js';
+import * as Helpers from '../helpers.js';
+import * as S from '../state.js';
+import { doSync, doInvite } from './actions.js';
+import { sdk } from '../sdk.js';
+
+export async function loadDetails(storeId) {
   const sid = { id: storeId };
   const [details, meta, peerStrategyResp] = await Promise.all([
-    API.store.GetDetails(sid),
-    API.store.GetStatus(sid),
-    API.store.GetPeerStrategy(sid).catch(() => ({})),
+    sdk.api.store.GetDetails(sid),
+    sdk.api.store.GetStatus(sid),
+    sdk.api.store.GetPeerStrategy(sid).catch(() => ({})),
   ]);
   const peerStrategy = peerStrategyResp.strategy || '';
   const uuid = Helpers.uuidFromBytes(storeId);
@@ -19,11 +25,17 @@ function DetailsView({ uuid, details, meta, peerStrategy, storeId }) {
   const headSeq = details.witness_head_seq || 0;
   const stalled = headSeq > 0 && appliedSeq !== headSeq;
 
+  // Show "Create App" for root KV stores
+  const stores = S.stores.value || [];
+  const storeInfo = stores.find(s => Helpers.uuidFromBytes(s.id) === uuid);
+  const isRootStore = storeInfo && Helpers.isRootStore(storeInfo);
+
   return html`
     <div class="action-bar">
       <button class="btn" onClick=${() => doSync(storeId)}>Sync</button>
       <button class="btn" onClick=${() => doInvite(storeId)}>Invite Peer</button>
       <button class="btn" onClick=${() => S.showModal('createStore', { parentId: storeId })}>Create Child Store</button>
+      ${isRootStore && html`<button class="btn" onClick=${() => S.showModal('registerApp', { registryStoreId: storeId })}>Create App</button>`}
       <button class="btn" onClick=${() => S.showModal('rename', { storeId })}>Rename</button>
       <button class="btn btn-danger" onClick=${() => S.showModal('delete', { storeId })}>Delete</button>
     </div>

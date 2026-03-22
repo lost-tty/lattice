@@ -45,6 +45,18 @@ pub use sexpr::{dynamic_message_to_sexpr, dynamic_value_to_sexpr, SExpr};
 pub use state_machine::{Op, StateMachine, StateWriter, StateWriterError};
 pub use storage_config::StorageConfig;
 pub use store_info::{StoreIdentity, StoreLink, StoreMeta, SystemEvent};
-pub use store_type::{CORE_STORE_TYPES, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
+pub use store_type::{CORE_STORE_TYPES, STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, STORE_TYPE_ROOTSTORE};
 pub use types::{Hash, PubKey, Signature};
 pub use uuid::Uuid;
+
+/// Node-local app binding.  Self-contained snapshot of everything needed
+/// to serve an app at a subdomain.  Created once at registration time by
+/// reading the root store.  Routing reads only meta.db.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AppBinding {
+    pub subdomain: String,
+    pub app_id: String,
+    pub store_id: Uuid,
+    pub registry_store_id: Uuid,
+    pub enabled: bool,
+}

@@ -139,6 +139,46 @@ Child stores currently use Negentropy (set reconciliation) instead of the bootst
 
 ---
 
+## App Hosting
+
+Serve web applications at subdomains, backed by Lattice stores. Independent of milestone numbering — can be worked in parallel with M18/M19.
+
+> **See:** [App Hosting Design](../design/app-hosting) for the full design.
+
+### A: Node-Local App Bindings ✅
+`AppBinding` struct, `MetaStore` CRUD, `LatticeBackend` trait methods, REST API (`/api/apps`), subdomain routing, embedded app bundles, app shell HTML with SDK bootstrap.
+- [x] `AppBinding` model in `lattice-model`
+- [x] `app_bindings` table in `meta.db` (redb) with CRUD operations
+- [x] `LatticeBackend` trait: `app_set_binding`, `app_remove_binding`, `app_get_binding`, `app_list_bindings`
+- [x] `InProcessBackend` implementation (delegates to `MetaStore`)
+- [x] REST API: `GET/POST/DELETE /api/apps/{subdomain}`
+- [x] Subdomain extraction from `Host` header, app shell serving
+- [x] Embedded inventory app bundle via `rust-embed`
+- [x] Lattice SDK reads `<meta>` tags and connects to store via WebSocket
+
+### B: Store Claiming via SystemOp
+Tag stores with an `app-id` so apps can discover which stores belong to them. A store can be claimed by one app type; multiple stores can share the same `app-id`.
+- [ ] `SystemOp::SetAppId(String)` — writes `app-id` key to system table (LWW)
+- [ ] `SystemOp::ClearAppId` — removes the `app-id` key
+- [ ] `SystemState` projection: apply/read `app-id` from system table
+- [ ] `get_app_id()` / `set_app_id()` on `SystemStore` trait
+- [ ] CLI: `store claim <store-id> <app-id>`, `store unclaim <store-id>`
+- [ ] Management UI: claim/unclaim in store detail view
+
+### C: Claim-Aware Discovery
+Apps discover their stores by filtering on `app-id` claims.
+- [ ] Backend method: `store_list_by_app_id(app_id: &str) -> Vec<StoreRef>` — filters stores with matching `app-id` in system table
+- [ ] REST endpoint: `GET /api/stores?app_id=inventory`
+- [ ] Management UI: "Register App" modal shows only stores claimed by the selected app type
+
+### D: Auto-Provisioning
+One-step app registration: create store, claim it, bind subdomain.
+- [ ] `POST /api/apps/{subdomain}` with `{ app_type }` (no `store_id`) — creates a child KV store, claims it, binds the subdomain
+- [ ] If `store_id` is provided, skip creation and just claim + bind
+- [ ] Unregister optionally unclaims the store
+
+---
+
 ## Milestone 20: Content-Addressable Store (CAS)
 
 Node-local content-addressable blob storage. Replication policy managed separately. Requires M11 and M12.
@@ -238,6 +278,7 @@ Run the kernel on the RP2350.
 - [ ] **Move `STORE_TYPE_KVSTORE` / `STORE_TYPE_LOGSTORE`** out of `lattice-model` into their respective store crates. `lattice-model` shouldn't know about specific store types.
 - [ ] **Stale author chaintips in state.db**: `verify_and_update_tip` writes `tip/<pubkey>` entries but nothing ever removes them. Revoked authors leave dead records. Low priority (64 bytes per author), but snapshots include stale data.
 - [ ] **Decouple Iroh transport key from lattice signing identity**: Iroh requires raw `SigningKey` bytes to derive its QUIC node identity (`lattice-net-iroh/src/transport.rs`), which is incompatible with HSM/TPM backends where the private key never leaves the hardware. Options: (1) derive a transport subkey from the HSM if it supports ECDH/key derivation, (2) give Iroh its own ephemeral key and add a post-connect attestation protocol to bind transport identity to lattice `PubKey`, (3) wait for Iroh to support trait-based signing. Option 2 also decouples transport identity from signing identity, which helps with key rotation and multi-device. Trade-off: nodes can no longer assume Iroh `NodeId` == lattice `PubKey`, so a mapping/attestation step is needed after connection.
+- [ ] **Migrate meta.db from redb to SQLite**: `meta.db` is low-volume, read-heavy, and schema-evolving (stores, rootstores, app bindings, node config). redb's typed table definitions fight schema evolution — changing a key type requires manual migration code and can crash on startup. SQLite with versioned migrations (e.g., `rusqlite` + `refinery`) makes schema changes composable and inspectable. Keep redb for `log.db` and `state.db` where raw sequential write performance matters.
 
 ---
 

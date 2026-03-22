@@ -9,7 +9,7 @@ use lattice_api::proto::{StoreMeta, StoreRef};
 use lattice_model::store_info::PeerStrategy;
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, WitnessEntry};
-use lattice_model::SExpr;
+use lattice_model::{AppBinding, SExpr};
 use lattice_node::Node;
 use lattice_systemstore::SystemBatch;
 use prost_reflect::prost::Message;
@@ -61,6 +61,7 @@ impl InProcessBackend {
             .get_handle(&store_id)
             .ok_or_else(|| BackendApiError::StoreNotFound(store_id).into())
     }
+
 }
 
 impl LatticeBackend for InProcessBackend {
@@ -641,6 +642,41 @@ impl LatticeBackend for InProcessBackend {
                 .subscribe(stream_name, params)
                 .await?;
             Ok(stream)
+        })
+    }
+
+    // ---- App operations ----
+
+    fn app_list(&self) -> AsyncResult<'_, Vec<AppBinding>> {
+        Box::pin(async move {
+            Ok(self.node.app_manager().list().await)
+        })
+    }
+
+    fn app_toggle(
+        &self,
+        registry_store_id: Uuid,
+        subdomain: &str,
+        enabled: bool,
+    ) -> AsyncResult<'_, AppBinding> {
+        let subdomain = subdomain.to_string();
+        Box::pin(async move {
+            self.node
+                .app_manager()
+                .set_enabled(registry_store_id, &subdomain, enabled)
+                .await
+                .map_err(|e| -> BackendError { e })?;
+
+            self.node
+                .app_manager()
+                .get(&subdomain)
+                .await
+                .ok_or_else(|| -> BackendError {
+                    BackendApiError::InvalidArgument(
+                        format!("App '{}' not found", subdomain),
+                    )
+                    .into()
+                })
         })
     }
 }

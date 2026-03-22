@@ -4,13 +4,23 @@
 // Data fetching + SVG/HTML rendering. Layout algorithm lives in dag.js.
 // ============================================================================
 
+import { html, Fragment, useState, useEffect, useRef, hex, fmtSExprPretty, extractIntentionHashes } from './util.js';
+import * as Helpers from '../helpers.js';
+import * as S from '../state.js';
+import { layoutDag } from '../dag.js';
+import { sdk } from '../sdk.js';
+
+// Build SExpr-like objects for fmtSExprPretty.
+function sexprSym(s)    { return { value: 'symbol', symbol: s }; }
+function sexprList(items) { return { value: 'list', list: { items } }; }
+
 // --- Data fetching -----------------------------------------------------------
 
 // Build pubkey hex → display name map from peers + local node.
 async function buildAuthorNames(storeId) {
   const names = new Map();
   try {
-    const peers = (await API.store.ListPeers({ id: storeId })).peers || [];
+    const peers = (await sdk.api.store.ListPeers({ id: storeId })).peers || [];
     for (const p of peers) {
       if (p.name) names.set(hex(p.public_key), p.name);
     }
@@ -26,7 +36,7 @@ async function buildAuthorNames(storeId) {
 // Pure data fetch — returns { layout, authorNames } or null.
 async function fetchHistoryLayout(storeId) {
   const [logResp, authorNames] = await Promise.all([
-    API.store.WitnessLog({ store_id: storeId }),
+    sdk.api.store.WitnessLog({ store_id: storeId }),
     buildAuthorNames(storeId),
   ]);
   const entries = logResp.entries || [];
@@ -39,7 +49,7 @@ async function fetchHistoryLayout(storeId) {
   // Fetch all intentions in parallel
   const results = await Promise.all(intentionHashes.map(async ({ bytes: hashBytes }) => {
     try {
-      return await API.store.GetIntention({
+      return await sdk.api.store.GetIntention({
         store_id: storeId,
         hash_prefix: hashBytes.slice(0, 4),
       });
@@ -76,7 +86,7 @@ async function fetchHistoryLayout(storeId) {
 }
 
 // Entry point for AsyncPanel — returns vnode.
-async function loadHistory(storeId) {
+export async function loadHistory(storeId) {
   const result = await fetchHistoryLayout(storeId);
   if (!result) return html`<div class="empty-state">No history</div>`;
   return html`<${HistoryGraph} layout=${result.layout} authorNames=${result.authorNames} />`;

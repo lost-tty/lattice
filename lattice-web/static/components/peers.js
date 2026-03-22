@@ -1,5 +1,10 @@
-async function loadPeers(storeId) {
-  const peers = (await API.store.ListPeers({ id: storeId })).peers || [];
+import { html, fmtTime } from './util.js';
+import * as Helpers from '../helpers.js';
+import { doRevokePeer } from './actions.js';
+import { sdk } from '../sdk.js';
+
+export async function loadPeers(storeId) {
+  const peers = (await sdk.api.store.ListPeers({ id: storeId })).peers || [];
   return html`<${PeersView} peers=${peers} storeId=${storeId} />`;
 }
 

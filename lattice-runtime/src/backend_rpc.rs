@@ -4,11 +4,12 @@
 
 use crate::backend::*;
 use lattice_api::proto::{
-    CreateStoreRequest, DeleteStoreRequest, Empty, ErrorCode, ExecRequest, GetIntentionRequest,
-    InspectBranchRequest, JoinRequest, RevokePeerRequest, SetNameRequest, SetStoreNameRequest,
-    StoreId, SubscribeRequest, WitnessLogRequest,
+    CreateStoreRequest, DeleteStoreRequest, Empty, ErrorCode, ExecRequest,
+    GetIntentionRequest, InspectBranchRequest, JoinRequest, RevokePeerRequest, SetNameRequest,
+    SetStoreNameRequest, StoreId, SubscribeRequest, ToggleAppRequest, WitnessLogRequest,
 };
 use lattice_model::types::Hash;
+use lattice_model::AppBinding;
 use lattice_api::RpcClient;
 use lattice_model::weaver::{FloatingIntention, WitnessEntry};
 use std::collections::HashMap;
@@ -548,6 +549,44 @@ impl LatticeBackend for RpcBackend {
             });
 
             Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)) as BoxByteStream)
+        })
+    }
+
+    // ---- App management ----
+
+    fn app_list(&self) -> AsyncResult<'_, Vec<AppBinding>> {
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client.node.list_active_apps(Empty {}).await?;
+            let bindings = resp
+                .into_inner()
+                .bindings
+                .into_iter()
+                .filter_map(|p| AppBinding::try_from(p).ok())
+                .collect();
+            Ok(bindings)
+        })
+    }
+
+    fn app_toggle(
+        &self,
+        registry_store_id: Uuid,
+        subdomain: &str,
+        enabled: bool,
+    ) -> AsyncResult<'_, AppBinding> {
+        let subdomain = subdomain.to_string();
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            let resp = client
+                .node
+                .toggle_app(ToggleAppRequest {
+                    subdomain,
+                    enabled,
+                    registry_store_id: registry_store_id.as_bytes().to_vec(),
+                })
+                .await?;
+            AppBinding::try_from(resp.into_inner())
+                .map_err(|e| -> BackendError { Box::new(e) })
         })
     }
 }

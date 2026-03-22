@@ -43,6 +43,7 @@ pub struct MethodInfo {
 }
 
 // Re-export model types needed by backends
+pub use lattice_model::AppBinding;
 pub use lattice_store_base::{BoxByteStream, MethodKind, StreamDescriptor};
 
 // ==================== Error Types ====================
@@ -170,6 +171,17 @@ pub trait LatticeBackend: Send + Sync {
         stream_name: &'a str,
         params: &'a [u8],
     ) -> AsyncResult<'a, BoxByteStream>;
+
+    // ---- App management ----
+    /// List all apps known to this node, with their enabled/disabled state.
+    fn app_list(&self) -> AsyncResult<'_, Vec<AppBinding>>;
+    /// Enable or disable an app on this node.
+    fn app_toggle(
+        &self,
+        registry_store_id: Uuid,
+        subdomain: &str,
+        enabled: bool,
+    ) -> AsyncResult<'_, AppBinding>;
 }
 
 /// Type alias for shared backend reference

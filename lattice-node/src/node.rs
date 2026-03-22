@@ -199,11 +199,14 @@ impl NodeBuilder {
             store_manager.register_opener(store_type, opener);
         }
 
+        let app_manager = Arc::new(crate::AppManager::new(store_manager.clone(), meta.clone(), event_tx.clone()));
+
         Ok(Node {
             data_dir: self.data_dir,
             node_identity,
             meta,
             store_manager,
+            app_manager,
             event_tx,
             net_tx,
             pending_joins: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -218,6 +221,8 @@ pub struct Node {
     meta: std::sync::Arc<MetaStore>,
     /// Store manager — single owner of store lifecycle
     store_manager: std::sync::Arc<crate::StoreManager>,
+    /// App manager — scans root stores for app definitions
+    app_manager: std::sync::Arc<crate::AppManager>,
     /// Events for CLI/UI listeners
     event_tx: broadcast::Sender<NodeEvent>,
     /// Events for network layer (NetworkService)
@@ -250,9 +255,19 @@ impl Node {
         &self.meta
     }
 
+    /// Get a shared reference to MetaStore (for passing to other services)
+    pub fn meta_arc(&self) -> std::sync::Arc<MetaStore> {
+        self.meta.clone()
+    }
+
     /// Get access to the shared StoreManager
     pub fn store_manager(&self) -> &std::sync::Arc<crate::StoreManager> {
         &self.store_manager
+    }
+
+    /// Get access to the AppManager
+    pub fn app_manager(&self) -> &Arc<crate::AppManager> {
+        &self.app_manager
     }
 
     pub fn node_id(&self) -> PubKey {
@@ -332,6 +347,9 @@ impl Node {
 
     /// Start the node - loads all root stores from meta.db and emits NetworkStore events.
     pub async fn start(&self) -> Result<(), NodeError> {
+        // Run one-off migrations before opening any stores.
+        crate::migrations::run_all(&self.meta, &self.data_dir);
+
         for (store_id, _info) in self.meta.list_rootstores()? {
             // 1. Open the store (resolve type from disk)
             let (handle, store_type) =

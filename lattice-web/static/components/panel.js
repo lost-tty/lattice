@@ -1,53 +1,59 @@
+import { html, useState, useEffect } from './util.js';
+import { panelOverride, stores, clearPanelOverride } from '../state.js';
+import { uuidFromBytes } from '../helpers.js';
+import { navigate } from '../router.js';
+import { loadDetails } from './details.js';
+import { loadPeers } from './peers.js';
+import { loadMethods } from './methods.js';
+import { loadStreams } from './streams.js';
+import { loadHistory } from './history.js';
+import { loadDebug, IntentionDetail } from './debug.js';
+import { loadSystem } from './system.js';
+import { Dashboard } from './dashboard.js';
+
 const TABS = ['details', 'peers', 'methods', 'streams', 'history', 'debug', 'system'];
 
-function TabBar() {
-  const activeStoreId = S.activeStoreId.value;
-  if (!activeStoreId) return null;
-  const activeTab = S.activeTab.value;
+export function TabBar({ storeId, activeTab }) {
+  if (!storeId) return html`<div id="tabs"></div>`;
+  const uuid = uuidFromBytes(storeId);
   return html`
     <div id="tabs">
       ${TABS.map(t => html`
         <div
           class="tab ${t === activeTab ? 'active' : ''}"
-          onClick=${() => S.switchTab(t)}
-        >${t}</div>
+          onClick=${() => navigate('/store/' + uuid + (t === 'details' ? '' : '/' + t))}
+        >${t[0].toUpperCase() + t.slice(1)}</div>
       `)}
     </div>
   `;
 }
 
-function Panel() {
-  const activeStoreId = S.activeStoreId.value;
-  const panelOverride = S.panelOverride.value;
+export function Panel({ storeId, tab, debugView }) {
+  const po = panelOverride.value;
 
-  if (!activeStoreId) {
-    return html`<div id="panel"><div class="empty-state">Select a store from the sidebar</div></div>`;
+  if (!storeId) {
+    return html`<${Dashboard} />`;
   }
 
-  if (panelOverride) {
-    return html`<div id="panel"><${PanelOverride} override=${panelOverride} /></div>`;
+  if (po) {
+    return html`<div id="panel"><${PanelOverride} override=${po} /></div>`;
   }
 
-  const activeTab = S.activeTab.value;
-  const debugView = S.debugView.value;
-  const rc = S.refreshCounter.value;
+  // Use stores signal in key so panel refreshes when store data changes
+  const sv = stores.value.length;
 
   return html`
     <div id="panel">
-      <${AsyncPanel} key=${Helpers.uuidFromBytes(activeStoreId) + ':' + activeTab + ':' + debugView + ':' + rc} />
+      <${AsyncPanel} storeId=${storeId} tab=${tab} debugView=${debugView}
+        key=${uuidFromBytes(storeId) + ':' + tab + ':' + debugView + ':' + sv} />
     </div>
   `;
 }
 
 // Wrapper that handles loading + error for async panel content.
-function AsyncPanel() {
+function AsyncPanel({ storeId, tab, debugView }) {
   const [content, setContent] = useState(null);
   const [error, setError] = useState(null);
-
-  // Read signal values once at mount (key= already ensures remount on change)
-  const sid = S.activeStoreId.value;
-  const tab = S.activeTab.value;
-  const dv = S.debugView.value;
 
   useEffect(() => {
     let cancelled = false;
@@ -58,13 +64,13 @@ function AsyncPanel() {
       try {
         let result;
         switch (tab) {
-          case 'details': result = await loadDetails(sid); break;
-          case 'peers': result = await loadPeers(sid); break;
-          case 'methods': result = await loadMethods(sid); break;
-          case 'streams': result = await loadStreams(sid); break;
-          case 'history': result = await loadHistory(sid); break;
-          case 'debug': result = await loadDebug(sid, dv); break;
-          case 'system': result = await loadSystem(sid); break;
+          case 'details': result = await loadDetails(storeId); break;
+          case 'peers': result = await loadPeers(storeId); break;
+          case 'methods': result = await loadMethods(storeId); break;
+          case 'streams': result = await loadStreams(storeId); break;
+          case 'history': result = await loadHistory(storeId); break;
+          case 'debug': result = await loadDebug(storeId, debugView); break;
+          case 'system': result = await loadSystem(storeId); break;
         }
         if (!cancelled) setContent(result);
       } catch (e) {
@@ -73,7 +79,7 @@ function AsyncPanel() {
     })();
 
     return () => { cancelled = true; };
-  }, [sid, tab, dv]);
+  }, [storeId, tab, debugView]);
 
   if (error) {
     return html`<div class="card"><div class="text-error">Error: ${error}</div></div>`;
@@ -87,10 +93,12 @@ function AsyncPanel() {
 }
 
 function PanelOverride({ override }) {
+  const goBack = () => clearPanelOverride();
+
   if (override.type === 'execResult') {
     return html`
       <div class="action-bar">
-        <button class="btn" onClick=${() => S.switchTab('methods')}>Back</button>
+        <button class="btn" onClick=${goBack}>Back</button>
       </div>
       <div class="card">
         <h3>${override.method}</h3>
@@ -102,7 +110,7 @@ function PanelOverride({ override }) {
   if (override.type === 'execError') {
     return html`
       <div class="action-bar">
-        <button class="btn" onClick=${() => S.switchTab('methods')}>Back</button>
+        <button class="btn" onClick=${goBack}>Back</button>
       </div>
       <div class="card">
         <h3>${override.method}</h3>

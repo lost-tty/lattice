@@ -144,7 +144,8 @@ impl RuntimeBuilder {
     pub fn with_core_stores(self) -> Self {
         use lattice_kvstore::KvState;
         use lattice_logstore::LogState;
-        use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE};
+        use lattice_rootstore::RootState;
+        use lattice_model::{STORE_TYPE_KVSTORE, STORE_TYPE_LOGSTORE, STORE_TYPE_ROOTSTORE};
         use lattice_node::direct_opener;
         use lattice_systemstore::SystemLayer;
 
@@ -153,6 +154,9 @@ impl RuntimeBuilder {
         })
         .with_opener(STORE_TYPE_LOGSTORE, || {
             direct_opener::<SystemLayer<LogState>>()
+        })
+        .with_opener(STORE_TYPE_ROOTSTORE, || {
+            direct_opener::<SystemLayer<RootState>>()
         })
     }
 
@@ -201,6 +205,9 @@ impl RuntimeBuilder {
             tracing::warn!("Node start: {}", e);
         }
 
+        // Start app manager (loads apps + bundles from existing stores, watches for new ones)
+        node.app_manager().start().await;
+
         // Start RPC server if requested
         let rpc_handle = if self.with_rpc {
             let rpc_server = RpcServer::new(backend.clone(), RpcServer::default_socket_path());
@@ -216,7 +223,11 @@ impl RuntimeBuilder {
         // Start web server if requested
         #[cfg(feature = "web")]
         let web_handle = if let Some(port) = self.web_port {
-            let web_server = lattice_web::WebServer::new(backend.clone(), port);
+            let web_server = lattice_web::WebServer::new(
+                backend.clone(),
+                node.app_manager().clone(),
+                port,
+            );
             tracing::info!("Web UI enabled on {}", web_server.url());
             Some(tokio::spawn(async move {
                 if let Err(e) = web_server.run().await {

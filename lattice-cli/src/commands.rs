@@ -1,7 +1,7 @@
 //! CLI command handlers and dispatch
 
 use crate::subscriptions::SubscriptionRegistry;
-use crate::{node_commands, peer_commands, store_commands};
+use crate::{app_commands, node_commands, peer_commands, store_commands};
 use clap::{CommandFactory, Parser, Subcommand};
 use lattice_runtime::LatticeBackend;
 use rustyline_async::SharedWriter;
@@ -77,6 +77,11 @@ pub enum LatticeCommand {
     Peer {
         #[command(subcommand)]
         subcommand: PeerSubcommand,
+    },
+    /// App management
+    App {
+        #[command(subcommand)]
+        subcommand: AppSubcommand,
     },
     /// Exit the CLI
     #[command(next_help_heading = "General")]
@@ -157,8 +162,8 @@ pub enum StoreSubcommand {
     Create {
         /// Optional display name
         name: Option<String>,
-        /// Store type (e.g., kvstore)
-        #[arg(short = 't', long)]
+        /// Store type (defaults to rootstore for root stores, required for child stores)
+        #[arg(short = 't', long, default_value = "core:rootstore")]
         r#type: String,
         /// Create as a new Root Store (independent of current context)
         #[arg(long, default_value_t = false)]
@@ -254,6 +259,24 @@ pub enum PeerSubcommand {
     /// Generate a one-time invite token for this store
     Invite,
 }
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum AppSubcommand {
+    /// List apps enabled on this node
+    List,
+    /// Enable an app on this node (local toggle — does not affect the mesh)
+    Enable {
+        /// Subdomain of the app to enable
+        subdomain: String,
+    },
+    /// Disable an app on this node (local toggle — does not affect the mesh)
+    Disable {
+        /// Subdomain of the app to disable
+        subdomain: String,
+    },
+}
+
+
 
 async fn format_help(
     backend: &dyn LatticeBackend,
@@ -394,6 +417,21 @@ pub async fn handle_command(
             }
             PeerSubcommand::Invite => {
                 peer_commands::cmd_peer_invite(backend, ctx.store_id, writer).await
+            }
+        },
+
+        LatticeCommand::App { subcommand } => match subcommand {
+            AppSubcommand::List => {
+                app_commands::cmd_app_list(backend, writer).await
+            }
+            AppSubcommand::Enable { ref subdomain } | AppSubcommand::Disable { ref subdomain } => {
+                let Some(store_id) = ctx.store_id else {
+                    let mut w = writer.clone();
+                    let _ = writeln!(w, "Error: No store selected. Use 'store use <uuid>' first.");
+                    return Ok(Continue);
+                };
+                let enabled = matches!(subcommand, AppSubcommand::Enable { .. });
+                app_commands::cmd_app_toggle(backend, store_id, subdomain, enabled, writer).await
             }
         },
 

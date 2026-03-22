@@ -1,20 +1,51 @@
 // Shared helpers and Preact imports for all components.
-// Every component file uses these globals.
+// Every component file can import from this module.
 
-const { html, Fragment, useState, useEffect, useRef } = P;
+import { html, Fragment, useState, useEffect, useRef, useMemo } from '../vendor/preact.mjs';
+import { hexFromBytes } from '../helpers.js';
+import { fieldTypeName, formatDecoded } from '../schema.js';
+import { sdk, pb } from '../sdk.js';
 
-function hex(bytes) {
-  return bytes ? Helpers.hexFromBytes(bytes) : '';
+// Re-export Preact primitives so components can import from util.js.
+export { html, Fragment, useState, useEffect, useRef, useMemo };
+
+// ---------------------------------------------------------------------------
+// Icon component — reusable SVG icons
+// Usage: html`<${Icon} name="plus" />` or html`<${Icon} name="plus" size=${16} />`
+// All icons use a 24-unit viewBox with stroke style, except "play" which is filled.
+// ---------------------------------------------------------------------------
+
+const ICONS = {
+  plus: html`<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>`,
+  close: html`<line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>`,
+  pause: html`<line x1="8" y1="6" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="18"/>`,
+  play: html`<polygon points="6,4 20,12 6,20"/>`,
+  'log-in': html`<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>`,
+};
+
+export function Icon({ name, size }) {
+  const s = size || 14;
+  const paths = ICONS[name];
+  if (!paths) return null;
+  const filled = name === 'play';
+  return html`<svg width=${s} height=${s} viewBox="0 0 24 24"
+    fill=${filled ? 'currentColor' : 'none'}
+    stroke=${filled ? 'none' : 'currentColor'}
+    stroke-width="2.5" stroke-linecap="round">${paths}</svg>`;
 }
 
-function fmtTime(ms) {
+export function hex(bytes) {
+  return bytes ? hexFromBytes(bytes) : '';
+}
+
+export function fmtTime(ms) {
   return ms ? new Date(Number(ms)).toLocaleString() : '-';
 }
 
-function fmtFieldValue(fld) {
+export function fmtFieldValue(fld) {
   if (Array.isArray(fld.value)) {
     return fld.value.map(v =>
-      Array.isArray(v) ? Schema.formatDecoded(v) : String(v)
+      Array.isArray(v) ? formatDecoded(v) : String(v)
     ).join(', ');
   }
   return String(fld.value);
@@ -23,7 +54,7 @@ function fmtFieldValue(fld) {
 // Detect tabular data: a single repeated message field where all items
 // share the same field names. Mirrors the CLI's table detection.
 // Returns a Preact vnode (or null).
-function tryRenderTable(fields) {
+export function tryRenderTable(fields) {
   function findRepeatedMessages(fs) {
     if (fs.length === 1 && fs[0].type === 'repeated' && Array.isArray(fs[0].value)) {
       const items = fs[0].value;
@@ -57,16 +88,12 @@ function tryRenderTable(fields) {
   `;
 }
 
-// Build SExpr-like objects for fmtSExpr (mirrors protobufjs oneof shape).
-function sexprSym(s)    { return { value: 'symbol', symbol: s }; }
-function sexprList(items) { return { value: 'list', list: { items } }; }
-
 // Render a proto SExpr (from GetIntentionResponse.ops) as a colored Preact vnode.
 // SExpr uses oneof "value" with variants: symbol, str, raw, num, list.
 // protobufjs decode() sets defaults on all fields, so we must check the
 // oneof discriminator (sexpr.value) to find the active variant.
 // Colors match the CLI scheme: symbol=blue, str=green, raw=magenta, num=yellow, parens=dimmed.
-function fmtSExpr(sexpr) {
+export function fmtSExpr(sexpr) {
   if (!sexpr) return '';
   const which = sexpr.value; // oneof discriminator: "symbol"|"str"|"raw"|"num"|"list"
   switch (which) {
@@ -87,7 +114,7 @@ function fmtSExpr(sexpr) {
 // Pretty-print an SExpr with indentation. Lists containing sub-lists get
 // each child on its own line. Rendered inside a white-space:pre-wrap container.
 // Returns vnodes with \n and space characters for structure.
-function fmtSExprPretty(sexpr, depth) {
+export function fmtSExprPretty(sexpr, depth) {
   if (!sexpr) return '';
   depth = depth || 0;
   if (sexpr.value !== 'list') return fmtSExpr(sexpr);
@@ -101,7 +128,7 @@ function fmtSExprPretty(sexpr, depth) {
 }
 
 // Render an array of SExpr ops as Preact vnodes, one per line.
-function fmtOps(ops) {
+export function fmtOps(ops) {
   if (!ops || ops.length === 0) return '-';
   return ops.map((op, i) =>
     html`${i > 0 ? '\n' : ''}${fmtSExpr(op)}`
@@ -110,24 +137,23 @@ function fmtOps(ops) {
 
 // Extract unique intention hashes from witness log entries.
 // Returns [{ hex, bytes }] — deduped, order-preserving.
-function extractIntentionHashes(entries) {
+export function extractIntentionHashes(entries) {
+  const WitnessContent = sdk.proto.lookup('lattice.weaver.WitnessContent');
   const seen = new Set();
   const result = [];
   for (const w of entries) {
     if (!w.content || w.content.length === 0) continue;
-    try {
-      const wc = T.WitnessContent.decode(w.content);
-      if (wc.intention_hash && wc.intention_hash.length > 0) {
-        const h = hex(wc.intention_hash);
-        if (!seen.has(h)) { seen.add(h); result.push({ hex: h, bytes: wc.intention_hash }); }
-      }
-    } catch (e) { /* skip */ }
+    const wc = WitnessContent.decode(w.content);
+    if (wc.intention_hash && wc.intention_hash.length > 0) {
+      const h = hex(wc.intention_hash);
+      if (!seen.has(h)) { seen.add(h); result.push({ hex: h, bytes: wc.intention_hash }); }
+    }
   }
   return result;
 }
 
 // Collect form field values from [data-field] elements.
-function collectFormFields(formRef) {
+export function collectFormFields(formRef) {
   const values = {};
   if (formRef.current) {
     for (const el of formRef.current.querySelectorAll('[data-field]')) {
@@ -139,11 +165,11 @@ function collectFormFields(formRef) {
 }
 
 // Reusable form field input for protobufjs message types.
-function FieldInput({ field, cssClass, autofocus }) {
+export function FieldInput({ field, cssClass, autofocus }) {
   const resolved = field.resolve();
-  const typeName = Schema.fieldTypeName(field);
+  const typeName = fieldTypeName(field);
 
-  if (resolved.resolvedType instanceof protobuf.Enum) {
+  if (resolved.resolvedType instanceof pb.Enum) {
     return html`
       <label>${field.name} <span class="field-type">(${typeName})</span></label>
       <select class=${cssClass} data-field=${field.name} autofocus=${autofocus}>

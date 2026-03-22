@@ -9,9 +9,11 @@
 
 pub mod node;
 
+pub mod app_manager;
 pub mod auth;
 pub mod data_dir;
 pub mod meta_store;
+mod migrations;
 pub mod peer_manager;
 pub mod store_handle;
 pub mod store_manager;
@@ -36,5 +38,6 @@ pub use node::{JoinAcceptance, Node, NodeBuilder, NodeError, NodeEvent, NodeInfo
 pub use peer_manager::{PeerManager, PeerManagerError};
 
 // Other exports
+pub use app_manager::{AppEvent, AppManager};
 pub use data_dir::DataDir;
 pub use meta_store::MetaStore;

@@ -3,10 +3,14 @@
 use crate::backend::Backend;
 use crate::proto::node_service_server::NodeService;
 use crate::proto::NodeEvent as NodeEventMessage;
-use crate::proto::{Empty, NodeStatus, SetNameRequest, StoreTypeList};
+use crate::proto::{
+    AppBindingList, AppBindingProto, Empty, NodeStatus, SetNameRequest, StoreTypeList,
+    ToggleAppRequest,
+};
 use crate::IntoStatus;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+use uuid::Uuid;
 
 pub struct NodeServiceImpl {
     backend: Backend,
@@ -71,5 +75,36 @@ impl NodeService for NodeServiceImpl {
         });
 
         Ok(Response::new(ReceiverStream::new(stream_rx)))
+    }
+
+    // ---- App management ----
+
+    async fn list_active_apps(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<AppBindingList>, Status> {
+        self.backend
+            .app_list()
+            .await
+            .map(|bindings| {
+                Response::new(AppBindingList {
+                    bindings: bindings.into_iter().map(Into::into).collect(),
+                })
+            })
+            .into_status()
+    }
+
+    async fn toggle_app(
+        &self,
+        request: Request<ToggleAppRequest>,
+    ) -> Result<Response<AppBindingProto>, Status> {
+        let req = request.into_inner();
+        let reg_id = Uuid::from_slice(&req.registry_store_id)
+            .map_err(|_| Status::invalid_argument("Invalid registry_store_id UUID"))?;
+        self.backend
+            .app_toggle(reg_id, &req.subdomain, req.enabled)
+            .await
+            .map(|b| Response::new(b.into()))
+            .into_status()
     }
 }

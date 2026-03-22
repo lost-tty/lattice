@@ -1,0 +1,170 @@
+syntax = "proto3";
+package lattice.rootstore;
+
+// Root Store Service — manages app definitions and bundles within a mesh.
+service RootStore {
+    // Commands (mutations)
+    rpc RegisterApp (RegisterAppOp) returns (RegisterAppResponse);
+    rpc RemoveApp (RemoveAppOp) returns (RemoveAppResponse);
+    rpc UploadBundle (UploadBundleRequest) returns (UploadBundleResponse);
+    rpc RemoveBundle (RemoveBundleOp) returns (RemoveBundleResponse);
+
+    // Queries (reads)
+    rpc GetApp (GetAppRequest) returns (GetAppResponse);
+    rpc ListApps (ListAppsRequest) returns (ListAppsResponse);
+    rpc GetBundle (GetBundleRequest) returns (GetBundleResponse);
+    rpc ListBundles (ListBundlesRequest) returns (ListBundlesResponse);
+}
+
+// ============================================================================
+// Intention payload — what gets stored in the log.
+// RootState::apply() also accepts legacy KvPayload (lattice.kv.KvPayload)
+// for backward compatibility with stores that were previously core:kvstore.
+// ============================================================================
+
+message RootPayload {
+    // Version tag to distinguish from KvPayload. KvPayload has
+    // `repeated Operation ops = 1` and no field 2. By requiring
+    // version > 0 we can reliably tell the formats apart.
+    uint32 version = 2;
+    repeated RootOperation ops = 1;
+}
+
+message RootOperation {
+    oneof op {
+        RegisterAppOp register_app = 1;
+        RemoveAppOp remove_app = 2;
+        UploadBundleOp upload_bundle = 3;
+        RemoveBundleOp remove_bundle = 4;
+    }
+}
+
+// ============================================================================
+// Commands
+// ============================================================================
+
+message RegisterAppOp {
+    string subdomain = 1;
+    string app_id = 2;
+    bytes store_id = 3;     // UUID bytes (16 bytes)
+}
+
+message RemoveAppOp {
+    string subdomain = 1;
+}
+
+// Client-facing request — just the zip (manifest is extracted server-side).
+message UploadBundleRequest {
+    string app_id = 1;
+    bytes data = 2;         // Zip bytes
+}
+
+// Internal intention op — includes the parsed manifest for replication.
+message UploadBundleOp {
+    string app_id = 1;
+    bytes data = 2;         // Zip bytes
+    bytes manifest = 3;     // Serialized BundleManifest proto
+}
+
+message RemoveBundleOp {
+    string app_id = 1;
+}
+
+message RegisterAppResponse {}
+message RemoveAppResponse {}
+message UploadBundleResponse {
+    string app_id = 1;      // Derived from manifest.toml if not provided in request
+}
+message RemoveBundleResponse {}
+
+// ============================================================================
+// Bundle manifest — generic key-value representation of manifest.toml.
+// Sections map to TOML table headers (e.g. [app]), entries to key-value pairs.
+// Stored as individual keys: appbundles/{app_id}/manifest/{section}/{key}
+//
+// Uses repeated pairs instead of map<> for protobufjs compatibility.
+// ============================================================================
+
+message BundleManifestEntry {
+    string key = 1;
+    string value = 2;
+}
+
+message BundleManifestSection {
+    string name = 1;
+    repeated BundleManifestEntry entries = 2;
+}
+
+message BundleManifest {
+    repeated BundleManifestSection sections = 1;
+}
+
+// ============================================================================
+// Queries
+// ============================================================================
+
+message GetAppRequest {
+    string subdomain = 1;
+}
+
+message GetAppResponse {
+    bool found = 1;
+    string subdomain = 2;
+    string app_id = 3;
+    bytes store_id = 4;
+}
+
+message ListAppsRequest {}
+
+message ListAppsResponse {
+    repeated AppEntry apps = 1;
+}
+
+message AppEntry {
+    string subdomain = 1;
+    string app_id = 2;
+    bytes store_id = 3;
+}
+
+message GetBundleRequest {
+    string app_id = 1;
+}
+
+message GetBundleResponse {
+    bool found = 1;
+    string app_id = 2;
+    bytes data = 3;
+}
+
+message ListBundlesRequest {}
+
+message ListBundlesResponse {
+    repeated BundleEntry bundles = 1;
+}
+
+message BundleEntry {
+    string app_id = 1;
+    BundleManifest manifest = 2;
+}
+
+// ============================================================================
+// Watch streams
+// ============================================================================
+
+message WatchAppsParams {}
+
+message WatchAppsEvent {
+    oneof event {
+        AppEntry updated = 1;
+        string removed = 2;     // subdomain that was removed
+    }
+}
+
+message WatchBundlesParams {}
+
+message WatchBundlesEvent {
+    oneof event {
+        string updated_app_id = 1;  // bundle was uploaded/updated
+        string removed_app_id = 2;  // bundle was removed
+    }
+}

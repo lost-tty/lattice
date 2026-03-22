@@ -1,5 +1,10 @@
-async function loadMethods(storeId) {
-  const methods = (await API.dynamic.ListMethods({ id: storeId })).methods || [];
+import { html } from './util.js';
+import * as S from '../state.js';
+import * as Schema from '../schema.js';
+import { sdk } from '../sdk.js';
+
+export async function loadMethods(storeId) {
+  const methods = (await sdk.api.dynamic.ListMethods({ id: storeId })).methods || [];
   const schema = await Schema.getSchema(storeId);
   return html`<${MethodsView} methods=${methods} schema=${schema} storeId=${storeId} />`;
 }

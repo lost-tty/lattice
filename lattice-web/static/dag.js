@@ -6,7 +6,7 @@
 // Output: { rows[], edges[], maxCol, totalRows }
 // ============================================================================
 
-function layoutDag(entries) {
+export function layoutDag(entries) {
   const entryHashes = new Set(entries.keys());
 
   // Build children map

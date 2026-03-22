@@ -2,6 +2,7 @@
 
 mod commands;
 
+mod app_commands;
 mod display_helpers;
 mod graph_renderer;
 mod node_commands;

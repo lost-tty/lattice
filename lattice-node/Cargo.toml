@@ -12,7 +12,9 @@ lattice-store-base = { workspace = true }
 lattice-net-types = { workspace = true }
 lattice-storage = { workspace = true }
 lattice-systemstore = { workspace = true }
+lattice-rootstore = { workspace = true }
 ed25519-dalek = { workspace = true }
+bytes = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true }
 thiserror = { workspace = true }
@@ -21,6 +23,7 @@ redb = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 hostname = "0.4"
+serde = { workspace = true }
 serde_json = "1"
 regex = "1"
 bs58 = { version = "0.5", features = ["check"] }
@@ -29,9 +32,15 @@ tracing = { workspace = true }
 futures-util = "0.3"
 futures-core = "0.3"
 tokio-stream = "0.1"
+zip = { version = "8.4.0", default-features = false, features = ["deflate"] }
+toml = "1"
 
 [dev-dependencies]
 lattice-mockkernel = { workspace = true }
 lattice-proto = { workspace = true }
+lattice-kvstore = { workspace = true }
+lattice-kvstore-api = { workspace = true }
+lattice-rootstore = { workspace = true }
+lattice-systemstore = { workspace = true }
 tokio-test = { workspace = true }
 tempfile = "3"

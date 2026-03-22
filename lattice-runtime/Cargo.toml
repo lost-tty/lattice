@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["core-stores", "web"]
-core-stores = ["dep:lattice-kvstore", "dep:lattice-logstore"]
+core-stores = ["dep:lattice-kvstore", "dep:lattice-logstore", "dep:lattice-rootstore"]
 web = ["dep:lattice-web"]
 
 [dependencies]
@@ -21,6 +21,7 @@ lattice-api = { workspace = true }
 lattice-proto = { workspace = true }
 lattice-kvstore = { workspace = true, optional = true }
 lattice-logstore = { workspace = true, optional = true }
+lattice-rootstore = { workspace = true, optional = true }
 lattice-web = { workspace = true, optional = true }
 hex = { workspace = true }
 thiserror = { workspace = true }

@@ -13,6 +13,10 @@ service NodeService {
   rpc SetName(SetNameRequest) returns (Empty);
   rpc ListStoreTypes(Empty) returns (StoreTypeList);
   rpc Subscribe(Empty) returns (stream NodeEvent);
+
+  // App management
+  rpc ListActiveApps(Empty) returns (AppBindingList);
+  rpc ToggleApp(ToggleAppRequest) returns (AppBindingProto);
 }
 
 // ============================================================================

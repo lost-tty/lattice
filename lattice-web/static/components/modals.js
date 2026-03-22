@@ -1,22 +1,36 @@
+import { html, useState, useEffect, useRef, FieldInput, collectFormFields } from './util.js';
+import { closeModal, modal, toast, refreshStores, refreshApps, stores, activeStoreId, setPanelOverride } from '../state.js';
+import { uuidFromBytes, uuidToBytes, bytesFromHex, getRootStores } from '../helpers.js';
+import { getSchema, encodeMessage } from '../schema.js';
+import { navigate } from '../router.js';
+import { runExecAndShow, doSubscribe, uploadBundleToStore } from './actions.js';
+import { sdk } from '../sdk.js';
+
+// Look up a value from a BundleManifest (repeated sections/entries structure).
+function manifestGet(manifest, sectionName, key) {
+  const section = manifest?.sections?.find(s => s.name === sectionName);
+  return section?.entries?.find(e => e.key === key)?.value;
+}
+
 function ModalActions({ onSubmit, label, danger }) {
   const cls = danger ? 'btn btn-danger' : 'btn btn-primary';
   return html`
     <div class="modal-actions">
-      <button class="btn" onClick=${S.closeModal}>Cancel</button>
+      <button class="btn" onClick=${closeModal}>Cancel</button>
       ${onSubmit ? html`<button class=${cls} onClick=${onSubmit}>${label}</button>` : null}
     </div>
   `;
 }
 
-function ModalContainer() {
-  const modal = S.modal.value;
-  if (!modal) return html`<div id="modal-container"></div>`;
+export function ModalContainer() {
+  const currentModal = modal.value;
+  if (!currentModal) return html`<div id="modal-container"></div>`;
 
   return html`
     <div id="modal-container">
-      <div class="modal-overlay" onClick=${(e) => { if (e.target === e.currentTarget) S.closeModal(); }}>
+      <div class="modal-overlay" onClick=${(e) => { if (e.target === e.currentTarget) closeModal(); }}>
         <div class="modal">
-          <${ModalContent} type=${modal.type} props=${modal.props} />
+          <${ModalContent} type=${currentModal.type} props=${currentModal.props} />
         </div>
       </div>
     </div>
@@ -33,6 +47,9 @@ function ModalContent({ type, props }) {
     case 'exec': return html`<${ExecModal} name=${props.name} storeId=${props.storeId} />`;
     case 'subscribe': return html`<${SubscribeModal} ...${props} />`;
     case 'inspectIntention': return html`<${InspectIntentionModal} />`;
+    case 'registerApp': return html`<${RegisterAppModal} registryStoreId=${props?.registryStoreId} />`;
+    case 'unregisterApp': return html`<${UnregisterAppModal} subdomain=${props.subdomain} registryStoreId=${props.registryStoreId} />`;
+    case 'selectRootStore': return html`<${SelectRootStoreModal} file=${props.file} />`;
     default: return null;
   }
 }
@@ -44,14 +61,10 @@ function CreateStoreModal({ parentId }) {
   const isChild = !!parentId;
 
   useEffect(() => {
-    (async () => {
-      try {
-        const t = (await API.node.ListStoreTypes({})).store_types || [];
-        setTypes(t.length > 0 ? t : ['core:kvstore', 'core:logstore']);
-      } catch (e) {
-        setTypes(['core:kvstore', 'core:logstore']);
-      }
-    })();
+    sdk.api.node.ListStoreTypes({}).then(
+      resp => setTypes(resp.store_types || []),
+      err => toast('Failed to load store types: ' + err.message, 'err'),
+    );
   }, []);
 
   const submit = async () => {
@@ -60,11 +73,11 @@ function CreateStoreModal({ parentId }) {
     const req = { name, store_type: type_ };
     if (parentId) req.parent_id = parentId;
     try {
-      await API.store.Create(req);
-      S.closeModal();
-      S.toast(`Store created: ${name || '(unnamed)'} [${type_}]`, 'ok');
-      await S.refresh();
-    } catch (e) { S.toast('Create error: ' + e.message, 'err'); }
+      await sdk.api.store.Create(req);
+      closeModal();
+      toast(`Store created: ${name || '(unnamed)'} [${type_}]`, 'ok');
+      await refreshStores();
+    } catch (e) { toast('Create error: ' + e.message, 'err'); }
   };
 
   const title = isChild ? 'Create Child Store' : 'Create Root Store';
@@ -72,7 +85,7 @@ function CreateStoreModal({ parentId }) {
 
   return html`
     <h2>${title}</h2>
-    ${isChild ? html`<p>Parent: <span class="mono">${Helpers.uuidFromBytes(parentId)}</span></p>` : null}
+    ${isChild ? html`<p>Parent: <span class="mono">${uuidFromBytes(parentId)}</span></p>` : null}
     <label>Name (optional)</label>
     <input ref=${nameRef} placeholder="my-store" autofocus />
     <label>Type</label>
@@ -89,13 +102,13 @@ function JoinStoreModal() {
   const submit = async () => {
     const token = inputRef.current?.value?.trim();
     if (!token) return;
-    S.closeModal();
+    closeModal();
     try {
-      const resp = await API.store.Join({ token });
-      const uuid = resp.store_id ? Helpers.uuidFromBytes(resp.store_id) : '';
-      S.toast(`Join initiated${uuid ? ': ' + uuid : ''}`, 'ok');
-      await S.refresh();
-    } catch (e) { S.toast('Join error: ' + e.message, 'err'); }
+      const resp = await sdk.api.store.Join({ token });
+      const uuid = resp.store_id ? uuidFromBytes(resp.store_id) : '';
+      toast(`Join initiated${uuid ? ': ' + uuid : ''}`, 'ok');
+      await refreshStores();
+    } catch (e) { toast('Join error: ' + e.message, 'err'); }
   };
 
   return html`
@@ -113,11 +126,11 @@ function RenameModal({ storeId }) {
     const name = inputRef.current?.value;
     if (!name) return;
     try {
-      await API.store.SetName({ store_id: storeId, name });
-      S.closeModal();
-      S.toast('Store renamed to: ' + name, 'ok');
-      await S.refresh();
-    } catch (e) { S.toast('Rename error: ' + e.message, 'err'); }
+      await sdk.api.store.SetName({ store_id: storeId, name });
+      closeModal();
+      toast('Store renamed to: ' + name, 'ok');
+      await refreshStores();
+    } catch (e) { toast('Rename error: ' + e.message, 'err'); }
   };
 
   return html`
@@ -130,21 +143,21 @@ function RenameModal({ storeId }) {
 
 function DeleteModal({ storeId }) {
   const inputRef = useRef(null);
-  const uuid = Helpers.uuidFromBytes(storeId);
+  const uuid = uuidFromBytes(storeId);
 
   const submit = async () => {
     const parentPrefix = inputRef.current?.value?.trim();
-    if (!parentPrefix) { S.toast('Parent UUID required', 'err'); return; }
-    const stores = S.stores.value;
-    const parentStore = stores.find(st => Helpers.uuidFromBytes(st.id).startsWith(parentPrefix));
-    if (!parentStore) { S.toast('Parent store not found', 'err'); return; }
+    if (!parentPrefix) { toast('Parent UUID required', 'err'); return; }
+    const allStores = stores.value;
+    const parentStore = allStores.find(st => uuidFromBytes(st.id).startsWith(parentPrefix));
+    if (!parentStore) { toast('Parent store not found', 'err'); return; }
     try {
-      await API.store.Delete({ store_id: parentStore.id, child_id: storeId });
-      S.closeModal();
-      S.toast('Store archived', 'ok');
-      S.activeStoreId.value = null;
-      await S.refresh();
-    } catch (e) { S.toast('Delete error: ' + e.message, 'err'); }
+      await sdk.api.store.Delete({ store_id: parentStore.id, child_id: storeId });
+      closeModal();
+      toast('Store archived', 'ok');
+      navigate('/');
+      await refreshStores();
+    } catch (e) { toast('Delete error: ' + e.message, 'err'); }
   };
 
   return html`
@@ -172,7 +185,7 @@ function ExecModal({ name, storeId }) {
 
   useEffect(() => {
     (async () => {
-      const s = await Schema.getSchema(storeId);
+      const s = await getSchema(storeId);
       setSchema(s);
       setLoaded(true);
     })();
@@ -186,8 +199,8 @@ function ExecModal({ name, storeId }) {
 
   const method = schema.service.methods[name];
   if (!method) {
-    S.toast(`Method '${name}' not found in schema`, 'err');
-    S.closeModal();
+    toast(`Method '${name}' not found in schema`, 'err');
+    closeModal();
     return null;
   }
 
@@ -205,7 +218,7 @@ function ExecRawModal({ name, storeId }) {
   const submit = async () => {
     const hexStr = inputRef.current?.value?.trim() || '';
     let payloadBytes = new Uint8Array(0);
-    if (hexStr) payloadBytes = Helpers.bytesFromHex(hexStr);
+    if (hexStr) payloadBytes = bytesFromHex(hexStr);
     await runExecAndShow(storeId, name, payloadBytes);
   };
 
@@ -232,7 +245,7 @@ function ExecFieldsModal({ name, storeId, inputType }) {
 
   const submit = async () => {
     const values = collectFormFields(formRef);
-    const payloadBytes = Schema.encodeMessage(inputType, values);
+    const payloadBytes = encodeMessage(inputType, values);
     await runExecAndShow(storeId, name, payloadBytes);
   };
 
@@ -254,10 +267,10 @@ function SubscribeModal({ streamName, storeId, paramType, eventSchema }) {
     let params = new Uint8Array(0);
     if (paramType && formRef.current) {
       try {
-        params = Schema.encodeMessage(paramType, collectFormFields(formRef));
+        params = encodeMessage(paramType, collectFormFields(formRef));
       } catch (e) { /* encode failed */ }
     }
-    S.closeModal();
+    closeModal();
     doSubscribe(storeId, streamName, params, eventSchema);
   };
 
@@ -278,14 +291,14 @@ function InspectIntentionModal() {
   const submit = async () => {
     const hexStr = inputRef.current?.value?.trim();
     if (!hexStr) return;
-    const hashBytes = Helpers.bytesFromHex(hexStr);
-    const activeStoreId = S.activeStoreId.value;
-    S.closeModal();
+    const hashBytes = bytesFromHex(hexStr);
+    const currentStoreId = activeStoreId.value;
+    closeModal();
     try {
-      const resp = await API.store.GetIntention({ store_id: activeStoreId, hash_prefix: hashBytes });
-      S.setPanelOverride({ type: 'intention', intention: resp.intention, ops: resp.ops || [], hexStr });
+      const resp = await sdk.api.store.GetIntention({ store_id: currentStoreId, hash_prefix: hashBytes });
+      setPanelOverride({ type: 'intention', intention: resp.intention, ops: resp.ops || [], hexStr });
     } catch (e) {
-      S.setPanelOverride({ type: 'intention', intention: null, ops: [], hexStr, error: e.message });
+      setPanelOverride({ type: 'intention', intention: null, ops: [], hexStr, error: e.message });
     }
   };
 
@@ -294,5 +307,174 @@ function InspectIntentionModal() {
     <label>Hash prefix (hex)</label>
     <input ref=${inputRef} placeholder="e.g. a1b2c3" autofocus />
     <${ModalActions} onSubmit=${submit} label="Inspect" />
+  `;
+}
+
+// ============================================================================
+// App Modals — Register + Unregister (all via gRPC)
+// ============================================================================
+
+function StoreOptions({ stores: storeList }) {
+  return storeList.map(s => {
+    const uuid = uuidFromBytes(s.id);
+    const label = s.name ? s.name + ' (' + uuid.slice(0,8) + ')' : uuid;
+    return html`<option value=${uuid}>${label}</option>`;
+  });
+}
+
+function RegisterAppModal({ registryStoreId }) {
+  const subdomainRef = useRef(null);
+  const rootStores = getRootStores(stores.value);
+  const firstRootUuid = rootStores.length > 0 ? uuidFromBytes(rootStores[0].id) : '';
+  const [selectedRegId, setSelectedRegId] = useState(
+    registryStoreId ? uuidFromBytes(registryStoreId) : firstRootUuid
+  );
+  
+  const [selectedAppId, setSelectedAppId] = useState('');
+  const [storeMode, setStoreMode] = useState('new');
+  const [selectedStoreId, setSelectedStoreId] = useState('');
+  const [bundles, setBundles] = useState([]);
+
+  // Load bundles from selected root store via typed store methods
+  useEffect(() => {
+    if (!selectedRegId) { setBundles([]); return; }
+    (async () => {
+      const store = await sdk.openStore(selectedRegId);
+      const resp = await store.ListBundles({});
+      setBundles(resp.bundles || []);
+    })();
+  }, [selectedRegId]);
+
+  // Filter stores to those compatible with the selected bundle's store_type.
+  // No bundle selected → no stores shown. Missing store_type → no stores shown.
+  const selectedBundle = bundles.find(b => b.app_id === selectedAppId);
+  const bundleStoreType = manifestGet(selectedBundle?.manifest, 'app', 'store_type');
+  const compatibleStores = bundleStoreType
+    ? stores.value.filter(s => s.store_type === bundleStoreType)
+    : [];
+
+  const onRegChange = (e) => {
+    setSelectedRegId(e.target.value);
+    setSelectedAppId('');
+  };
+
+  const onAppChange = (e) => {
+    const val = e.target.value;
+    setSelectedAppId(val);
+    if (val && subdomainRef.current && !subdomainRef.current.value) {
+      subdomainRef.current.value = val;
+    }
+  };
+
+  const submit = async () => {
+    if (!selectedRegId) { toast('Select a root store', 'err'); return; }
+    const subdomain = subdomainRef.current?.value?.trim();
+    if (!subdomain) { toast('Subdomain is required', 'err'); return; }
+    if (!selectedAppId) { toast('Select an app type', 'err'); return; }
+    if (storeMode === 'existing' && !selectedStoreId) { toast('Select a data store', 'err'); return; }
+
+    try {
+      const store = await sdk.openStore(selectedRegId);
+      const req = {
+        subdomain,
+        app_id: selectedAppId,
+        store_id: storeMode === 'existing'
+          ? uuidToBytes(selectedStoreId)
+          : new Uint8Array(16), // empty = server creates child store
+      };
+      await store.RegisterApp(req);
+      closeModal();
+      toast('App registered: ' + subdomain + '.' + location.hostname, 'ok');
+      await refreshApps();
+    } catch (e) { toast('Register error: ' + e.message, 'err'); }
+  };
+
+  const regFixed = !!registryStoreId;
+
+  return html`
+    <h2>Create App</h2>
+    ${regFixed ? html`
+      <p class="muted small">in ${rootStores.find(s => uuidFromBytes(s.id) === selectedRegId)?.name || selectedRegId.slice(0, 8)}</p>
+    ` : html`
+      <label>Root Store</label>
+      <select value=${selectedRegId} onChange=${onRegChange}>
+        <option value="">Select a root store...</option>
+        <${StoreOptions} stores=${rootStores} />
+      </select>
+    `}
+    ${selectedRegId && bundles.length === 0 ? html`
+      <p class="muted">No app bundles in this store. Drop a .zip onto the page to upload.</p>
+      <${ModalActions} />
+    ` : html`
+      <label>App Type</label>
+      <select value=${selectedAppId} onChange=${onAppChange}>
+        <option value="">Select an app...</option>
+        ${bundles.map(b => html`<option value=${b.app_id}>${manifestGet(b.manifest, 'app', 'name') || b.app_id}</option>`)}
+      </select>
+      <label>Subdomain</label>
+      <input ref=${subdomainRef} placeholder="e.g. inventory" />
+      <p class="muted small">Served at <em>subdomain</em>.${location.hostname}:${location.port}</p>
+      <label>Data Store</label>
+      <div class="radio-group">
+        <label class="radio-label">
+          <input type="radio" name="store-mode" value="new"
+            checked=${storeMode === 'new'} onChange=${() => setStoreMode('new')} />
+          Create new child store
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="store-mode" value="existing"
+            checked=${storeMode === 'existing'} onChange=${() => setStoreMode('existing')} />
+          Use existing store
+        </label>
+      </div>
+      ${storeMode === 'existing' && html`
+        <select value=${selectedStoreId} onChange=${(e) => setSelectedStoreId(e.target.value)}>
+          <option value="">Select a store...</option>
+          <${StoreOptions} stores=${compatibleStores} />
+        </select>
+      `}
+      <${ModalActions} onSubmit=${submit} label="Create App" />
+    `}
+  `;
+}
+
+function SelectRootStoreModal({ file }) {
+  const rootStores = getRootStores(stores.value);
+  const [selected, setSelected] = useState('');
+
+  const submit = async () => {
+    const match = rootStores.find(s => uuidFromBytes(s.id) === selected);
+    if (!match) { toast('Select a root store', 'err'); return; }
+    closeModal();
+    await uploadBundleToStore(match.id, file);
+  };
+
+  return html`
+    <h2>Select Root Store</h2>
+    <p>Multiple root stores found. Which one should receive this bundle?</p>
+    <select value=${selected} onChange=${(e) => setSelected(e.target.value)}>
+      <option value="">Select a root store...</option>
+      <${StoreOptions} stores=${rootStores} />
+    </select>
+    <${ModalActions} onSubmit=${submit} label="Upload" />
+  `;
+}
+
+function UnregisterAppModal({ subdomain, registryStoreId }) {
+  const submit = async () => {
+    try {
+      const store = await sdk.openStore(uuidFromBytes(registryStoreId));
+      await store.RemoveApp({ subdomain });
+      closeModal();
+      toast('App removed: ' + subdomain, 'ok');
+      await refreshApps();
+    } catch (e) { toast('Remove error: ' + e.message, 'err'); }
+  };
+
+  return html`
+    <h2>Unregister App</h2>
+    <p>Remove <strong>${subdomain}</strong> from the mesh? This deletes the app definition.</p>
+    <p class="muted">Data stores are not affected.</p>
+    <${ModalActions} onSubmit=${submit} label="Unregister" danger />
   `;
 }

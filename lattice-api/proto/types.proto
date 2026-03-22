@@ -298,6 +298,64 @@ message InspectBranchResponse {
 }
 
 // ============================================================================
+// App Binding Types
+// ============================================================================
+
+message AppBindingProto {
+  string subdomain = 1;
+  string app_id = 2;
+  bytes store_id = 3;
+  bytes registry_store_id = 4;
+  bool enabled = 5;
+}
+
+message AppBindingList {
+  repeated AppBindingProto bindings = 1;
+}
+
+message ToggleAppRequest {
+  string subdomain = 1;
+  bool enabled = 2;
+  bytes registry_store_id = 3;  // UUID bytes — which root store the app belongs to
+}
+
+message RegisterAppRequest {
+  bytes registry_store_id = 1;
+  string subdomain = 2;
+  string app_id = 3;
+  bytes store_id = 4;          // empty = auto-create child KV store
+}
+
+message RemoveAppRequest {
+  bytes registry_store_id = 1;
+  string subdomain = 2;
+}
+
+message UploadBundleRequest {
+  bytes registry_store_id = 1;
+  // app_id removed — server reads from manifest.toml inside zip
+  bytes data = 3;
+}
+
+message UploadBundleResponse {
+  string app_id = 1;           // app_id extracted from manifest
+}
+
+message RemoveBundleRequest {
+  bytes registry_store_id = 1;
+  string app_id = 2;
+}
+
+message BundleInfo {
+  string app_id = 1;
+  bytes registry_store_id = 2;
+}
+
+message BundleList {
+  repeated BundleInfo bundles = 1;
+}
+
+// ============================================================================
 // Dynamic Store Types
 // ============================================================================
 

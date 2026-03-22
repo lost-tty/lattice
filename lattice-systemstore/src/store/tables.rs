@@ -1,3 +1,4 @@
+use lattice_kvtable::KvRead;
 use lattice_model::dag_queries::DagQueries;
 use lattice_model::{Hash, InviteInfo, InviteStatus as ModelInviteStatus, Op, PubKey};
 use lattice_proto::storage::{

@@ -7,9 +7,14 @@ license.workspace = true
 
 [dependencies]
 lattice-api = { workspace = true }
+lattice-model = { workspace = true }
+lattice-node = { workspace = true }
 lattice-proto = { workspace = true }
+lattice-kvstore = { workspace = true }
+lattice-rootstore = { workspace = true }
 
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "json", "query"] }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tonic = "0.14"
 prost = { workspace = true }
@@ -22,6 +27,8 @@ mime_guess = "2"
 http = "1"
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+zip = { version = "8.4.0", default-features = false, features = ["deflate"] }
+serde = { workspace = true, features = ["derive"] }
 
 [build-dependencies]
 prost-build = { workspace = true }

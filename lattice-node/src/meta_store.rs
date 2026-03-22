@@ -3,17 +3,20 @@
 //! Tables:
 //! - stores: UUID → StoreRecord protobuf (store_id, created_at)
 //! - rootstores: UUID → RootStoreRecord protobuf
+//! - app_bindings: UUID → AppBinding JSON (node-local app exposure decisions)
 //! - meta: key → value bytes
 
 use lattice_kernel::proto::storage::{RootStoreRecord, StoreRecord};
+use lattice_model::AppBinding;
 use prost::Message;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, TableDefinition, TableHandle};
 use std::path::Path;
 use thiserror::Error;
 use uuid::Uuid;
 
 const STORES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("stores");
 const ROOTSTORES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rootstores");
+const APP_BINDINGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("app_bindings");
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
 const META_NAME: &str = "name";
@@ -52,6 +55,24 @@ impl MetaStore {
             let _ = write_txn.open_table(STORES_TABLE)?;
             let _ = write_txn.open_table(ROOTSTORES_TABLE)?;
             let _ = write_txn.open_table(META_TABLE)?;
+
+            match write_txn.open_table(APP_BINDINGS_TABLE) {
+                Ok(_) => {}
+                Err(redb::TableError::TableTypeMismatch { .. }) => {
+                    tracing::warn!(
+                        "app_bindings table has incompatible schema from a prior version — \
+                         recreating (re-register apps via the UI)"
+                    );
+                    // Delete the old table by untyped handle, then create with correct schema
+                    if let Ok(mut tables) = write_txn.list_tables() {
+                        if let Some(handle) = tables.find(|t| t.name() == "app_bindings") {
+                            let _ = write_txn.delete_table(handle);
+                        }
+                    }
+                    write_txn.open_table(APP_BINDINGS_TABLE)?;
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         write_txn.commit()?;
 
@@ -190,6 +211,51 @@ impl MetaStore {
         }
         write_txn.commit()?;
         Ok(())
+    }
+
+    // ==================== App Bindings ====================
+
+    pub fn set_app_binding(&self, binding: &AppBinding) -> Result<(), MetaStoreError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(APP_BINDINGS_TABLE)?;
+            let bytes = serde_json::to_vec(binding).unwrap();
+            table.insert(binding.subdomain.as_str(), bytes.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_app_binding(&self, subdomain: &str) -> Result<(), MetaStoreError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(APP_BINDINGS_TABLE)?;
+            table.remove(subdomain)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub fn get_app_binding(&self, subdomain: &str) -> Result<Option<AppBinding>, MetaStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(APP_BINDINGS_TABLE)?;
+        match table.get(subdomain)? {
+            Some(value) => Ok(serde_json::from_slice(value.value()).ok()),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_app_bindings(&self) -> Result<Vec<AppBinding>, MetaStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(APP_BINDINGS_TABLE)?;
+        let mut bindings = Vec::new();
+        for result in table.iter()? {
+            let (_key, value) = result?;
+            if let Ok(b) = serde_json::from_slice::<AppBinding>(value.value()) {
+                bindings.push(b);
+            }
+        }
+        Ok(bindings)
     }
 }
 

@@ -252,6 +252,34 @@ impl From<proto::MethodInfo> for backend::MethodInfo {
     }
 }
 
+impl From<lattice_model::AppBinding> for proto::AppBindingProto {
+    fn from(b: lattice_model::AppBinding) -> Self {
+        proto::AppBindingProto {
+            subdomain: b.subdomain,
+            app_id: b.app_id,
+            store_id: b.store_id.as_bytes().to_vec(),
+            registry_store_id: b.registry_store_id.as_bytes().to_vec(),
+            enabled: b.enabled,
+        }
+    }
+}
+
+impl TryFrom<proto::AppBindingProto> for lattice_model::AppBinding {
+    type Error = uuid::Error;
+
+    fn try_from(p: proto::AppBindingProto) -> Result<Self, Self::Error> {
+        Ok(lattice_model::AppBinding {
+            subdomain: p.subdomain,
+            app_id: p.app_id,
+            store_id: uuid::Uuid::from_slice(&p.store_id)
+                .unwrap_or_default(),
+            registry_store_id: uuid::Uuid::from_slice(&p.registry_store_id)
+                .unwrap_or_default(),
+            enabled: p.enabled,
+        })
+    }
+}
+
 pub mod backend;
 
 /// Extension trait to convert `Result<T, BackendError>` into `Result<T, tonic::Status>`.

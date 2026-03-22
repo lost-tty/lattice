@@ -1,4 +1,10 @@
-async function loadDebug(storeId, debugView) {
+import { html, hex, fmtTime, fmtOps, extractIntentionHashes } from './util.js';
+import * as Helpers from '../helpers.js';
+import * as S from '../state.js';
+import * as Router from '../router.js';
+import { sdk } from '../sdk.js';
+
+export async function loadDebug(storeId, debugView) {
   switch (debugView) {
     case 'tips': return await loadDebugTips(storeId);
     case 'log': return await loadDebugLog(storeId);
@@ -7,15 +13,15 @@ async function loadDebug(storeId, debugView) {
   }
 }
 
-function DebugNav() {
-  const dv = S.debugView.value;
+function DebugNav({ storeId, debugView }) {
+  const uuid = Helpers.uuidFromBytes(storeId);
   const views = ['tips', 'log', 'intentions', 'floating'];
   return html`
     <div class="action-bar">
       ${views.map(v => html`
         <button
-          class="btn${v === dv ? ' btn-primary' : ''}"
-          onClick=${() => S.switchDebugView(v)}
+          class="btn${v === debugView ? ' btn-primary' : ''}"
+          onClick=${() => Router.navigate('/store/' + uuid + '/debug' + (v === 'tips' ? '' : '/' + v))}
         >${v}</button>
       `)}
       <button class="btn" onClick=${() => S.showModal('inspectIntention')}>inspect</button>
@@ -24,9 +30,9 @@ function DebugNav() {
 }
 
 async function loadDebugTips(storeId) {
-  const authors = (await API.store.Debug({ id: storeId })).authors || [];
+  const authors = (await sdk.api.store.Debug({ id: storeId })).authors || [];
   return html`
-    <${DebugNav} />
+    <${DebugNav} storeId=${storeId} debugView="tips" />
     ${authors.length === 0
       ? html`<div class="empty-state">No author state</div>`
       : html`
@@ -45,9 +51,10 @@ async function loadDebugTips(storeId) {
 }
 
 async function loadDebugLog(storeId) {
-  const entries = (await API.store.WitnessLog({ store_id: storeId })).entries || [];
+  const entries = (await sdk.api.store.WitnessLog({ store_id: storeId })).entries || [];
+  const WitnessContent = sdk.proto.lookup('lattice.weaver.WitnessContent');
   return html`
-    <${DebugNav} />
+    <${DebugNav} storeId=${storeId} debugView="log" />
     ${entries.length === 0
       ? html`<div class="empty-state">No witness log entries</div>`
       : html`
@@ -57,7 +64,7 @@ async function loadDebugLog(storeId) {
             let intentionHash = '-', wallTime = '-', prevHash = '-';
             if (w.content && w.content.length > 0) {
               try {
-                const wc = T.WitnessContent.decode(w.content);
+                const wc = WitnessContent.decode(w.content);
                 intentionHash = hex(wc.intention_hash) || '-';
                 wallTime = wc.wall_time ? fmtTime(wc.wall_time) : '-';
                 prevHash = hex(wc.prev_hash) || '-';
@@ -81,21 +88,21 @@ async function loadDebugLog(storeId) {
 }
 
 async function loadDebugIntentions(storeId) {
-  const entries = (await API.store.WitnessLog({ store_id: storeId })).entries || [];
+  const entries = (await sdk.api.store.WitnessLog({ store_id: storeId })).entries || [];
   if (entries.length === 0) {
-    return html`<${DebugNav} /><div class="empty-state">No intentions</div>`;
+    return html`<${DebugNav} storeId=${storeId} debugView="intentions" /><div class="empty-state">No intentions</div>`;
   }
 
   const intentionHashes = extractIntentionHashes(entries);
 
   if (intentionHashes.length === 0) {
-    return html`<${DebugNav} /><div class="empty-state">No intention hashes found in witness log</div>`;
+    return html`<${DebugNav} storeId=${storeId} debugView="intentions" /><div class="empty-state">No intention hashes found in witness log</div>`;
   }
 
   const rows = [];
   for (const { hex: h, bytes: hashBytes } of intentionHashes) {
     try {
-      const resp = await API.store.GetIntention({ store_id: storeId, hash_prefix: hashBytes.slice(0, 4) });
+      const resp = await sdk.api.store.GetIntention({ store_id: storeId, hash_prefix: hashBytes.slice(0, 4) });
       if (!resp.intention) continue;
       rows.push({ intention: resp.intention, ops: resp.ops || [] });
     } catch (e) {
@@ -104,7 +111,7 @@ async function loadDebugIntentions(storeId) {
   }
 
   return html`
-    <${DebugNav} />
+    <${DebugNav} storeId=${storeId} debugView="intentions" />
     <table>
       <tr><th>Hash</th><th>Author</th><th>Store Prev</th><th>Wall Time</th><th>Ops</th></tr>
       ${rows.map(r => r._error
@@ -124,9 +131,9 @@ async function loadDebugIntentions(storeId) {
 }
 
 async function loadDebugFloating(storeId) {
-  const floating = (await API.store.FloatingIntentions({ id: storeId })).intentions || [];
+  const floating = (await sdk.api.store.FloatingIntentions({ id: storeId })).intentions || [];
   return html`
-    <${DebugNav} />
+    <${DebugNav} storeId=${storeId} debugView="floating" />
     ${floating.length === 0
       ? html`<div class="empty-state">No floating intentions</div>`
       : html`
@@ -152,7 +159,7 @@ async function loadDebugFloating(storeId) {
   `;
 }
 
-function IntentionDetail({ intention, ops, hexStr, error }) {
+export function IntentionDetail({ intention, ops, hexStr, error }) {
   if (error) {
     return html`
       <div class="action-bar"><button class="btn" onClick=${() => S.clearPanelOverride()}>Back</button></div>
