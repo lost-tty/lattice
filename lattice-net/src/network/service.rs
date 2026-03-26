@@ -493,11 +493,17 @@ impl<T: Transport> NetworkService<T> {
                         // Resume after the last entry in this batch
                         start_seq = resp.last_seq + 1;
 
-                        let intentions: Vec<_> = resp
-                            .intentions
-                            .iter()
-                            .filter_map(|proto| intention_from_proto(proto).ok())
-                            .collect();
+                        let mut intentions = Vec::with_capacity(resp.intentions.len());
+                        for proto in &resp.intentions {
+                            match intention_from_proto(proto) {
+                                Ok(signed) => intentions.push(signed),
+                                Err(e) => {
+                                    return Err(LatticeNetError::Bootstrap(format!(
+                                        "Invalid intention in bootstrap batch: {e}"
+                                    )));
+                                }
+                            }
+                        }
 
                         store
                             .ingest_witness_batch(resp.witness_records, intentions, peer_id)

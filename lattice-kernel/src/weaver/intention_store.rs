@@ -85,6 +85,10 @@ pub enum IntentionStoreError {
     RangeTooLarge(usize),
     #[error("intention already witnessed: {0}")]
     AlreadyWitnessed(Hash),
+    #[error("payload too large: {size} bytes (max {max})")]
+    PayloadTooLarge { size: usize, max: usize },
+    #[error("too many causal deps: {count} (max {max})")]
+    TooManyCausalDeps { count: usize, max: usize },
 }
 
 /// Structured corruption errors — the on-disk data is internally inconsistent.
@@ -366,6 +370,25 @@ impl IntentionStore {
     pub fn insert(&mut self, signed: &SignedIntention) -> Result<Hash, IntentionStoreError> {
         let intention = &signed.intention;
         let hash = intention.hash();
+
+        // Validate payload size and causal dep count.
+        // These mirror the local-submit checks but also protect against
+        // oversized intentions arriving from the network.
+        if intention.ops.len() > lattice_model::weaver::MAX_PAYLOAD_SIZE {
+            return Err(IntentionStoreError::PayloadTooLarge {
+                size: intention.ops.len(),
+                max: lattice_model::weaver::MAX_PAYLOAD_SIZE,
+            });
+        }
+        let dep_count = match &intention.condition {
+            lattice_model::weaver::Condition::V1(deps) => deps.len(),
+        };
+        if dep_count > lattice_model::weaver::MAX_CAUSAL_DEPS {
+            return Err(IntentionStoreError::TooManyCausalDeps {
+                count: dep_count,
+                max: lattice_model::weaver::MAX_CAUSAL_DEPS,
+            });
+        }
 
         let proto = lattice_proto::weaver::SignedIntention {
             intention_borsh: intention.to_borsh(),
@@ -2719,5 +2742,56 @@ mod tests {
         let (store, hash_a, _, _, _) = build_diamond_dag();
         let bogus = Hash([0xFF; 32]);
         assert!(store.get_path(&hash_a, &bogus).is_err());
+    }
+
+    #[test]
+    fn insert_rejects_oversized_payload() {
+        let mut store = open_store_in_memory();
+        let (key, pk) = make_key();
+
+        let ops = vec![0u8; lattice_model::weaver::MAX_PAYLOAD_SIZE + 1];
+        let intention = make_intention(pk, Hash::ZERO, ops);
+        let signed = SignedIntention::sign(intention, &key);
+
+        assert!(matches!(
+            store.insert(&signed),
+            Err(IntentionStoreError::PayloadTooLarge { .. }),
+        ));
+    }
+
+    #[test]
+    fn insert_rejects_too_many_deps() {
+        let mut store = open_store_in_memory();
+        let (key, pk) = make_key();
+
+        let deps: Vec<Hash> = (0..lattice_model::weaver::MAX_CAUSAL_DEPS + 1)
+            .map(|i| Hash([i as u8; 32]))
+            .collect();
+        let intention = Intention {
+            author: pk,
+            timestamp: HLC::new(1000, 0),
+            store_id: uuid::Uuid::from_bytes([0xAA; 16]),
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(deps),
+            ops: vec![1],
+        };
+        let signed = SignedIntention::sign(intention, &key);
+
+        assert!(matches!(
+            store.insert(&signed),
+            Err(IntentionStoreError::TooManyCausalDeps { .. }),
+        ));
+    }
+
+    #[test]
+    fn insert_accepts_large_valid_intention() {
+        let mut store = open_store_in_memory();
+        let (key, pk) = make_key();
+
+        let ops = vec![0u8; lattice_model::weaver::MAX_PAYLOAD_SIZE];
+        let intention = make_intention(pk, Hash::ZERO, ops);
+        let signed = SignedIntention::sign(intention, &key);
+
+        assert!(store.insert(&signed).is_ok());
     }
 }

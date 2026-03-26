@@ -31,6 +31,12 @@ pub enum StateError {
     #[error("Backend error: {0}")]
     Backend(String),
 
+    #[error("Payload too large: {size} bytes (max {max})")]
+    PayloadTooLarge { size: usize, max: usize },
+
+    #[error("Too many causal deps: {count} (max {max})")]
+    TooManyCausalDeps { count: usize, max: usize },
+
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 

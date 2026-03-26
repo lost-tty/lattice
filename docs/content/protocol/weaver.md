@@ -142,27 +142,38 @@ Application data example (KvStore):
 
 ---
 
-## 4. Validation Logic
+## 4. Limits
+
+| Constant | Value | Scope |
+|----------|-------|-------|
+| `MAX_PAYLOAD_SIZE` | 128 KiB (131072 bytes) | Maximum size of `ops` |
+| `MAX_CAUSAL_DEPS` | 16 | Maximum entries in `Condition::V1` |
+
+Both limits are enforced on local submit (before signing) and on insert (protecting against oversized intentions from the network). If a state machine needs more than 16 causal dependencies, it should structure them as a tree of intentions.
+
+## 5. Validation Logic
 
 A Node accepts and stores an Intention `I` if:
 
 1. **Signature Valid:** `Ed25519.verify(I.author, blake3(borsh(I)), signature)` is TRUE.
 2. **Store ID Valid:** `I.store_id` matches the local store.
+3. **Payload Size:** `I.ops.len() <= MAX_PAYLOAD_SIZE`.
+4. **Causal Dep Count:** The number of hashes in `I.condition` does not exceed `MAX_CAUSAL_DEPS`.
 
 An accepted Intention is **witnessed** (committed to the witness log) when:
 
-3. **Linearity Resolved:** `I.store_prev` matches the current tip of `I.author`'s chain in this store (or is `Hash::ZERO` for the author's first write). Until `store_prev` is available, the intention floats.
-4. **Dependencies Met:** For every `h` in `I.condition.V1`, `h` must be witnessed. If not, the intention floats until they arrive.
+5. **Linearity Resolved:** `I.store_prev` matches the current tip of `I.author`'s chain in this store (or is `Hash::ZERO` for the author's first write). Until `store_prev` is available, the intention floats.
+6. **Dependencies Met:** For every `h` in `I.condition.V1`, `h` must be witnessed. If not, the intention floats until they arrive.
 
 Note: linearity is enforced at **witnessing time**, not acceptance time. An intention with an unknown `store_prev` is accepted and stored, but floats until its predecessor arrives.
 
-### 4.1 Floating Intentions
+### 5.1 Floating Intentions
 
 When an accepted Intention has unresolved `store_prev` or unmet causal dependencies, it is stored but not witnessed. These are called **floating intentions**. They are indexed by `store_prev` in `TABLE_FLOATING_BY_PREV` and automatically witnessed in cascade once their dependencies arrive (e.g., after sync delivers the missing intentions).
 
 ---
 
-## 5. Witness Log (Total Apply Order)
+## 6. Witness Log (Total Apply Order)
 
 When an Intention is applied to the state machine, a `WitnessRecord` is appended to the witness log. The canonical data type is the proto-generated `lattice_proto::weaver::WitnessRecord`:
 
@@ -180,7 +191,7 @@ message WitnessRecord {
 }
 ```
 
-### 5.1 Hash Chain Integrity
+### 6.1 Hash Chain Integrity
 
 The `prev_hash` field creates a tamper-evident chain across the witness log:
 
@@ -190,7 +201,7 @@ The `prev_hash` field creates a tamper-evident chain across the witness log:
 
 The `IntentionStore` caches `last_witness_hash` in memory for O(1) chain extension.
 
-### 5.2 Signing and Verification
+### 6.2 Signing and Verification
 
 Witness records use a similar **content + envelope** pattern to `SignedIntention`, but with a different verification strictness level. Intentions use `verify_hash_strict()` (rejects small-order keys, checks canonical S), while witness records use `verify_hash()` (cofactored verification, less strict) since witness keys are under the node's own control.
 

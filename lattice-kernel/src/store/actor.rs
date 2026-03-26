@@ -315,6 +315,26 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
         let author = self.node_identity.public_key();
         let store_prev = store.author_tip(&author);
 
+        // Early checks before signing — validate what the state machine controls.
+        // insert() does the authoritative byte-level check on the final
+        // serialized size.
+        if causal_deps.len() > lattice_model::weaver::MAX_CAUSAL_DEPS {
+            return Err(ReplicationControllerError::State(
+                StateError::TooManyCausalDeps {
+                    count: causal_deps.len(),
+                    max: lattice_model::weaver::MAX_CAUSAL_DEPS,
+                },
+            ));
+        }
+        if payload.len() > lattice_model::weaver::MAX_PAYLOAD_SIZE {
+            return Err(ReplicationControllerError::State(
+                StateError::PayloadTooLarge {
+                    size: payload.len(),
+                    max: lattice_model::weaver::MAX_PAYLOAD_SIZE,
+                },
+            ));
+        }
+
         let intention = Intention {
             author,
             timestamp: lattice_model::hlc::HLC::now(),
@@ -1716,6 +1736,139 @@ mod tests {
             handle.witness_count().await, 0,
             "No witness records should be stored"
         );
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_submit_rejects_oversized_payload() {
+        let identity = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
+
+        let huge = vec![0u8; lattice_model::weaver::MAX_PAYLOAD_SIZE + 1];
+        let result = handle.submit(huge, vec![]).await;
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("too large"),
+            "Expected 'too large' error, got: {err}",
+        );
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_submit_empty_payload_succeeds() {
+        let identity = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
+
+        let hash = handle.submit(vec![], vec![]).await.unwrap();
+        assert!(handle.state().has_applied(hash));
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_ingest_rejects_oversized_intention_from_peer() {
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
+
+        let intention = Intention {
+            author: identity_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: vec![0u8; lattice_model::weaver::MAX_PAYLOAD_SIZE + 1],
+        };
+        let signed = SignedIntention::sign(intention, &identity_b);
+
+        let result = handle.ingest_intention(signed).await;
+        assert!(result.is_err(), "Should reject oversized intention from peer");
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_submit_rejects_too_many_causal_deps() {
+        let identity = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
+
+        // Create enough real intentions to exceed MAX_CAUSAL_DEPS
+        let mut deps = Vec::new();
+        for i in 0u8..(lattice_model::weaver::MAX_CAUSAL_DEPS as u8 + 1) {
+            let h = handle.submit(vec![i], vec![]).await.unwrap();
+            deps.push(h);
+        }
+
+        let result = handle.submit(vec![99], deps).await;
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("causal deps"),
+            "Expected 'causal deps' error, got: {err}",
+        );
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_submit_accepts_max_causal_deps() {
+        let identity = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
+
+        let mut deps = Vec::new();
+        for i in 0u8..(lattice_model::weaver::MAX_CAUSAL_DEPS as u8) {
+            let h = handle.submit(vec![i], vec![]).await.unwrap();
+            deps.push(h);
+        }
+
+        // Exactly at the limit should succeed
+        let result = handle.submit(vec![99], deps).await;
+        assert!(result.is_ok(), "Should accept exactly MAX_CAUSAL_DEPS deps");
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_submit_large_payload_succeeds() {
+        let identity = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
+
+        let payload = vec![0u8; lattice_model::weaver::MAX_PAYLOAD_SIZE];
+        let hash = handle.submit(payload, vec![]).await.unwrap();
+        assert!(handle.state().has_applied(hash));
+
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_ingest_rejects_too_many_deps_from_peer() {
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, identity_a.clone()).unwrap();
+
+        let deps: Vec<Hash> = (0..lattice_model::weaver::MAX_CAUSAL_DEPS + 1)
+            .map(|i| Hash([i as u8; 32]))
+            .collect();
+        let intention = Intention {
+            author: identity_b.public_key(),
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(deps),
+            ops: vec![1],
+        };
+        let signed = SignedIntention::sign(intention, &identity_b);
+
+        let result = handle.ingest_intention(signed).await;
+        assert!(result.is_err(), "Should reject too many deps from peer");
 
         handle.close().await;
     }
