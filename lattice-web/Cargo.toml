@@ -30,5 +30,8 @@ tower = { version = "0.5", features = ["util"] }
 zip = { version = "8.4.0", default-features = false, features = ["deflate"] }
 serde = { workspace = true, features = ["derive"] }
 
+[dev-dependencies]
+boa_engine = "0.21"
+
 [build-dependencies]
 prost-build = { workspace = true }

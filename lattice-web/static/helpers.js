@@ -9,7 +9,7 @@ export function uuidFromBytes(u8) {
 export function uuidToBytes(uuid) {
   const hex = uuid.replace(/-/g, '');
   const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i++) bytes[i] = parseInt(hex.substr(i*2, 2), 16);
+  for (let i = 0; i < 16; i++) bytes[i] = parseInt(hex.substring(i*2, i*2+2), 16);
   return bytes;
 }
 

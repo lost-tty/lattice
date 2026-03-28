@@ -90,7 +90,7 @@ function CreateStoreModal({ parentId }) {
     <input ref=${nameRef} placeholder="my-store" autofocus />
     <label>Type</label>
     <select ref=${typeRef}>
-      ${types.map(t => html`<option value=${t}>${t}</option>`)}
+      ${types.map(t => html`<option value=${t} selected=${!isChild && t === 'core:rootstore'}>${t}</option>`)}
     </select>
     <${ModalActions} onSubmit=${submit} label="Create" />
   `;
@@ -362,7 +362,8 @@ function RegisterAppModal({ registryStoreId }) {
     const val = e.target.value;
     setSelectedAppId(val);
     if (val && subdomainRef.current && !subdomainRef.current.value) {
-      subdomainRef.current.value = val;
+      // Strip any prefix (e.g. "example:kanban" → "kanban")
+      subdomainRef.current.value = val.includes(':') ? val.split(':').pop() : val;
     }
   };
 
@@ -374,17 +375,24 @@ function RegisterAppModal({ registryStoreId }) {
     if (storeMode === 'existing' && !selectedStoreId) { toast('Select a data store', 'err'); return; }
 
     try {
+      let storeId;
+      if (storeMode === 'existing') {
+        storeId = uuidToBytes(selectedStoreId);
+      } else {
+        // Create a new child store matching the app's required store_type
+        if (!bundleStoreType) { toast('Bundle has no store_type in manifest', 'err'); return; }
+        const createResp = await sdk.api.store.Create({
+          name: subdomain,
+          store_type: bundleStoreType,
+          parent_id: uuidToBytes(selectedRegId),
+        });
+        storeId = createResp.id;
+      }
       const store = await sdk.openStore(selectedRegId);
-      const req = {
-        subdomain,
-        app_id: selectedAppId,
-        store_id: storeMode === 'existing'
-          ? uuidToBytes(selectedStoreId)
-          : new Uint8Array(16), // empty = server creates child store
-      };
-      await store.RegisterApp(req);
+      await store.RegisterApp({ subdomain, app_id: selectedAppId, store_id: storeId });
       closeModal();
       toast('App registered: ' + subdomain + '.' + location.hostname, 'ok');
+      await refreshStores();
       await refreshApps();
     } catch (e) { toast('Register error: ' + e.message, 'err'); }
   };
