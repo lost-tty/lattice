@@ -131,7 +131,15 @@ async fn run_gossip_ingester<T: Transport>(
     pm: Arc<dyn PeerProvider>,
     mut receiver: broadcast::Receiver<(PubKey, Vec<u8>)>,
 ) {
-    while let Ok((sender_pubkey, raw_bytes)) = receiver.recv().await {
+    loop {
+        let (sender_pubkey, raw_bytes) = match receiver.recv().await {
+            Ok(pair) => pair,
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(store_id = %store_id, lagged = n, "Gossip handler lagged, missed {} events", n);
+                continue;
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        };
         let Some(service) = weak_service.upgrade() else {
             break;
         };
@@ -656,19 +664,33 @@ impl<T: Transport> NetworkService<T> {
                     tokio::select! {
                         result = transport_events.recv() => match result {
                             Ok(event) => apply_event(&sessions, event),
-                            Err(_) => break,
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::warn!(lagged = n, "Transport event listener lagged, missed {} events", n);
+                                // Continue — lagging is recoverable, don't kill the listener
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
                         },
                         result = gossip_rx.recv() => match result {
                             Ok(event) => apply_event(&sessions, event),
-                            Err(_) => break,
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::warn!(lagged = n, "Gossip event listener lagged, missed {} events", n);
+                                // Continue — lagging is recoverable, don't kill the listener
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
                         },
                     }
                 }
             });
         } else {
             tokio::spawn(async move {
-                while let Ok(event) = transport_events.recv().await {
-                    apply_event(&sessions, event);
+                loop {
+                    match transport_events.recv().await {
+                        Ok(event) => apply_event(&sessions, event),
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(lagged = n, "Transport event listener lagged, missed {} events", n);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
                 }
             });
         }
@@ -679,7 +701,15 @@ impl<T: Transport> NetworkService<T> {
         service: Arc<Self>,
         mut event_rx: broadcast::Receiver<NetEvent>,
     ) {
-        while let Ok(event) = event_rx.recv().await {
+        loop {
+            let event = match event_rx.recv().await {
+                Ok(e) => e,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(lagged = n, "NetEvent handler lagged, missed {} events", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
             let service = service.clone();
             match event {
                 NetEvent::Join {

@@ -157,9 +157,17 @@ impl LatticeBackend for InProcessBackend {
         let (tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
-                if tx.send(to_node_event(event)).is_err() {
-                    break;
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if tx.send(to_node_event(event)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(lagged = n, "Node event bridge lagged, missed {} events", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });

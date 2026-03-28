@@ -526,7 +526,15 @@ impl AppManager {
         let meta = self.meta.clone();
         let app_tx = self.app_tx.clone();
         tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
+            loop {
+                let event = match rx.recv().await {
+                    Ok(e) => e,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(lagged = n, "App manager node-event listener lagged, missed {} events", n);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
                 let store_id = match event {
                     NodeEvent::StoreReady { store_id } => store_id,
                     _ => continue,
