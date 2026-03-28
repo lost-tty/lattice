@@ -251,7 +251,7 @@ async fn run_auto_sync<T: Transport>(
     // peers were already established (e.g. child stores discovered via sync).
     if has_peers {
         if let Some(service) = weak_service.upgrade() {
-            tracing::info!(store_id = %store_id, "Peers already connected, triggering sync");
+            tracing::debug!(store_id = %store_id, "Peers already connected, triggering sync");
             let _ = service.sync_all_by_id(store_id).await;
         }
     }
@@ -271,7 +271,7 @@ async fn run_auto_sync<T: Transport>(
                     tracing::debug!(store_id = %store_id, peer = %peer, "Skipping sync — peer not in acceptable authors");
                     continue;
                 }
-                tracing::info!(store_id = %store_id, peer = %peer, "New peer connected, syncing");
+                tracing::debug!(store_id = %store_id, peer = %peer, "New peer connected, syncing");
                 let _ = service.sync_with_peer(&store, peer, &[]).await;
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -379,7 +379,7 @@ impl<T: Transport> NetworkService<T> {
             return;
         };
 
-        tracing::info!(store_id = %store_id, "Registering store for network");
+        tracing::debug!(store_id = %store_id, "Registering store for network");
 
         // Mark as registered to prevent double-registration.
         self.registered_stores.write().await.insert(store_id);
@@ -1016,7 +1016,11 @@ impl<T: Transport> NetworkService<T> {
         // For generic transports, dropping the sink is sufficient.
         drop(sink);
 
-        tracing::info!(entries = result.entries_received, "Sync: complete");
+        if result.entries_received > 0 || result.entries_sent > 0 {
+            tracing::info!(received = result.entries_received, sent = result.entries_sent, "Sync: complete");
+        } else {
+            tracing::debug!("Sync: complete (no changes)");
+        }
 
         Ok(SyncResult {
             entries_received: result.entries_received,
@@ -1069,7 +1073,7 @@ impl<T: Transport> NetworkService<T> {
 
         tracing::debug!("[Sync] Syncing with {} peers...", peer_ids.len());
         let results = self.sync_peers(store, &peer_ids, &[]).await;
-        tracing::info!(
+        tracing::debug!(
             "[Sync] Complete: {}/{} peers",
             results.len(),
             peer_ids.len()

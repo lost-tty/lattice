@@ -59,7 +59,7 @@ graph TB
     end
     
     subgraph "Runtime"
-        DAEMON["lattice-daemon<br/>(latticed orchestrator)"]
+        DAEMON["lattice-cli<br/>(lattice binary)"]
         RT["lattice-runtime<br/>(RuntimeBuilder)"]
         RPC["lattice-api<br/>(gRPC server, LatticeBackend)"]
     end
@@ -130,12 +130,11 @@ For child stores discovered via the fractal hierarchy, the `RecursiveWatcher` au
 
 - **`lattice-runtime`:** Composition root. `RuntimeBuilder` wires up `Node` + `NetworkService` + optional `RpcServer`. Re-exports the `LatticeBackend` trait (defined in `lattice-api`) with two implementations:
   - `InProcessBackend` — direct `Arc<Node>` + `Arc<NetworkService>` calls (mobile, embedded CLI).
-  - `RpcBackend` — gRPC over UDS to a running `latticed` daemon.
+   - `RpcBackend` — gRPC over UDS to a running `lattice --daemon` instance.
 - **`lattice-api`:** gRPC services (`NodeService`, `StoreService`, `DynamicStoreService`) over Unix Domain Sockets. Domain↔DTO conversion between `lattice-model` types and Protobuf. Event streaming via `mpsc` channel bridging.
 - **`lattice-bindings`:** UniFFI bridge for Swift/Kotlin. Uses a "hidden runtime" pattern (owns a dedicated Tokio runtime). Dynamic Protobuf reflection (`prost-reflect` → `ReflectValue` enum tree) lets mobile apps discover and interact with arbitrary store schemas without recompilation.
-- **`lattice-cli`:** REPL with dual-mode backend. Dynamic command execution pipeline: fetches Protobuf descriptors at runtime, parses S-expression input, reflects into `DynamicMessage`, executes, and renders. Includes a Unicode graph renderer (Kahn's algorithm + HLC priority) for visualizing DAG history.
-- **`lattice-web`:** Browser-based SPA served directly from the node. Preact + htm + Signals (no build step, no JSX transpiler). Communicates via WebSocket-tunneled gRPC — the WS tunnel routes synthetic `http::Request`s through `tonic::service::Routes`. Protobuf descriptors are served as binary `FileDescriptorSet` and converted in-browser via `protobufjs`. Features: store CRUD, peer management, dynamic method execution, live event subscriptions, system table inspection, and an SVG DAG history graph with variable-height label measurement via `ResizeObserver`.
-- **`lattice-daemon` (`latticed`):** Thin wrapper — `Runtime::builder().with_core_stores().with_rpc().build()`, signal handling, structured tracing. Optional `--web <port>` flag (feature-gated) enables the web UI.
+- **`lattice-cli` (`lattice`):** Single binary with three modes: REPL connecting to daemon (default), headless daemon (`--daemon`), and embedded mode (`--embedded`). Dynamic command execution pipeline: fetches Protobuf descriptors at runtime, parses S-expression input, reflects into `DynamicMessage`, executes, and renders. Includes a Unicode graph renderer (Kahn's algorithm + HLC priority) for visualizing DAG history. Daemon mode enables the web UI by default on port 8123.
+- **`lattice-web`:** Browser-based SPA served directly from the node. Preact + htm + Signals (no build step, no JSX transpiler). Communicates via WebSocket-tunneled gRPC — the WS tunnel routes synthetic `http::Request`s through `tonic::service::Routes`. Protobuf descriptors are served as binary `FileDescriptorSet` and converted in-browser via `protobufjs`. Features: dashboard, app management, store CRUD, peer management, dynamic method execution, live event subscriptions, system table inspection, and an SVG DAG history graph.
 
 ## Cryptographic Primitives
 

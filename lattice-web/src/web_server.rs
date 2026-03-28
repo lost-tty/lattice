@@ -68,7 +68,6 @@ impl WebServer {
 
     /// Run the web server (blocks until shutdown).
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = self.url();
         let routes = Routes::new(NodeServiceServer::new(NodeServiceImpl::new(
             self.backend.clone(),
         )))
@@ -93,7 +92,7 @@ impl WebServer {
 
         let app_count = apps.read().await.len();
         let bundle_count = bundles.read().await.len();
-        tracing::info!(apps = app_count, bundles = bundle_count, "Web server: ready");
+        tracing::debug!(apps = app_count, bundles = bundle_count, "Web server: ready");
 
         let apps_ref = apps.clone();
         let bundles_ref = bundles.clone();
@@ -131,11 +130,33 @@ impl WebServer {
             .route("/{*path}", get(serve_catchall))
             .with_state(state);
 
-        let addr = SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), self.port);
-        tracing::info!("Lattice web UI listening on {}", url);
+        // Bind to both IPv4 and IPv6 localhost for dual-stack.
+        // Either may fail (e.g. IPv6 disabled), but at least one must succeed.
+        let v4 = tokio::net::TcpListener::bind(
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), self.port),
+        ).await;
+        let v6 = tokio::net::TcpListener::bind(
+            SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), self.port),
+        ).await;
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
+        match (v4, v6) {
+            (Ok(v4), Ok(v6)) => {
+                let app_clone = app.clone();
+                tokio::select! {
+                    r = axum::serve(v4, app_clone) => { r?; }
+                    r = axum::serve(v6, app) => { r?; }
+                }
+            }
+            (Ok(v4), Err(_)) => {
+                axum::serve(v4, app).await?;
+            }
+            (Err(_), Ok(v6)) => {
+                axum::serve(v6, app).await?;
+            }
+            (Err(e4), Err(e6)) => {
+                return Err(format!("Failed to bind web server — v4: {e4}, v6: {e6}").into());
+            }
+        }
 
         Ok(())
     }

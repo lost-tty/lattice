@@ -136,7 +136,7 @@ async fn collect_store_events(
             .await
             {
                 if get_resp.found {
-                    info!(app_id = %bundle.app_id, store = %store_id, "Loaded bundle");
+                    debug!(app_id = %bundle.app_id, store = %store_id, "Loaded bundle");
                     events.push(AppEvent::BundleUpdated {
                         app_id: bundle.app_id.clone(),
                         data: get_resp.data.into(),
@@ -248,7 +248,7 @@ fn spawn_watchers(
                                             registry_store_id: store_id,
                                             enabled,
                                         };
-                                        info!(subdomain = %subdomain, "App updated via replication");
+                                        debug!(subdomain = %subdomain, "App updated via replication");
                                         if enabled {
                                             let _ = app_tx.send(AppEvent::AppAvailable(app));
                                         }
@@ -256,7 +256,7 @@ fn spawn_watchers(
                                 }
                             }
                             Some(lattice_rootstore::proto::watch_apps_event::Event::Removed(subdomain)) => {
-                                info!(subdomain = %subdomain, "App removed via replication");
+                                debug!(subdomain = %subdomain, "App removed via replication");
                                 let _ = app_tx.send(AppEvent::AppRemoved { subdomain });
                             }
                             None => {}
@@ -294,7 +294,7 @@ fn spawn_watchers(
                                 .await
                                 {
                                     Ok(resp) if resp.found => {
-                                        info!(app_id = %app_id, store = %store_id, bytes = resp.data.len(), "Bundle updated via replication");
+                                        debug!(app_id = %app_id, store = %store_id, bytes = resp.data.len(), "Bundle updated via replication");
                                         let _ = app_tx.send(AppEvent::BundleUpdated { app_id, data: resp.data.into() });
                                     }
                                     Ok(_) => {
@@ -306,7 +306,7 @@ fn spawn_watchers(
                                 }
                             }
                             Some(lattice_rootstore::proto::watch_bundles_event::Event::RemovedAppId(app_id)) => {
-                                info!(app_id = %app_id, store = %store_id, "Bundle removed via replication");
+                                debug!(app_id = %app_id, store = %store_id, "Bundle removed via replication");
                                 let _ = app_tx.send(AppEvent::BundleRemoved { app_id });
                             }
                             None => {}
@@ -549,7 +549,7 @@ impl AppManager {
                 if info.store_type != lattice_model::STORE_TYPE_ROOTSTORE {
                     continue;
                 }
-                info!(store = %store_id, "AppManager: new root store, loading");
+                debug!(store = %store_id, "AppManager: new root store, loading");
                 load_and_emit(&store_manager, &meta, store_id, &app_tx).await;
                 spawn_watchers(store_manager.clone(), meta.clone(), store_id, app_tx.clone());
             }

@@ -13,7 +13,7 @@ use lattice_systemstore::SystemBatch;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Error type for StoreManager operations
 #[derive(Debug, thiserror::Error)]
@@ -331,7 +331,7 @@ impl StoreManager {
                 },
             );
 
-            info!(store_id = %store_id, store_type = %store_type, "Registered store");
+            debug!(store_id = %store_id, store_type = %store_type, "Registered store");
         }
 
         // Persist in meta.db (idempotent — skips if already present)
@@ -413,7 +413,7 @@ impl StoreManager {
             entry.store_handle.shutdown();
         }
 
-        info!(store_id = %store_id, "Closed store");
+        debug!(store_id = %store_id, "Closed store");
         Ok(())
     }
 
@@ -564,7 +564,7 @@ impl StoreManager {
             }
         }
 
-        info!(parent_id = %parent_id, child_id = %child_id, "Created child store");
+        debug!(parent_id = %parent_id, child_id = %child_id, "Created child store");
         Ok(child_id)
     }
 
@@ -709,7 +709,7 @@ impl StoreManager {
         batch = batch.set_child_status(child_id, lattice_model::store_info::ChildStatus::Archived);
         batch.commit().await?;
 
-        info!(parent_id = %parent_id, child_id = %child_id, "Deleted (archived) child store");
+        debug!(parent_id = %parent_id, child_id = %child_id, "Archived child store");
         Ok(())
     }
 

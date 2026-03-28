@@ -19,16 +19,18 @@ cargo build --release
 **Daemon mode**:
 
 ```bash
-# Terminal 1: start the daemon
-latticed
+# Start the daemon (web UI starts at http://localhost:8123)
+lattice --daemon
 
-# Terminal 2: use the CLI
+# Use the CLI in another terminal
 lattice
 lattice> store create --root
 lattice:a1b2> put hello world
 lattice:a1b2> get hello
 world
 ```
+
+The web UI is enabled by default on port 8123 in daemon mode. Use `--web <port>` to change the port or `--no-web` to disable it.
 
 **Embedded mode** (standalone, no daemon):
 
@@ -52,8 +54,7 @@ lattice --embedded
 | `lattice-api` | IPC layer over UDS, exposing gRPC services. |
 | `lattice-runtime` | Bootstrapper for daemon and in-process modes. |
 | `lattice-bindings` | UniFFI exports for Swift/Kotlin. |
-| `lattice-daemon` | Headless orchestrator binary (`latticed`). |
-| `lattice-cli` | Interactive REPL binary (`lattice`). |
+| `lattice-cli` | Single binary (`lattice`): REPL, daemon mode (`--daemon`), embedded mode (`--embedded`). |
 
 ## Key Dependencies
 
@@ -67,7 +68,7 @@ lattice --embedded
 <app-data>/lattice/
 ├── identity.key        # Ed25519 node keypair
 ├── meta.db             # Global inventory (rootstores table, node name)
-├── latticed.sock       # Daemon UDS socket (when running)
+├── lattice.sock        # Daemon UDS socket (when running)
 └── stores/{uuid}/      # Per-store data
     ├── intentions/
     │   └── log.db      # Intention DAG (Weaver)

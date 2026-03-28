@@ -15,10 +15,10 @@ cargo build --release
 ## Quick Start
 
 ```bash
-# Start the daemon
-latticed
+# Start the daemon (web UI at http://localhost:8123)
+lattice --daemon
 
-# In another terminal
+# Use the CLI in another terminal
 lattice
 lattice> store create --root
 lattice:a1b2> put hello world
@@ -26,25 +26,24 @@ lattice:a1b2> get hello
 world
 ```
 
-Or standalone without the daemon:
+Or standalone with an embedded node:
 
 ```bash
 lattice --embedded
+lattice --embedded --web 8123   # with web UI
 ```
 
 ## Web Interface
 
-Lattice includes a browser-based UI served directly from the node. No external dependencies, no build step — the SPA is bundled into the binary.
+Lattice includes a browser-based UI served directly from the node. No external dependencies, no build step — the SPA is bundled into the binary. In daemon mode, the web UI is enabled by default on port 8123.
 
 ```bash
-# With the daemon
-latticed --web 8080
-
-# Embedded mode
-lattice --embedded --web 8080
+lattice --daemon                # web UI on http://localhost:8123
+lattice --daemon --web 9000     # custom port
+lattice --daemon --no-web       # disable web UI
 ```
 
-Then open `http://localhost:8080`. The web UI connects to the node over WebSocket and provides store management, peer operations, method execution, live subscriptions, system table inspection, and a DAG history graph.
+The web UI connects to the node over WebSocket and provides a dashboard, app management, store browsing, peer operations, method execution, live subscriptions, and a DAG history graph.
 
 Requires the `web` feature (enabled by default):
 

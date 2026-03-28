@@ -62,7 +62,7 @@ impl RpcServer {
 
         let uds_stream = UnixListenerStream::new(uds);
 
-        tracing::info!("RPC server listening on {:?}", self.socket_path);
+        tracing::debug!("RPC listening on {:?}", self.socket_path);
 
         // Create all service implementations - all wrap the same backend
         let node_service = NodeServiceImpl::new(self.backend.clone());

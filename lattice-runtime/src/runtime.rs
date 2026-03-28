@@ -5,7 +5,13 @@ use crate::{LatticeBackend, NetworkService, Node, NodeBuilder, RpcServer};
 use lattice_node::StoreOpener;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::task::JoinHandle;
+
+/// Maximum time to wait for the mesh service to shut down gracefully
+/// before forcing exit. The iroh QUIC transport can be slow to close
+/// connections when peers are unreachable.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Type alias for opener factory closures (matches NodeBuilder's signature).
 type OpenerFactory = Box<dyn FnOnce() -> Box<dyn StoreOpener> + Send>;
@@ -47,11 +53,15 @@ impl Runtime {
             handle.abort();
         }
 
-        // Shutdown mesh service
-        self.mesh_service
-            .shutdown()
-            .await
-            .map_err(|e| RuntimeError::Network(e.to_string()))?;
+        // Shutdown mesh service (with timeout — iroh transport can be slow to close)
+        match tokio::time::timeout(SHUTDOWN_TIMEOUT, self.mesh_service.shutdown()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("Mesh shutdown error: {}", e),
+            Err(_) => tracing::warn!("Mesh shutdown timed out after {}s", SHUTDOWN_TIMEOUT.as_secs()),
+        }
+
+        // Shutdown node (closes stores, watchers, databases)
+        self.node.shutdown().await;
 
         Ok(())
     }
@@ -228,7 +238,17 @@ impl RuntimeBuilder {
                 node.app_manager().clone(),
                 port,
             );
-            tracing::info!("Web UI enabled on {}", web_server.url());
+            let url = web_server.url();
+            let text = "Lattice running at";
+            let pad = 3;
+            let inner = pad + text.len() + 1 + url.len() + pad;
+            eprintln!();
+            eprintln!("  ╭{}╮", "─".repeat(inner));
+            eprintln!("  │{}│", " ".repeat(inner));
+            eprintln!("  │{}{} {}{}│", " ".repeat(pad), text, url, " ".repeat(pad));
+            eprintln!("  │{}│", " ".repeat(inner));
+            eprintln!("  ╰{}╯", "─".repeat(inner));
+            eprintln!();
             Some(tokio::spawn(async move {
                 if let Err(e) = web_server.run().await {
                     tracing::error!("Web server error: {}", e);

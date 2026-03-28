@@ -42,7 +42,7 @@ pub use web_server::WebServer;
 
 /// Returns the URL the web UI will be reachable at for a given port.
 pub fn web_url(port: u16) -> String {
-    format!("http://[::1]:{}", port)
+    format!("http://localhost:{}", port)
 }
 
 #[cfg(test)]

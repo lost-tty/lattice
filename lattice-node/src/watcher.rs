@@ -171,7 +171,7 @@ impl RecursiveWatcher {
                                 if let Ok(mut guard) = opened_stores.write() {
                                     guard.insert(decl.id);
                                 }
-                                info!(store_id = %decl.id, store_type = %store_type, "Opened store");
+                                debug!(store_id = %decl.id, store_type = %store_type, "Opened store");
                             }
                         }
                         Err(e) => {

@@ -141,31 +141,154 @@ async fn dispatch_command(
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "lattice", about = "Lattice Interactive CLI", version)]
+#[command(name = "lattice", about = "Lattice — local-first mesh platform", version)]
 struct CliArgs {
-    /// Run Node in-process (standalone mode)
+    /// Run as headless daemon (no REPL)
+    #[arg(short, long)]
+    daemon: bool,
+
+    /// Run node in-process with REPL (standalone mode)
     #[arg(short, long)]
     embedded: bool,
 
-    /// Start web UI on the given port (embedded mode only)
+    /// Web UI port (default: 8123 in daemon mode, off in other modes)
+    #[cfg(feature = "web")]
     #[arg(long)]
     web: Option<u16>,
+
+    /// Disable the web UI
+    #[cfg(feature = "web")]
+    #[arg(long)]
+    no_web: bool,
+
+    /// Verbose logging (-v for debug, -vv for trace)
+    #[arg(long, short, action = clap::ArgAction::Count)]
+    verbose: u8,
+}
+
+impl CliArgs {
+    /// Resolve the effective web port based on mode and flags.
+    #[cfg(feature = "web")]
+    fn web_port(&self) -> Option<u16> {
+        if self.no_web {
+            return None;
+        }
+        if let Some(port) = self.web {
+            return Some(port);
+        }
+        // Default: web on in daemon mode, off otherwise
+        if self.daemon {
+            Some(8123)
+        } else {
+            None
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() {
-    // Parse CLI args
     let args = CliArgs::parse();
 
-    if args.embedded {
-        run_embedded_mode(args.web).await;
+    if args.daemon {
+        run_headless_daemon(&args).await;
+    } else if args.embedded {
+        run_embedded_mode(&args).await;
     } else {
-        run_daemon_mode().await;
+        run_rpc_client().await;
     }
 }
 
-/// Daemon mode: connect to latticed via RPC
-async fn run_daemon_mode() {
+/// Headless daemon mode: run node without REPL
+async fn run_headless_daemon(args: &CliArgs) {
+    init_daemon_tracing(args.verbose);
+    tracing::info!("lattice v{} starting...", env!("CARGO_PKG_VERSION"));
+
+    let builder = lattice_runtime::Runtime::builder()
+        .with_core_stores()
+        .with_rpc();
+
+    #[cfg(feature = "web")]
+    let builder = if let Some(port) = args.web_port() {
+        builder.with_web(port)
+    } else {
+        builder
+    };
+
+    let runtime = match builder.build().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to start: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    tracing::info!(
+        "Ready — node {} — press Ctrl+C to stop",
+        hex::encode(&runtime.backend().node_id()[..4])
+    );
+
+    shutdown_signal().await;
+    tracing::info!("Shutdown signal received...");
+
+    if let Err(e) = runtime.shutdown().await {
+        tracing::error!("Shutdown error: {}", e);
+    }
+
+    tracing::info!("Stopped");
+}
+
+fn init_daemon_tracing(verbosity: u8) {
+    let mut filter = EnvFilter::from_default_env();
+
+    if std::env::var("RUST_LOG").is_err() {
+        let level = match verbosity {
+            0 => "info",
+            1 => "debug",
+            _ => "trace",
+        };
+        filter = filter.add_directive(level.parse().unwrap());
+    }
+
+    const SILENCE: &[&str] = &[
+        "iroh_net::magicsock=error",
+        "iroh::magicsock=error",
+        "iroh::discovery=warn",
+        "iroh::endpoint=warn",
+        "iroh_gossip=warn",
+        "swarm_discovery=error",
+    ];
+    for d in SILENCE {
+        filter = filter.add_directive(d.parse().unwrap());
+    }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+        tokio::select! {
+            _ = sigint.recv() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    }
+}
+
+/// RPC client mode: connect to running daemon via REPL
+async fn run_rpc_client() {
     use owo_colors::OwoColorize;
 
     let initial_prompt = format!("{}:{}> ", "lattice".cyan(), "connecting".yellow());
@@ -205,7 +328,7 @@ async fn run_daemon_mode() {
             let _ = writeln!(&mut writer.clone(), "Failed to connect to daemon: {}", e);
             let _ = writeln!(
                 &mut writer.clone(),
-                "Is latticed running? Start with: cargo run -p lattice-daemon"
+                "Is the daemon running? Start with: lattice --daemon"
             );
             return;
         }
@@ -219,8 +342,8 @@ async fn run_daemon_mode() {
     run_cli(backend, rl, writer).await;
 }
 
-/// Embedded mode: run Node in-process
-async fn run_embedded_mode(web_port: Option<u16>) {
+/// Embedded mode: run Node in-process with REPL
+async fn run_embedded_mode(args: &CliArgs) {
     let initial_prompt = make_prompt(None);
 
     let (rl, writer) = match Readline::new(initial_prompt) {
@@ -240,6 +363,9 @@ async fn run_embedded_mode(web_port: Option<u16>) {
         "lattice_core=info",
         "iroh_net::magicsock=error",
         "iroh::magicsock=error",
+        "iroh::discovery=warn",
+        "iroh::endpoint=warn",
+        "iroh_gossip=warn",
         "swarm_discovery=error",
     ];
 
@@ -271,19 +397,11 @@ async fn run_embedded_mode(web_port: Option<u16>) {
     let builder = lattice_runtime::Runtime::builder().with_core_stores();
 
     #[cfg(feature = "web")]
-    let builder = if let Some(port) = web_port {
+    let builder = if let Some(port) = args.web_port() {
         builder.with_web(port)
     } else {
         builder
     };
-
-    #[cfg(not(feature = "web"))]
-    if web_port.is_some() {
-        let _ = writeln!(
-            &mut writer.clone(),
-            "Warning: --web flag ignored, compile with --features web"
-        );
-    }
 
     let runtime = match builder.build().await {
         Ok(r) => r,
@@ -291,7 +409,7 @@ async fn run_embedded_mode(web_port: Option<u16>) {
             let _ = writeln!(&mut writer.clone(), "Failed to start: {}", e);
             let _ = writeln!(
                 &mut writer.clone(),
-                "Hint: If latticed is already running, use --daemon flag to connect via RPC."
+                "Hint: If another instance is already running, connect via: lattice"
             );
             return;
         }
