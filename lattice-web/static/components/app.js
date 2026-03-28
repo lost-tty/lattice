@@ -35,9 +35,9 @@ export function App() {
     e.preventDefault();
     setDragging(false);
 
-    const file = [...e.dataTransfer.files].find(f => f.name.endsWith('.zip'));
+    const file = [...e.dataTransfer.files].find(f => f.name.endsWith('.zip') || f.name.endsWith('.lattice'));
     if (!file) {
-      toast('Drop a .zip app bundle', 'err');
+      toast('Drop a .zip or .lattice app bundle', 'err');
       return;
     }
 
@@ -88,7 +88,7 @@ export function App() {
       </div>
       <${Toasts} />
       <${ModalContainer} />
-      ${dragging && html`<div class="drop-overlay">Drop app bundle (.zip)</div>`}
+      ${dragging && html`<div class="drop-overlay">Drop app bundle (.zip / .lattice)</div>`}
     </div>
   `;
 }

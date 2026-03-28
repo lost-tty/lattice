@@ -79,7 +79,7 @@ export function Dashboard() {
             <div class="dashboard-empty">
               <p>No apps deployed yet.</p>
               ${meshes.length > 0
-                ? html`<p class="muted">Create an app or drag & drop a .zip bundle.</p>`
+                ? html`<p class="muted">Create an app or drag & drop a bundle (.zip / .lattice).</p>`
                 : html`<p class="muted">Create or join a mesh first, then deploy apps.</p>`
               }
             </div>

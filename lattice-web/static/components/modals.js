@@ -403,7 +403,7 @@ function RegisterAppModal({ registryStoreId }) {
       </select>
     `}
     ${selectedRegId && bundles.length === 0 ? html`
-      <p class="muted">No app bundles in this store. Drop a .zip onto the page to upload.</p>
+      <p class="muted">No app bundles in this store. Drop a .zip or .lattice file onto the page to upload.</p>
       <${ModalActions} />
     ` : html`
       <label>App Type</label>
