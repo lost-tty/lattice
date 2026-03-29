@@ -26,11 +26,60 @@ weight: 1
 
 ---
 
-## Milestone 18: Log Lifecycle & Pruning
+## Milestone 18: Store & Log Lifecycle
 
-Manage log growth on long-running nodes via stability frontier, snapshots, pruning, and finality checkpoints.
+Store/mesh lifecycle operations and log growth management. Two themes: (1) how users create, join, leave, and delete stores/meshes; (2) how the system manages unbounded log growth via epochs, pruning, and finality.
 
-> **See:** [Stability Frontier](../design/stability-frontier) for the full design.
+> **See:** [Connected DAG & Genesis Commitment](../design/connected-dag) for the epoch/pruning design.
+> **See also:** `docs/content/design/revocation-*.dot` for DAG diagrams (render with `dot -Tpdf`).
+
+### Open Questions
+
+These require design decisions before the relevant sub-milestones can be implemented.
+
+**1. Concurrent epoch creation.**
+If two nodes simultaneously author epoch-triggering system ops (e.g., A revokes C while B revokes D at the same time), both actors create epoch N with the same seq but different hashes, different frontiers, and different `required_acks`. The current design has no resolution. Options:
+- **Reject second epoch** — the first epoch (by hash ordering or HLC) wins. The second node's epoch is dropped. But the second revocation happened — the second node must create epoch N+1 instead.
+- **Both valid** — allow multiple epochs at the same seq. Peers ack all of them. Settlement requires all `required_acks` across all epoch N variants. Complex tracking.
+- **Epoch seq from DAG** — the epoch's seq is derived from the number of settled epochs reachable from genesis. Two concurrent epochs would naturally diverge into two branches; whichever gets more acks first settles. The other becomes a dead branch.
+
+**2. Child store epochs on parent revocation.**
+Child stores with `PeerStrategy::Inherited` share the parent's `PeerManager` (same `Arc`). Gossip filtering (`can_accept_gossip`) therefore already reflects the parent's revocation immediately — no separate peer governance needed in the child.
+
+However, the child still needs its own epoch intention in its own DAG for: pruning boundary, snapshot computation, gossip topic rotation, and negentropy sync scoping. The child's epoch must cite the child's own genesis and author tips, with `required_acks` from the shared `PeerManager`.
+
+**Proposed mechanism:** After the parent's revocation creates epoch N on the parent's actor, `StoreManager` propagates the epoch to inherited children. For each open child store with `PeerStrategy::Inherited`, it submits a kernel-level `EpochOp` directly to the child's actor (not via the SSM — no system batch needed). The child's epoch cites the child's genesis + child's current author tips. `required_acks` is read from the shared `PeerManager`.
+
+Open sub-questions:
+- Does propagation happen synchronously in the same `StoreManager` call, or as a follow-up task?
+- What if a child store is closed/archived at revocation time? The epoch must be created when the child is re-opened and the node detects its peer set has drifted from the parent's current epoch.
+
+**3. Offline node returns after multiple epochs.**
+A node offline during epoch 1 and epoch 2 receives both on reconnect. It must ack both. If it acks epoch 2 (which transitively cites epoch 1 via the DAG), does that satisfy the epoch 1 `required_acks` check? The answer depends on whether the settlement check is "B's tip cites epoch N directly" or "transitively." If transitive, one ack for epoch 2 satisfies both — simpler. Needs to be made explicit.
+
+### 18-Lifecycle: Store & Mesh Lifecycle
+Complete the store/mesh lifecycle operations. Currently only create, join, and archive-child exist.
+
+**Join & Leave:**
+- [x] Join a mesh via invite token (`store join <token>`)
+- [ ] Leave a mesh — stop replicating a root store, remove from `meta.db` rootstores table, close all children, stop watchers. Data kept on disk for possible re-join.
+- [ ] Leave confirmation — warn if node is the last peer (data only exists locally)
+- [ ] Re-join — re-open a previously left root store from local data, re-register, resume replication
+
+**Add & Remove Stores:**
+- [x] Create child store under a parent (`store create --parent <uuid>`)
+- [x] Archive child store (`store delete` — sets status to Archived in parent system table)
+- [ ] Unarchive child store — restore an archived child to Active status
+- [ ] Permanent local delete — remove store data from disk (state.db, intentions/). Only after leaving or archiving. Requires confirmation.
+- [ ] Remove root store — leave mesh + optionally delete local data. Two-step: leave first, then delete.
+
+**Peer Management:**
+- [x] Invite a peer (`store invite`)
+- [x] Revoke a peer (`store revoke-peer`)
+- [x] Gossip-level revocation enforcement — revoked peers' gossip broadcasts rejected (`can_accept_gossip`). Negentropy sync and bootstrap unaffected (historical intentions from revoked peers still transfer). Renamed `can_accept_entry` → `can_accept_gossip`, `list_acceptable_authors` → `gossip_authorized_authors`.
+- [x] Genesis intention — `GenesisOp` as first intention in every store. Synthetic genesis migration for pre-genesis stores. `genesis::build_synthetic_genesis()` produces deterministic genesis from store UUID.
+- [ ] Epoch-level revocation enforcement — epoch frontier defines cutoff for revoked authors' data. SSM signals `EpochRequired { required_acks }`, kernel builds `EpochOp` citing genesis + all author tips. Gossip topic rotates per epoch (`content_hash("lattice/{store_id}/{epoch_hash}")`). Negentropy sync scoped to epoch boundary for revoked peers (they receive the epoch but nothing after). Bootstrap refused for revoked peers. See connected-dag.md Part 3.
+- [ ] Self-revoke — a peer removes itself from the peer list (graceful departure)
 
 ### 18A: Witness-Only Sync ✅
 Negentropy set reconciliation now operates on witnessed intentions only. Floating (unwitnessed) intentions are excluded from fingerprints and range queries.
@@ -62,29 +111,62 @@ Both databases retain `store_id` and `store_type` for independent identity verif
 
 This separation enables headless replication: a node can participate in sync and witnessing for a store it doesn't have an opener for. `log.db` + `TABLE_LOG_META` is self-sufficient for the replication layer. `state.db` + `TABLE_STATE_META` is only needed for projection.
 
-### 18C: Epoch Indexes
-Index infrastructure for partitioning the witnessed intention set by prune epoch. No pruning yet — just the machinery to compute epoch-aware fingerprints.
-- [ ] `TABLE_EPOCHS`: `{epoch: u32 BE}{intention_hash: 32 bytes} → ()` — existence means "this intention is below this epoch's cut"
-- [ ] Per-epoch fingerprint: modular sum of all hashes tagged in epoch N (cumulative, includes prior epochs). Persisted in `TABLE_LOG_META` as `epoch_fingerprint/{epoch} → Hash`
-- [ ] `Hash::wrapping_sub_assign` for `effective_fingerprint = witness_fingerprint - epoch_fingerprint[epoch]`
-- [ ] Tagging walk: on receiving a `PruneCut`, walk `store_prev` chains from cut vector, insert entries into `TABLE_EPOCHS`. Epoch entries are self-contained (copy forward from prior epoch)
-- [ ] Negentropy merge-skip: iterate `TABLE_INTENTIONS` and `TABLE_EPOCHS` (at agreed epoch prefix) in parallel, skip matching hashes
+### 18B½: Self-Contained State (Pruning Prerequisite)
+The state machine's materialized state must be fully self-contained — no DAG lookups during conflict resolution or value reads. This is a hard prerequisite for pruning: once intentions are deleted from `log.db`, any code that reaches back into the DAG to resolve state breaks.
 
-### 18D: PruneCut & Tip Attestations
-The protocol layer for coordinated pruning. Nodes agree on prune epochs via replicated `SystemOp`s, attest their state, and delete once safety is confirmed.
-- [ ] `SystemOp::PruneCut { epoch: u32, tips: Vec<(PubKey, Hash)> }` — proposed as a system intention, causally depends on the tip intentions it references. Per-author cut vector, monotonic epoch. Max-wins CRDT: higher epoch supersedes lower
-- [ ] `SystemOp::TipAttestation { tips: Vec<(PubKey, Hash)> }` — delta of changed author tips, causally depends on the latest `PruneCut` plus the attested tip intentions. Serves as both progress report and implicit ack of the referenced epoch
-- [ ] Attestation keys in `TABLE_SYSTEM`: `attestation/{author_hex}/{attester_hex} → Hash` (LWW by HLC, raw 32-byte value). Author-first key order for per-author frontier prefix scans. Filtered at query time against active peer list — no tombstoning of removed peers
-- [ ] Derive per-author frontier: `frontier[A] = min(tip[A] across all Active peers)`
-- [ ] Attestation triggers: post-sync, batch threshold, periodic heartbeat (~15 min), graceful shutdown
-- [ ] **Deletion safety:** A node deletes tagged intentions only when all active peers have emitted a `TipAttestation` causally depending on the relevant `PruneCut`. Proposer threshold with jitter to avoid multi-proposer noise
-- [ ] **Sync handshake:** Nodes exchange epoch IDs. Negentropy runs over `[agreed_epoch, ∞)`. Behind node fast-forwards epoch via the `PruneCut` intention (guaranteed receivable — causal deps ensure data is present)
-- [ ] **Stale peer return:** Node behind on epochs that connects to a node that has already deleted needs snapshot bootstrap (→ M19D)
-- [ ] **Lag metric:** Per-peer divergence from local tips, surfaced via `NodeEvent::PeerLagWarning` and `store status`
+Currently `KvTable::apply_head()` calls `dag.get_intention()` to fetch the current winner's `(timestamp, author)` for LWW tiebreaking. After pruning, that intention may be gone.
 
-### 18E: Snapshotting
-- [ ] **Frontier snapshot via replay:** The frontier is behind the current state. Generating a snapshot at the frontier requires replaying intentions from the last snapshot up to the frontier cut, producing the correct state at that point. Options: tempfile-based replay (works today, heavy on I/O) or in-memory `StateBackend` variant (cleaner). **Note:** `StateMachine::snapshot()`/`restore()` were removed in M16A Step 3 — the old `StateBackend::snapshot_internal()` serialization format is deleted. M18 will design a new snapshot mechanism tailored to pruning requirements (frontier-aware, incremental, possibly stored in a separate `snapshot.db`).
-- [ ] Store snapshots in `snapshot.db` (per-store, includes `TABLE_SYSTEM` attestation state)
+**Fix:** Store `(hash, timestamp, author)` per head in the `Value` proto rather than bare hashes. Conflict resolution becomes self-contained.
+
+- [ ] Update `lattice-kvtable/proto/value.proto`: replace `repeated bytes heads` with `repeated HeadEntry head_entries` where `HeadEntry { hash, HLC hlc, author, value, tombstone }`. Define `HLC { wall_time, counter }` locally in `value.proto` (mirrors `storage.proto`). Each entry is a fully self-contained CRDT branch — hash, LWW metadata, and the value the branch wrote. Keep old `heads` field readable for migration.
+- [ ] Update `KvTable::apply_head()`: use stored `(wall_time, counter, author)` from `head_entries[0]` for LWW comparison instead of `dag.get_intention()`. Remove `dag: &dyn DagQueries` parameter.
+- [ ] Update all callers of `apply_head()` (SystemTable, KvState, rootstore state machine) to drop the `dag` argument.
+- [ ] Update `decode_heads()`, `decode_inspect()`, `decode_lww_with_conflict()` to read from `head_entries`.
+- [ ] Remove `DagQueries` import from `lattice-kvtable`.
+
+**Note:** This also applies to `SystemTable` — any system key with concurrent writes (e.g., concurrent `SetPeerStatus`) resolves via the same LWW mechanism. Same fix applies.
+
+**Migration:** Existing `state.db` values are in the old bare-hash format. Full replay is required: bump `KEY_SCHEMA_VERSION` in `TABLE_META`, detect the old version on startup, delete `state.db`, let the projection loop rebuild from `log.db` with the new format. All values written during replay will be in the new `head_entries` format. This reuses the existing state.db recovery mechanism (`test_state_db_recovery` already validates this path).
+
+### 18C: Epoch Intentions
+Epoch intentions bridge the system and data partitions, enable revocation enforcement at the projection layer, and define pruning boundaries. See connected-dag.md Part 3 for the full design.
+
+**Kernel-level ops (UniversalOp variants):**
+- [ ] `EpochOp { seq, required_acks }` — emitted after genesis (epoch 0) and after membership-critical system changes. `causal_deps` cite genesis + all author tips (complete DAG frontier). `required_acks` is the SSM-provided subset of peers that must ack for settlement.
+- [ ] `EpochAckOp { epoch_seq }` — submitted by each peer in `required_acks` on receiving a new epoch. `causal_deps` cite the epoch hash + peer's current tip. Epoch creator has implicit ack (no separate op needed).
+
+**Epoch creation flow:**
+- [ ] SSM returns `SystemEvent::EpochRequired { required_acks }` when processing membership-critical ops (revocation, key rotation, prune cut)
+- [ ] Kernel receives event, reads author tips, submits `EpochOp` with `causal_deps: [genesis, ...all_author_tips]`
+- [ ] Epoch 0 emitted automatically: actor detects `EpochRequired` from SSM during projection of the initial system batch (`add_peer(self)` triggers "peers exist, no epoch"). `StoreManager::create()` does not need an explicit epoch 0 step.
+- [ ] Auto-submit `EpochAckOp` when a node receives a new epoch it didn't create
+
+**Settlement and pruning:**
+- [ ] Kernel tracks settlement: for each peer in `required_acks`, check if their author tip transitively cites the epoch hash (`is_ancestor` query on DAG)
+- [ ] Epoch is settled when all `required_acks` peers have acked
+- [ ] Once settled, pre-epoch history is safe to prune (no peer will request it)
+- [ ] Orphaned branches from revoked peers are garbage collected
+
+**Projection filter:**
+- [ ] Kernel queries SSM via `ProjectionFilter` trait: "is this author revoked?"
+- [ ] Intentions from revoked authors beyond the epoch frontier are excluded from materialized state
+- [ ] Scoped re-projection on epoch arrival: only revoked peer's data re-evaluated
+
+### 18D: Pruning Execution
+Physical deletion of intentions below a settled epoch. The coordination protocol (epoch + epoch ack) is in 18C. This milestone covers the actual deletion and sync implications.
+- [ ] **Deletion walk:** Once an epoch is settled, walk intentions reachable from the epoch's `causal_deps`. Everything NOT reachable and below the epoch's frontier is deleted from `log.db` (`TABLE_INTENTIONS`, `TABLE_WITNESS`, `TABLE_WITNESS_INDEX`).
+- [ ] **Genesis and frontier tips survive:** Genesis is always reachable (epoch cites it). The epoch's immediate deps (author tips at epoch creation) survive as the frontier. The sparse spine is: `genesis ← epoch N ← acks + tail`.
+- [ ] **Fingerprint adjustment:** Witness fingerprint must exclude pruned intentions. Either recompute from remaining entries or maintain a cumulative "pruned fingerprint" to subtract.
+- [ ] **Sync handshake:** Nodes exchange current epoch seq. Negentropy runs over post-epoch intentions only. A node behind on epochs fast-forwards via the epoch intention (guaranteed receivable — `causal_deps` ensure dependencies are present).
+- [ ] **Stale peer return:** Node behind on epochs that connects to a node that has already pruned needs epoch bootstrap — receive the epoch + frontier tips + tail (→ M19D).
+- [ ] **Lag metric:** Per-peer epoch lag, surfaced via `NodeEvent::PeerLagWarning` and `store status`.
+
+### 18E: Epoch-Aware Bootstrap Snapshots
+Materialized state snapshots for efficient bootstrap of new peers joining a pruned store. Distinct from epoch intentions (which are DAG structural checkpoints) — these carry the projected state.
+- [ ] **State at epoch frontier:** The epoch defines the frontier. State at the frontier is deterministic: project all intentions reachable from the epoch's `causal_deps`. For a freshly-settled epoch, this is the current state minus any post-epoch writes.
+- [ ] **Snapshot format:** Serialize `TABLE_DATA` + `TABLE_SYSTEM` state at the epoch frontier. Store in `snapshot.db` (per-store) or as a CAS blob (→ M20).
+- [ ] **Bootstrap from snapshot:** New peer receives genesis + epoch + snapshot + tail. Applies snapshot as initial state, then projects the tail. No full log replay needed.
+- [ ] **Note:** `StateMachine::snapshot()`/`restore()` were removed in M16A Step 3. New mechanism needed, tailored to epoch-aware projection.
 - [ ] **Future optimization:** Inverse operations stored in `WitnessRecord` could allow rolling back from current state to frontier in O(head − frontier), avoiding replay. Deferred until profiling shows replay is a bottleneck.
 
 ### 18E½: Store-Level Pruning Hints
@@ -156,6 +238,33 @@ Serve web applications at subdomains, backed by Lattice stores. Independent of m
 - [x] Embedded inventory app bundle via `rust-embed`
 - [x] Lattice SDK reads `<meta>` tags and connects to store via WebSocket
 
+### A½: App Hosting Hardening ✅
+Security, architecture, and web UI improvements.
+- [x] **Bundle manifest storage**: Manifest fields stored as individual rootstore keys (`appbundles/{app_id}/manifest/{section}/{key}`), generic `BundleManifest` proto (repeated sections/entries), `ListBundles` returns manifest metadata
+- [x] **Shared manifest parsing**: `lattice-rootstore::manifest::parse_bundle_manifest()` used by both rootstore and web server, eliminated duplicate TOML parsing
+- [x] **Separated request/op protos**: `UploadBundleRequest` (client-facing, no manifest) vs `UploadBundleOp` (internal intention, includes manifest)
+- [x] **Zip bomb protection**: `Read::take()` caps actual decompression, manifest capped at 64 KB, bundle capped at 64 MB at command handler level
+- [x] **Subdomain extraction**: Works with arbitrary hostname depth (not just 2-3 labels)
+- [x] **Broadcast resilience**: All `broadcast::Receiver` loops handle `Lagged` explicitly
+- [x] **O(1) broadcast clones**: `AppEvent::BundleUpdated` uses `bytes::Bytes`
+- [x] **Non-blocking zip parsing**: `spawn_blocking` for bundle extraction
+- [x] **TOCTOU fix**: `set_enabled` serialized via `tokio::sync::Mutex`
+- [x] **KvRead trait**: Shared read interface for `KVTable` and `ReadOnlyKVTable`
+- [x] **Deduplicated app manager**: `collect_store_events()`, `watch_stream()` generic helper
+- [x] **`WebServer` takes `Arc<AppManager>`**: Calls `attach()` itself, no temporal coupling
+- [x] **Error pages**: `error.html` template with status code, message, back-link to management UI
+- [x] **App registration creates child store**: UI creates store matching manifest `store_type` before registering app
+
+### A⅔: Web UI Modernization ✅
+ES modules, path-based routing, event-driven state, dashboard.
+- [x] **ES modules**: All JS files use `import`/`export`, vendor UMD shims (`preact.mjs`, `sdk.js`), zero globals in application code
+- [x] **Path-based routing**: `/`, `/store/{uuid}`, `/store/{uuid}/{tab}`, `/store/{uuid}/debug/{view}`, SPA fallback on server
+- [x] **Clean components**: Navigation state passed via props from `App` root, not read from globals
+- [x] **Event-driven state**: Node event stream + root store `watch-apps` streams update signals, targeted `refreshStores()`/`refreshApps()`/`refreshNodeStatus()` after mutations, `refresh()` and `refreshCounter` removed
+- [x] **Dashboard**: Apps with status/actions, meshes with peer counts, editable node name, copyable node ID
+- [x] **JS unit tests**: `boa_engine` runs `.test.js` files in `cargo test` — 33 tests for router and helpers, no Node.js/npm needed
+- [x] **CSS cleanup**: Single `--hue` knob, consolidated badge styles, removed Inter font
+
 ### B: Store Claiming via SystemOp
 Tag stores with an `app-id` so apps can discover which stores belong to them. A store can be claimed by one app type; multiple stores can share the same `app-id`.
 - [ ] `SystemOp::SetAppId(String)` — writes `app-id` key to system table (LWW)
@@ -173,7 +282,7 @@ Apps discover their stores by filtering on `app-id` claims.
 
 ### D: Auto-Provisioning
 One-step app registration: create store, claim it, bind subdomain.
-- [ ] `POST /api/apps/{subdomain}` with `{ app_type }` (no `store_id`) — creates a child KV store, claims it, binds the subdomain
+- [ ] `POST /api/apps/{subdomain}` with `{ app_type }` (no `store_id`) — creates a child store (type from manifest), claims it, binds the subdomain
 - [ ] If `store_id` is provided, skip creation and just claim + bind
 - [ ] Unregister optionally unclaims the store
 
@@ -291,8 +400,8 @@ Run the kernel on the RP2350.
 
 ## Discussion
 
-- [x] ~~Does StateMachine need snapshot/restore once we have IntentionStore pruning/snapshots?~~ **Resolved (M16A Step 3):** Removed from `StateMachine`. Not used in production — replication is witness-log-based. M18 will redesign snapshot mechanism for pruning when requirements are clear.
-- [ ] Revoking a Peer is untested. How do we ensure removed peers will not receive future Intentions?
+- [x] ~~Does StateMachine need snapshot/restore once we have IntentionStore pruning/snapshots?~~ **Resolved (M16A Step 3):** Removed from `StateMachine`. Not used in production — replication is witness-log-based. M18E redesigns snapshots for epoch-aware bootstrap.
+- [x] ~~Revoking a Peer is untested. How do we ensure removed peers will not receive future Intentions?~~ **Partially resolved:** Gossip-level enforcement implemented (`can_accept_gossip` rejects revoked peers). Full enforcement via epoch intentions designed (connected-dag.md Part 3) — epoch frontier is cutoff for revoked authors' data, SSM signals `EpochRequired`, kernel builds epoch + tracks settlement. Implementation in 18C.
 
 ---
 
@@ -303,7 +412,7 @@ Run the kernel on the RP2350.
 - **Root Identity & Key Hierarchy**: Four-layer key model: Seed (24 words, offline) → Root Identity (Ed25519, signs authorizations only) → Device Keys (per-node, sign intentions) → DAG operations. Peers tracked by root identity in SystemStore; each root identity has an authorized device key list. New SystemOps: `DeviceAuthorize(root, device, sig)`, `DeviceRevoke(root, device)`. Device keys validated against authorization chain. Existing DAG/chain/gossip/sync works unchanged at the device-key level.
 - **Seed-Based Disaster Recovery**: BIP-39 mnemonic (24 words) generated during onboarding. Recovery flow: enter seed on fresh device → regenerate identity → connect vault-node → revoke lost device keys → resume. Setup flow includes a recovery drill (verify backup words before setup is complete).
 - Secure storage of node key (Keychain, TPM)
-- **Salted Gossip ALPN**: Use `/config/salt` from root store to salt the gossip ALPN per mesh (improves privacy by isolating mesh traffic).
+- **Salted Gossip ALPN**: Use `/config/salt` from root store to salt the gossip ALPN per mesh (improves privacy by isolating mesh traffic). Note: gossip topics already rotate per epoch for revocation isolation (`content_hash("lattice/{store_id}/{epoch_hash}")`). ALPN salting is an additional layer for mesh-level privacy.
 - **HTTP API**: External access to stores via REST/gRPC-Web (design TBD based on store types)
 - **Inter-Store Messaging** (research): Stores exchange typed messages using an actor model. Parent stores have a store-level identity (keypair derived from UUID + node key). Children trust the parent's store key — not individual parent authors — preserving encapsulation. Parent state machines decide what to relay; child state machines process messages as ops in their own DAG. Key design questions: message format, delivery guarantees (at-least-once via DAG?), bidirectional messaging (child→parent replies), and whether messages are durable (intentions) or ephemeral.
 - **Audit Trail Enhancements** (HLC `wall_time` already in Intention):

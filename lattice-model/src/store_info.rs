@@ -49,6 +49,9 @@ pub struct StoreMeta {
     pub store_id: Uuid,
     pub store_type: String,
     pub schema_version: u64,
+    /// blake3 hash of the genesis intention (if present).
+    /// Becomes the store's cryptographic identity in a future step.
+    pub genesis_hash: Option<crate::Hash>,
 }
 
 /// Read-only access to store identity and backend metadata.

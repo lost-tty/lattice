@@ -1,0 +1,82 @@
+digraph revocation {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", width=1.8, height=0.4];
+    edge [fontname="Helvetica", fontsize=8];
+    newrank=true;
+    compound=true;
+    splines=true;
+
+    // ─── Node A's view ───────────────────────────────────────────────
+    subgraph cluster_a {
+        label="Node A (revoker)";
+        labeljust=l;
+        fontsize=12;
+        fontname="Helvetica-Bold";
+        style="dashed";
+        color="#666666";
+        margin=16;
+
+        a_genesis [label="genesis", fillcolor="#e8e8e8"];
+        a_addB    [label="A: add_peer B", fillcolor="#b3d9ff"];
+        a_putx1   [label="B: put x=1", fillcolor="#c2f0c2"];
+        a_revoke  [label="A: revoke_peer B", fillcolor="#ffb3b3"];
+        a_drop    [label="B: put x=2\n(gossip DROPPED)", fillcolor="#ffdddd", style="rounded,filled,dashed", fontcolor="#999999"];
+
+        a_genesis -> a_addB;
+        a_genesis -> a_putx1;
+        a_addB    -> a_revoke;
+        a_putx1   -> a_drop [style=dashed, color="#cc0000", label="rejected\nby gossip", fontcolor="#cc0000"];
+    }
+
+    // ─── Node B's view ───────────────────────────────────────────────
+    subgraph cluster_b {
+        label="Node B (revoked, keeps writing)";
+        labeljust=l;
+        fontsize=12;
+        fontname="Helvetica-Bold";
+        style="dashed";
+        color="#666666";
+        margin=16;
+
+        b_genesis [label="genesis", fillcolor="#e8e8e8"];
+        b_addB    [label="A: add_peer B", fillcolor="#b3d9ff"];
+        b_putx1   [label="B: put x=1", fillcolor="#c2f0c2"];
+        b_putx2   [label="B: put x=2", fillcolor="#c2f0c2"];
+        b_putx3   [label="B: put x=3", fillcolor="#c2f0c2"];
+        b_note    [label="B has no revocation\nintention in its DAG", shape=note, fillcolor="#ffffcc", style=filled];
+
+        b_genesis -> b_addB;
+        b_genesis -> b_putx1;
+        b_putx1   -> b_putx2;
+        b_putx2   -> b_putx3;
+        b_putx3   -> b_note [style=invis];
+    }
+
+    // ─── Node C's view ───────────────────────────────────────────────
+    subgraph cluster_c {
+        label="Node C (syncs with B only, partition from A)";
+        labeljust=l;
+        fontsize=12;
+        fontname="Helvetica-Bold";
+        style="dashed";
+        color="#666666";
+        margin=16;
+
+        c_genesis [label="genesis", fillcolor="#e8e8e8"];
+        c_addB    [label="A: add_peer B", fillcolor="#b3d9ff"];
+        c_putx1   [label="B: put x=1", fillcolor="#c2f0c2"];
+        c_putx2   [label="B: put x=2", fillcolor="#c2f0c2"];
+        c_putx3   [label="B: put x=3", fillcolor="#c2f0c2"];
+        c_note    [label="C has no revocation\n(received B's writes\nvia negentropy sync)", shape=note, fillcolor="#ffffcc", style=filled];
+
+        c_genesis -> c_addB;
+        c_genesis -> c_putx1;
+        c_putx1   -> c_putx2;
+        c_putx2   -> c_putx3;
+        c_putx3   -> c_note [style=invis];
+    }
+
+    // Layout hints
+    {rank=same; a_genesis; b_genesis; c_genesis}
+}

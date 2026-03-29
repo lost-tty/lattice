@@ -174,6 +174,18 @@ async fn run_gossip_ingester<T: Transport>(
             _ => continue,
         };
 
+        // Reject intentions from revoked authors at the gossip layer.
+        // Negentropy sync and bootstrap bypass this check so that
+        // historical intentions written before revocation still sync.
+        if !pm.can_accept_gossip(&intention.intention.author) {
+            tracing::debug!(
+                store_id = %store_id,
+                author = %intention.intention.author,
+                "Rejected gossip intention from revoked author"
+            );
+            continue;
+        }
+
         match store.ingest_intention(intention).await {
             Ok(lattice_model::weaver::ingest::IngestResult::Applied) => {}
             Ok(lattice_model::weaver::ingest::IngestResult::MissingDeps(missing_deps)) => {
@@ -267,7 +279,7 @@ async fn run_auto_sync<T: Transport>(
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                if !store.list_acceptable_authors().contains(&peer) {
+                if !store.gossip_authorized_authors().contains(&peer) {
                     tracing::debug!(store_id = %store_id, peer = %peer, "Skipping sync — peer not in acceptable authors");
                     continue;
                 }
@@ -602,7 +614,7 @@ impl<T: Transport> NetworkService<T> {
 
                     // Acceptable authors we're not yet connected to
                     let offline_authors: Vec<PubKey> = store
-                        .list_acceptable_authors()
+                        .gossip_authorized_authors()
                         .into_iter()
                         .filter(|p| *p != peer && *p != my_pubkey)
                         .filter(|p| !online_peers.contains(p))
@@ -964,7 +976,7 @@ impl<T: Transport> NetworkService<T> {
 
         let online_peers = self.sessions.online_peers()?;
 
-        let acceptable_authors = store.list_acceptable_authors();
+        let acceptable_authors = store.gossip_authorized_authors();
 
         let active: Vec<PubKey> = online_peers
             .keys()

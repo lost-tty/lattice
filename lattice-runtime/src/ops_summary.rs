@@ -19,6 +19,12 @@ pub fn summarize_intention_ops(
     };
 
     match universal.op {
+        Some(universal_op::Op::Genesis(genesis)) => {
+            vec![SExpr::list(vec![
+                SExpr::sym("genesis"),
+                SExpr::str(&genesis.store_type),
+            ])]
+        }
         Some(universal_op::Op::System(sys_op)) => {
             let mut items = vec![SExpr::sym("system")];
             items.extend(crate::system_summary::summarize(&sys_op));

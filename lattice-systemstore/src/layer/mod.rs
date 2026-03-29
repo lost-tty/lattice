@@ -5,7 +5,7 @@ use dag::{DagScope, ScopedDag};
 use lattice_model::{Hash, IntentionInfo, Op, StateMachine, StateWriter, SystemEvent};
 use lattice_model::Openable;
 use lattice_proto::storage::{universal_op, UniversalOp};
-use lattice_storage::{ScopedDb, StateBackend, StateContext, StateDbError, StateLogic, TABLE_DATA, TABLE_SYSTEM};
+use lattice_storage::{ScopedDb, StateBackend, StateContext, StateDbError, StateLogic, TABLE_DATA, TABLE_META, TABLE_SYSTEM, KEY_GENESIS_HASH};
 use lattice_store_base::{BoxByteStream, CommandHandler, StreamError, StreamHandler, StreamProvider, Subscriber};
 use prost::Message;
 use std::borrow::Cow;
@@ -147,6 +147,14 @@ impl<S: StateLogic> SystemLayer<S> {
                 let events = SystemState::apply(&mut table, &sys_op_view, &sys_dag)?;
                 drop(table);
                 ApplyResult::System(events)
+            }
+            Some(universal_op::Op::Genesis(_)) => {
+                // Genesis intention: store its hash in TABLE_META.
+                // The state machine never sees this -- it is a kernel-level op.
+                let mut meta_table = write_txn.open_table(TABLE_META)?;
+                meta_table.insert(KEY_GENESIS_HASH, op.info.hash.as_bytes().as_slice())?;
+                drop(meta_table);
+                ApplyResult::Skipped
             }
             Some(universal_op::Op::AppData(data)) => {
                 let new_op = Op {

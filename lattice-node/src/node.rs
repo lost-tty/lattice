@@ -380,11 +380,14 @@ impl Node {
 
             if let Err(e) = self
                 .store_manager
-                .register(store_id, Uuid::nil(), handle, &store_type, peer_manager)
+                .register(store_id, Uuid::nil(), handle.clone(), &store_type, peer_manager)
             {
                 tracing::warn!("Failed to register root store {}: {:?}", store_id, e);
                 continue;
             }
+
+            // 2b. MIGRATION: backfill genesis for pre-genesis root stores.
+            crate::genesis::ensure_genesis(store_id, &handle, &store_type).await;
 
             // 3. Start watcher
             if let Err(e) = self.store_manager.start_watching(store_id) {

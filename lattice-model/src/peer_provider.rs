@@ -45,15 +45,24 @@ pub trait PeerProvider: Send + Sync {
     /// Can this peer connect to us? (Active or Dormant peers allowed)
     fn can_connect(&self, peer: &PubKey) -> bool;
 
-    /// Can we accept entries authored by this pubkey?
-    fn can_accept_entry(&self, author: &PubKey) -> bool;
-
-    /// List all authors whose entries we can accept.
+    /// Should we accept a new gossip broadcast from this author?
     ///
-    /// Intentionally infallible: this is a hot-path auth check called on every
-    /// incoming intention during sync. If the peer store can't be read,
-    /// implementations should `warn!` and return an empty list (reject all).
-    fn list_acceptable_authors(&self) -> Vec<PubKey>;
+    /// This gates the **gossip ingester only** — real-time intentions
+    /// broadcast by a peer.  It is NOT checked during negentropy sync or
+    /// bootstrap, because those paths must transfer historical intentions
+    /// written before a peer was revoked.  Revoked peers return `false`.
+    fn can_accept_gossip(&self, author: &PubKey) -> bool;
+
+    /// Authors whose gossip broadcasts we currently accept.
+    ///
+    /// Same scope as `can_accept_gossip`: used to decide which peers to
+    /// initiate sync with and whose gossip to process.  Excludes revoked
+    /// peers.
+    ///
+    /// Intentionally infallible: this is a hot-path auth check. If the
+    /// peer store can't be read, implementations should `warn!` and
+    /// return an empty list (reject all).
+    fn gossip_authorized_authors(&self) -> Vec<PubKey>;
 
     /// Reset ephemeral bootstrap peers (optional).
     fn reset_bootstrap_peers(&self) {}

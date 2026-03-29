@@ -185,10 +185,10 @@ mod tests {
         fn can_connect(&self, _peer: &PubKey) -> bool {
             true
         }
-        fn can_accept_entry(&self, _author: &PubKey) -> bool {
+        fn can_accept_gossip(&self, _author: &PubKey) -> bool {
             true
         }
-        fn list_acceptable_authors(&self) -> Vec<PubKey> {
+        fn gossip_authorized_authors(&self) -> Vec<PubKey> {
             self.acceptable.clone()
         }
         fn subscribe_peer_events(&self) -> lattice_model::PeerEventStream {

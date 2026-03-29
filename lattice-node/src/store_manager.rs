@@ -233,6 +233,9 @@ impl StoreManager {
 
     /// Create a new store with a fresh UUID.
     /// Does not register the store — call register() after.
+    ///
+    /// Submits a genesis intention as the very first operation, then
+    /// applies any requested system ops (name, peer strategy).
     pub async fn create(
         &self,
         name: Option<String>,
@@ -243,6 +246,13 @@ impl StoreManager {
         let opened = self.open(store_id, store_type)?;
 
         let system = opened.clone().as_system();
+
+        // Submit genesis intention as the very first operation.
+        if let Some(ref system) = system {
+            let nonce: u32 = rand::random();
+            let payload = crate::genesis::build_genesis_payload(store_type, nonce);
+            system._submit_entry(payload, vec![]).await?;
+        }
 
         // Batch updates to System Table if needed
         if system.is_some() && (name.is_some() || peer_strategy.is_some()) {

@@ -17,6 +17,7 @@ pub const TABLE_SYSTEM: TableDefinition<&[u8], &[u8]> = TableDefinition::new("sy
 pub const KEY_STORE_ID: &[u8] = b"store_id";
 pub const KEY_STORE_TYPE: &[u8] = b"store_type";
 pub const KEY_SCHEMA_VERSION: &[u8] = b"schema_version";
+pub const KEY_GENESIS_HASH: &[u8] = b"genesis_hash";
 pub const PREFIX_TIP: &[u8] = b"tip/";
 pub const KEY_LAST_APPLIED_WITNESS: &[u8] = b"last_applied_witness";
 
@@ -247,10 +248,17 @@ impl StateBackend {
             .map(|v| u64::from_le_bytes(v.value().try_into().unwrap_or_default()))
             .unwrap_or(0);
 
+        let genesis_hash = table
+            .get(KEY_GENESIS_HASH)
+            .ok()
+            .flatten()
+            .and_then(|v| Hash::try_from(v.value()).ok());
+
         StoreMeta {
             store_id: self.id,
             store_type,
             schema_version,
+            genesis_hash,
         }
     }
 

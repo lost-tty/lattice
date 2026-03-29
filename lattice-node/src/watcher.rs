@@ -162,12 +162,14 @@ impl RecursiveWatcher {
                             if let Err(e) = store_manager.register(
                                 decl.id,
                                 root_store_id,
-                                opened,
+                                opened.clone(),
                                 &store_type,
                                 peer_manager.clone(),
                             ) {
                                 warn!(store_id = %decl.id, error = ?e, "Failed to register store");
                             } else {
+                                // MIGRATION: backfill genesis for pre-genesis child stores.
+                                crate::genesis::ensure_genesis(decl.id, &opened, &store_type).await;
                                 if let Ok(mut guard) = opened_stores.write() {
                                     guard.insert(decl.id);
                                 }

@@ -1,0 +1,125 @@
+digraph witness_logs {
+    rankdir=TB;
+    fontname="Helvetica";
+    fontsize=14;
+    label="Witness log split on epoch settlement — old log pruned, new log starts clean";
+    labelloc=t;
+    splines=false;
+    node [fontname="Helvetica", fontsize=9, shape=box, style="rounded,filled", width=2.6, height=0.28, margin="0.05,0.05"];
+    edge [style=invis];
+    nodesep=0.02;
+    ranksep=0.02;
+
+    //   #e0e0e0 = genesis
+    //   #fff9c4 = epoch 0 ancestors
+    //   #c8e6c9 = epoch 1 ancestors
+    //   #bbdefb = above epoch 1 (tail)
+
+    // ═══════════════════════════════════════════════════════════════
+    // Before settlement: Node B's witness log (messy interleaving)
+    // ═══════════════════════════════════════════════════════════════
+
+    subgraph cluster_before {
+        label="Node B: before settlement (original witness order)";
+        labeljust=c;
+        fontsize=11;
+        fontname="Helvetica-Bold";
+        style="rounded";
+        color="#666666";
+        margin=8;
+
+        o1  [label="genesis", fillcolor="#e0e0e0"];
+        o2  [label="A: add_peer A,B,C", fillcolor="#fff9c4"];
+        o3  [label="epoch 0", fillcolor="#fff9c4"];
+        o4  [label="B: put x = 1", fillcolor="#fff9c4"];
+        o5  [label="B: put x = 2", fillcolor="#fff9c4"];
+        o6  [label="C: put y = 10", fillcolor="#fff9c4"];
+        o7  [label="B: put x = 3", fillcolor="#bbdefb"];
+        o8  [label="B: put x = 4", fillcolor="#bbdefb"];
+        o9  [label="C: put y = 20", fillcolor="#c8e6c9"];
+        o10 [label="A: revoke_peer C", fillcolor="#c8e6c9"];
+        o11 [label="epoch 1", fillcolor="#c8e6c9"];
+        o12 [label="B: epoch_ack", fillcolor="#bbdefb"];
+        o13 [label="B: put x = 5", fillcolor="#bbdefb"];
+
+        o1 -> o2 -> o3 -> o4 -> o5 -> o6 -> o7 -> o8 -> o9 -> o10 -> o11 -> o12 -> o13;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // After settlement: new witness log starts clean
+    // ═══════════════════════════════════════════════════════════════
+
+    subgraph cluster_after {
+        label="Node B: new witness log after epoch 1 settlement";
+        labeljust=c;
+        fontsize=11;
+        fontname="Helvetica-Bold";
+        style="rounded";
+        color="#006600";
+        margin=8;
+
+        n1  [label="seq 0: genesis", fillcolor="#e0e0e0"];
+        n2  [label="seq 1: epoch 1", fillcolor="#c8e6c9"];
+        n3  [label="seq 2: B: epoch_ack", fillcolor="#bbdefb"];
+        n4  [label="seq 3: B: put x = 3", fillcolor="#bbdefb"];
+        n5  [label="seq 4: B: put x = 4", fillcolor="#bbdefb"];
+        n6  [label="seq 5: B: put x = 5", fillcolor="#bbdefb"];
+
+        n1 -> n2 -> n3 -> n4 -> n5 -> n6;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Old log: retained until pruned
+    // ═══════════════════════════════════════════════════════════════
+
+    subgraph cluster_old {
+        label="Old witness log (prunable)";
+        labeljust=c;
+        fontsize=11;
+        fontname="Helvetica-Bold";
+        style="rounded";
+        color="#999999";
+        margin=8;
+
+        node [fontcolor="#888888", color="#cccccc"];
+
+        p1  [label="genesis", fillcolor="#f0f0f0"];
+        p2  [label="A: add_peer A,B,C", fillcolor="#fff9c4"];
+        p3  [label="epoch 0", fillcolor="#fff9c4"];
+        p4  [label="B: put x = 1", fillcolor="#fff9c4"];
+        p5  [label="B: put x = 2", fillcolor="#fff9c4"];
+        p6  [label="C: put y = 10", fillcolor="#fff9c4"];
+        p7  [label="C: put y = 20", fillcolor="#c8e6c9"];
+        p8  [label="A: revoke_peer C", fillcolor="#c8e6c9"];
+
+        p1 -> p2 -> p3 -> p4 -> p5 -> p6 -> p7 -> p8;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Legend
+    // ═══════════════════════════════════════════════════════════════
+
+    subgraph cluster_legend {
+        label="";
+        style="rounded";
+        color="#999999";
+        margin=8;
+        node [width=2.2, height=0.25];
+
+        lg [label="genesis (permanent)", fillcolor="#e0e0e0"];
+        l0 [label="epoch 0 ancestors", fillcolor="#fff9c4"];
+        l1 [label="epoch 1 ancestors", fillcolor="#c8e6c9"];
+        lt [label="above epoch 1 (tail)", fillcolor="#bbdefb"];
+        lg -> l0 -> l1 -> lt;
+    }
+
+    subgraph cluster_notes {
+        label="";
+        style="rounded";
+        color="#006600";
+        margin=8;
+        node [shape=note, fillcolor="#e8f5e9", style=filled, fontsize=9, width=3.2];
+
+        nn [label="On epoch 1 settlement:\n1. Compute state snapshot from old log\n2. Start new witness log:\n   seq 0: genesis (re-witnessed)\n   seq 1: epoch 1 (re-witnessed)\n   seq 2+: acks, then transition writes,\n           then post-ack writes\n3. Old log retained for lagging peers\n4. Old log pruned once no peer needs it\n\nNew log is clean: no interleaving,\nepoch boundary is a seq cutoff,\nnegentropy range is [0, inf)"];
+    }
+}
