@@ -177,6 +177,13 @@ One-step app registration: create store, claim it, bind subdomain.
 - [ ] If `store_id` is provided, skip creation and just claim + bind
 - [ ] Unregister optionally unclaims the store
 
+### E: SDK List Response Convention
+The SDK must not auto-unwrap repeated fields from protobuf responses. Implicit unwrapping breaks the moment a response gains pagination, metadata, or a second repeated field.
+- [ ] Define `ListResponse` protos with an explicit array field (e.g., `repeated Entry items = 1;`) — no bare repeated-field-as-root
+- [ ] SDK returns decoded protobuf objects as-is — no magic field detection or unwrapping
+- [ ] Frontend reads the schema-defined field explicitly: `const data = (await store.List(...)).items || [];`
+- [ ] Audit existing store protos (`KvStore`, any app-level schemas) for bare repeated responses and migrate to named wrapper fields
+
 ---
 
 ## Milestone 20: Content-Addressable Store (CAS)
