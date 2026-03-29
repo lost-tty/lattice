@@ -62,7 +62,7 @@ function CreateStoreModal({ parentId }) {
 
   useEffect(() => {
     sdk.api.node.ListStoreTypes({}).then(
-      resp => setTypes(resp.store_types || []),
+      resp => setTypes(resp.items || []),
       err => toast('Failed to load store types: ' + err.message, 'err'),
     );
   }, []);
@@ -341,7 +341,7 @@ function RegisterAppModal({ registryStoreId }) {
     (async () => {
       const store = await sdk.openStore(selectedRegId);
       const resp = await store.ListBundles({});
-      setBundles(resp.bundles || []);
+      setBundles(resp.items || []);
     })();
   }, [selectedRegId]);
 

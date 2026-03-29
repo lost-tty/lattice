@@ -42,32 +42,55 @@ export function fmtTime(ms) {
   return ms ? new Date(Number(ms)).toLocaleString() : '-';
 }
 
+function fieldsToSExpr(fields) {
+  const sym = s => ({ value: 'symbol', symbol: s });
+  const str = s => ({ value: 'str', str: String(s) });
+  const num = n => ({ value: 'num', num: n });
+  const list = items => ({ value: 'list', list: { items } });
+
+  const items = [];
+  for (const f of fields) {
+    items.push(sym(f.name));
+    if (Array.isArray(f.value) && f.type === 'repeated') {
+      items.push(list(f.value.map(v => Array.isArray(v) ? fieldsToSExpr(v) : str(v))));
+    } else if (Array.isArray(f.value)) {
+      items.push(fieldsToSExpr(f.value));
+    } else {
+      items.push(typeof f.value === 'number' ? num(f.value) : str(f.value));
+    }
+  }
+  return list(items);
+}
+
+function ppSExpr(sexpr, depth) {
+  if (!sexpr) return '';
+  if (sexpr.value !== 'list') return fmtSExpr(sexpr);
+  const items = sexpr.list.items || [];
+  if (items.length === 0) return html`<span class="sexpr-paren">()</span>`;
+  // Simple lists (no nested lists) render inline
+  if (!items.some(i => i.value === 'list')) return fmtSExpr(sexpr);
+  // Complex lists: each child on its own indented line
+  const pad = '  '.repeat(depth + 1);
+  return html`<span class="sexpr-paren">(</span>${items.map((child, i) =>
+    html`${i > 0 ? '\n' + pad : ''}${ppSExpr(child, depth + 1)}`
+  )}<span class="sexpr-paren">)</span>`;
+}
+
 export function fmtFieldValue(fld) {
   if (Array.isArray(fld.value)) {
-    return fld.value.map(v =>
-      Array.isArray(v) ? formatDecoded(v) : String(v)
-    ).join(', ');
+    return html`<span class="sexpr-block">${ppSExpr(fieldsToSExpr(fld.value), 0)}</span>`;
   }
   return String(fld.value);
 }
 
-// Detect tabular data: a single repeated message field where all items
-// share the same field names. Mirrors the CLI's table detection.
+// Detect tabular data: responses that follow the convention have a field
+// named 'items' (repeated message). Mirrors the CLI's table detection.
 // Returns a Preact vnode (or null).
 export function tryRenderTable(fields) {
-  function findRepeatedMessages(fs) {
-    if (fs.length === 1 && fs[0].type === 'repeated' && Array.isArray(fs[0].value)) {
-      const items = fs[0].value;
-      if (items.length > 0 && items.every(item => Array.isArray(item))) return items;
-    }
-    if (fs.length === 1 && Array.isArray(fs[0].value) && fs[0].type !== 'repeated') {
-      return findRepeatedMessages(fs[0].value);
-    }
-    return null;
-  }
-
-  const rows = findRepeatedMessages(fields);
-  if (!rows || rows.length === 0) return null;
+  const itemsField = fields.find(f => f.name === 'items' && f.type === 'repeated');
+  if (!itemsField || !Array.isArray(itemsField.value)) return null;
+  const rows = itemsField.value;
+  if (rows.length === 0 || !rows.every(item => Array.isArray(item))) return null;
 
   const headers = rows[0].map(f => f.name);
   for (const row of rows) {
@@ -78,7 +101,7 @@ export function tryRenderTable(fields) {
   }
 
   return html`
-    <table>
+    <table class="data">
       <tr>${headers.map(h => html`<th>${h}</th>`)}</tr>
       ${rows.map(row => html`
         <tr>${row.map(f => html`<td class="mono">${fmtFieldValue(f)}</td>`)}</tr>

@@ -281,7 +281,7 @@
 
         async methods() {
           const resp = await api.dynamic.ListMethods({ id: storeIdBytes });
-          return (resp.methods || []).map(function (m) {
+          return (resp.items || []).map(function (m) {
             return {
               name: m.name,
               description: m.description || '',
@@ -293,7 +293,7 @@
         async streams() {
           if (cachedStreams) return cachedStreams;
           const resp = await api.dynamic.ListStreams({ id: storeIdBytes });
-          cachedStreams = (resp.streams || []).map(function (s) {
+          cachedStreams = (resp.items || []).map(function (s) {
             return {
               name: s.name,
               description: s.description || '',

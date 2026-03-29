@@ -87,7 +87,7 @@ function decodeStrategy(buf) {
 }
 
 export async function loadSystem(storeId) {
-  const entries = (await sdk.api.store.SystemList({ id: storeId })).entries || [];
+  const entries = (await sdk.api.store.SystemList({ id: storeId })).items || [];
   if (entries.length === 0) {
     return html`<div class="empty-state">No system entries</div>`;
   }

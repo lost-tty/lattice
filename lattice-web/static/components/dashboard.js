@@ -20,7 +20,7 @@ export function Dashboard() {
     Promise.all(roots.map(async s => {
       try {
         const resp = await sdk.api.store.ListPeers({ id: s.id });
-        return [uuidFromBytes(s.id), (resp.peers || []).length];
+        return [uuidFromBytes(s.id), (resp.items || []).length];
       } catch { return [uuidFromBytes(s.id), 0]; }
     })).then(counts => {
       setPeerCounts(Object.fromEntries(counts));

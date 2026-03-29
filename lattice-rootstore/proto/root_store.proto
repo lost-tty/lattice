@@ -117,7 +117,7 @@ message GetAppResponse {
 message ListAppsRequest {}
 
 message ListAppsResponse {
-    repeated AppEntry apps = 1;
+    repeated AppEntry items = 1;
 }
 
 message AppEntry {
@@ -139,7 +139,7 @@ message GetBundleResponse {
 message ListBundlesRequest {}
 
 message ListBundlesResponse {
-    repeated BundleEntry bundles = 1;
+    repeated BundleEntry items = 1;
 }
 
 message BundleEntry {

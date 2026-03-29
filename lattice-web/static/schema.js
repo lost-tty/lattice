@@ -65,7 +65,7 @@ export function decodeMessage(msgType, bytes) {
   return msgType.toObject(msgType.decode(bytes), {
     longs: Number,
     bytes: Uint8Array,
-    defaults: false,
+    defaults: true,
   });
 }
 
@@ -97,7 +97,7 @@ function formatSingleValue(field, val, depth) {
       const name = Object.entries(enumObj.values).find(([, v]) => v === val);
       return name ? name[0] : String(val);
     }
-    if (resolved.resolvedType instanceof pb.Type && depth < 3) {
+    if (resolved.resolvedType instanceof pb.Type && depth < 6) {
       if (typeof val === 'object' && val !== null) {
         return formatFields(resolved.resolvedType, val, depth + 1);
       }

@@ -584,6 +584,9 @@ pre {
 .text-error { color: var(--red); }
 .loading-state { color: var(--muted); padding: 20px; }
 .placeholder-text { padding: 0.4rem 0; }
+table.data { table-layout: fixed; }
+table.data td { word-break: break-all; }
+.sexpr-block { white-space: pre-wrap; }
 .table-count { margin-top: 8px; }
 .pre-wrap { white-space: pre-wrap; }
 .sub-header { margin-bottom: 0.6rem; }

@@ -20,7 +20,7 @@ function sexprList(items) { return { value: 'list', list: { items } }; }
 async function buildAuthorNames(storeId) {
   const names = new Map();
   try {
-    const peers = (await sdk.api.store.ListPeers({ id: storeId })).peers || [];
+    const peers = (await sdk.api.store.ListPeers({ id: storeId })).items || [];
     for (const p of peers) {
       if (p.name) names.set(hex(p.public_key), p.name);
     }
@@ -39,7 +39,7 @@ async function fetchHistoryLayout(storeId) {
     sdk.api.store.WitnessLog({ store_id: storeId }),
     buildAuthorNames(storeId),
   ]);
-  const entries = logResp.entries || [];
+  const entries = logResp.items || [];
   if (entries.length === 0) return null;
 
   // Collect unique intention hashes from witness log

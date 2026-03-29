@@ -38,7 +38,7 @@ impl NodeService for NodeServiceImpl {
     ) -> Result<Response<StoreTypeList>, Status> {
         let types = self.backend.store_types().await.into_status()?;
         Ok(Response::new(StoreTypeList {
-            store_types: types,
+            items: types,
         }))
     }
 
@@ -88,7 +88,7 @@ impl NodeService for NodeServiceImpl {
             .await
             .map(|bindings| {
                 Response::new(AppBindingList {
-                    bindings: bindings.into_iter().map(Into::into).collect(),
+                    items: bindings.into_iter().map(Into::into).collect(),
                 })
             })
             .into_status()

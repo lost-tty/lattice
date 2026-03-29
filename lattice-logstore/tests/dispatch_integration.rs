@@ -30,15 +30,15 @@ async fn test_dispatch_log() {
         .await
         .expect("Read failed");
 
-    assert_eq!(resp_read.entries.len(), 2);
-    assert_eq!(resp_read.entries[0], b"msg1");
-    assert_eq!(resp_read.entries[1], b"msg2");
+    assert_eq!(resp_read.items.len(), 2);
+    assert_eq!(resp_read.items[0], b"msg1");
+    assert_eq!(resp_read.items[1], b"msg2");
 
     // 4. Read Tail
     let req_tail = ReadRequest { tail: Some(1) };
     let resp_tail: ReadResponse = invoke_command(&store, "Read", req_tail)
         .await
         .expect("Read tail failed");
-    assert_eq!(resp_tail.entries.len(), 1);
-    assert_eq!(resp_tail.entries[0], b"msg2");
+    assert_eq!(resp_tail.items.len(), 1);
+    assert_eq!(resp_tail.items[0], b"msg2");
 }

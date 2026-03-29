@@ -75,7 +75,7 @@ fn apps_from_response(
     local: &HashMap<String, bool>,
     apps: &mut HashMap<String, AppBinding>,
 ) {
-    for entry in &resp.apps {
+    for entry in &resp.items {
         let enabled = local.get(&entry.subdomain).copied().unwrap_or(false);
         let store_id = Uuid::from_slice(&entry.store_id).unwrap_or(Uuid::nil());
         apps.insert(
@@ -125,7 +125,7 @@ async fn collect_store_events(
     )
     .await
     {
-        for bundle in &resp.bundles {
+        for bundle in &resp.items {
             if let Ok(get_resp) = invoke_command::<GetBundleRequest, GetBundleResponse>(
                 dispatcher,
                 "GetBundle",
@@ -567,7 +567,7 @@ mod tests {
         let reg_id = Uuid::new_v4();
         let store_id = Uuid::new_v4();
         let resp = ListAppsResponse {
-            apps: vec![lattice_rootstore::proto::AppEntry {
+            items: vec![lattice_rootstore::proto::AppEntry {
                 subdomain: "inventory".into(),
                 app_id: "inventory".into(),
                 store_id: store_id.as_bytes().to_vec(),
@@ -583,7 +583,7 @@ mod tests {
     fn locally_enabled_app_is_enabled() {
         let reg_id = Uuid::new_v4();
         let resp = ListAppsResponse {
-            apps: vec![lattice_rootstore::proto::AppEntry {
+            items: vec![lattice_rootstore::proto::AppEntry {
                 subdomain: "myapp".into(),
                 app_id: "myapp".into(),
                 store_id: Uuid::new_v4().as_bytes().to_vec(),
@@ -600,7 +600,7 @@ mod tests {
     fn locally_disabled_app_stays_disabled() {
         let reg_id = Uuid::new_v4();
         let resp = ListAppsResponse {
-            apps: vec![lattice_rootstore::proto::AppEntry {
+            items: vec![lattice_rootstore::proto::AppEntry {
                 subdomain: "myapp".into(),
                 app_id: "myapp".into(),
                 store_id: Uuid::new_v4().as_bytes().to_vec(),
@@ -617,7 +617,7 @@ mod tests {
     fn multiple_apps_mixed_local_state() {
         let reg_id = Uuid::new_v4();
         let resp = ListAppsResponse {
-            apps: vec![
+            items: vec![
                 lattice_rootstore::proto::AppEntry {
                     subdomain: "enabled-app".into(),
                     app_id: "app1".into(),

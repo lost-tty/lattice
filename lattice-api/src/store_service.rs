@@ -64,7 +64,7 @@ impl StoreService for StoreServiceImpl {
         self.backend
             .store_list(parent_id)
             .await
-            .map(|stores| Response::new(StoreList { stores }))
+            .map(|stores| Response::new(StoreList { items: stores }))
             .into_status()
     }
 
@@ -142,7 +142,7 @@ impl StoreService for StoreServiceImpl {
         self.backend
             .store_debug(store_id)
             .await
-            .map(|authors| Response::new(DebugInfo { authors }))
+            .map(|authors| Response::new(DebugInfo { items: authors }))
             .into_status()
     }
 
@@ -157,7 +157,7 @@ impl StoreService for StoreServiceImpl {
             .await
             .map(|entries| {
                 Response::new(WitnessLogResponse {
-                    entries: entries.into_iter().map(Into::into).collect(),
+                    items: entries.into_iter().map(Into::into).collect(),
                 })
             })
             .into_status()
@@ -173,7 +173,7 @@ impl StoreService for StoreServiceImpl {
             .await
             .map(|intentions| {
                 Response::new(FloatingIntentionsResponse {
-                    intentions: intentions.into_iter().map(Into::into).collect(),
+                    items: intentions.into_iter().map(Into::into).collect(),
                 })
             })
             .into_status()
@@ -222,7 +222,7 @@ impl StoreService for StoreServiceImpl {
             .await
             .map(|entries| {
                 Response::new(SystemListResponse {
-                    entries: entries
+                    items: entries
                         .into_iter()
                         .map(|(key, value)| SystemEntry { key, value })
                         .collect(),
@@ -239,7 +239,7 @@ impl StoreService for StoreServiceImpl {
         self.backend
             .store_peers(store_id)
             .await
-            .map(|peers| Response::new(crate::proto::PeerList { peers }))
+            .map(|peers| Response::new(crate::proto::PeerList { items: peers }))
             .into_status()
     }
 

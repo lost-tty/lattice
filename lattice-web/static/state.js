@@ -191,13 +191,13 @@ function subscribeWatchApps(storeIdBytes, uuid) {
 
 async function listApps() {
   const resp = await sdk.api.node.ListActiveApps({});
-  return (resp.bindings || []).sort((a, b) =>
+  return (resp.items || []).sort((a, b) =>
     (a.subdomain || '').localeCompare(b.subdomain || '')
   );
 }
 
 async function listAllStores() {
-  const roots = (await sdk.api.store.List({})).stores || [];
+  const roots = (await sdk.api.store.List({})).items || [];
   const result = [];
   const seen = new Set();
   async function walk(list, depth) {
@@ -207,7 +207,7 @@ async function listAllStores() {
       seen.add(uuid);
       result.push(Object.assign({}, s, { depth }));
       try {
-        const children = (await sdk.api.store.List({ parent_id: s.id })).stores || [];
+        const children = (await sdk.api.store.List({ parent_id: s.id })).items || [];
         if (children.length > 0) await walk(children, depth + 1);
       } catch {}
     }

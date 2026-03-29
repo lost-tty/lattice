@@ -63,7 +63,7 @@ impl LatticeBackend for RpcBackend {
         Box::pin(async move {
             let mut client = self.client.clone();
             let resp = client.node.list_store_types(Empty {}).await?;
-            Ok(resp.into_inner().store_types)
+            Ok(resp.into_inner().items)
         })
     }
 
@@ -128,7 +128,7 @@ impl LatticeBackend for RpcBackend {
                 parent_id: parent_id.map(|u| u.as_bytes().to_vec()),
             };
             let resp = client.store.list(req).await?;
-            Ok(resp.into_inner().stores)
+            Ok(resp.into_inner().items)
         })
     }
 
@@ -176,7 +176,7 @@ impl LatticeBackend for RpcBackend {
                     id: store_id.as_bytes().to_vec(),
                 })
                 .await?;
-            Ok(resp.into_inner().peers)
+            Ok(resp.into_inner().items)
         })
     }
 
@@ -272,7 +272,7 @@ impl LatticeBackend for RpcBackend {
                     id: store_id.as_bytes().to_vec(),
                 })
                 .await?;
-            Ok(resp.into_inner().authors)
+            Ok(resp.into_inner().items)
         })
     }
 
@@ -287,7 +287,7 @@ impl LatticeBackend for RpcBackend {
                 .await?;
             Ok(resp
                 .into_inner()
-                .entries
+                .items
                 .into_iter()
                 .map(Into::into)
                 .collect())
@@ -305,7 +305,7 @@ impl LatticeBackend for RpcBackend {
                 .await?;
             Ok(resp
                 .into_inner()
-                .intentions
+                .items
                 .into_iter()
                 .map(Into::into)
                 .collect())
@@ -387,7 +387,7 @@ impl LatticeBackend for RpcBackend {
                 .await?;
             Ok(resp
                 .into_inner()
-                .entries
+                .items
                 .into_iter()
                 .map(|e| (e.key, e.value))
                 .collect())
@@ -476,7 +476,7 @@ impl LatticeBackend for RpcBackend {
                 .await?;
             Ok(resp
                 .into_inner()
-                .methods
+                .items
                 .into_iter()
                 .map(Into::into)
                 .collect())
@@ -494,7 +494,7 @@ impl LatticeBackend for RpcBackend {
                 .await?;
             Ok(resp
                 .into_inner()
-                .streams
+                .items
                 .into_iter()
                 .map(|s| StreamDescriptor {
                     name: s.name,
@@ -560,7 +560,7 @@ impl LatticeBackend for RpcBackend {
             let resp = client.node.list_active_apps(Empty {}).await?;
             let bindings = resp
                 .into_inner()
-                .bindings
+                .items
                 .into_iter()
                 .filter_map(|p| AppBinding::try_from(p).ok())
                 .collect();

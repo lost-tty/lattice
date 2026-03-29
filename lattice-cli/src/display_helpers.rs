@@ -113,6 +113,20 @@ pub fn render_sexpr_colored(expr: &lattice_runtime::SExpr, max_hex_bytes: usize)
     }
 }
 
+/// Find a `(items (...))` child within an SExpr list and return the row slice.
+/// Matches the standard list response convention: every list response wraps its
+/// repeated field in a field named "items".
+fn find_items_rows(children: &[lattice_runtime::SExpr]) -> Option<&[lattice_runtime::SExpr]> {
+    use lattice_runtime::SExpr;
+    children.iter().find_map(|child| match child {
+        SExpr::List(pair) => match pair.as_slice() {
+            [SExpr::Symbol(name), SExpr::List(rows)] if name == "items" => Some(rows.as_slice()),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
 /// Render an SExpr with ANSI colors, hex truncation, and indentation.
 ///
 /// Top-level list children get their own indented line (like `to_pretty()`).
@@ -132,30 +146,16 @@ fn fmt_pretty_colored(
         SExpr::List(items)
             if items.len() > 1 && items.iter().any(|i| matches!(i, SExpr::List(_))) =>
         {
-            // Try table rendering for lists of homogeneous records
+            // Try table rendering for bare lists of homogeneous records
+            // e.g. (list (Row (f1 v) ...) (Row (f1 v) ...))
             if let Some(table) = try_render_table(items, max_hex_bytes, indent) {
                 return table;
             }
 
-            // Unwrap nested single-field wrappers down to a table.
-            // e.g. (ListResponse (items ((KVP ...) (KVP ...))))
-            //       └ 2 items     └ 2 items  └ headless list → table
-            {
-                let mut cursor = items.as_slice();
-                loop {
-                    if cursor.len() != 2 {
-                        break;
-                    }
-                    match &cursor[1] {
-                        SExpr::List(inner) => {
-                            if let Some(table) = try_render_table(inner, max_hex_bytes, indent) {
-                                return table;
-                            }
-                            // Keep drilling into the single child
-                            cursor = inner;
-                        }
-                        _ => break,
-                    }
+            // Explicit items field detection — (WrapperType (items (row1 row2 ...)))
+            if let Some(rows) = find_items_rows(items) {
+                if let Some(table) = try_render_table(rows, max_hex_bytes, indent) {
+                    return table;
                 }
             }
 

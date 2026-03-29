@@ -24,7 +24,7 @@ message SetNameRequest {
 }
 
 message StoreTypeList {
-  repeated string store_types = 1;
+  repeated string items = 1;
 }
 
 // ============================================================================
@@ -87,7 +87,7 @@ message PeerInfo {
 }
 
 message PeerList {
-  repeated PeerInfo peers = 1;
+  repeated PeerInfo items = 1;
 }
 
 message RevokePeerRequest {
@@ -144,7 +144,7 @@ message StoreMeta {
 
 // List of store references
 message StoreList {
-  repeated StoreRef stores = 1;
+  repeated StoreRef items = 1;
 }
 
 // Runtime statistics
@@ -165,7 +165,7 @@ message SyncResult {
 }
 
 message DebugInfo {
-  repeated AuthorState authors = 1;
+  repeated AuthorState items = 1;
 }
 
 message WitnessLogRequest {
@@ -226,7 +226,7 @@ message SExprList {
 }
 
 message WitnessLogResponse {
-  repeated WitnessLogEntry entries = 1;
+  repeated WitnessLogEntry items = 1;
 }
 
 message FloatingIntention {
@@ -235,7 +235,7 @@ message FloatingIntention {
 }
 
 message FloatingIntentionsResponse {
-  repeated FloatingIntention intentions = 1;
+  repeated FloatingIntention items = 1;
 }
 
 message GetIntentionRequest {
@@ -259,7 +259,7 @@ message AuthorState {
 }
 
 message AuthorStateResponse {
-  repeated AuthorState authors = 1;
+  repeated AuthorState items = 1;
 }
 
 message CleanupResult {
@@ -272,7 +272,7 @@ message SystemEntry {
 }
 
 message SystemListResponse {
-  repeated SystemEntry entries = 1;
+  repeated SystemEntry items = 1;
 }
 
 // ============================================================================
@@ -310,7 +310,7 @@ message AppBindingProto {
 }
 
 message AppBindingList {
-  repeated AppBindingProto bindings = 1;
+  repeated AppBindingProto items = 1;
 }
 
 message ToggleAppRequest {
@@ -396,7 +396,7 @@ message MethodInfo {
 }
 
 message MethodList {
-  repeated MethodInfo methods = 1;
+  repeated MethodInfo items = 1;
 }
 
 // ============================================================================
@@ -412,7 +412,7 @@ message StreamDescriptor {
 }
 
 message StreamList {
-  repeated StreamDescriptor streams = 1;
+  repeated StreamDescriptor items = 1;
 }
 
 // Subscribe to a store stream

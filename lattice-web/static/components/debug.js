@@ -30,7 +30,7 @@ function DebugNav({ storeId, debugView }) {
 }
 
 async function loadDebugTips(storeId) {
-  const authors = (await sdk.api.store.Debug({ id: storeId })).authors || [];
+  const authors = (await sdk.api.store.Debug({ id: storeId })).items || [];
   return html`
     <${DebugNav} storeId=${storeId} debugView="tips" />
     ${authors.length === 0
@@ -51,7 +51,7 @@ async function loadDebugTips(storeId) {
 }
 
 async function loadDebugLog(storeId) {
-  const entries = (await sdk.api.store.WitnessLog({ store_id: storeId })).entries || [];
+  const entries = (await sdk.api.store.WitnessLog({ store_id: storeId })).items || [];
   const WitnessContent = sdk.proto.lookup('lattice.weaver.WitnessContent');
   return html`
     <${DebugNav} storeId=${storeId} debugView="log" />
@@ -88,7 +88,7 @@ async function loadDebugLog(storeId) {
 }
 
 async function loadDebugIntentions(storeId) {
-  const entries = (await sdk.api.store.WitnessLog({ store_id: storeId })).entries || [];
+  const entries = (await sdk.api.store.WitnessLog({ store_id: storeId })).items || [];
   if (entries.length === 0) {
     return html`<${DebugNav} storeId=${storeId} debugView="intentions" /><div class="empty-state">No intentions</div>`;
   }
@@ -131,7 +131,7 @@ async function loadDebugIntentions(storeId) {
 }
 
 async function loadDebugFloating(storeId) {
-  const floating = (await sdk.api.store.FloatingIntentions({ id: storeId })).intentions || [];
+  const floating = (await sdk.api.store.FloatingIntentions({ id: storeId })).items || [];
   return html`
     <${DebugNav} storeId=${storeId} debugView="floating" />
     ${floating.length === 0

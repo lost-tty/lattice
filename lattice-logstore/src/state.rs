@@ -383,7 +383,7 @@ impl LogState {
         let entries = self.read(tail);
         let entry_values = entries.iter().map(|e| e.content.clone()).collect();
         Ok(ReadResponse {
-            entries: entry_values,
+            items: entry_values,
         })
     }
 }

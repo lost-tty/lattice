@@ -102,7 +102,7 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
             .await
             .map(|methods| {
                 let methods = methods.into_iter().map(Into::into).collect();
-                Response::new(MethodList { methods })
+                Response::new(MethodList { items: methods })
             })
             .into_status()
     }
@@ -125,7 +125,7 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
                         event_schema: s.event_schema.unwrap_or_default(),
                     })
                     .collect();
-                Response::new(StreamList { streams })
+                Response::new(StreamList { items: streams })
             })
             .into_status()
     }

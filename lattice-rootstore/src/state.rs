@@ -862,7 +862,7 @@ impl RootState {
         })?;
 
         Ok(ListAppsResponse {
-            apps: apps.into_values().collect(),
+            items: apps.into_values().collect(),
         })
     }
 
@@ -926,7 +926,7 @@ impl RootState {
         })?;
 
         Ok(ListBundlesResponse {
-            bundles: entries.into_values().collect(),
+            items: entries.into_values().collect(),
         })
     }
 }
