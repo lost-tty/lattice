@@ -78,6 +78,10 @@ lattice --embedded
 
 `<app-data>` is platform-dependent: `~/Library/Application Support` on macOS, `~/.local/share` on Linux.
 
+## Community
+
+Join the Matrix room: [#latticesync:matrix.org](https://matrix.to/#/%23latticesync:matrix.org)
+
 ## License
 
 Mozilla Public License 2.0 (MPL-2.0).

@@ -69,6 +69,10 @@ Run the docs site locally:
 cd docs && hugo server
 ```
 
+## Community
+
+Join the Matrix room: [#latticesync:matrix.org](https://matrix.to/#/%23latticesync:matrix.org)
+
 ## License
 
 MPL-2.0
