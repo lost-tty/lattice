@@ -4,7 +4,7 @@ status: design
 weight: 6
 ---
 
-> **Status**: Unimplemented design. Preserved for future reference. The current daemon (`latticed`) is thin and does not follow this model.
+> **Status**: Unimplemented design. Preserved for future reference. The current daemon (`lattice`) is thin and does not follow this model.
 
 Services allow Lattice nodes to interact with the outside world (TCP/HTTP/SSH) or perform background maintenance. This document defines how services could be **declared**, **configured**, and **orchestrated** across the mesh.
 
