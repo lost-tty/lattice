@@ -84,8 +84,8 @@ lattice-web = { path = "lattice-web" }
 clap = { version = "4", features = ["derive"] }
 
 # Networking (Iroh)
-iroh = { version = "0.95", features = ["discovery-local-network", "discovery-pkarr-dht"] }
-iroh-gossip = "0.95"
+iroh = { version = "0.97", features = ["address-lookup-mdns", "address-lookup-pkarr-dht"] }
+iroh-gossip = "0.97"
 
 # Cryptography
 ed25519-dalek = { version = "2", features = ["rand_core"] }

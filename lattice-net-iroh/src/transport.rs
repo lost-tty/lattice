@@ -3,16 +3,15 @@
 //! Creates an Iroh endpoint from the node's Ed25519 secret key,
 //! ensuring the same identity is used for both Lattice and Iroh.
 //!
-//! Discovery: Uses static provider (for direct peer addition), mDNS (local network),
+//! Address lookup: Uses memory lookup (for direct peer addition), mDNS (local network),
 //! DHT and DNS (internet).
 
-use iroh::discovery::dns::DnsDiscovery;
-use iroh::discovery::mdns::MdnsDiscovery;
-use iroh::discovery::pkarr::dht::DhtDiscovery;
-use iroh::discovery::static_provider::StaticProvider;
+use iroh::address_lookup::mdns::MdnsAddressLookup;
+use iroh::address_lookup::memory::MemoryLookup;
+use iroh::address_lookup::pkarr::dht::DhtAddressLookup;
 pub use iroh::PublicKey;
 use iroh::{
-    endpoint::{BindError, ConnectError, Connection},
+    endpoint::{BindError, ConnectError, Connection, presets},
     Endpoint,
 };
 
@@ -29,8 +28,8 @@ pub const LATTICE_ALPN: &[u8] = b"lattice-sync/1";
 #[derive(Clone)]
 pub struct IrohTransport {
     endpoint: Endpoint,
-    /// Static provider for adding peer addresses directly (useful for tests)
-    static_discovery: StaticProvider,
+    /// Memory lookup for adding peer addresses directly (useful for tests)
+    memory_lookup: MemoryLookup,
     pub(crate) events_tx: tokio::sync::broadcast::Sender<lattice_net_types::NetworkEvent>,
 }
 
@@ -44,32 +43,28 @@ impl std::fmt::Debug for IrohTransport {
 
 impl IrohTransport {
     /// Create a new endpoint from a `NodeIdentity`.
-    /// Enables both DNS discovery (internet) and mDNS discovery (local network)
+    /// Enables N0 preset (DNS + relay) plus mDNS (local) and DHT (internet).
     pub async fn new(identity: &NodeIdentity) -> Result<Self, BindError> {
         let secret_key = iroh::SecretKey::from(identity.signing_key().to_bytes());
 
-        // Static provider for direct peer address addition (highest priority)
-        let static_discovery = StaticProvider::new();
+        // Memory lookup for direct peer address addition (highest priority)
+        let memory_lookup = MemoryLookup::new();
 
         // mDNS for local network discovery
-        let mdns = MdnsDiscovery::builder();
+        let mdns = MdnsAddressLookup::builder();
 
         // DHT for internet-wide discovery (pkarr/mainline)
-        let dht = DhtDiscovery::builder();
+        let dht = DhtAddressLookup::builder();
 
-        // DNS discovery (iroh.link)
-        let dns = DnsDiscovery::n0_dns();
-
-        let endpoint = Endpoint::builder()
+        let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret_key)
             .alpns(vec![
                 LATTICE_ALPN.to_vec(),
-                iroh_gossip::ALPN.to_vec(), // Also accept gossip protocol
+                iroh_gossip::ALPN.to_vec(),
             ])
-            .discovery(static_discovery.clone())
-            .discovery(mdns)
-            .discovery(dht)
-            .discovery(dns)
+            .address_lookup(memory_lookup.clone())
+            .address_lookup(mdns)
+            .address_lookup(dht)
             .bind()
             .await?;
 
@@ -78,7 +73,7 @@ impl IrohTransport {
 
         Ok(Self {
             endpoint,
-            static_discovery,
+            memory_lookup,
             events_tx,
         })
     }
@@ -111,7 +106,7 @@ impl IrohTransport {
     /// Add a peer's address directly (bypasses mDNS discovery).
     /// This is useful for tests or when you have out-of-band address information.
     pub fn add_peer_addr(&self, addr: iroh::EndpointAddr) {
-        self.static_discovery.add_endpoint_info(addr);
+        self.memory_lookup.add_endpoint_info(addr);
     }
 }
 
@@ -170,9 +165,9 @@ impl Transport for IrohTransport {
             .await
             .map_err(|e| TransportError::Connect(e.to_string()))?;
 
-        let _ = self
-            .events_tx
-            .send(lattice_net_types::NetworkEvent::PeerConnected(*peer));
+        // Don't emit PeerConnected for outbound connections — they are
+        // explicit operations (sync, bootstrap, join), not discovery events.
+        // PeerConnected is emitted by accept() (inbound) and gossip NeighborUp.
         Ok(IrohConnection { inner: conn })
     }
 
