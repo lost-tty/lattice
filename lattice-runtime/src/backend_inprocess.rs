@@ -442,6 +442,12 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
+    fn store_rebuild(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
+        Box::pin(async move {
+            Ok(self.node.store_manager().rebuild(store_id).await?)
+        })
+    }
+
     fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
             // Trigger sync via network event - actual result comes via SyncResult event from subscribe()

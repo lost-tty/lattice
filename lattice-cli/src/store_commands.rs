@@ -241,6 +241,30 @@ pub async fn cmd_store_use(
 }
 
 /// Delete (archive) a child store
+pub async fn cmd_store_rebuild(
+    backend: &dyn LatticeBackend,
+    store_id: Option<Uuid>,
+    writer: Writer,
+) -> CmdResult {
+    let mut w = writer.clone();
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "Error: No store selected.");
+            return Ok(Continue);
+        }
+    };
+    match backend.store_rebuild(store_id).await {
+        Ok(()) => {
+            let _ = writeln!(w, "Rebuilt state for store {}", &store_id.to_string()[..8]);
+        }
+        Err(e) => {
+            let _ = writeln!(w, "Error: {}", e);
+        }
+    }
+    Ok(Continue)
+}
+
 pub async fn cmd_store_delete(
     backend: &dyn LatticeBackend,
     parent_id: Option<Uuid>,

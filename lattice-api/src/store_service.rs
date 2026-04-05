@@ -103,6 +103,18 @@ impl StoreService for StoreServiceImpl {
             .into_status()
     }
 
+    async fn rebuild(
+        &self,
+        request: Request<StoreId>,
+    ) -> Result<Response<Empty>, Status> {
+        let store_id = Self::parse_uuid(&request.into_inner().id)?;
+        self.backend
+            .store_rebuild(store_id)
+            .await
+            .map(|_| Response::new(Empty {}))
+            .into_status()
+    }
+
     async fn set_name(
         &self,
         request: Request<SetStoreNameRequest>,

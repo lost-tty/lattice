@@ -208,6 +208,19 @@ impl LatticeBackend for RpcBackend {
         })
     }
 
+    fn store_rebuild(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
+        Box::pin(async move {
+            let mut client = self.client.clone();
+            client
+                .store
+                .rebuild(StoreId {
+                    id: store_id.as_bytes().to_vec(),
+                })
+                .await?;
+            Ok(())
+        })
+    }
+
     fn store_delete(&self, store_id: Uuid, child_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
             let mut client = self.client.clone();

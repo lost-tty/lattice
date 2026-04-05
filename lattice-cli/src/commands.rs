@@ -181,6 +181,8 @@ pub enum StoreSubcommand {
         /// Child store UUID to archive
         uuid: String,
     },
+    /// Rebuild a store's state from its intention log
+    Rebuild,
     /// Set the display name for a store
     SetName { name: String },
     /// Show store status
@@ -345,6 +347,9 @@ pub async fn handle_command(
             }
             StoreSubcommand::Delete { uuid } => {
                 store_commands::cmd_store_delete(backend, ctx.store_id, &uuid, writer).await
+            }
+            StoreSubcommand::Rebuild => {
+                store_commands::cmd_store_rebuild(backend, ctx.store_id, writer).await
             }
             StoreSubcommand::SetName { name } => {
                 store_commands::cmd_store_set_name(backend, ctx.store_id, &name, writer).await

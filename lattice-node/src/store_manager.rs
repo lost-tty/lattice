@@ -447,6 +447,21 @@ impl StoreManager {
 
     // ==================== Store Lifecycle ====================
 
+    /// Rebuild a store's state from its intention log.
+    /// Closes the store, deletes state.db, and reopens it.
+    pub async fn rebuild(self: &Arc<Self>, store_id: Uuid) -> Result<(), StoreManagerError> {
+        self.close(&store_id)?;
+        if !self.in_memory {
+            let state_dir = self.data_dir.store_state_dir(store_id);
+            if state_dir.exists() {
+                std::fs::remove_dir_all(&state_dir)
+                    .map_err(|e| StoreManagerError::Storage(lattice_kernel::store::StateError::Io(e)))?;
+            }
+        }
+        self.open(store_id).await?;
+        Ok(())
+    }
+
     pub fn close(&self, store_id: &Uuid) -> Result<(), StoreManagerError> {
         // Stop watcher if exists
         self.stop_watching(store_id);

@@ -29,6 +29,7 @@ service StoreService {
   rpc GetStatus(StoreId) returns (StoreMeta);
   rpc GetDetails(StoreId) returns (StoreDetails);
   rpc Delete(DeleteStoreRequest) returns (Empty);
+  rpc Rebuild(StoreId) returns (Empty);
   rpc SetName(SetStoreNameRequest) returns (Empty);
   rpc GetName(StoreId) returns (StoreNameResponse);
   rpc Sync(StoreId) returns (Empty);

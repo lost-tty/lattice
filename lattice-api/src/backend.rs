@@ -129,6 +129,7 @@ pub trait LatticeBackend: Send + Sync {
         store_type: &str,
     ) -> AsyncResult<'_, StoreRef>;
     fn store_delete(&self, parent_id: Uuid, child_id: Uuid) -> AsyncResult<'_, ()>;
+    fn store_rebuild(&self, store_id: Uuid) -> AsyncResult<'_, ()>;
     fn store_list(&self, parent_id: Option<Uuid>) -> AsyncResult<'_, Vec<StoreRef>>;
     fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreMeta>;
     fn store_peers(&self, store_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>>;
