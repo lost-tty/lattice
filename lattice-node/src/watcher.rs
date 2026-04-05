@@ -1,4 +1,4 @@
-use crate::{peer_manager::PeerManager, store_manager::StoreManager, StoreHandle, Uuid};
+use crate::{store_manager::{StoreManager, StoreManagerError}, StoreHandle, Uuid};
 use futures_util::StreamExt;
 use lattice_model::{store_info::ChildStatus, SystemEvent};
 use std::collections::HashSet;
@@ -10,7 +10,6 @@ pub struct RecursiveWatcher {
     store_manager: Arc<StoreManager>,
     root_store_id: Uuid,
     root_store: Arc<dyn StoreHandle>,
-    peer_manager: Arc<PeerManager>,
     opened_stores: Arc<RwLock<HashSet<Uuid>>>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
@@ -21,14 +20,12 @@ impl RecursiveWatcher {
         store_manager: Arc<StoreManager>,
         root_store_id: Uuid,
         root_store: Arc<dyn StoreHandle>,
-        peer_manager: Arc<PeerManager>,
     ) -> Self {
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
         Self {
             store_manager,
             root_store_id,
             root_store,
-            peer_manager,
             opened_stores: Arc::new(RwLock::new(HashSet::new())),
             shutdown_tx,
         }
@@ -39,7 +36,6 @@ impl RecursiveWatcher {
         let store_manager = self.store_manager.clone();
         let root_store_id = self.root_store_id;
         let root_store = self.root_store.clone();
-        let peer_manager = self.peer_manager.clone();
         let opened_stores = self.opened_stores.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
@@ -61,7 +57,6 @@ impl RecursiveWatcher {
                 &store_manager,
                 &root_store,
                 root_store_id,
-                &peer_manager,
                 &opened_stores,
             )
             .await
@@ -90,7 +85,7 @@ impl RecursiveWatcher {
                                 );
 
                                 if should_reconcile {
-                                    if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &peer_manager, &opened_stores).await {
+                                    if let Err(e) = Self::reconcile_stores(&store_manager, &root_store, root_store_id, &opened_stores).await {
                                         warn!(error = %e, "Reconcile failed");
                                     }
                                 }
@@ -118,7 +113,6 @@ impl RecursiveWatcher {
         store_manager: &Arc<StoreManager>,
         root: &Arc<dyn StoreHandle>,
         root_store_id: Uuid,
-        peer_manager: &Arc<PeerManager>,
         opened_stores: &Arc<RwLock<HashSet<Uuid>>>,
     ) -> Result<(), String> {
         let declarations = Self::list_declarations(root).await?;
@@ -147,35 +141,31 @@ impl RecursiveWatcher {
                 }
             } else {
                 if !current_ids.contains(&decl.id) {
-                    // If type is "unknown" (from SystemTable), try to resolve from disk registry
-                    let mut store_type = decl.store_type.clone();
-                    if store_type == "unknown" {
-                        if let Ok((_, t, _)) = store_manager.peek_store_info(decl.id) {
-                            store_type = t;
+                    // Try open (already in meta.db), fallback to create (first discovery)
+                    let result = match store_manager.open(decl.id).await {
+                        Ok(handle) => Ok(handle),
+                        Err(StoreManagerError::NotFound(_)) => {
+                            store_manager
+                                .create(
+                                    decl.id,
+                                    Some(root_store_id),
+                                    &decl.store_type,
+                                    None,
+                                    Some(lattice_model::store_info::PeerStrategy::Inherited),
+                                )
+                                .await
                         }
-                    }
-
-                    match store_manager.open(decl.id, &store_type) {
-                        Ok(opened) => {
-                            // Register with same peer_manager as root store
-                            // Note: We deliberately use root's peer manager for children (Inherited)
-                            if let Err(e) = store_manager.register(
-                                decl.id,
-                                root_store_id,
-                                opened,
-                                &store_type,
-                                peer_manager.clone(),
-                            ) {
-                                warn!(store_id = %decl.id, error = ?e, "Failed to register store");
-                            } else {
-                                if let Ok(mut guard) = opened_stores.write() {
-                                    guard.insert(decl.id);
-                                }
-                                debug!(store_id = %decl.id, store_type = %store_type, "Opened store");
+                        Err(e) => Err(e),
+                    };
+                    match result {
+                        Ok(_) => {
+                            if let Ok(mut guard) = opened_stores.write() {
+                                guard.insert(decl.id);
                             }
+                            debug!(store_id = %decl.id, store_type = %decl.store_type, "Opened child store");
                         }
                         Err(e) => {
-                            warn!(store_id = %decl.id, error = ?e, "Failed to open store");
+                            warn!(store_id = %decl.id, error = ?e, "Failed to open child store");
                         }
                     }
                 } else {

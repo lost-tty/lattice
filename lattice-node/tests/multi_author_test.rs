@@ -3,31 +3,17 @@ mod common;
 use common::TestCtx;
 use lattice_mockkernel::STORE_TYPE_NULLSTORE;
 use lattice_model::Uuid;
-use lattice_node::{PeerManager, StoreHandle};
+use lattice_node::StoreHandle;
 use prost::Message;
 use std::sync::Arc;
 use std::time::Duration;
 
-// Open a store as a replica (initially empty) without network join
+// Create a store as a replica (initially empty) without network join
 async fn open_replica(ctx: &TestCtx, store_id: Uuid, store_type: &str) -> Arc<dyn StoreHandle> {
-    // 1. Open (creates backend/state if missing by default for direct_opener)
-    let handle = ctx.sm().open(store_id, store_type).expect("open replica");
-
-    // 2. Create PeerManager
-    let sys = handle.clone().as_system().expect("system store required");
-    let pm = PeerManager::new(sys).await.expect("create peer manager");
-
-    // 3. Register
     ctx.sm()
-        .register(store_id, Uuid::nil(), handle.clone(), store_type, pm)
-        .expect("register replica");
-
-    // 4. Start Watching
-    ctx.sm()
-        .start_watching(store_id)
-        .expect("start watching replica");
-
-    handle
+        .create(store_id, None, store_type, None, None)
+        .await
+        .expect("create replica")
 }
 
 // Manually sync intentions from src to dst (Simulating network sync)

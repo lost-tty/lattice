@@ -345,50 +345,13 @@ impl Node {
         self.emit_net(NetEvent::SyncStore { store_id });
     }
 
-    /// Start the node - loads all root stores from meta.db and emits NetworkStore events.
+    /// Start the node - loads all root stores from meta.db.
     pub async fn start(&self) -> Result<(), NodeError> {
-        // Run one-off migrations before opening any stores.
         crate::migrations::run_all(&self.meta, &self.data_dir);
 
         for (store_id, _info) in self.meta.list_rootstores()? {
-            // 1. Open the store (resolve type from disk)
-            let (handle, store_type) =
-                match self.store_manager.open_existing(store_id) {
-                    Ok((handle, store_type)) => (handle, store_type),
-                    Err(e) => {
-                        tracing::warn!(store_id = %store_id, error = %e, "Failed to open root store");
-                        continue;
-                    }
-                };
-
-            // 2. Create PeerManager and register the store
-            let peer_manager = if let Some(system) = handle.clone().as_system() {
-                match crate::PeerManager::new(system).await {
-                    Ok(pm) => pm,
-                    Err(e) => {
-                        tracing::warn!("Failed to create PeerManager for {}: {:?}", store_id, e);
-                        continue;
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    "Root store {} does not support system table, skipping PeerManager",
-                    store_id
-                );
-                continue;
-            };
-
-            if let Err(e) = self
-                .store_manager
-                .register(store_id, Uuid::nil(), handle, &store_type, peer_manager)
-            {
-                tracing::warn!("Failed to register root store {}: {:?}", store_id, e);
-                continue;
-            }
-
-            // 3. Start watcher
-            if let Err(e) = self.store_manager.start_watching(store_id) {
-                tracing::warn!("Failed to start watcher for {}: {:?}", store_id, e);
+            if let Err(e) = self.store_manager.open(store_id).await {
+                tracing::warn!(store_id = %store_id, error = %e, "Failed to open root store");
             }
         }
         Ok(())
@@ -456,45 +419,23 @@ impl Node {
         Ok(store)
     }
 
-    /// Complete joining a mesh - creates store with given UUID, caches handle.
-    /// Called after receiving store_id and store_type from peer's JoinResponse.
-    /// If `bootstrap_peers` is provided, server will sync with those peers after registration.
+    /// Complete joining a mesh - creates store with given UUID.
     pub async fn complete_join(
         &self,
         store_id: Uuid,
         store_type: &str,
         bootstrap_peers: Vec<PubKey>,
     ) -> Result<std::sync::Arc<dyn StoreHandle>, NodeError> {
-        // Record in meta.db (as member)
-        self.meta.add_rootstore(
-            store_id,
-            &lattice_kernel::proto::storage::RootStoreRecord {
-                joined_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0),
-            },
-        )?;
+        let handle = self.store_manager
+            .create(store_id, None, store_type, None, None)
+            .await?;
 
-        let handle = self.store_manager.open(store_id, store_type)?;
-
-        // Configure System Table
-        let system = handle
-            .clone()
-            .as_system()
-            .ok_or_else(|| NodeError::Validation("Root store must support SystemStore".into()))?;
-
-        let peer_manager = crate::PeerManager::new(system.clone()).await?;
-
-        for peer in &bootstrap_peers {
-            peer_manager.add_bootstrap_peer(*peer);
+        // Add bootstrap peers for initial sync
+        if let Some(pm) = self.store_manager.get_peer_manager(&store_id) {
+            for peer in &bootstrap_peers {
+                pm.add_bootstrap_peer(*peer);
+            }
         }
-
-        self.store_manager
-            .register(store_id, Uuid::nil(), handle.clone(), store_type, peer_manager)?;
-
-        // Start watching
-        self.store_manager.start_watching(store_id)?;
 
         let _ = self.publish_name_to(store_id).await;
 
@@ -530,9 +471,6 @@ impl Node {
     /// Create a store (Fractal Model).
     /// If `parent_id` is None, creates a new Root Store (Independent).
     /// If `parent_id` is Some, creates a Child Store (Inherited) and registers it in parent's SystemTable.
-    /// Create a store (Fractal Model).
-    /// If `parent_id` is None, creates a new Root Store (Independent).
-    /// If `parent_id` is Some, creates a Child Store (Inherited) and registers it in parent's SystemTable.
     pub async fn create_store(
         &self,
         parent_id: Option<Uuid>,
@@ -540,73 +478,44 @@ impl Node {
         store_type: &str,
     ) -> Result<Uuid, NodeError> {
         let name = name.unwrap_or_default();
+        let name_opt = if name.is_empty() { None } else { Some(name.clone()) };
 
         if let Some(parent_id) = parent_id {
-            // Add as child to parent
             self.store_manager
-                .create_child_store(
-                    parent_id,
-                    if name.is_empty() { None } else { Some(name) },
-                    store_type,
-                )
+                .create_child_store(parent_id, name_opt, store_type)
                 .await
                 .map_err(NodeError::StoreManager)
         } else {
-            // New Root Store
+            let store_id = Uuid::new_v4();
 
-            // 1. Create store
-            let (store_id, handle) = self
-                .store_manager
+            self.store_manager
                 .create(
-                    if name.is_empty() {
-                        None
-                    } else {
-                        Some(name.clone())
-                    },
-                    store_type,
+                    store_id, None, store_type, name_opt,
                     Some(lattice_model::store_info::PeerStrategy::Independent),
                 )
                 .await?;
 
-            // 2. Register with PeerManager (create new one)
-            let system = handle.clone().as_system().ok_or_else(|| {
-                NodeError::Validation("Root store must support SystemStore".into())
-            })?;
-            let peer_manager = crate::PeerManager::new(system).await?;
-
-            self.store_manager
-                .register(store_id, Uuid::nil(), handle, store_type, peer_manager.clone())?;
-
-            // 3. Start Watcher
-            // Note: start_watching requires Arc<StoreManager>. Node holds it.
-            self.store_manager.start_watching(store_id)?;
-
-            // 4. Record in meta.db and activate
-            self.meta.add_rootstore(
-                store_id,
-                &lattice_kernel::proto::storage::RootStoreRecord {
-                    joined_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0),
-                },
-            )?;
-
-            // 5. Initialize Peer Self-Status
-            let pubkey = self.node_identity.public_key();
-
-            if !name.is_empty() {
-                peer_manager.set_peer_name(pubkey, &name).await?;
-            } else if let Some(n) = self.name() {
-                peer_manager.set_peer_name(pubkey, &n).await?;
-            }
-
-            peer_manager
-                .set_peer_status(pubkey, PeerStatus::Active)
-                .await?;
+            // Initialize self as active peer
+            self.init_self_as_peer(store_id, &name).await?;
 
             Ok(store_id)
         }
+    }
+
+    /// Register this node as an active peer in the store's System Table.
+    async fn init_self_as_peer(&self, store_id: Uuid, name: &str) -> Result<(), NodeError> {
+        let peer_manager = self.store_manager
+            .get_peer_manager(&store_id)
+            .ok_or_else(|| NodeError::Validation("Store not registered".into()))?;
+
+        let pubkey = self.node_identity.public_key();
+        if !name.is_empty() {
+            peer_manager.set_peer_name(pubkey, name).await?;
+        } else if let Some(n) = self.name() {
+            peer_manager.set_peer_name(pubkey, &n).await?;
+        }
+        peer_manager.set_peer_status(pubkey, PeerStatus::Active).await?;
+        Ok(())
     }
 }
 
@@ -743,7 +652,8 @@ mod tests {
 
         let _store = node
             .store_manager()
-            .open(store_id, STORE_TYPE_NULLSTORE)
+            .open(store_id)
+            .await
             .expect("Failed to open store");
 
         let _ = std::fs::remove_dir_all(data_dir.base());
@@ -771,11 +681,13 @@ mod tests {
 
         let store_a = node
             .store_manager()
-            .open(id_a, STORE_TYPE_NULLSTORE)
+            .open(id_a)
+            .await
             .expect("open A");
         let store_b = node
             .store_manager()
-            .open(id_b, STORE_TYPE_NULLSTORE)
+            .open(id_b)
+            .await
             .expect("open B");
 
         // Both stores are independently functional (system intentions from creation)

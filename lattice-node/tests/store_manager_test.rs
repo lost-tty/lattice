@@ -233,23 +233,12 @@ async fn test_stores_opened_on_startup() {
             .unwrap();
         wait_for_open(node.store_manager(), child_id).await;
         node.shutdown().await;
-        drop(node);
     }
-    // Let OS release file locks after full drop
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Phase 2: Restart — stores should reappear
-    // Retry build in case redb lock is slow to release
-    let node = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match file_node_builder(DataDir::new(data_dir.base())).build() {
-                Ok(n) => return n,
-                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-            }
-        }
-    })
-    .await
-    .expect("Failed to rebuild node: redb lock not released within timeout");
+    let node = file_node_builder(DataDir::new(data_dir.base()))
+        .build()
+        .expect("Failed to rebuild node after shutdown");
     node.start().await.expect("node start");
 
     wait_for_open(node.store_manager(), child_id).await;
@@ -789,28 +778,17 @@ async fn test_state_db_recovery() {
         );
         node.shutdown().await;
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Phase 2: Delete state.db but keep intentions (witness log)
     let state_dir = data_dir.store_state_dir(store_id);
     std::fs::remove_dir_all(&state_dir).unwrap();
 
     // Phase 3: Reopen — actor should recover state from witness log
-    let node = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match file_node_builder(DataDir::new(data_dir.base())).build() {
-                Ok(n) => return n,
-                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-            }
-        }
-    })
-    .await
-    .expect("Failed to rebuild node");
+    let node = file_node_builder(DataDir::new(data_dir.base()))
+        .build()
+        .expect("Failed to rebuild node after shutdown");
     node.start().await.unwrap();
     wait_for_open(node.store_manager(), store_id).await;
-
-    // Give the actor time to project witness entries onto fresh state
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let handle = node.store_manager().get_handle(&store_id).unwrap();
     let recovered_count = handle.as_inspector().intention_count().await;
@@ -821,7 +799,7 @@ async fn test_state_db_recovery() {
 }
 
 #[tokio::test]
-async fn test_open_existing_resolves_type_from_meta() {
+async fn test_open_resolves_type_from_meta() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = DataDir::new(tmp.path().to_path_buf());
 
@@ -837,27 +815,18 @@ async fn test_open_existing_resolves_type_from_meta() {
             .unwrap();
         node.shutdown().await;
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Phase 2: Reopen — verify open_existing resolves type from meta.db
-    let node = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match file_node_builder(DataDir::new(data_dir.base())).build() {
-                Ok(n) => return n,
-                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-            }
-        }
-    })
-    .await
-    .expect("Failed to rebuild node");
+    // Phase 2: Reopen — verify open() resolves type from meta.db
+    let node = file_node_builder(DataDir::new(data_dir.base()))
+        .build()
+        .expect("Failed to rebuild node after shutdown");
 
     // Verify meta.db has the type before opening
     let meta_record = node.meta().get_store(store_id).unwrap().unwrap();
     assert_eq!(meta_record.store_type, STORE_TYPE_NULLSTORE);
 
-    // open_existing should resolve type from meta.db and return it
-    let (handle, resolved_type) = node.store_manager().open_existing(store_id).unwrap();
-    assert_eq!(resolved_type, STORE_TYPE_NULLSTORE);
+    // open() should resolve type from meta.db and return it
+    let handle = node.store_manager().open(store_id).await.unwrap();
     assert_eq!(handle.store_type(), STORE_TYPE_NULLSTORE);
 }
 

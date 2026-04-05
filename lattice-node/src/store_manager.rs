@@ -192,8 +192,7 @@ impl StoreManager {
 
     /// Open a store by ID and type using the registered opener.
     /// Handles caching — returns existing handle if already open.
-    /// Does not register the store (no PeerManager yet) — call register() after.
-    pub fn open(
+    fn open_by_type(
         &self,
         store_id: Uuid,
         store_type: &str,
@@ -231,48 +230,55 @@ impl StoreManager {
         Ok(bundle.handle)
     }
 
-    /// Create a new store with a fresh UUID.
-    /// Does not register the store — call register() after.
+    /// Create a new store. Handles the complete lifecycle:
+    /// open → System Table setup → PeerManager → register → meta.db → watcher.
+    ///
+    /// - `parent_id: None` → Root Store (Independent PeerManager, ROOTSTORES_TABLE, watcher)
+    /// - `parent_id: Some(pid)` → Child Store (Inherited PeerManager from parent)
     pub async fn create(
-        &self,
-        name: Option<String>,
+        self: &Arc<Self>,
+        store_id: Uuid,
+        parent_id: Option<Uuid>,
         store_type: &str,
+        name: Option<String>,
         peer_strategy: Option<lattice_model::store_info::PeerStrategy>,
-    ) -> Result<(Uuid, Arc<dyn StoreHandle>), StoreManagerError> {
-        let store_id = Uuid::new_v4();
-        let opened = self.open(store_id, store_type)?;
+    ) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
+        let handle = self.open_by_type(store_id, store_type)?;
 
-        let system = opened.clone().as_system();
-
-        // Batch updates to System Table if needed
-        if system.is_some() && (name.is_some() || peer_strategy.is_some()) {
-            let system = system.unwrap();
-            let mut batch = SystemBatch::new(system.as_ref());
-
-            if let Some(name_str) = name {
-                batch = batch.set_name(&name_str);
+        // System Table setup (name, strategy)
+        if let Some(system) = handle.clone().as_system() {
+            if name.is_some() || peer_strategy.is_some() {
+                let mut batch = SystemBatch::new(system.as_ref());
+                if let Some(ref n) = name {
+                    batch = batch.set_name(n);
+                }
+                if let Some(strategy) = peer_strategy {
+                    batch = batch.set_strategy(strategy);
+                }
+                batch.commit().await?;
             }
-
-            if let Some(strategy) = peer_strategy {
-                batch = batch.set_strategy(strategy);
-            }
-
-            batch.commit().await?;
-        } else if (name.is_some() || peer_strategy.is_some()) && system.is_none() {
+        } else if name.is_some() || peer_strategy.is_some() {
             return Err(StoreManagerError::NotSystemStore);
         }
 
-        Ok((store_id, opened))
+        self.register_internal(store_id, parent_id.unwrap_or(Uuid::nil()), handle.clone(), store_type)
+            .await?;
+
+        Ok(handle)
     }
 
     /// Open an existing store by ID, resolving its type from persisted metadata.
-    /// Does not register the store — call register() after.
-    pub fn open_existing(
-        &self,
+    /// Handles the complete lifecycle: open → PeerManager → register → watcher.
+    pub async fn open(
+        self: &Arc<Self>,
         store_id: Uuid,
-    ) -> Result<(Arc<dyn StoreHandle>, String), StoreManagerError> {
-        // Get store type from meta.db (source of truth).
-        // Fall back to state.db for stores created before meta.db tracked the type.
+    ) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
+        // Already open? Return cached handle.
+        if let Some(handle) = self.get_handle(&store_id) {
+            return Ok(handle);
+        }
+
+        // Resolve type + parent from meta.db
         let meta_type = self.store_type_from_meta(store_id)?;
         let disk_type = self.peek_store_info(store_id).ok().map(|(_, t, _)| t);
 
@@ -280,38 +286,44 @@ impl StoreManager {
             (Some(mt), Some(dt)) => {
                 if mt != dt {
                     return Err(StoreManagerError::StoreTypeMismatch {
-                        store_id,
-                        expected: mt,
-                        actual: dt,
+                        store_id, expected: mt, actual: dt,
                     });
                 }
                 mt
             }
-            (Some(mt), None) => mt, // state.db missing — will be recreated
-            (None, Some(_)) => {
-                // Store type missing from meta.db — this should not happen post-migration.
-                return Err(StoreManagerError::NotFound(store_id));
-            }
+            (Some(mt), None) => mt,
+            (None, Some(_)) => return Err(StoreManagerError::NotFound(store_id)),
             (None, None) => return Err(StoreManagerError::NotFound(store_id)),
         };
 
-        let handle = self.open(store_id, &store_type)?;
-        Ok((handle, store_type))
+        let parent_id = self.meta
+            .get_store(store_id)
+            .ok()
+            .flatten()
+            .and_then(|r| Uuid::from_slice(&r.parent_id).ok())
+            .unwrap_or(Uuid::nil());
+
+        let handle = self.open_by_type(store_id, &store_type)?;
+
+        self.register_internal(store_id, parent_id, handle.clone(), &store_type)
+            .await?;
+
+        Ok(handle)
     }
 
-    // ==================== Store Registration ====================
+    // ==================== Internal Registration ====================
 
-    /// Register an opened store with its peer_manager.
-    /// Writes to meta.db STORES_TABLE and emits NetEvent::StoreReady.
-    pub fn register(
-        &self,
+    /// Register a store: create PeerManager, persist to meta.db, start watcher for roots, emit events.
+    async fn register_internal(
+        self: &Arc<Self>,
         store_id: Uuid,
         parent_id: Uuid,
         store_handle: Arc<dyn StoreHandle>,
-        store_type: impl Into<String>,
-        peer_manager: Arc<PeerManager>,
+        store_type: &str,
     ) -> Result<(), StoreManagerError> {
-        let store_type = store_type.into();
+        // Create or inherit PeerManager
+        let peer_manager = self.resolve_peer_manager(&store_handle, parent_id).await?;
+
         {
             let mut stores = self
                 .stores
@@ -319,31 +331,67 @@ impl StoreManager {
                 .map_err(|_| StoreManagerError::LockPoisoned)?;
 
             if stores.contains_key(&store_id) {
-                return Ok(()); // Already registered
+                return Ok(());
             }
 
-            stores.insert(
-                store_id,
-                StoredEntry {
-                    store_handle,
-                    store_type: store_type.clone(),
-                    peer_manager,
-                },
-            );
-
-            debug!(store_id = %store_id, store_type = %store_type, "Registered store");
+            stores.insert(store_id, StoredEntry {
+                store_handle,
+                store_type: store_type.to_string(),
+                peer_manager,
+            });
         }
 
-        // Persist in meta.db (idempotent — skips if already present)
-        if let Err(e) = self.meta.add_store(store_id, parent_id, &store_type) {
+        // Persist to STORES_TABLE
+        if let Err(e) = self.meta.add_store(store_id, parent_id, store_type) {
             warn!(store_id = %store_id, error = %e, "Failed to persist store in meta.db");
         }
 
-        // Emit events (outside lock)
+        // Root stores: persist to ROOTSTORES_TABLE and start watcher
+        let is_root = parent_id == Uuid::nil();
+        if is_root {
+            let _ = self.meta.add_rootstore(
+                store_id,
+                &lattice_kernel::proto::storage::RootStoreRecord {
+                    joined_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                },
+            );
+            if let Err(e) = self.start_watching(store_id) {
+                warn!(store_id = %store_id, error = %e, "Failed to start watcher");
+            }
+        }
+
+        debug!(store_id = %store_id, store_type = %store_type, "Registered store");
+
+        // Emit events
         let _ = self.event_tx.send(NodeEvent::StoreReady { store_id });
         let _ = self.net_tx.send(NetEvent::StoreReady { store_id });
 
         Ok(())
+    }
+
+    /// Resolve the PeerManager for a store based on its PeerStrategy.
+    async fn resolve_peer_manager(
+        &self,
+        handle: &Arc<dyn StoreHandle>,
+        parent_id: Uuid,
+    ) -> Result<Arc<PeerManager>, StoreManagerError> {
+        let system = match handle.clone().as_system() {
+            Some(s) => s,
+            None => return Err(StoreManagerError::NotSystemStore),
+        };
+
+        let strategy = system.get_peer_strategy().unwrap_or_default();
+
+        match strategy {
+            Some(lattice_model::store_info::PeerStrategy::Inherited) if parent_id != Uuid::nil() => {
+                self.get_peer_manager(&parent_id)
+                    .ok_or(StoreManagerError::NotFound(parent_id))
+            }
+            _ => Ok(PeerManager::new(system).await?),
+        }
     }
 
     // ==================== Store Queries ====================
@@ -417,9 +465,8 @@ impl StoreManager {
         Ok(())
     }
 
-    /// Start watching using an Arc reference (needed for the watcher task)
-    pub fn start_watching(self: &Arc<Self>, store_id: Uuid) -> Result<(), StoreManagerError> {
-        let (store, peer_manager) = {
+    fn start_watching(self: &Arc<Self>, store_id: Uuid) -> Result<(), StoreManagerError> {
+        let store = {
             let stores = self
                 .stores
                 .read()
@@ -427,14 +474,13 @@ impl StoreManager {
             let entry = stores
                 .get(&store_id)
                 .ok_or(StoreManagerError::NotFound(store_id))?;
-            (entry.store_handle.clone(), entry.peer_manager.clone())
+            entry.store_handle.clone()
         };
 
         let watcher = Arc::new(crate::watcher::RecursiveWatcher::new(
             self.clone(),
             store_id,
             store,
-            peer_manager,
         ));
 
         watcher.start();
@@ -448,8 +494,7 @@ impl StoreManager {
         Ok(())
     }
 
-    /// Stop watching a store.
-    pub fn stop_watching(&self, store_id: &Uuid) {
+    fn stop_watching(&self, store_id: &Uuid) {
         if let Ok(mut watchers) = self.watchers.write() {
             if let Some(watcher) = watchers.remove(store_id) {
                 // shutdown_tx.send(()) is synchronous — just signals the watcher task to exit
@@ -499,65 +544,41 @@ impl StoreManager {
 
     // ==================== Child Store Management ====================
 
-    /// Create a new child store declaration in a root/parent store.
-    /// This combines creating the store (if needed) and registering it in the parent's System Table.
+    /// Create a child store: creates the store, registers in parent's SystemTable,
+    /// and updates the watcher's tracking set.
     pub async fn create_child_store(
-        &self,
+        self: &Arc<Self>,
         parent_id: Uuid,
         name: Option<String>,
         store_type: &str,
     ) -> Result<Uuid, StoreManagerError> {
-        // 1. Create actual store instance (DB)
-        let (child_id, handle) = self
-            .create(
-                name.clone(),
-                store_type,
-                Some(lattice_model::store_info::PeerStrategy::Inherited),
-            )
-            .await?;
+        let child_id = Uuid::new_v4();
 
-        // 2. Register child locally - using parent's PeerManager
-        // If parent is not a root or doesn't have a peer manager, we might have issues.
-        // Assuming parent is open and has a peer manager since we are calling this.
-        let peer_manager = self
-            .get_peer_manager(&parent_id)
-            .or_else(|| {
-                // If parent doesn't have one (maybe it's not a root?), create a new one?
-                // For now, fail if parent not found.
-                None
-            })
-            .ok_or_else(|| StoreManagerError::NotFound(parent_id))?;
-
-        self.register(
+        // Create + register (PeerManager inherited from parent via register_internal)
+        self.create(
             child_id,
-            parent_id,
-            handle.clone(),
-            store_type.to_string(),
-            peer_manager,
-        )?;
+            Some(parent_id),
+            store_type,
+            name.clone(),
+            Some(lattice_model::store_info::PeerStrategy::Inherited),
+        )
+        .await?;
 
-        // 4. Write declaration to parent's SystemTable
+        // Declare in parent's SystemTable
         let parent_handle = self
             .get_handle(&parent_id)
             .ok_or(StoreManagerError::NotFound(parent_id))?;
-
         let system = parent_handle
             .as_system()
             .ok_or(StoreManagerError::NotSystemStore)?;
 
-        let mut batch = SystemBatch::new(system.as_ref());
-        if let Some(n) = name {
-            batch = batch.add_child(child_id, n, store_type);
-        } else {
-            batch = batch.add_child(child_id, "".to_string(), store_type);
-        }
-        batch = batch.set_child_status(child_id, lattice_model::store_info::ChildStatus::Active);
+        SystemBatch::new(system.as_ref())
+            .add_child(child_id, name.unwrap_or_default(), store_type)
+            .set_child_status(child_id, lattice_model::store_info::ChildStatus::Active)
+            .commit()
+            .await?;
 
-        batch.commit().await?;
-
-        // 5. If we are watching the parent, the watcher will pick this up.
-        // But since we just registered it, we are good.
-        // If parent is being watched, update the watcher's tracking set.
+        // Update watcher tracking so it doesn't try to re-open this store
         if let Ok(watchers) = self.watchers.read() {
             if let Some(watcher) = watchers.get(&parent_id) {
                 watcher.track_store(child_id);
