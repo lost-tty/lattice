@@ -165,9 +165,9 @@ impl Transport for IrohTransport {
             .await
             .map_err(|e| TransportError::Connect(e.to_string()))?;
 
-        // Don't emit PeerConnected for outbound connections — they are
-        // explicit operations (sync, bootstrap, join), not discovery events.
-        // PeerConnected is emitted by accept() (inbound) and gossip NeighborUp.
+        let _ = self
+            .events_tx
+            .send(lattice_net_types::NetworkEvent::PeerConnected(*peer));
         Ok(IrohConnection { inner: conn })
     }
 

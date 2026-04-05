@@ -12,12 +12,17 @@ lattice-model = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 futures-util = { workspace = true }
 async-trait = "0.1"
 
+[features]
+test-utils = []
+
 [dev-dependencies]
+lattice-net-iroh = { path = ".", features = ["test-utils"] }
 tokio = { workspace = true, features = ["full", "macros"] }
 futures-util = { workspace = true }
 async-trait = "0.1"

@@ -237,7 +237,12 @@ async fn run_intention_forwarder(
 /// Two triggers:
 /// - **Startup**: if peers are already connected when this store is registered,
 ///   sync with all of them immediately (catch-up).
-/// - **New peer**: when a genuinely new peer connects, sync only with that peer.
+/// - **Peer (re)connect**: when `SessionTracker::mark_online` broadcasts a peer
+///   (new connection or reconnection after debounce threshold), sync with that peer.
+///
+/// Recovery after sleep/wake relies on the debounced `mark_online` broadcast:
+/// when iroh re-establishes gossip and emits `NeighborUp`, the `PeerConnected`
+/// event triggers auto-sync even if `PeerDisconnected` was never received.
 ///
 /// Terminates when the `SessionTracker` drops (broadcast closed) or
 /// the `NetworkService` is dropped (Weak upgrade fails).
@@ -271,7 +276,7 @@ async fn run_auto_sync<T: Transport>(
                     tracing::debug!(store_id = %store_id, peer = %peer, "Skipping sync — peer not in acceptable authors");
                     continue;
                 }
-                tracing::debug!(store_id = %store_id, peer = %peer, "New peer connected, syncing");
+                tracing::debug!(store_id = %store_id, peer = %peer, "Peer connected, syncing");
                 let _ = service.sync_with_peer(&store, peer, &[]).await;
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -660,24 +665,39 @@ impl<T: Transport> NetworkService<T> {
 
         if let Some(mut gossip_rx) = gossip_events {
             tokio::spawn(async move {
+                // Track whether the gossip channel is still alive.
+                // Some implementations (e.g., BroadcastGossip) return a dead channel
+                // from network_events(). When it closes, fall back to transport-only.
+                let mut gossip_alive = true;
                 loop {
-                    tokio::select! {
-                        result = transport_events.recv() => match result {
+                    if gossip_alive {
+                        tokio::select! {
+                            result = transport_events.recv() => match result {
+                                Ok(event) => apply_event(&sessions, event),
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    tracing::warn!(lagged = n, "Transport event listener lagged, missed {} events", n);
+                                }
+                                Err(broadcast::error::RecvError::Closed) => break,
+                            },
+                            result = gossip_rx.recv() => match result {
+                                Ok(event) => apply_event(&sessions, event),
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    tracing::warn!(lagged = n, "Gossip event listener lagged, missed {} events", n);
+                                }
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    // Gossip channel closed — fall back to transport-only.
+                                    gossip_alive = false;
+                                }
+                            },
+                        }
+                    } else {
+                        match transport_events.recv().await {
                             Ok(event) => apply_event(&sessions, event),
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 tracing::warn!(lagged = n, "Transport event listener lagged, missed {} events", n);
-                                // Continue — lagging is recoverable, don't kill the listener
                             }
                             Err(broadcast::error::RecvError::Closed) => break,
-                        },
-                        result = gossip_rx.recv() => match result {
-                            Ok(event) => apply_event(&sessions, event),
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!(lagged = n, "Gossip event listener lagged, missed {} events", n);
-                                // Continue — lagging is recoverable, don't kill the listener
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        },
+                        }
                     }
                 }
             });
