@@ -33,6 +33,20 @@ fn make_prompt(store_id: Option<Uuid>) -> String {
     }
 }
 
+fn format_url_box(url: &str) -> String {
+    let text = "Lattice running at";
+    let pad = 3;
+    let inner = pad + text.len() + 1 + url.len() + pad;
+    format!(
+        "\n  ╭{0}╮\n  │{1}│\n  │{2}{3} {4}{2}│\n  │{1}│\n  ╰{0}╯\n",
+        "─".repeat(inner),
+        " ".repeat(inner),
+        " ".repeat(pad),
+        text,
+        url,
+    )
+}
+
 /// Macro for writing output consistently
 macro_rules! wout {
     ($writer:expr, $($arg:tt)*) => {{
@@ -46,7 +60,7 @@ fn handle_node_event(event: NodeEvent, writer: &rustyline_async::SharedWriter) {
     match event {
         NodeEvent::StoreReady(e) => {
             if let Ok(uuid) = Uuid::from_slice(&e.store_id) {
-                wout!(writer, "\nInfo: Store {} ready.", &uuid.to_string()[..8]);
+                wout!(writer, "Info: Store {} ready.", &uuid.to_string()[..8]);
             }
         }
         NodeEvent::JoinFailed(e) => {
@@ -222,6 +236,9 @@ async fn run_headless_daemon(args: &CliArgs) {
         }
     };
 
+    if let Some(url) = runtime.web_url() {
+        eprint!("{}", format_url_box(url));
+    }
     tracing::info!(
         "Ready — node {} — press Ctrl+C to stop",
         hex::encode(&runtime.backend().node_id()[..4])
@@ -250,12 +267,13 @@ fn init_daemon_tracing(verbosity: u8) {
     }
 
     const SILENCE: &[&str] = &[
-        "iroh_net::magicsock=error",
-        "iroh::magicsock=error",
-        "iroh::discovery=warn",
-        "iroh::endpoint=warn",
-        "iroh_gossip=warn",
+        "iroh=error",
+        "iroh_gossip=error",
+        "iroh_relay=error",
         "swarm_discovery=error",
+        "mainline=error",
+        "netwatch=error",
+        "portmapper=error",
     ];
     for d in SILENCE {
         filter = filter.add_directive(d.parse().unwrap());
@@ -305,7 +323,14 @@ async fn run_rpc_client() {
     let make_writer = tracing_writer::SharedWriterMakeWriter::new(writer.clone());
     let filter = EnvFilter::from_default_env()
         .add_directive("warn".parse().unwrap())
-        .add_directive("lattice_cli=info".parse().unwrap());
+        .add_directive("lattice_cli=info".parse().unwrap())
+        .add_directive("iroh=error".parse().unwrap())
+        .add_directive("iroh_gossip=error".parse().unwrap())
+        .add_directive("iroh_relay=error".parse().unwrap())
+        .add_directive("swarm_discovery=error".parse().unwrap())
+        .add_directive("mainline=error".parse().unwrap())
+        .add_directive("netwatch=error".parse().unwrap())
+        .add_directive("portmapper=error".parse().unwrap());
     tracing_subscriber::fmt()
         .with_writer(make_writer)
         .with_env_filter(filter)
@@ -361,12 +386,13 @@ async fn run_embedded_mode(args: &CliArgs) {
         "warn",
         "lattice_net=info",
         "lattice_core=info",
-        "iroh_net::magicsock=error",
-        "iroh::magicsock=error",
-        "iroh::discovery=warn",
-        "iroh::endpoint=warn",
-        "iroh_gossip=warn",
+        "iroh=error",
+        "iroh_gossip=error",
+        "iroh_relay=error",
         "swarm_discovery=error",
+        "mainline=error",
+        "netwatch=error",
+        "portmapper=error",
     ];
 
     let filter = DIRECTIVES
@@ -414,6 +440,10 @@ async fn run_embedded_mode(args: &CliArgs) {
             return;
         }
     };
+
+    if let Some(url) = runtime.web_url() {
+        wout!(writer, "{}", format_url_box(url));
+    }
 
     let backend = runtime.backend().clone();
 

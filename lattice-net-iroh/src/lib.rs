@@ -49,13 +49,18 @@ impl ToLattice for PublicKey {
 use lattice_net::network::{NetworkBackend, ShutdownHandle};
 use lattice_net_types::{GossipLayer, NodeProviderExt};
 
-/// ShutdownHandle implementation for iroh Router
-struct RouterShutdownHandle(iroh::protocol::Router);
+/// ShutdownHandle implementation for iroh Router + Endpoint
+struct IrohShutdownHandle {
+    router: iroh::protocol::Router,
+    endpoint: iroh::Endpoint,
+}
 
 #[async_trait::async_trait]
-impl ShutdownHandle for RouterShutdownHandle {
+impl ShutdownHandle for IrohShutdownHandle {
     async fn shutdown(&self) -> Result<(), String> {
-        self.0.shutdown().await.map_err(|e| e.to_string())
+        self.router.shutdown().await.map_err(|e| e.to_string())?;
+        self.endpoint.close().await;
+        Ok(())
     }
 }
 
@@ -84,10 +89,11 @@ impl IrohBackend {
             .accept(iroh_gossip::ALPN, gossip.gossip().clone())
             .spawn();
 
+        let endpoint = transport.endpoint().clone();
         Ok(NetworkBackend {
             transport,
             gossip: Some(gossip as Arc<dyn GossipLayer>),
-            router: Some(Box::new(RouterShutdownHandle(router))),
+            router: Some(Box::new(IrohShutdownHandle { router, endpoint })),
         })
     }
 }

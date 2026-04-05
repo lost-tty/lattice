@@ -23,6 +23,7 @@ pub struct Runtime {
     backend: Arc<dyn LatticeBackend>,
     rpc_handle: Option<JoinHandle<()>>,
     web_handle: Option<JoinHandle<()>>,
+    web_url: Option<String>,
 }
 
 impl Runtime {
@@ -39,6 +40,11 @@ impl Runtime {
     /// Get the backend for SDK operations.
     pub fn backend(&self) -> &Arc<dyn LatticeBackend> {
         &self.backend
+    }
+
+    /// Get the web server URL, if running.
+    pub fn web_url(&self) -> Option<&str> {
+        self.web_url.as_deref()
     }
 
     /// Shutdown the runtime gracefully.
@@ -232,23 +238,15 @@ impl RuntimeBuilder {
 
         // Start web server if requested
         #[cfg(feature = "web")]
+        let mut web_url: Option<String> = None;
+        #[cfg(feature = "web")]
         let web_handle = if let Some(port) = self.web_port {
             let web_server = lattice_web::WebServer::new(
                 backend.clone(),
                 node.app_manager().clone(),
                 port,
             );
-            let url = web_server.url();
-            let text = "Lattice running at";
-            let pad = 3;
-            let inner = pad + text.len() + 1 + url.len() + pad;
-            eprintln!();
-            eprintln!("  ╭{}╮", "─".repeat(inner));
-            eprintln!("  │{}│", " ".repeat(inner));
-            eprintln!("  │{}{} {}{}│", " ".repeat(pad), text, url, " ".repeat(pad));
-            eprintln!("  │{}│", " ".repeat(inner));
-            eprintln!("  ╰{}╯", "─".repeat(inner));
-            eprintln!();
+            web_url = Some(web_server.url());
             Some(tokio::spawn(async move {
                 if let Err(e) = web_server.run().await {
                     tracing::error!("Web server error: {}", e);
@@ -259,6 +257,8 @@ impl RuntimeBuilder {
         };
         #[cfg(not(feature = "web"))]
         let web_handle: Option<JoinHandle<()>> = None;
+        #[cfg(not(feature = "web"))]
+        let web_url: Option<String> = None;
 
         Ok(Runtime {
             node,
@@ -266,6 +266,7 @@ impl RuntimeBuilder {
             backend,
             rpc_handle,
             web_handle,
+            web_url,
         })
     }
 }
