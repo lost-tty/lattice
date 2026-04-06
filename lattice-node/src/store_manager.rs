@@ -450,7 +450,7 @@ impl StoreManager {
     /// Rebuild a store's state from its intention log.
     /// Closes the store, deletes state.db, and reopens it.
     pub async fn rebuild(self: &Arc<Self>, store_id: Uuid) -> Result<(), StoreManagerError> {
-        self.close(&store_id)?;
+        self.close(&store_id).await?;
         if !self.in_memory {
             let state_dir = self.data_dir.store_state_dir(store_id);
             if state_dir.exists() {
@@ -458,22 +458,35 @@ impl StoreManager {
                     .map_err(|e| StoreManagerError::Storage(lattice_kernel::store::StateError::Io(e)))?;
             }
         }
-        self.open(store_id).await?;
-        Ok(())
+        // Retry open — the DB lock may briefly be held by a finishing sync task.
+        for i in 0..10 {
+            match self.open(store_id).await {
+                Ok(_) => return Ok(()),
+                Err(e) if i < 9 => {
+                    tracing::debug!(store_id = %store_id, attempt = i + 1, "Rebuild open retry: {}", e);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
     }
 
-    pub fn close(&self, store_id: &Uuid) -> Result<(), StoreManagerError> {
+    pub async fn close(&self, store_id: &Uuid) -> Result<(), StoreManagerError> {
         // Stop watcher if exists
         self.stop_watching(store_id);
 
-        let mut stores = self
-            .stores
-            .write()
-            .map_err(|_| StoreManagerError::LockPoisoned)?;
+        let entry = {
+            let mut stores = self
+                .stores
+                .write()
+                .map_err(|_| StoreManagerError::LockPoisoned)?;
+            stores.remove(store_id)
+        };
 
-        if let Some(entry) = stores.remove(store_id) {
-            // Signal actor shutdown before dropping the handle
-            entry.store_handle.shutdown();
+        if let Some(entry) = entry {
+            // Wait for actor to fully shut down and release DB locks
+            entry.store_handle.close().await;
         }
 
         debug!(store_id = %store_id, "Closed store");
@@ -730,7 +743,7 @@ impl StoreManager {
         //    race to close the child once it sees the Archived status.
         //    We only unregister descendants from StoreManager (no SystemTable writes),
         //    so un-archiving the parent later lets the watcher rediscover them.
-        self.close_descendants(child_id);
+        self.close_descendants(child_id).await;
 
         // 2. Mark as Archived in parent's SystemTable
         let parent_handle = self
@@ -751,7 +764,7 @@ impl StoreManager {
 
     /// Recursively close a store and all its descendants from the local StoreManager.
     /// Does NOT write to any SystemTable — purely local cleanup.
-    fn close_descendants(&self, store_id: Uuid) {
+    async fn close_descendants(&self, store_id: Uuid) {
         // Read children from the store's SystemTable before closing it
         let child_ids: Vec<Uuid> = match self.get_handle(&store_id).and_then(|h| h.as_system()) {
             Some(sys) => sys.get_children().unwrap_or_else(|e| {
@@ -767,11 +780,11 @@ impl StoreManager {
 
         // Recurse into each child first (depth-first)
         for child_id in child_ids {
-            self.close_descendants(child_id);
+            Box::pin(self.close_descendants(child_id)).await;
         }
 
         // Close this store (stops watcher + removes from cache)
-        let _ = self.close(&store_id);
+        let _ = self.close(&store_id).await;
     }
 }
 

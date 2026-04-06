@@ -45,6 +45,9 @@ pub trait StoreHandle: Send + Sync {
 
     /// Signal shutdown of the store actor
     fn shutdown(&self);
+
+    /// Shut down and wait for the actor to fully stop (releases DB locks).
+    fn close(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
 }
 
 // specialized implementation...
@@ -97,6 +100,10 @@ where
 
     fn shutdown(&self) {
         Store::shutdown(self);
+    }
+
+    fn close(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(Store::close(self))
     }
 }
 
