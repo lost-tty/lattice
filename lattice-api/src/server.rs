@@ -1,30 +1,20 @@
 //! RPC Server with UDS listener
 
-use crate::backend::Backend;
-use crate::dynamic_store_service::DynamicStoreServiceImpl;
-use crate::node_service::NodeServiceImpl;
-use crate::proto::{
-    dynamic_store_service_server::DynamicStoreServiceServer,
-    node_service_server::NodeServiceServer, store_service_server::StoreServiceServer,
-};
-use crate::store_service::StoreServiceImpl;
 use std::path::PathBuf;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
+use tonic::service::Routes;
 use tonic::transport::Server;
 
 /// RPC Server for latticed daemon
 pub struct RpcServer {
-    backend: Backend,
+    routes: Option<Routes>,
     socket_path: PathBuf,
 }
 
 impl RpcServer {
-    pub fn new(backend: Backend, socket_path: PathBuf) -> Self {
-        Self {
-            backend,
-            socket_path,
-        }
+    pub fn new(routes: Routes, socket_path: PathBuf) -> Self {
+        Self { routes: Some(routes), socket_path }
     }
 
     /// Default socket path using platform-specific data directory
@@ -36,7 +26,7 @@ impl RpcServer {
     }
 
     /// Run the RPC server
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Remove stale socket if exists
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path)?;
@@ -64,15 +54,10 @@ impl RpcServer {
 
         tracing::debug!("RPC listening on {:?}", self.socket_path);
 
-        // Create all service implementations - all wrap the same backend
-        let node_service = NodeServiceImpl::new(self.backend.clone());
-        let store_service = StoreServiceImpl::new(self.backend.clone());
-        let dynamic_store_service = DynamicStoreServiceImpl::new(self.backend.clone());
-
+        let routes = self.routes.take()
+            .ok_or("RpcServer already consumed")?;
         Server::builder()
-            .add_service(NodeServiceServer::new(node_service))
-            .add_service(StoreServiceServer::new(store_service))
-            .add_service(DynamicStoreServiceServer::new(dynamic_store_service))
+            .add_routes(routes)
             .serve_with_incoming(uds_stream)
             .await?;
 

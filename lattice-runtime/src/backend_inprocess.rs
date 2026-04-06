@@ -8,8 +8,9 @@ use crate::StoreHandle;
 use lattice_api::proto::{StoreMeta, StoreRef};
 use lattice_model::store_info::PeerStrategy;
 use lattice_model::types::{Hash, PubKey};
-use lattice_model::weaver::{FloatingIntention, WitnessEntry};
-use lattice_model::{AppBinding, SExpr};
+
+use lattice_model::AppBinding;
+use lattice_model::weaver::FloatingIntention;
 use lattice_node::Node;
 use lattice_systemstore::SystemBatch;
 use prost_reflect::prost::Message;
@@ -45,6 +46,11 @@ fn to_node_event(event: lattice_node::NodeEvent) -> NodeEvent {
     }
 }
 
+pub(crate) fn parse_uuid(bytes: &[u8]) -> Result<Uuid, tonic::Status> {
+    Uuid::from_slice(bytes).map_err(|_| tonic::Status::invalid_argument("Invalid UUID"))
+}
+
+#[derive(Clone)]
 pub struct InProcessBackend {
     node: Arc<Node>,
     network: Option<Arc<NetworkService>>,
@@ -64,8 +70,9 @@ impl InProcessBackend {
 
 }
 
-impl LatticeBackend for InProcessBackend {
-    fn node_status(&self) -> AsyncResult<'_, NodeStatus> {
+/// Backend methods — called by gRPC service trait impls.
+impl InProcessBackend {
+    pub fn node_status(&self) -> AsyncResult<'_, NodeStatus> {
         Box::pin(async move {
             Ok(NodeStatus {
                 public_key: self.node.node_id().to_vec(),
@@ -81,78 +88,16 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn node_set_name(&self, name: &str) -> AsyncResult<'_, ()> {
+    pub fn node_set_name(&self, name: &str) -> AsyncResult<'_, ()> {
         let name = name.to_string();
         Box::pin(async move { Ok(self.node.set_name(&name).await?) })
     }
 
-    fn node_id(&self) -> Vec<u8> {
-        self.node.node_id().to_vec()
-    }
-
-    fn store_types(&self) -> AsyncResult<'_, Vec<String>> {
+    pub fn store_types(&self) -> AsyncResult<'_, Vec<String>> {
         Box::pin(async move { Ok(self.node.store_manager().registered_types()) })
     }
 
-    fn node_meta(&self) -> AsyncResult<'_, Vec<SExpr>> {
-        Box::pin(async move {
-            let meta = self.node.meta();
-            let mut sections = Vec::new();
-
-            // meta table (name)
-            let mut meta_entries = Vec::new();
-            if let Ok(Some(name)) = meta.name() {
-                meta_entries.push(SExpr::list(vec![SExpr::sym("name"), SExpr::str(&name)]));
-            }
-            sections.push(SExpr::list(
-                std::iter::once(SExpr::sym("meta"))
-                    .chain(meta_entries)
-                    .collect(),
-            ));
-
-            // rootstores table
-            if let Ok(roots) = meta.list_rootstores() {
-                let mut rows: Vec<SExpr> = Vec::new();
-                for (id, record) in &roots {
-                    rows.push(SExpr::list(vec![
-                        SExpr::sym("root"),
-                        SExpr::list(vec![SExpr::sym("id"), SExpr::str(&id.to_string())]),
-                        SExpr::list(vec![SExpr::sym("joined-at"), SExpr::Num(record.joined_at)]),
-                    ]));
-                }
-                sections.push(SExpr::list(
-                    std::iter::once(SExpr::sym("rootstores"))
-                        .chain(rows)
-                        .collect(),
-                ));
-            }
-
-            // stores table
-            if let Ok(stores) = meta.list_stores() {
-                let mut rows: Vec<SExpr> = Vec::new();
-                for (id, record) in &stores {
-                    let parent = Uuid::from_slice(&record.parent_id)
-                        .unwrap_or(Uuid::nil());
-                    rows.push(SExpr::list(vec![
-                        SExpr::sym("store"),
-                        SExpr::list(vec![SExpr::sym("id"), SExpr::str(&id.to_string())]),
-                        SExpr::list(vec![SExpr::sym("parent"), SExpr::str(&parent.to_string())]),
-                        SExpr::list(vec![SExpr::sym("type"), SExpr::str(&record.store_type)]),
-                        SExpr::list(vec![SExpr::sym("created-at"), SExpr::Num(record.created_at)]),
-                    ]));
-                }
-                sections.push(SExpr::list(
-                    std::iter::once(SExpr::sym("stores"))
-                        .chain(rows)
-                        .collect(),
-                ));
-            }
-
-            Ok(sections)
-        })
-    }
-
-    fn subscribe(&self) -> BackendResult<EventReceiver> {
+    pub fn subscribe(&self) -> BackendResult<EventReceiver> {
         let mut rx = self.node.subscribe();
         let (tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -175,7 +120,7 @@ impl LatticeBackend for InProcessBackend {
         Ok(event_rx)
     }
 
-    fn store_peer_invite(&self, store_id: Uuid) -> AsyncResult<'_, String> {
+    pub fn store_peer_invite(&self, store_id: Uuid) -> AsyncResult<'_, String> {
         let node_id = self.node.node_id().to_vec();
         Box::pin(async move {
             let store = self.get_store(store_id)?;
@@ -213,7 +158,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_peer_revoke(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()> {
+    pub fn store_peer_revoke(&self, store_id: Uuid, peer_key: &[u8]) -> AsyncResult<'_, ()> {
         let peer_key = peer_key.to_vec();
         Box::pin(async move {
             let store = self.get_store(store_id)?;
@@ -242,7 +187,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_create(
+    pub fn store_create(
         &self,
         parent_id: Option<Uuid>,
         name: Option<String>,
@@ -264,7 +209,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_join(&self, token: &str) -> AsyncResult<'_, Uuid> {
+    pub fn store_join(&self, token: &str) -> AsyncResult<'_, Uuid> {
         let token = token.to_string();
         Box::pin(async move {
             let invite = lattice_node::token::Invite::parse(&token)?;
@@ -274,7 +219,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_list(&self, parent_id: Option<Uuid>) -> AsyncResult<'_, Vec<StoreRef>> {
+    pub fn store_list(&self, parent_id: Option<Uuid>) -> AsyncResult<'_, Vec<StoreRef>> {
         Box::pin(async move {
             match parent_id {
                 None => {
@@ -327,7 +272,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreMeta> {
+    pub fn store_status(&self, store_id: Uuid) -> AsyncResult<'_, StoreMeta> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
@@ -338,7 +283,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_peers(&self, store_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>> {
+    pub fn store_peers(&self, store_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
 
@@ -380,7 +325,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_details(&self, store_id: Uuid) -> AsyncResult<'_, StoreDetails> {
+    pub fn store_details(&self, store_id: Uuid) -> AsyncResult<'_, StoreDetails> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
@@ -402,7 +347,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_set_name(&self, store_id: Uuid, name: &str) -> AsyncResult<'_, ()> {
+    pub fn store_set_name(&self, store_id: Uuid, name: &str) -> AsyncResult<'_, ()> {
         let name = name.to_string();
         Box::pin(async move {
             let store = self.get_store(store_id)?;
@@ -418,7 +363,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_get_name(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>> {
+    pub fn store_get_name(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
 
@@ -432,7 +377,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_delete(&self, parent_id: Uuid, child_id: Uuid) -> AsyncResult<'_, ()> {
+    pub fn store_delete(&self, parent_id: Uuid, child_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
             Ok(self
                 .node
@@ -442,13 +387,13 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_rebuild(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
+    pub fn store_rebuild(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
             Ok(self.node.store_manager().rebuild(store_id).await?)
         })
     }
 
-    fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
+    pub fn store_sync(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move {
             // Trigger sync via network event - actual result comes via SyncResult event from subscribe()
             self.node.trigger_store_sync(store_id);
@@ -456,7 +401,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_debug(&self, store_id: Uuid) -> AsyncResult<'_, Vec<AuthorState>> {
+    pub fn store_debug(&self, store_id: Uuid) -> AsyncResult<'_, Vec<AuthorState>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
@@ -472,7 +417,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessEntry>> {
+    pub fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessEntry>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
@@ -480,14 +425,14 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_floating(&self, store_id: Uuid) -> AsyncResult<'_, Vec<FloatingIntention>> {
+    pub fn store_floating(&self, store_id: Uuid) -> AsyncResult<'_, Vec<FloatingIntention>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             Ok(store.as_inspector().floating_intentions().await)
         })
     }
 
-    fn store_get_intention(
+    pub fn store_get_intention(
         &self,
         store_id: Uuid,
         hash_prefix: &[u8],
@@ -517,7 +462,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_inspect_branch(
+    pub fn store_inspect_branch(
         &self,
         store_id: Uuid,
         heads: Vec<Vec<u8>>,
@@ -539,7 +484,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_system_list(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, Vec<u8>)>> {
+    pub fn store_system_list(&self, store_id: Uuid) -> AsyncResult<'_, Vec<(String, Vec<u8>)>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let system = store
@@ -550,7 +495,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_peer_strategy(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>> {
+    pub fn store_peer_strategy(&self, store_id: Uuid) -> AsyncResult<'_, Option<String>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let system = store
@@ -567,7 +512,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_exec(&self, store_id: Uuid, method: &str, payload: &[u8]) -> AsyncResult<'_, Vec<u8>> {
+    pub fn store_exec(&self, store_id: Uuid, method: &str, payload: &[u8]) -> AsyncResult<'_, Vec<u8>> {
         let method = method.to_string();
         let payload = payload.to_vec();
         Box::pin(async move {
@@ -599,7 +544,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_get_descriptor(&self, store_id: Uuid) -> AsyncResult<'_, (Vec<u8>, String)> {
+    pub fn store_get_descriptor(&self, store_id: Uuid) -> AsyncResult<'_, (Vec<u8>, String)> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let service = store.as_dispatcher().service_descriptor();
@@ -610,7 +555,7 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_list_methods(&self, store_id: Uuid) -> AsyncResult<'_, Vec<MethodInfo>> {
+    pub fn store_list_methods(&self, store_id: Uuid) -> AsyncResult<'_, Vec<MethodInfo>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let dispatcher = store.as_dispatcher();
@@ -636,14 +581,14 @@ impl LatticeBackend for InProcessBackend {
         })
     }
 
-    fn store_list_streams(&self, store_id: Uuid) -> AsyncResult<'_, Vec<StreamDescriptor>> {
+    pub fn store_list_streams(&self, store_id: Uuid) -> AsyncResult<'_, Vec<StreamDescriptor>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             Ok(store.as_stream_reflectable().stream_descriptors())
         })
     }
 
-    fn store_subscribe<'a>(
+    pub fn store_subscribe<'a>(
         &'a self,
         store_id: Uuid,
         stream_name: &'a str,
@@ -661,13 +606,13 @@ impl LatticeBackend for InProcessBackend {
 
     // ---- App operations ----
 
-    fn app_list(&self) -> AsyncResult<'_, Vec<AppBinding>> {
+    pub fn app_list(&self) -> AsyncResult<'_, Vec<AppBinding>> {
         Box::pin(async move {
             Ok(self.node.app_manager().list().await)
         })
     }
 
-    fn app_toggle(
+    pub fn app_toggle(
         &self,
         registry_store_id: Uuid,
         subdomain: &str,

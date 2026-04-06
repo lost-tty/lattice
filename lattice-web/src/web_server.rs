@@ -17,12 +17,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use lattice_api::backend::Backend;
-use lattice_api::proto::{
-    dynamic_store_service_server::DynamicStoreServiceServer,
-    node_service_server::NodeServiceServer, store_service_server::StoreServiceServer,
-};
-use lattice_api::{DynamicStoreServiceImpl, NodeServiceImpl, StoreServiceImpl};
+use lattice_api::RpcClient;
 use lattice_model::AppBinding;
 use lattice_node::{AppEvent, AppManager};
 use std::collections::HashMap;
@@ -34,7 +29,7 @@ use tonic::service::Routes;
 /// Shared state for the web server.
 struct AppState {
     routes: Routes,
-    backend: Backend,
+    client: RpcClient,
     /// subdomain → binding (routing)
     apps: Arc<RwLock<HashMap<String, AppBinding>>>,
     /// app_id → parsed bundle (serving)
@@ -43,19 +38,22 @@ struct AppState {
 
 /// The web server: serves UI on `/` and WebSocket tunnel on `/ws`.
 pub struct WebServer {
-    backend: Backend,
+    routes: Routes,
+    client: RpcClient,
     app_manager: Arc<AppManager>,
     port: u16,
 }
 
 impl WebServer {
     pub fn new(
-        backend: Backend,
+        routes: Routes,
+        client: RpcClient,
         app_manager: Arc<AppManager>,
         port: u16,
     ) -> Self {
         Self {
-            backend,
+            routes,
+            client,
             app_manager,
             port,
         }
@@ -68,16 +66,7 @@ impl WebServer {
 
     /// Run the web server (blocks until shutdown).
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let routes = Routes::new(NodeServiceServer::new(NodeServiceImpl::new(
-            self.backend.clone(),
-        )))
-        .add_service(StoreServiceServer::new(StoreServiceImpl::new(
-            self.backend.clone(),
-        )))
-        .add_service(DynamicStoreServiceServer::new(
-            DynamicStoreServiceImpl::new(self.backend.clone()),
-        ))
-        .prepare();
+        let routes = self.routes.prepare();
 
         let apps: Arc<RwLock<HashMap<String, AppBinding>>> =
             Arc::new(RwLock::new(HashMap::new()));
@@ -111,7 +100,7 @@ impl WebServer {
 
         let state = Arc::new(AppState {
             routes,
-            backend: self.backend.clone(),
+            client: self.client.clone(),
             apps: apps.clone(),
             bundles: bundles.clone(),
         });
@@ -379,7 +368,7 @@ async fn serve_store_proto(
         Ok(id) => id,
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UUID".to_string()).into_response(),
     };
-    match state.backend.store_get_descriptor(store_id).await {
+    match state.client.store_get_descriptor(store_id).await {
         Ok((fds_bytes, _service_name)) => (
             [(header::CONTENT_TYPE, "application/octet-stream".to_string())],
             fds_bytes,

@@ -288,7 +288,7 @@ pub mod backend;
 /// appropriate gRPC status code. Falls back to `Status::internal` for
 /// unrecognized error types.
 #[cfg(feature = "server")]
-pub(crate) trait IntoStatus<T> {
+pub trait IntoStatus<T> {
     fn into_status(self) -> Result<T, tonic::Status>;
 }
 
@@ -346,14 +346,7 @@ fn backend_error_to_status(e: backend::BackendError) -> tonic::Status {
 }
 
 #[cfg(feature = "server")]
-mod node_service;
-
-#[cfg(feature = "server")]
-mod dynamic_store_service;
-#[cfg(feature = "server")]
 mod server;
-#[cfg(feature = "server")]
-mod store_service;
 
 #[cfg(feature = "client")]
 mod client;
@@ -361,20 +354,13 @@ mod client;
 #[cfg(feature = "server")]
 pub use server::RpcServer;
 
-#[cfg(feature = "server")]
-pub use node_service::NodeServiceImpl;
-#[cfg(feature = "server")]
-pub use store_service::StoreServiceImpl;
-#[cfg(feature = "server")]
-pub use dynamic_store_service::DynamicStoreServiceImpl;
-
 #[cfg(feature = "client")]
 pub use client::RpcClient;
 
 // Re-export backend types for consumers
 pub use backend::{
-    AsyncResult, Backend, BackendApiError, BackendError, BackendResult, EventReceiver, ExecError,
-    LatticeBackend, NodeEvent,
+    AsyncResult, BackendApiError, BackendError, BackendResult, EventReceiver, ExecError,
+    NodeEvent,
 };
 
 #[cfg(test)]

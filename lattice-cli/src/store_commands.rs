@@ -5,7 +5,7 @@ use crate::display_helpers::{format_id, parse_uuid};
 use crate::graph_renderer;
 use crate::subscriptions::SubscriptionRegistry;
 use futures_util::StreamExt;
-use lattice_runtime::LatticeBackend;
+use lattice_runtime::RpcClient;
 use lattice_runtime::{dynamic_message_to_sexpr, Hash, PubKey, SExpr};
 use prost_reflect::prost::Message as ProstMessage;
 use prost_reflect::{DescriptorPool, DynamicMessage, Value};
@@ -20,7 +20,7 @@ use uuid::Uuid;
 /// Create a new store in the mesh
 /// Create a new store
 pub async fn cmd_store_create(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     parent_id: Option<Uuid>,
     name: Option<String>,
     store_type: &str,
@@ -80,7 +80,7 @@ fn format_store_name(name: &str) -> String {
 }
 
 /// Build the full store tree by recursively fetching roots and their children
-async fn build_store_tree(backend: &dyn LatticeBackend) -> Vec<StoreNode> {
+async fn build_store_tree(backend: &RpcClient) -> Vec<StoreNode> {
     let roots = match backend.store_list(None).await {
         Ok(r) => r,
         Err(_) => return Vec::new(),
@@ -96,7 +96,7 @@ async fn build_store_tree(backend: &dyn LatticeBackend) -> Vec<StoreNode> {
 
 /// Recursively build a subtree for a single store
 async fn build_subtree(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store: lattice_runtime::StoreRef,
 ) -> StoreNode {
     let children = if let Some(id) = parse_uuid(&store.id) {
@@ -172,7 +172,7 @@ fn print_tree(nodes: &[StoreNode], active_store: Option<Uuid>, depth: usize, w: 
 
 /// List all stores as a tree from roots, highlighting the active store
 pub async fn cmd_store_list(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     active_store: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -190,7 +190,7 @@ pub async fn cmd_store_list(
 
 /// Select a store by UUID prefix (searches all stores flat)
 pub async fn cmd_store_use(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     uuid_prefix: &str,
     writer: Writer,
 ) -> CmdResult {
@@ -242,7 +242,7 @@ pub async fn cmd_store_use(
 
 /// Delete (archive) a child store
 pub async fn cmd_store_rebuild(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -266,7 +266,7 @@ pub async fn cmd_store_rebuild(
 }
 
 pub async fn cmd_store_delete(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     parent_id: Option<Uuid>,
     uuid_prefix: &str,
     writer: Writer,
@@ -336,7 +336,7 @@ pub async fn cmd_store_delete(
 
 /// Set the name of a store
 pub async fn cmd_store_set_name(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     name: &str,
     writer: Writer,
@@ -366,7 +366,7 @@ pub async fn cmd_store_set_name(
 // ==================== Store Status/Debug Commands ====================
 
 pub async fn cmd_store_status(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -437,7 +437,7 @@ pub async fn cmd_store_status(
 }
 
 pub async fn cmd_store_sync(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -465,7 +465,7 @@ pub async fn cmd_store_sync(
 }
 
 pub async fn cmd_store_debug_tips(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -499,7 +499,7 @@ pub async fn cmd_store_debug_tips(
 }
 
 pub async fn cmd_store_debug_log(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -542,7 +542,7 @@ pub async fn cmd_store_debug_log(
 }
 
 pub async fn cmd_store_debug_intentions(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -583,7 +583,7 @@ pub async fn cmd_store_debug_intentions(
 }
 
 pub async fn cmd_store_debug_floating(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -620,7 +620,7 @@ pub async fn cmd_store_debug_floating(
 }
 
 pub async fn cmd_store_debug_intention(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     hash_hex: &str,
     writer: Writer,
@@ -670,7 +670,7 @@ pub async fn cmd_store_debug_intention(
 }
 
 pub async fn cmd_store_debug_branch(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     hashes: &[String],
     writer: Writer,
@@ -934,7 +934,7 @@ fn detail_to_sexpr_short(detail: &lattice_runtime::IntentionDetail) -> SExpr {
 }
 
 pub async fn cmd_history(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -1028,7 +1028,7 @@ pub async fn cmd_history(
 
 /// Show the system table contents (debugging)
 pub async fn cmd_store_system_show(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -1167,7 +1167,7 @@ enum OperationType {
 
 /// Lookup operation type using introspection
 async fn lookup_operation_type(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Uuid,
     name: &str,
 ) -> Option<OperationType> {
@@ -1197,7 +1197,7 @@ async fn lookup_operation_type(
 
 /// Single entry point for dynamic store operations
 pub async fn cmd_dynamic_exec(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     ctx: &crate::commands::CommandContext,
     args: &[String],
     writer: Writer,
@@ -1236,7 +1236,7 @@ pub async fn cmd_dynamic_exec(
 
 /// Public entry point for `store inspect-type [name]`
 pub async fn cmd_store_inspect_type(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     type_name: Option<&str>,
     writer: Writer,
@@ -1259,7 +1259,7 @@ pub async fn cmd_store_inspect_type(
 
 /// Inspect a type's schema
 async fn cmd_inspect_type(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Uuid,
     type_name: &str,
     writer: Writer,
@@ -1333,7 +1333,7 @@ async fn cmd_inspect_type(
 }
 
 /// List all types in the store's schema
-async fn cmd_list_types(backend: &dyn LatticeBackend, store_id: Uuid, writer: Writer) -> CmdResult {
+async fn cmd_list_types(backend: &RpcClient, store_id: Uuid, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
 
     let (descriptor_bytes, _) = match backend.store_get_descriptor(store_id).await {
@@ -1440,7 +1440,7 @@ struct HelpContext {
 }
 
 impl HelpContext {
-    async fn load(backend: &dyn LatticeBackend, store_id: Uuid) -> Option<Self> {
+    async fn load(backend: &RpcClient, store_id: Uuid) -> Option<Self> {
         let (descriptor_bytes, service_name) = backend.store_get_descriptor(store_id).await.ok()?;
         let pool = DescriptorPool::decode(descriptor_bytes.as_slice()).ok()?;
         let service = pool.get_service_by_name(&service_name)?;
@@ -1514,7 +1514,7 @@ impl HelpContext {
 
 /// Generate detailed help for a specific command or stream
 pub async fn format_topic_help(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Uuid,
     topic: &str,
 ) -> Option<String> {
@@ -1523,7 +1523,7 @@ pub async fn format_topic_help(
 }
 
 /// Format dynamic store operations and streams for help output
-pub async fn format_dynamic_help(backend: &dyn LatticeBackend, store_id: Uuid) -> String {
+pub async fn format_dynamic_help(backend: &RpcClient, store_id: Uuid) -> String {
     let Some(ctx) = HelpContext::load(backend, store_id).await else {
         return String::new();
     };
@@ -1554,7 +1554,7 @@ pub async fn format_dynamic_help(backend: &dyn LatticeBackend, store_id: Uuid) -
 
 // Dynamic command execution
 async fn cmd_dynamic_command(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Uuid,
     operation: &str,
     args: &[String],
@@ -1933,7 +1933,7 @@ fn parse_value_for_field(field: &prost_reflect::FieldDescriptor, s: &str) -> pro
 
 /// Subscribe to a store stream - runs in background with introspection-based decoding
 pub async fn cmd_stream_subscribe(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Uuid,
     stream_name: &str,
     args: &[String],

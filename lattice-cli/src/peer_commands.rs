@@ -1,13 +1,13 @@
 //! Peer commands - Listing, revoking, and inviting peers
 
 use crate::commands::{CmdResult, CommandOutput::*, Writer};
-use lattice_runtime::LatticeBackend;
+use lattice_runtime::RpcClient;
 use std::io::Write;
 use uuid::Uuid;
 
 /// List all peers for a store (replaces mesh peers)
 pub async fn cmd_peer_list(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {
@@ -90,7 +90,7 @@ pub async fn cmd_peer_list(
 
 /// Revoke a peer from the store
 pub async fn cmd_peer_revoke(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     pubkey: &str,
     writer: Writer,
@@ -127,7 +127,7 @@ pub async fn cmd_peer_revoke(
 
 /// Generate a one-time invite token for a store
 pub async fn cmd_peer_invite(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     store_id: Option<Uuid>,
     writer: Writer,
 ) -> CmdResult {

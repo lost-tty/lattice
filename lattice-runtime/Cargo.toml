@@ -25,6 +25,7 @@ lattice-rootstore = { workspace = true, optional = true }
 lattice-web = { workspace = true, optional = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
+tonic = "0.14"
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = "0.1"
 prost = { workspace = true }

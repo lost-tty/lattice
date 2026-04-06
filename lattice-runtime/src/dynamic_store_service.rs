@@ -1,37 +1,21 @@
-//! DynamicStoreService gRPC implementation
-//!
-//! Thin wrapper - parses bytes to Uuid at the boundary, then delegates to backend.
+//! DynamicStoreService gRPC — implemented directly on InProcessBackend
 
-use crate::backend::{Backend, ExecError};
-use crate::proto::{
+use crate::backend_inprocess::{parse_uuid, InProcessBackend};
+use lattice_api::backend::ExecError;
+use lattice_api::proto::{
     dynamic_store_service_server::DynamicStoreService, DescriptorResponse, ErrorCode, ExecRequest,
     ExecResponse, MethodList, StoreEvent, StoreId, StreamDescriptor, StreamList, SubscribeRequest,
 };
-use crate::IntoStatus;
+use lattice_api::IntoStatus;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use uuid::Uuid;
-
-pub struct DynamicStoreServiceImpl {
-    backend: Backend,
-}
-
-impl DynamicStoreServiceImpl {
-    pub fn new(backend: Backend) -> Self {
-        Self { backend }
-    }
-
-    fn parse_uuid(bytes: &[u8]) -> Result<Uuid, Status> {
-        Uuid::from_slice(bytes).map_err(|_| Status::invalid_argument("Invalid UUID"))
-    }
-}
 
 #[tonic::async_trait]
-impl DynamicStoreService for DynamicStoreServiceImpl {
+impl DynamicStoreService for InProcessBackend {
     async fn exec(&self, request: Request<ExecRequest>) -> Result<Response<ExecResponse>, Status> {
         let req = request.into_inner();
 
-        let store_id = match Self::parse_uuid(&req.store_id) {
+        let store_id = match parse_uuid(&req.store_id) {
             Ok(id) => id,
             Err(_) => {
                 return Ok(Response::new(ExecResponse {
@@ -43,7 +27,6 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
         };
 
         match self
-            .backend
             .store_exec(store_id, &req.method, &req.payload)
             .await
         {
@@ -79,8 +62,8 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
         &self,
         request: Request<StoreId>,
     ) -> Result<Response<DescriptorResponse>, Status> {
-        let store_id = Self::parse_uuid(&request.into_inner().id)?;
-        self.backend
+        let store_id = parse_uuid(&request.into_inner().id)?;
+        self
             .store_get_descriptor(store_id)
             .await
             .map(|(file_descriptor_set, service_name)| {
@@ -96,8 +79,8 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
         &self,
         request: Request<StoreId>,
     ) -> Result<Response<MethodList>, Status> {
-        let store_id = Self::parse_uuid(&request.into_inner().id)?;
-        self.backend
+        let store_id = parse_uuid(&request.into_inner().id)?;
+        self
             .store_list_methods(store_id)
             .await
             .map(|methods| {
@@ -111,8 +94,8 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
         &self,
         request: Request<StoreId>,
     ) -> Result<Response<StreamList>, Status> {
-        let store_id = Self::parse_uuid(&request.into_inner().id)?;
-        self.backend
+        let store_id = parse_uuid(&request.into_inner().id)?;
+        self
             .store_list_streams(store_id)
             .await
             .map(|streams| {
@@ -137,10 +120,9 @@ impl DynamicStoreService for DynamicStoreServiceImpl {
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
         let req = request.into_inner();
-        let store_id = Self::parse_uuid(&req.store_id)?;
+        let store_id = parse_uuid(&req.store_id)?;
 
         let stream = self
-            .backend
             .store_subscribe(store_id, &req.stream_name, &req.params)
             .await
             .into_status()?;

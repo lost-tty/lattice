@@ -2,11 +2,11 @@
 
 use crate::commands::{CmdResult, CommandOutput::*, Writer};
 use crate::display_helpers::render_sexpr_pretty_colored;
-use lattice_runtime::LatticeBackend;
+use lattice_runtime::RpcClient;
 use std::io::Write;
 
 /// Show node status
-pub async fn cmd_status(backend: &dyn LatticeBackend, writer: Writer) -> CmdResult {
+pub async fn cmd_status(backend: &RpcClient, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
 
     match backend.node_status().await {
@@ -32,7 +32,7 @@ pub async fn cmd_status(backend: &dyn LatticeBackend, writer: Writer) -> CmdResu
 }
 
 /// Dump meta.db contents
-pub async fn cmd_meta(backend: &dyn LatticeBackend, writer: Writer) -> CmdResult {
+pub async fn cmd_meta(backend: &RpcClient, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
 
     match backend.node_meta().await {
@@ -50,7 +50,7 @@ pub async fn cmd_meta(backend: &dyn LatticeBackend, writer: Writer) -> CmdResult
 }
 
 /// Set display name for this node
-pub async fn cmd_set_name(backend: &dyn LatticeBackend, name: &str, writer: Writer) -> CmdResult {
+pub async fn cmd_set_name(backend: &RpcClient, name: &str, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
 
     match backend.node_set_name(name).await {
@@ -66,7 +66,7 @@ pub async fn cmd_set_name(backend: &dyn LatticeBackend, name: &str, writer: Writ
 }
 
 /// Join an existing mesh using an invite token
-pub async fn cmd_join(backend: &dyn LatticeBackend, token: &str, writer: Writer) -> CmdResult {
+pub async fn cmd_join(backend: &RpcClient, token: &str, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
 
     match backend.store_join(token).await {

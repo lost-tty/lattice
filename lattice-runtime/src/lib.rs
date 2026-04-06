@@ -2,23 +2,21 @@
 //!
 //! Provides:
 //! - `LatticeBackend` trait - the canonical SDK interface
-//! - `InProcessBackend` - wraps Node for embedded mode
-//! - `RpcBackend` - connects to latticed daemon
+//! - `RpcClient` - unified client (in-process or remote via gRPC)
 //! - `Runtime` - wires Node + NetworkService together
-//!
-//! All consumers (CLI, Swift bindings, etc.) use `dyn LatticeBackend`.
 
 mod backend;
-mod backend_inprocess;
-mod backend_rpc;
+pub(crate) mod backend_inprocess;
+mod dynamic_store_service;
+mod node_service;
 mod ops_summary;
 mod runtime;
+mod store_service;
 mod system_summary;
 
 // Re-export backend abstraction
 pub use backend::*;
-pub use backend_inprocess::InProcessBackend;
-pub use backend_rpc::RpcBackend;
+pub use lattice_api::RpcClient;
 pub use runtime::{Runtime, RuntimeBuilder, RuntimeError};
 
 // Re-export types consumers need
@@ -31,3 +29,15 @@ pub(crate) type NetworkService =
     lattice_net::network::NetworkService<lattice_net_iroh::IrohTransport>;
 pub(crate) use lattice_api::RpcServer;
 pub(crate) use lattice_node::{Node, NodeBuilder, StoreHandle};
+
+/// Build the gRPC service routes from an InProcessBackend.
+pub(crate) fn build_grpc_routes(backend: backend_inprocess::InProcessBackend) -> tonic::service::Routes {
+    use lattice_api::proto::{
+        dynamic_store_service_server::DynamicStoreServiceServer,
+        node_service_server::NodeServiceServer,
+        store_service_server::StoreServiceServer,
+    };
+    tonic::service::Routes::new(NodeServiceServer::new(backend.clone()))
+        .add_service(StoreServiceServer::new(backend.clone()))
+        .add_service(DynamicStoreServiceServer::new(backend))
+}

@@ -13,7 +13,7 @@ mod tracing_writer;
 
 use commands::{CommandContext, CommandOutput};
 use display_helpers::parse_uuid;
-use lattice_runtime::{LatticeBackend, NodeEvent, RpcBackend};
+use lattice_runtime::{NodeEvent, RpcClient};
 use rustyline_async::{Readline, ReadlineEvent};
 use std::io::Write;
 use std::sync::{Arc, RwLock};
@@ -98,7 +98,7 @@ enum DispatchResult {
 /// Dispatch a parsed command, handling blocking vs non-blocking execution
 async fn dispatch_command(
     cli: commands::LatticeCli,
-    backend: &Arc<dyn LatticeBackend>,
+    backend: &Arc<RpcClient>,
     current_store: &Arc<RwLock<Option<Uuid>>>,
     registry: &Arc<subscriptions::SubscriptionRegistry>,
     writer: &rustyline_async::SharedWriter,
@@ -347,7 +347,7 @@ async fn run_rpc_client() {
     let _ = writeln!(&mut writer.clone(), "Connecting to daemon...");
 
     // Connect to daemon via RPC
-    let backend: Arc<dyn LatticeBackend> = match RpcBackend::connect().await {
+    let backend: Arc<RpcClient> = match RpcClient::connect_default().await {
         Ok(b) => Arc::new(b),
         Err(e) => {
             let _ = writeln!(&mut writer.clone(), "Failed to connect to daemon: {}", e);
@@ -451,7 +451,7 @@ async fn run_embedded_mode(args: &CliArgs) {
 }
 
 /// Unified CLI loop - works for both embedded and daemon modes
-async fn run_cli(backend: Arc<dyn LatticeBackend>, mut rl: Readline, writer: commands::Writer) {
+async fn run_cli(backend: Arc<RpcClient>, mut rl: Readline, writer: commands::Writer) {
     // Context tracking - current store ID
     let current_store: Arc<RwLock<Option<Uuid>>> = Arc::new(RwLock::new(None));
 

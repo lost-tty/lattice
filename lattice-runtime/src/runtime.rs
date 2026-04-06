@@ -1,7 +1,6 @@
 //! Runtime - wires together Node, NetworkService, RPC server, and provides backend
 
-use crate::backend_inprocess::InProcessBackend;
-use crate::{LatticeBackend, NetworkService, Node, NodeBuilder, RpcServer};
+use crate::{NetworkService, Node, NodeBuilder, RpcServer};
 use lattice_node::StoreOpener;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +19,7 @@ type OpenerFactory = Box<dyn FnOnce() -> Box<dyn StoreOpener> + Send>;
 pub struct Runtime {
     node: Arc<Node>,
     mesh_service: Arc<NetworkService>,
-    backend: Arc<dyn LatticeBackend>,
+    backend: Arc<lattice_api::RpcClient>,
     rpc_handle: Option<JoinHandle<()>>,
     web_handle: Option<JoinHandle<()>>,
     web_url: Option<String>,
@@ -38,7 +37,7 @@ impl Runtime {
     }
 
     /// Get the backend for SDK operations.
-    pub fn backend(&self) -> &Arc<dyn LatticeBackend> {
+    pub fn backend(&self) -> &Arc<lattice_api::RpcClient> {
         &self.backend
     }
 
@@ -210,10 +209,19 @@ impl RuntimeBuilder {
 
         let mesh_service = lattice_net::network::NetworkService::new(node.clone(), backend, net_rx);
 
-        // Create backend
-        let backend = Arc::new(InProcessBackend::new(
+        // Create backend: InProcessBackend (for gRPC services) + RpcClient (for consumers)
+        let inprocess = crate::backend_inprocess::InProcessBackend::new(
             node.clone(),
             Some(mesh_service.clone()),
+        );
+
+        // Build gRPC routes from the in-process backend
+        let routes = crate::build_grpc_routes(inprocess);
+
+        // Create RpcClient over in-process DuplexStream
+        let backend = Arc::new(lattice_api::RpcClient::connect_in_process(
+            routes.clone(),
+            node.identity().public_key().to_vec(),
         ));
 
         // Start node (opens existing meshes)
@@ -226,7 +234,7 @@ impl RuntimeBuilder {
 
         // Start RPC server if requested
         let rpc_handle = if self.with_rpc {
-            let rpc_server = RpcServer::new(backend.clone(), RpcServer::default_socket_path());
+            let rpc_server = RpcServer::new(routes.clone(), RpcServer::default_socket_path());
             Some(tokio::spawn(async move {
                 if let Err(e) = rpc_server.run().await {
                     tracing::error!("RPC server error: {}", e);
@@ -242,7 +250,8 @@ impl RuntimeBuilder {
         #[cfg(feature = "web")]
         let web_handle = if let Some(port) = self.web_port {
             let web_server = lattice_web::WebServer::new(
-                backend.clone(),
+                routes.clone(),
+                (*backend).clone(),
                 node.app_manager().clone(),
                 port,
             );

@@ -5,25 +5,9 @@
 
 // Re-export everything from lattice-api's backend module
 pub use lattice_api::backend::{
-    AsyncResult,
-    Backend,
-    BackendApiError,
-    BackendError,
-    BackendResult,
-    BoxByteStream,
-    BranchInspection,
-    EventReceiver,
-    ExecError,
-    IntentionDetail,
-    JoinFailedEvent,
-    LatticeBackend,
-    MethodInfo,
-    MethodKind,
-    NodeEvent,
-    // Event wrapper types
-    StoreReadyEvent,
-    StreamDescriptor,
-    SyncResultEvent,
+    AsyncResult, BackendApiError, BackendError, BackendResult, BoxByteStream, BranchInspection,
+    EventReceiver, ExecError, IntentionDetail, JoinFailedEvent, MethodInfo, MethodKind, NodeEvent,
+    StoreReadyEvent, StreamDescriptor, SyncResultEvent,
 };
 
 // Re-export proto types for consumers

@@ -3,7 +3,7 @@
 use crate::subscriptions::SubscriptionRegistry;
 use crate::{app_commands, node_commands, peer_commands, store_commands};
 use clap::{CommandFactory, Parser, Subcommand};
-use lattice_runtime::LatticeBackend;
+use lattice_runtime::RpcClient;
 use rustyline_async::SharedWriter;
 use std::io::Write;
 use std::sync::Arc;
@@ -281,7 +281,7 @@ pub enum AppSubcommand {
 
 
 async fn format_help(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     ctx: &CommandContext,
     topic: Option<&str>,
 ) -> String {
@@ -309,7 +309,7 @@ async fn format_help(
 }
 
 pub async fn handle_command(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     ctx: &CommandContext,
     cli: LatticeCli,
     writer: Writer,

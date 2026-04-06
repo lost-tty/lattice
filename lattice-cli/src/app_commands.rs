@@ -1,12 +1,12 @@
 //! App commands — list active apps and local enable/disable toggles.
 
 use crate::commands::{CmdResult, CommandOutput::*, Writer};
-use lattice_runtime::LatticeBackend;
+use lattice_runtime::RpcClient;
 use std::io::Write;
 use uuid::Uuid;
 
 /// List apps enabled on this node.
-pub async fn cmd_app_list(backend: &dyn LatticeBackend, writer: Writer) -> CmdResult {
+pub async fn cmd_app_list(backend: &RpcClient, writer: Writer) -> CmdResult {
     let mut w = writer.clone();
 
     match backend.app_list().await {
@@ -42,7 +42,7 @@ pub async fn cmd_app_list(backend: &dyn LatticeBackend, writer: Writer) -> CmdRe
 
 /// Enable or disable an app on this node.
 pub async fn cmd_app_toggle(
-    backend: &dyn LatticeBackend,
+    backend: &RpcClient,
     registry_store_id: Uuid,
     subdomain: &str,
     enabled: bool,
