@@ -830,6 +830,38 @@ async fn test_open_resolves_type_from_meta() {
     assert_eq!(handle.store_type(), STORE_TYPE_NULLSTORE);
 }
 
+// ==================== Store Rebuild ====================
+
+/// rebuild() closes a live store, deletes state.db, and reopens it.
+/// The actor reconstructs state from the intention log.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rebuild_live_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = DataDir::new(tmp.path().to_path_buf());
+    let node = file_node_builder(DataDir::new(data_dir.base()))
+        .build()
+        .unwrap();
+
+    let store_id = node
+        .create_store(None, None, STORE_TYPE_NULLSTORE)
+        .await
+        .unwrap();
+    wait_for_open(node.store_manager(), store_id).await;
+
+    let handle = node.store_manager().get_handle(&store_id).unwrap();
+    let count_before = handle.as_inspector().intention_count().await;
+    assert!(count_before > 0);
+    drop(handle);
+
+    // Rebuild while the node is running
+    node.store_manager().rebuild(store_id).await.unwrap();
+    wait_for_open(node.store_manager(), store_id).await;
+
+    let handle = node.store_manager().get_handle(&store_id).unwrap();
+    let count_after = handle.as_inspector().intention_count().await;
+    assert_eq!(count_before, count_after, "intention count should match after rebuild");
+}
+
 // ==================== Duplicate Intention Regression ====================
 
 // Regression: node set-name with root + child stores should produce exactly

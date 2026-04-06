@@ -23,12 +23,23 @@ pub struct NetworkStore {
     id: Uuid,
     sync: Arc<dyn SyncProvider>,
     peer: Arc<dyn PeerProvider>,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl NetworkStore {
     /// Create a new NetworkStore from trait objects
-    pub fn new(id: Uuid, sync: Arc<dyn SyncProvider>, peer: Arc<dyn PeerProvider>) -> Self {
-        Self { id, sync, peer }
+    pub fn new(
+        id: Uuid,
+        sync: Arc<dyn SyncProvider>,
+        peer: Arc<dyn PeerProvider>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self { id, sync, peer, cancel }
+    }
+
+    /// Token that is cancelled when this store is being closed.
+    pub fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
+        &self.cancel
     }
 
     // ==================== SyncProvider delegation ====================

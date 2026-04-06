@@ -17,5 +17,6 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 hex = { workspace = true }
 async-trait = "0.1"
+tokio-util = { workspace = true }
 futures-core = "0.3"
 futures-util = "0.3"

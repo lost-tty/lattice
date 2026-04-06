@@ -131,14 +131,18 @@ async fn run_gossip_ingester<T: Transport>(
     pm: Arc<dyn PeerProvider>,
     mut receiver: broadcast::Receiver<(PubKey, Vec<u8>)>,
 ) {
+    let cancel = store.cancel_token().clone();
     loop {
-        let (sender_pubkey, raw_bytes) = match receiver.recv().await {
-            Ok(pair) => pair,
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(store_id = %store_id, lagged = n, "Gossip handler lagged, missed {} events", n);
-                continue;
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
+        let (sender_pubkey, raw_bytes) = tokio::select! {
+            result = receiver.recv() => match result {
+                Ok(pair) => pair,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(store_id = %store_id, lagged = n, "Gossip handler lagged, missed {} events", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            _ = cancel.cancelled() => break,
         };
         let Some(service) = weak_service.upgrade() else {
             break;

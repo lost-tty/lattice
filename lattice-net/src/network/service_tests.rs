@@ -290,6 +290,7 @@ mod tests {
             Arc::new(ConfigurablePeerProvider {
                 acceptable: acceptable_authors,
             }),
+            tokio_util::sync::CancellationToken::new(),
         )
     }
 

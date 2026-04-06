@@ -78,6 +78,8 @@ struct StoredEntry {
     store_handle: Arc<dyn StoreHandle>,
     store_type: String,
     peer_manager: Arc<PeerManager>,
+    /// Cancelled on close() — signals all tasks holding refs to this store.
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 /// Manages store lifecycle: opening, caching, registration, shutdown.
@@ -338,6 +340,7 @@ impl StoreManager {
                 store_handle,
                 store_type: store_type.to_string(),
                 peer_manager,
+                cancel: tokio_util::sync::CancellationToken::new(),
             });
         }
 
@@ -419,6 +422,12 @@ impl StoreManager {
         self.get_info(store_id).map(|info| info.peer_manager)
     }
 
+    /// Get the cancellation token for a store.
+    pub fn get_cancel_token(&self, store_id: &Uuid) -> Option<tokio_util::sync::CancellationToken> {
+        let stores = self.stores.read().ok()?;
+        stores.get(store_id).map(|e| e.cancel.clone())
+    }
+
     /// List all store IDs.
     pub fn store_ids(&self) -> Vec<Uuid> {
         self.stores
@@ -458,22 +467,11 @@ impl StoreManager {
                     .map_err(|e| StoreManagerError::Storage(lattice_kernel::store::StateError::Io(e)))?;
             }
         }
-        // Retry open — the DB lock may briefly be held by a finishing sync task.
-        for i in 0..10 {
-            match self.open(store_id).await {
-                Ok(_) => return Ok(()),
-                Err(e) if i < 9 => {
-                    tracing::debug!(store_id = %store_id, attempt = i + 1, "Rebuild open retry: {}", e);
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.open(store_id).await?;
+        Ok(())
     }
 
     pub async fn close(&self, store_id: &Uuid) -> Result<(), StoreManagerError> {
-        // Stop watcher if exists
         self.stop_watching(store_id);
 
         let entry = {
@@ -485,7 +483,11 @@ impl StoreManager {
         };
 
         if let Some(entry) = entry {
-            // Wait for actor to fully shut down and release DB locks
+            // Signal all tasks holding store refs to stop
+            entry.cancel.cancel();
+            // Let cancelled tasks drop their Arcs
+            tokio::task::yield_now().await;
+            // Now shut down the actor and wait for DB locks to release
             entry.store_handle.close().await;
         }
 
@@ -797,6 +799,7 @@ impl NetworkStoreRegistry for StoreManager {
             *id,
             entry.store_handle.as_sync_provider(),
             entry.peer_manager.clone(),
+            entry.cancel.clone(),
         ))
     }
 
