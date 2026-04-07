@@ -60,14 +60,6 @@ impl NetworkStore {
         &self,
         intention: SignedIntention,
     ) -> Result<IngestResult, SyncError> {
-        // Check authorization first
-        if !self.peer.can_accept_entry(&intention.intention.author) {
-            return Err(SyncError::Internal(format!(
-                "Author {} not authorized",
-                hex::encode(&intention.intention.author.0)
-            )));
-        }
-
         self.sync.ingest_intention(intention).await
     }
 
@@ -75,16 +67,6 @@ impl NetworkStore {
         &self,
         intentions: Vec<SignedIntention>,
     ) -> Result<IngestResult, SyncError> {
-        // Enforce authorization for all intentions in batch
-        for intention in &intentions {
-            if !self.peer.can_accept_entry(&intention.intention.author) {
-                return Err(SyncError::Internal(format!(
-                    "Author {} not authorized",
-                    hex::encode(&intention.intention.author.0)
-                )));
-            }
-        }
-
         self.sync.ingest_batch(intentions).await
     }
 
@@ -135,12 +117,12 @@ impl NetworkStore {
         self.peer.can_connect(peer)
     }
 
-    pub fn can_accept_entry(&self, author: &PubKey) -> bool {
-        self.peer.can_accept_entry(author)
+    pub fn can_accept_gossip(&self, author: &PubKey) -> bool {
+        self.peer.can_accept_gossip(author)
     }
 
-    pub fn list_acceptable_authors(&self) -> Vec<PubKey> {
-        self.peer.list_acceptable_authors()
+    pub fn gossip_authorized_authors(&self) -> Vec<PubKey> {
+        self.peer.gossip_authorized_authors()
     }
 
     /// Reset ephemeral bootstrap peers

@@ -185,7 +185,10 @@ impl PeerManager {
         self.get_peer_status(peer) == Some(PeerStatus::Active)
     }
 
-    /// Check if author's entries are acceptable
+    /// Check if author's entries are acceptable.
+    /// Revoked peers are excluded — their new intentions must not be ingested
+    /// via gossip or negentropy sync. Historical intentions from revoked peers
+    /// are still received during bootstrap (which bypasses this check).
     fn can_accept_author(&self, author: &PubKey) -> bool {
         // Also trust the ephemeral bootstrap peers
         if let Ok(guard) = self.bootstrap_peers.lock() {
@@ -196,7 +199,7 @@ impl PeerManager {
 
         matches!(
             self.get_peer_status(author),
-            Some(PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked)
+            Some(PeerStatus::Active | PeerStatus::Dormant)
         )
     }
 
@@ -301,11 +304,11 @@ impl PeerProvider for PeerManager {
         )
     }
 
-    fn can_accept_entry(&self, author: &PubKey) -> bool {
+    fn can_accept_gossip(&self, author: &PubKey) -> bool {
         self.can_accept_author(author)
     }
 
-    fn list_acceptable_authors(&self) -> Vec<PubKey> {
+    fn gossip_authorized_authors(&self) -> Vec<PubKey> {
         let mut authors: Vec<PubKey> = self
             .store
             .get_peers()
@@ -317,7 +320,7 @@ impl PeerProvider for PeerManager {
             .filter(|p| {
                 matches!(
                     p.status,
-                    PeerStatus::Active | PeerStatus::Dormant | PeerStatus::Revoked
+                    PeerStatus::Active | PeerStatus::Dormant
                 )
             })
             .map(|p| p.pubkey)

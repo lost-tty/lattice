@@ -350,8 +350,15 @@ impl Node {
         crate::migrations::run_all(&self.meta, &self.data_dir);
 
         for (store_id, _info) in self.meta.list_rootstores()? {
-            if let Err(e) = self.store_manager.open(store_id).await {
-                tracing::warn!(store_id = %store_id, error = %e, "Failed to open root store");
+            match self.store_manager.open(store_id).await {
+                Ok(handle) => {
+                    // MIGRATION: backfill genesis for pre-genesis stores
+                    let store_type = handle.store_type().to_string();
+                    crate::genesis::ensure_genesis(store_id, &handle, &store_type).await;
+                }
+                Err(e) => {
+                    tracing::warn!(store_id = %store_id, error = %e, "Failed to open root store");
+                }
             }
         }
         Ok(())

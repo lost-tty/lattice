@@ -1,0 +1,137 @@
+digraph merged {
+    rankdir=TB;
+    fontname="Helvetica";
+    fontsize=14;
+    label="Three nodes: A revokes C, B writes across epoch boundary, B acks citing new writes";
+    labelloc=t;
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", width=2.4, height=0.4];
+    edge [fontname="Helvetica", fontsize=8];
+
+    genesis  [label="genesis\nauthor: A, deps: []", fillcolor="#e8e8e8"];
+
+    // System partition — add_peer cites genesis
+    addBC    [label="A: add_peer B, C\ndeps: [genesis]", fillcolor="#b3d9ff"];
+
+    // Epoch 0 — created by actor after add_peer projection
+    epoch0   [label="epoch 0\ndeps: [genesis, add_peer B,C]", fillcolor="#ffeeaa", penwidth=2];
+
+    // Data partition — cites epoch 0
+    bputx1   [label="B: put x = 1\ndeps: [epoch 0]", fillcolor="#c2f0c2"];
+    cputy1   [label="C: put y = 10\ndeps: [epoch 0]", fillcolor="#d9b3ff"];
+    bputx2   [label="B: put x = 2\ndeps: [B:put x=1]", fillcolor="#c2f0c2"];
+    cputy2   [label="C: put y = 20\ndeps: [C:put y=10]", fillcolor="#d9b3ff"];
+
+    // A revokes C
+    revoke   [label="A: revoke_peer C\ndeps: [add_peer B,C]", fillcolor="#ffb3b3"];
+
+    // Epoch 1: genesis + all author tips (A knew B's tip as x=2)
+    epoch1   [label="epoch 1\nrequired_acks: [B]\ndeps: [genesis,\n          revoke_peer C,\n          B:put x=2,\n          C:put y=20]", fillcolor="#ffeeaa", penwidth=2];
+
+    // B writes WITHOUT knowing about epoch 1 (transition window)
+    bputx3   [label="B: put x = 3\ndeps: [B:put x=2]\n(epoch 0 awareness)", fillcolor="#c2f0c2"];
+    bputx4   [label="B: put x = 4\ndeps: [B:put x=3]\n(epoch 0 awareness)", fillcolor="#c2f0c2"];
+
+    // C's orphaned post-revocation write
+    cputy3   [label="C: put y = 30\ndeps: [C:put y=20]\n(orphaned)", fillcolor="#d9b3ff", style="rounded,filled,dashed", fontcolor="#888888"];
+
+    // B learns about epoch 1 and acks — citing BOTH epoch 1 AND B's current tip
+    // This pulls x=3 and x=4 into epoch 1's domain
+    back     [label="B: epoch_ack\ndeps: [B:put x=4, epoch 1]", fillcolor="#ffe0b2", penwidth=2];
+
+    // Post-ack writes — clearly in epoch 1
+    bputx5   [label="B: put x = 5\ndeps: [B:epoch_ack]\n(epoch 1 awareness)", fillcolor="#c2f0c2"];
+
+    // ─── Edges ───────────────────────────────────────────────────
+
+    genesis -> addBC;
+    genesis -> epoch0;
+    addBC -> epoch0;
+    epoch0 -> bputx1;
+    epoch0 -> cputy1;
+
+    bputx1 -> bputx2;
+    cputy1 -> cputy2;
+
+    addBC -> revoke;
+    genesis -> epoch1;
+    revoke -> epoch1;
+    bputx2 -> epoch1;
+    cputy2 -> epoch1;
+
+    // B writes across epoch boundary
+    bputx2 -> bputx3;
+    bputx3 -> bputx4;
+
+    // C's orphaned write
+    cputy2 -> cputy3 [style=dashed, color="#999999"];
+
+    // B acks epoch 1 — cites own tip (x=4) + epoch 1
+    // This is the bridge: x=3 and x=4 become transitively
+    // connected to epoch 1 through the ack
+    bputx4 -> back;
+    epoch1 -> back;
+
+    // B continues after ack
+    back -> bputx5;
+
+    // ─── State snapshots ─────────────────────────────────────────
+
+    node [shape=box, fillcolor="#f5f5f5", style="rounded,filled", fontsize=9, width=4.0];
+
+    s0 [label="t0  peers: {A,B,C}  epoch: 0  x: --  y: --"];
+    s1 [label="t1  epoch: 0  x = 2  y = 20"];
+    s2 [label="t2  epoch 1 created. Frontier: B@x=2, C@y=20\n     x = 2  y = 20  (epoch 1 state from frontier)"];
+    s3 [label="t3  B:put x=3 (transition window, B is active)\n     x = 3  y = 20  (valid, applied normally)"];
+    s4 [label="t4  B:put x=4 (still transition window)\n     x = 4  y = 20  (valid, applied normally)"];
+    s5 [label="t5  B:epoch_ack cites [x=4, epoch 1]\n     x=3 and x=4 now transitively connected to epoch 1\n     epoch 1 settled. Pruning safe."];
+    s6 [label="t6  B:put x=5 (post-ack, epoch 1 awareness)\n     x = 5  y = 20"];
+
+    genesis -> s0 [style=dotted, color="#999999", constraint=false];
+    bputx2  -> s1 [style=dotted, color="#999999", constraint=false];
+    epoch1  -> s2 [style=dotted, color="#999999", constraint=false];
+    bputx3  -> s3 [style=dotted, color="#999999", constraint=false];
+    bputx4  -> s4 [style=dotted, color="#999999", constraint=false];
+    back    -> s5 [style=dotted, color="#999999", constraint=false];
+    bputx5  -> s6 [style=dotted, color="#999999", constraint=false];
+
+    s0 -> s1 -> s2 -> s3 -> s4 -> s5 -> s6 [style=invis];
+
+    // ─── Legend ──────────────────────────────────────────────────
+
+    subgraph cluster_legend {
+        label="Legend";
+        labeljust=l;
+        fontsize=10;
+        style="rounded";
+        color="#999999";
+        margin=12;
+        node [shape=box, width=1.6, height=0.3, fontsize=9];
+
+        l_g [label="Genesis", fillcolor="#e8e8e8"];
+        l_e [label="Epoch", fillcolor="#ffeeaa"];
+        l_k [label="Epoch ack (kernel)", fillcolor="#ffe0b2"];
+        l_a [label="System ops (A)", fillcolor="#b3d9ff"];
+        l_b [label="Data ops (B) active", fillcolor="#c2f0c2"];
+        l_c [label="Data ops (C) revoked", fillcolor="#d9b3ff"];
+        l_r [label="Revocation", fillcolor="#ffb3b3"];
+        l_g -> l_e -> l_k -> l_a -> l_b -> l_c -> l_r [style=invis];
+    }
+
+    // ─── Explanation ─────────────────────────────────────────────
+
+    subgraph cluster_explain {
+        label="Transition window writes";
+        labeljust=l;
+        fontsize=10;
+        fontname="Helvetica-Bold";
+        style="rounded";
+        color="#006600";
+        margin=12;
+        node [shape=note, fillcolor="#e8f5e9", style=filled, fontsize=9, width=4.0];
+
+        e1 [label="B:put x=3 and x=4 are in the TRANSITION WINDOW:\n  - Created under epoch 0 awareness (don't cite epoch 1)\n  - Beyond epoch 1's frontier (epoch 1 cites B@x=2)\n  - From an ACTIVE peer (B is not revoked)\n  - Therefore VALID and applied normally"];
+        e2 [label="B:epoch_ack bridges the gap:\n  - cites B:put x=4 (B's current tip)\n  - cites epoch 1\n  - Pulls x=3 and x=4 into epoch 1's domain\n    (transitively connected via the ack)"];
+        e3 [label="After the ack, x=3 and x=4 belong to epoch 1.\nThey will survive pruning (above the ack, which is\nabove epoch 1). C:put y=30 is orphaned and pruned.\n\nFor pruning snapshot: state at epoch 1 frontier\nis x=2, y=20. But materialized state includes\nx=3, x=4 (transition window) and x=5 (post-ack)."];
+        e1 -> e2 -> e3 [style=invis];
+    }
+}

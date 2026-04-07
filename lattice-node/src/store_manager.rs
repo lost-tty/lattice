@@ -233,10 +233,7 @@ impl StoreManager {
     }
 
     /// Create a new store. Handles the complete lifecycle:
-    /// open → System Table setup → PeerManager → register → meta.db → watcher.
-    ///
-    /// - `parent_id: None` → Root Store (Independent PeerManager, ROOTSTORES_TABLE, watcher)
-    /// - `parent_id: Some(pid)` → Child Store (Inherited PeerManager from parent)
+    /// genesis → System Table setup → PeerManager → register → meta.db → watcher.
     pub async fn create(
         self: &Arc<Self>,
         store_id: Uuid,
@@ -247,8 +244,13 @@ impl StoreManager {
     ) -> Result<Arc<dyn StoreHandle>, StoreManagerError> {
         let handle = self.open_by_type(store_id, store_type)?;
 
-        // System Table setup (name, strategy)
         if let Some(system) = handle.clone().as_system() {
+            // Submit genesis intention as the very first operation.
+            let nonce: u32 = rand::random();
+            let payload = crate::genesis::build_genesis_payload(store_type, nonce);
+            system._submit_entry(payload, vec![]).await?;
+
+            // System Table setup (name, strategy)
             if name.is_some() || peer_strategy.is_some() {
                 let mut batch = SystemBatch::new(system.as_ref());
                 if let Some(ref n) = name {

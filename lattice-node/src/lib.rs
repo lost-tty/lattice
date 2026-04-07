@@ -12,6 +12,7 @@ pub mod node;
 pub mod app_manager;
 pub mod auth;
 pub mod data_dir;
+pub mod genesis;
 pub mod meta_store;
 mod migrations;
 pub mod peer_manager;

@@ -915,3 +915,152 @@ async fn test_set_name_does_not_duplicate_across_child_stores() {
         final_count - before
     );
 }
+
+// ==================== Genesis ====================
+
+/// New stores must have a genesis intention as the very first witness entry
+/// and genesis_hash set in TABLE_META.
+#[tokio::test]
+async fn test_new_store_has_genesis() {
+    use lattice_proto::storage::{universal_op, UniversalOp};
+    use prost::Message;
+
+    let ctx = TestCtx::new();
+    let store_id = ctx
+        .node
+        .create_store(None, Some("genesis-test".to_string()), STORE_TYPE_NULLSTORE)
+        .await
+        .unwrap();
+
+    let handle = ctx.sm().get_handle(&store_id).unwrap();
+    let inspector = handle.as_inspector();
+
+    // genesis_hash should be populated in TABLE_META
+    let meta = inspector.store_meta().await;
+    assert!(
+        meta.genesis_hash.is_some(),
+        "New store must have genesis_hash in TABLE_META"
+    );
+
+    // The first witnessed intention should be a GenesisOp
+    let log = inspector.witness_log().await;
+    assert!(!log.is_empty(), "Witness log should not be empty");
+
+    let first_hash = {
+        let content = lattice_proto::weaver::WitnessContent::decode(log[0].content.as_slice())
+            .expect("decode WitnessContent");
+        lattice_model::Hash::try_from(content.intention_hash.as_slice())
+            .expect("valid hash bytes")
+    };
+
+    let intentions = inspector
+        .get_intention(first_hash.as_bytes().to_vec())
+        .await
+        .expect("fetch first intention");
+    assert_eq!(intentions.len(), 1);
+
+    let ops = &intentions[0].intention.ops;
+    let universal = UniversalOp::decode(ops.as_slice()).expect("decode UniversalOp");
+    match universal.op {
+        Some(universal_op::Op::Genesis(g)) => {
+            assert_eq!(g.store_type, STORE_TYPE_NULLSTORE);
+        }
+        other => panic!("First intention should be GenesisOp, got {:?}", other),
+    }
+
+    // genesis_hash should match the first intention's hash
+    assert_eq!(
+        meta.genesis_hash.unwrap(),
+        first_hash,
+        "genesis_hash in TABLE_META must match the first witnessed intention"
+    );
+}
+
+/// Existing stores (created before GenesisOp) get a synthetic genesis on
+/// restart via the migration path in Node::start().
+#[tokio::test]
+async fn test_existing_store_gets_synthetic_genesis() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = DataDir::new(tmp.path().to_path_buf());
+
+    // Phase 1: Create a store, then manually clear genesis_hash from
+    // TABLE_META to simulate a pre-genesis store.
+    let store_id;
+    {
+        let node = file_node_builder(DataDir::new(data_dir.base()))
+            .build()
+            .unwrap();
+        store_id = node
+            .create_store(None, None, STORE_TYPE_NULLSTORE)
+            .await
+            .unwrap();
+
+        // Verify genesis exists after create
+        let handle = node.store_manager().get_handle(&store_id).unwrap();
+        let meta = handle.as_inspector().store_meta().await;
+        assert!(meta.genesis_hash.is_some(), "Sanity: genesis should exist after create");
+
+        node.shutdown().await;
+        drop(node);
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Simulate a pre-genesis store by clearing genesis_hash from state.db
+    {
+        let state_dir = data_dir.store_state_dir(store_id);
+        let db_path = state_dir.join("state.db");
+        let db = redb::Database::open(&db_path).unwrap();
+        let table_def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("meta");
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(table_def).unwrap();
+            table.remove(b"genesis_hash".as_slice()).unwrap();
+        }
+        write_txn.commit().unwrap();
+        drop(db);
+    }
+
+    // Phase 2: Restart -- Node::start() should inject synthetic genesis
+    let node = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match file_node_builder(DataDir::new(data_dir.base())).build() {
+                Ok(n) => return n,
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    })
+    .await
+    .expect("Failed to rebuild node");
+    node.start().await.unwrap();
+
+    wait_for_open(node.store_manager(), store_id).await;
+
+    // The migration runs as a background task spawned from register().
+    // Wait for it to complete.
+    let handle = node.store_manager().get_handle(&store_id).unwrap();
+    let inspector = handle.as_inspector();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let meta = inspector.store_meta().await;
+            if meta.genesis_hash.is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("Migration should have set genesis_hash");
+
+    let meta = inspector.store_meta().await;
+
+    // The synthetic genesis should be deterministic: rebuilding it from
+    // the same UUID must produce the same hash.
+    let expected = lattice_node::genesis::build_synthetic_genesis(store_id, STORE_TYPE_NULLSTORE);
+    assert_eq!(
+        meta.genesis_hash.unwrap(),
+        expected.intention.hash(),
+        "genesis_hash should match the deterministic synthetic genesis"
+    );
+
+    node.shutdown().await;
+}

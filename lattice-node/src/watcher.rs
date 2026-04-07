@@ -158,7 +158,10 @@ impl RecursiveWatcher {
                         Err(e) => Err(e),
                     };
                     match result {
-                        Ok(_) => {
+                        Ok(handle) => {
+                            // MIGRATION: backfill genesis for pre-genesis child stores.
+                            let st = handle.store_type().to_string();
+                            crate::genesis::ensure_genesis(decl.id, &handle, &st).await;
                             if let Ok(mut guard) = opened_stores.write() {
                                 guard.insert(decl.id);
                             }

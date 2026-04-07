@@ -1,0 +1,208 @@
+digraph node_b {
+    rankdir=TB;
+    fontname="Helvetica";
+    fontsize=14;
+    label="Node B's perspective — four phases: write, epoch, ack, prune";
+    labelloc=t;
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", width=2.4, height=0.4];
+    edge [fontname="Helvetica", fontsize=8];
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 1: B writing, no knowledge of revocation
+    // ═══════════════════════════════════════════════════════════════
+
+    subgraph cluster_phase1 {
+        label="Phase 1: B writes under epoch 0 (no revocation yet)";
+        labeljust=l;
+        fontsize=12;
+        fontname="Helvetica-Bold";
+        style="dashed";
+        color="#666666";
+        margin=16;
+
+        b1_genesis [label="genesis", fillcolor="#e8e8e8"];
+        b1_addBC   [label="A: add_peer B, C", fillcolor="#b3d9ff"];
+        b1_epoch0  [label="epoch 0", fillcolor="#ffeeaa", penwidth=2];
+        b1_bputx1  [label="B: put x = 1", fillcolor="#c2f0c2"];
+        b1_cputy1  [label="C: put y = 10", fillcolor="#d9b3ff"];
+        b1_bputx2  [label="B: put x = 2", fillcolor="#c2f0c2"];
+        b1_cputy2  [label="C: put y = 20", fillcolor="#d9b3ff"];
+        b1_bputx3  [label="B: put x = 3", fillcolor="#c2f0c2"];
+        b1_bputx4  [label="B: put x = 4", fillcolor="#c2f0c2"];
+
+        b1_genesis -> b1_addBC;
+        b1_genesis -> b1_epoch0;
+        b1_addBC   -> b1_epoch0;
+        b1_epoch0  -> b1_bputx1;
+        b1_epoch0  -> b1_cputy1;
+        b1_bputx1  -> b1_bputx2;
+        b1_cputy1  -> b1_cputy2;
+        b1_bputx2  -> b1_bputx3;
+        b1_bputx3  -> b1_bputx4;
+
+        node [shape=box, fillcolor="#f5f5f5", style="rounded,filled", fontsize=9, width=3.0];
+        b1_s [label="B's state:\npeers: {A,B,C}  epoch: 0\nx = 4  y = 20"];
+        b1_bputx4 -> b1_s [style=dotted, color="#999999"];
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 2: B syncs with A — receives revocation + epoch 1
+    // ═══════════════════════════════════════════════════════════════
+
+    subgraph cluster_phase2 {
+        label="Phase 2: B receives epoch 1 via sync (A created it — implicit ack)";
+        labeljust=l;
+        fontsize=12;
+        fontname="Helvetica-Bold";
+        style="dashed";
+        color="#666666";
+        margin=16;
+
+        b2_genesis [label="genesis", fillcolor="#e8e8e8"];
+        b2_addBC   [label="A: add_peer B, C", fillcolor="#b3d9ff"];
+        b2_epoch0  [label="epoch 0", fillcolor="#ffeeaa", penwidth=2];
+        b2_bputx1  [label="B: put x = 1", fillcolor="#c2f0c2"];
+        b2_cputy1  [label="C: put y = 10", fillcolor="#d9b3ff"];
+        b2_bputx2  [label="B: put x = 2", fillcolor="#c2f0c2"];
+        b2_cputy2  [label="C: put y = 20", fillcolor="#d9b3ff"];
+        b2_bputx3  [label="B: put x = 3", fillcolor="#c2f0c2"];
+        b2_bputx4  [label="B: put x = 4", fillcolor="#c2f0c2"];
+
+        b2_revoke  [label="A: revoke_peer C\n(received via sync)", fillcolor="#ffb3b3"];
+        b2_epoch1  [label="epoch 1\nrequired_acks: [B]\ndeps: [genesis,\n          revoke_peer C,\n          B:put x=2,\n          C:put y=20]\n(received via sync)", fillcolor="#ffeeaa", penwidth=2];
+
+        b2_cputy3  [label="C: put y = 30\n(orphaned)", fillcolor="#d9b3ff", style="rounded,filled,dashed", fontcolor="#888888"];
+
+        b2_genesis -> b2_addBC;
+        b2_genesis -> b2_epoch0;
+        b2_addBC   -> b2_epoch0;
+        b2_epoch0  -> b2_bputx1;
+        b2_epoch0  -> b2_cputy1;
+        b2_bputx1  -> b2_bputx2;
+        b2_cputy1  -> b2_cputy2;
+        b2_bputx2  -> b2_bputx3;
+        b2_bputx3  -> b2_bputx4;
+        b2_addBC   -> b2_revoke;
+        b2_genesis -> b2_epoch1;
+        b2_revoke  -> b2_epoch1;
+        b2_bputx2  -> b2_epoch1;
+        b2_cputy2  -> b2_epoch1;
+        b2_cputy2  -> b2_cputy3 [style=dashed, color="#999999"];
+
+        node [shape=box, fillcolor="#f5f5f5", style="rounded,filled", fontsize=9, width=3.6];
+        b2_s [label="After receiving epoch 1:\npeers: {A,B}  epoch: 1  x = 4  y = 20\n\nB's writes preserved — B is active.\nC:put y=30 excluded.\nB has NOT acked yet — pruning not safe."];
+        b2_epoch1 -> b2_s [style=dotted, color="#999999"];
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 3: B submits epoch_ack — pruning becomes safe
+    // ═══════════════════════════════════════════════════════════════
+
+    subgraph cluster_phase3 {
+        label="Phase 3: B acks epoch 1 — only remaining active peer, pruning now safe";
+        labeljust=l;
+        fontsize=12;
+        fontname="Helvetica-Bold";
+        style="dashed";
+        color="#666666";
+        margin=16;
+
+        b3_genesis [label="genesis", fillcolor="#e8e8e8"];
+        b3_addBC   [label="A: add_peer B, C", fillcolor="#b3d9ff"];
+        b3_epoch0  [label="epoch 0", fillcolor="#ffeeaa", penwidth=2];
+        b3_bputx1  [label="B: put x = 1", fillcolor="#c2f0c2"];
+        b3_cputy1  [label="C: put y = 10", fillcolor="#d9b3ff"];
+        b3_bputx2  [label="B: put x = 2", fillcolor="#c2f0c2"];
+        b3_cputy2  [label="C: put y = 20", fillcolor="#d9b3ff"];
+        b3_bputx3  [label="B: put x = 3", fillcolor="#c2f0c2"];
+        b3_bputx4  [label="B: put x = 4", fillcolor="#c2f0c2"];
+
+        b3_revoke  [label="A: revoke_peer C", fillcolor="#ffb3b3"];
+        b3_epoch1  [label="epoch 1\nrequired_acks: [B]\ndeps: [genesis,\n          revoke_peer C,\n          B:put x=2,\n          C:put y=20]", fillcolor="#ffeeaa", penwidth=2];
+
+        b3_back    [label="B: epoch_ack\ndeps: [B:put x=4, epoch 1]", fillcolor="#ffe0b2", penwidth=2];
+
+        b3_bputx5  [label="B: put x = 5\ndeps: [B:epoch_ack]", fillcolor="#c2f0c2"];
+
+        b3_cputy3  [label="C: put y = 30\n(orphaned)", fillcolor="#d9b3ff", style="rounded,filled,dashed", fontcolor="#888888"];
+
+        b3_genesis -> b3_addBC;
+        b3_genesis -> b3_epoch0;
+        b3_addBC   -> b3_epoch0;
+        b3_epoch0  -> b3_bputx1;
+        b3_epoch0  -> b3_cputy1;
+        b3_bputx1  -> b3_bputx2;
+        b3_cputy1  -> b3_cputy2;
+        b3_bputx2  -> b3_bputx3;
+        b3_bputx3  -> b3_bputx4;
+        b3_addBC   -> b3_revoke;
+        b3_genesis -> b3_epoch1;
+        b3_revoke  -> b3_epoch1;
+        b3_bputx2  -> b3_epoch1;
+        b3_cputy2  -> b3_epoch1;
+        b3_bputx4  -> b3_back;
+        b3_epoch1  -> b3_back;
+        b3_back    -> b3_bputx5;
+        b3_cputy2  -> b3_cputy3 [style=dashed, color="#999999"];
+
+        node [shape=box, fillcolor="#fff3e0", style="rounded,filled", fontsize=9, width=3.6];
+        b3_prune [label="A created epoch 1 (implicit ack).\nB has now acked. All active peers done.\nPre-epoch-1 history is prunable."];
+        b3_back -> b3_prune [style=dotted, color="#cc6600"];
+
+        node [shape=box, fillcolor="#f5f5f5", style="rounded,filled", fontsize=9, width=3.6];
+        b3_s [label="B's state:\npeers: {A,B}  epoch: 1  x = 5  y = 20"];
+        b3_bputx5 -> b3_s [style=dotted, color="#999999"];
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 4: After pruning — sparse spine
+    // ═══════════════════════════════════════════════════════════════
+
+    subgraph cluster_phase4 {
+        label="Phase 4: After pruning — epoch 1 is the new base";
+        labeljust=l;
+        fontsize=12;
+        fontname="Helvetica-Bold";
+        style="dashed";
+        color="#666666";
+        margin=16;
+
+        b4_genesis [label="genesis", fillcolor="#e8e8e8"];
+
+        b4_revoke  [label="A: revoke_peer C", fillcolor="#ffb3b3"];
+        b4_bputx2  [label="B: put x = 2", fillcolor="#c2f0c2"];
+        b4_cputy2  [label="C: put y = 20", fillcolor="#d9b3ff"];
+        b4_epoch1  [label="epoch 1", fillcolor="#ffeeaa", penwidth=2];
+
+        b4_back    [label="B: epoch_ack", fillcolor="#ffe0b2", penwidth=2];
+
+        b4_bputx3  [label="B: put x = 3", fillcolor="#c2f0c2"];
+        b4_bputx4  [label="B: put x = 4", fillcolor="#c2f0c2"];
+        b4_bputx5  [label="B: put x = 5", fillcolor="#c2f0c2"];
+
+        b4_pruned  [label="epoch 0, add_peer B,C,\nB:put x=1, C:put y=10,\nC:put y=30\n(all pruned)", fillcolor="#ffffff", style="rounded,dashed", fontcolor="#bbbbbb", color="#bbbbbb"];
+
+        b4_genesis -> b4_epoch1;
+        b4_genesis -> b4_pruned [style=dashed, color="#bbbbbb"];
+        b4_pruned  -> b4_revoke [style=dashed, color="#bbbbbb"];
+        b4_pruned  -> b4_bputx2 [style=dashed, color="#bbbbbb"];
+        b4_pruned  -> b4_cputy2 [style=dashed, color="#bbbbbb"];
+
+        b4_revoke  -> b4_epoch1;
+        b4_bputx2  -> b4_epoch1;
+        b4_cputy2  -> b4_epoch1;
+
+        b4_epoch1  -> b4_back;
+        b4_bputx2  -> b4_bputx3;
+        b4_bputx3  -> b4_bputx4;
+        b4_bputx4  -> b4_back;
+        b4_back    -> b4_bputx5;
+
+        node [shape=box, fillcolor="#f5f5f5", style="rounded,filled", fontsize=9, width=3.6];
+        b4_s [label="After pruning:\npeers: {A,B}  epoch: 1  x = 5  y = 20\n\nSparse spine: genesis <-- epoch 1 <-- tail"];
+        b4_bputx5 -> b4_s [style=dotted, color="#999999"];
+
+        b4_note [label="Pruning keeps:\n  - genesis (epoch 1 cites it directly)\n  - epoch 1 + immediate deps (frontier)\n  - B's epoch_ack (proves settlement)\n  - tail (post-frontier active writes)\n\nEpoch creator (A) has no separate ack.\nCreating the epoch IS the ack.", shape=note, fillcolor="#ffffcc", style=filled, fontsize=9, width=3.6];
+        b4_s -> b4_note [style=invis];
+    }
+}

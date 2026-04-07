@@ -37,14 +37,14 @@ impl PeerProvider for GlobalPeerProvider {
         self.stores().any(|s| s.peer_provider().can_connect(peer))
     }
 
-    fn can_accept_entry(&self, author: &PubKey) -> bool {
+    fn can_accept_gossip(&self, author: &PubKey) -> bool {
         self.stores()
-            .any(|s| s.peer_provider().can_accept_entry(author))
+            .any(|s| s.peer_provider().can_accept_gossip(author))
     }
 
-    fn list_acceptable_authors(&self) -> Vec<PubKey> {
+    fn gossip_authorized_authors(&self) -> Vec<PubKey> {
         self.stores()
-            .flat_map(|s| s.peer_provider().list_acceptable_authors())
+            .flat_map(|s| s.peer_provider().gossip_authorized_authors())
             .collect::<HashSet<_>>()
             .into_iter()
             .collect()
