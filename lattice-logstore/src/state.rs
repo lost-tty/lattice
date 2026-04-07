@@ -163,9 +163,11 @@ impl StateLogic for LogState {
         op: &Op,
         _dag: &dyn lattice_model::DagQueries,
     ) -> Result<Vec<Self::Event>, StateDbError> {
-        // Validate payload
+        // Empty payloads carry no information — silently accept without storing.
+        // This avoids stalling the projection on no-op intentions (e.g. from
+        // a client that submitted an empty append by mistake).
         if op.info.payload.is_empty() {
-            return Err(StateDbError::Conversion("Empty payload".into()));
+            return Ok(vec![]);
         }
 
         // Key: HLC (8 bytes, big-endian) + Author (32 bytes) for chronological ordering
@@ -540,5 +542,56 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, b"log_entry_1");
         assert_eq!(entries[0].timestamp, h1.store.read(None)[0].timestamp);
+    }
+
+    #[test]
+    fn empty_payload_is_silently_ignored() {
+        let h = LogHarness::new();
+        let author = PubKey::from([1u8; 32]);
+
+        // Apply a normal entry
+        let op1 = Op {
+            info: lattice_model::IntentionInfo {
+                hash: Hash::from([1u8; 32]),
+                payload: std::borrow::Cow::Borrowed(b"first"),
+                timestamp: HLC { wall_time: 1000, counter: 0 },
+                author,
+            },
+            prev_hash: Hash::ZERO,
+            causal_deps: &[],
+        };
+        h.apply(&op1, &NULL_DAG).unwrap();
+
+        // Apply an empty payload — must not error or store anything
+        let op2 = Op {
+            info: lattice_model::IntentionInfo {
+                hash: Hash::from([2u8; 32]),
+                payload: std::borrow::Cow::Borrowed(b""),
+                timestamp: HLC { wall_time: 2000, counter: 0 },
+                author,
+            },
+            prev_hash: Hash::from([1u8; 32]),
+            causal_deps: &[],
+        };
+        h.apply(&op2, &NULL_DAG).unwrap();
+
+        // Apply another normal entry after the empty one
+        let op3 = Op {
+            info: lattice_model::IntentionInfo {
+                hash: Hash::from([3u8; 32]),
+                payload: std::borrow::Cow::Borrowed(b"third"),
+                timestamp: HLC { wall_time: 3000, counter: 0 },
+                author,
+            },
+            prev_hash: Hash::from([2u8; 32]),
+            causal_deps: &[],
+        };
+        h.apply(&op3, &NULL_DAG).unwrap();
+
+        // Only the two non-empty entries should be stored
+        let entries = h.store.read(None);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].content, b"first");
+        assert_eq!(entries[1].content, b"third");
     }
 }
