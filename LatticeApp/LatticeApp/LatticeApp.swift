@@ -2,16 +2,19 @@ import SwiftUI
 
 @main
 struct LatticeAppApp: App {
-    @StateObject private var latticeService = LatticeService.shared
-    
+    @StateObject private var service = LatticeService.shared
+
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(latticeService)
+                .environmentObject(service)
+                #if os(macOS)
+                .frame(minWidth: 800, minHeight: 600)
+                #endif
         }
         #if os(macOS)
         .commands {
-            CommandGroup(replacing: .newItem) { }
+            CommandGroup(replacing: .newItem) {}
         }
         #endif
     }

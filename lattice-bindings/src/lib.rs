@@ -288,6 +288,7 @@ impl Lattice {
         &self,
         data_dir: Option<String>,
         name: Option<String>,
+        web_port: Option<u16>,
     ) -> Result<(), LatticeError> {
         let mut w = self.rt.block_on(self.runtime.write());
         if w.is_some() {
@@ -301,6 +302,9 @@ impl Lattice {
         if let Some(n) = name {
             builder = builder.with_name(n);
         }
+        if let Some(port) = web_port {
+            builder = builder.with_web(port);
+        }
 
         let rt = self
             .rt
@@ -308,6 +312,21 @@ impl Lattice {
             .map_err(LatticeError::from_backend)?;
         *w = Some(rt);
         Ok(())
+    }
+
+    /// Returns the web UI URL if the web server was started.
+    pub fn web_url(&self) -> Result<Option<String>, LatticeError> {
+        let r = self.rt.block_on(self.runtime.read());
+        let rt = r.as_ref().ok_or(LatticeError::NotInitialized)?;
+        Ok(rt.web_url().map(|s| s.to_string()))
+    }
+
+    /// List active (enabled) apps.
+    pub fn list_apps(&self) -> Result<Vec<AppBindingProto>, LatticeError> {
+        let r = self.rt.block_on(self.runtime.read());
+        let rt = r.as_ref().ok_or(LatticeError::NotInitialized)?;
+        Ok(self.rt.block_on(rt.node().app_manager().list_active())
+            .into_iter().map(AppBindingProto::from).collect())
     }
 
     /// Subscribe to app lifecycle events. Initial state is replayed as
@@ -347,7 +366,6 @@ impl Lattice {
             rx: Arc::new(tokio::sync::Mutex::new(rx)),
         }))
     }
-
 
     pub fn is_started(&self) -> bool {
         self.rt.block_on(self.runtime.read()).is_some()

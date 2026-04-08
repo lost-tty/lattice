@@ -36,9 +36,22 @@
 		29D32BD22F2A68C800EBEF2E /* CoreFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreFoundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.2.sdk/System/Library/Frameworks/CoreFoundation.framework; sourceTree = DEVELOPER_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		29D32BFF2F2A700000000001 /* Exceptions for "LatticeApp" folder in "LatticeApp" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 29D32B432F2A300800EBEF2E /* LatticeApp */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		29D32B462F2A300800EBEF2E /* LatticeApp */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				29D32BFF2F2A700000000001 /* Exceptions for "LatticeApp" folder in "LatticeApp" target */,
+			);
 			path = LatticeApp;
 			sourceTree = "<group>";
 		};
@@ -418,6 +431,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = LatticeApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Lattice;
 				INFOPLIST_KEY_CFBundleName = Lattice;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -470,6 +484,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = LatticeApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Lattice;
 				INFOPLIST_KEY_CFBundleName = Lattice;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;

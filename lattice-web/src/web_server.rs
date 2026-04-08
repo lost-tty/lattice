@@ -59,13 +59,31 @@ impl WebServer {
         }
     }
 
-    /// The URL the web UI will be reachable at.
+    /// The URL the web UI will be reachable at (before binding; uses configured port).
     pub fn url(&self) -> String {
         crate::web_url(self.port)
     }
 
     /// Run the web server (blocks until shutdown).
+    ///
+    /// If `url_tx` is provided, the actual bound URL is sent once the listener
+    /// is ready. This is useful when the configured port is 0 (OS-assigned).
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.run_inner(None).await
+    }
+
+    /// Like [`run`], but sends the actual URL via `url_tx` after binding.
+    pub async fn run_with_url(
+        self,
+        url_tx: tokio::sync::oneshot::Sender<String>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.run_inner(Some(url_tx)).await
+    }
+
+    async fn run_inner(
+        self,
+        url_tx: Option<tokio::sync::oneshot::Sender<String>>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let routes = self.routes.prepare();
 
         let apps: Arc<RwLock<HashMap<String, AppBinding>>> =
@@ -127,6 +145,32 @@ impl WebServer {
         let v6 = tokio::net::TcpListener::bind(
             SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), self.port),
         ).await;
+
+        // Determine the actual bound port (important when configured port is 0).
+        let actual_port = match (&v4, &v6) {
+            (Ok(l), _) => l.local_addr()?.port(),
+            (_, Ok(l)) => l.local_addr()?.port(),
+            (Err(e4), Err(e6)) => {
+                return Err(format!("Failed to bind web server — v4: {e4}, v6: {e6}").into());
+            }
+        };
+
+        if let Some(tx) = url_tx {
+            let _ = tx.send(crate::web_url(actual_port));
+        }
+
+        // If port was 0, rebind v6 to the same actual port for dual-stack.
+        let v6 = if self.port == 0 {
+            if v4.is_ok() {
+                tokio::net::TcpListener::bind(
+                    SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), actual_port),
+                ).await
+            } else {
+                v6
+            }
+        } else {
+            v6
+        };
 
         match (v4, v6) {
             (Ok(v4), Ok(v6)) => {

@@ -1,140 +1,111 @@
 import SwiftUI
 
+/// A tab identity — either the main node UI or an app subdomain.
+enum Tab: Hashable {
+    case node
+    case app(String) // subdomain
+}
+
 struct ContentView: View {
-    @EnvironmentObject var latticeService: LatticeService
-    @State private var expandedMeshes: Set<Data> = []
-    
-    var body: some View {
-        Group {
-            switch latticeService.state {
-            case .initializing:
-                loadingView(text: "Initializing...")
-            case .startingNode:
-                loadingView(text: "Starting Node...")
-            case .ready:
-                mainContent
-            case .failed(let error):
-                errorView(message: error)
-            }
-        }
-    }
-    
-    private func loadingView(text: String) -> some View {
-        VStack(spacing: 16) {
-            ProgressView()
-                .controlSize(.large)
-            Text(text)
-                .foregroundStyle(.secondary)
-        }
-    }
-    
-    private func errorView(message: String) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.largeTitle)
-                .foregroundStyle(.red)
-            Text("Initialization Failed")
-                .font(.headline)
-            Text(message)
-                .font(.caption)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-        }
-        .padding()
-    }
-    
-    @ViewBuilder
-    private var mainContent: some View {
-        #if os(iOS)
-        NavigationStack {
-            DashboardView()
-        }
-        #else
-        NavigationSplitView {
-            sidebarContent
-        } detail: {
-            DashboardView()
-        }
-        #endif
-    }
-    
-    #if os(macOS)
-    private var sidebarContent: some View {
-        List {
-            NavigationLink {
-                DashboardView()
-            } label: {
-                Label("Dashboard", systemImage: "gauge")
-            }
+    @EnvironmentObject var service: LatticeService
+    @State private var selectedTab: Tab = .node
 
-            Section("Meshes") {
-                ForEach(latticeService.meshes) { mesh in
-                    MeshDisclosureRow(
-                        mesh: mesh,
-                        stores: latticeService.stores[mesh.idString] ?? [],
-                        isExpanded: expandedMeshes.contains(mesh.id),
-                        onExpandChange: { isExpanded in
-                            if isExpanded {
-                                expandedMeshes.insert(mesh.id)
-                                Task { await latticeService.refreshStores(mesh: mesh) }
-                            } else {
-                                expandedMeshes.remove(mesh.id)
-                            }
-                        }
-                    )
+    var body: some View {
+        switch service.state {
+        case .stopped, .starting:
+            VStack(spacing: 16) {
+                ProgressView()
+                    .controlSize(.large)
+                Text("Starting Lattice...")
+                    .foregroundStyle(.secondary)
+            }
+        case .running(let url):
+            tabView(baseURL: url)
+        case .failed(let error):
+            VStack(spacing: 16) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.red)
+                Text("Failed to Start")
+                    .font(.title2)
+                Text(error)
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+                Button("Retry") {
+                    Task { await service.start() }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding()
+        }
+    }
+
+    private func tabView(baseURL: String) -> some View {
+        VStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    tabButton("Node", systemImage: "network", tab: .node)
+                    ForEach(service.apps, id: \.subdomain) { app in
+                        tabButton(app.subdomain, systemImage: "app", tab: .app(app.subdomain))
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+            .frame(height: 36)
+
+            Divider()
+
+            ZStack {
+                WebView(
+                    url: URL(string: baseURL)!,
+                    onNavigate: handleNavigation
+                )
+                .opacity(selectedTab == .node ? 1 : 0)
+
+                ForEach(service.apps, id: \.subdomain) { app in
+                    if let url = service.appURL(subdomain: app.subdomain) {
+                        WebView(
+                            url: url,
+                            onNavigate: handleNavigation
+                        )
+                        .opacity(selectedTab == .app(app.subdomain) ? 1 : 0)
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .navigationTitle("Lattice")
-        .listStyle(.sidebar)
+        .ignoresSafeArea(edges: .bottom)
     }
-    #endif
-}
 
-#if os(macOS)
-struct MeshDisclosureRow: View {
-    let mesh: MeshInfo
-    let stores: [StoreInfo]
-    let isExpanded: Bool
-    let onExpandChange: (Bool) -> Void
-    
-    var body: some View {
-        DisclosureGroup(
-            isExpanded: Binding(
-                get: { isExpanded },
-                set: { onExpandChange($0) }
-            )
-        ) {
-            storesList
+    private func tabButton(_ title: String, systemImage: String, tab: Tab) -> some View {
+        Button {
+            selectedTab = tab
         } label: {
-            NavigationLink {
-                MeshDetailView(mesh: mesh)
-            } label: {
-                Label(mesh.displayName, systemImage: "network")
-            }
+            Label(title, systemImage: systemImage)
+                .font(.callout)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(selectedTab == tab ? Color.accentColor.opacity(0.15) : Color.clear)
+                .cornerRadius(6)
         }
+        .buttonStyle(.plain)
     }
-    
-    @ViewBuilder
-    private var storesList: some View {
-        if stores.isEmpty {
-            Text("No stores")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } else {
-            ForEach(stores) { store in
-                NavigationLink {
-                    StoreReflectionView(store: store, meshId: mesh.idString)
-                } label: {
-                    Label(store.name.isEmpty ? "Store" : store.name, systemImage: "externaldrive")
-                }
-            }
-        }
-    }
-}
-#endif
 
-#Preview {
-    ContentView()
-        .environmentObject(LatticeService.shared)
+    private func handleNavigation(_ url: URL) -> Bool {
+        guard let host = url.host else { return true }
+        let suffix = ".localhost"
+        guard host.hasSuffix(suffix) else { return true }
+
+        let subdomain = String(host.dropLast(suffix.count))
+        if subdomain.isEmpty { return true }
+
+        if service.apps.contains(where: { $0.subdomain == subdomain }) {
+            selectedTab = .app(subdomain)
+            return false
+        }
+
+        return true
+    }
 }

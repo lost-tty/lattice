@@ -255,12 +255,15 @@ impl RuntimeBuilder {
                 node.app_manager().clone(),
                 port,
             );
-            web_url = Some(web_server.url());
-            Some(tokio::spawn(async move {
-                if let Err(e) = web_server.run().await {
+            let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+            let handle = Some(tokio::spawn(async move {
+                if let Err(e) = web_server.run_with_url(url_tx).await {
                     tracing::error!("Web server error: {}", e);
                 }
-            }))
+            }));
+            // Wait briefly for the actual bound URL (important when port is 0).
+            web_url = url_rx.await.ok();
+            handle
         } else {
             None
         };
