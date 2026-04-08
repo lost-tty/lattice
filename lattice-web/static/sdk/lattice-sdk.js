@@ -41,7 +41,7 @@
   // --- Store schema loader ---
 
   async function loadStoreSchema(api, storeIdBytes, storeUuid) {
-    const desc = await api.dynamic.GetDescriptor({ id: storeIdBytes });
+    const desc = await api.dynamic.GetDescriptor({ store_id: storeIdBytes });
     const serviceName = desc.service_name || '';
 
     const resp = await fetch('/proto/store/' + storeUuid);
@@ -280,7 +280,7 @@
         schema: schemaRoot,
 
         async methods() {
-          const resp = await api.dynamic.ListMethods({ id: storeIdBytes });
+          const resp = await api.dynamic.ListMethods({ store_id: storeIdBytes });
           return (resp.items || []).map(function (m) {
             return {
               name: m.name,
@@ -292,7 +292,7 @@
 
         async streams() {
           if (cachedStreams) return cachedStreams;
-          const resp = await api.dynamic.ListStreams({ id: storeIdBytes });
+          const resp = await api.dynamic.ListStreams({ store_id: storeIdBytes });
           cachedStreams = (resp.items || []).map(function (s) {
             return {
               name: s.name,

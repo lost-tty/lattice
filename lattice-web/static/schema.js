@@ -14,7 +14,7 @@ export async function getSchema(storeIdBytes) {
   const uuid = uuidFromBytes(storeIdBytes);
   if (cache.has(uuid)) return cache.get(uuid);
 
-  const desc = await sdk.api.dynamic.GetDescriptor({ id: storeIdBytes });
+  const desc = await sdk.api.dynamic.GetDescriptor({ store_id: storeIdBytes });
   if (!desc.file_descriptor_set || desc.file_descriptor_set.length === 0) return null;
   const serviceName = desc.service_name || '';
 
