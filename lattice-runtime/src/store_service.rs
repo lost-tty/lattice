@@ -2,7 +2,7 @@
 
 use crate::backend_inprocess::{parse_uuid, InProcessBackend};
 use lattice_api::proto::{
-    store_service_server::StoreService, BranchPath, CreateStoreRequest, DebugInfo,
+    store_service_server::StoreService, AuthorStateResponse, BranchPath, CreateStoreRequest,
     DeleteStoreRequest, Empty, FloatingIntentionsResponse, GetIntentionRequest,
     GetIntentionResponse, InspectBranchRequest, InspectBranchResponse, PeerStrategyResponse,
     SetStoreNameRequest, StoreDetails, StoreId, StoreList, StoreMeta, StoreNameResponse, StoreRef,
@@ -27,12 +27,12 @@ impl StoreService for InProcessBackend {
     }
 
     async fn get_status(&self, request: Request<StoreId>) -> Result<Response<StoreMeta>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
+        let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_status(id).await.map(Response::new).into_status()
     }
 
     async fn get_details(&self, request: Request<StoreId>) -> Result<Response<StoreDetails>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
+        let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_details(id).await.map(Response::new).into_status()
     }
 
@@ -44,7 +44,7 @@ impl StoreService for InProcessBackend {
     }
 
     async fn rebuild(&self, request: Request<StoreId>) -> Result<Response<Empty>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
+        let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_rebuild(id).await.map(|_| Response::new(Empty {})).into_status()
     }
 
@@ -55,31 +55,35 @@ impl StoreService for InProcessBackend {
     }
 
     async fn get_name(&self, request: Request<StoreId>) -> Result<Response<StoreNameResponse>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
+        let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_get_name(id).await.map(|name| Response::new(StoreNameResponse { name })).into_status()
     }
 
     async fn sync(&self, request: Request<StoreId>) -> Result<Response<Empty>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
+        let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_sync(id).await.map(|_| Response::new(Empty {})).into_status()
     }
 
-    async fn debug(&self, request: Request<StoreId>) -> Result<Response<DebugInfo>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
-        self.store_debug(id).await.map(|a| Response::new(DebugInfo { items: a })).into_status()
+    async fn get_author_tips(&self, request: Request<StoreId>) -> Result<Response<AuthorStateResponse>, Status> {
+        let id = parse_uuid(&request.into_inner().store_id)?;
+        self.store_debug(id).await.map(|a| Response::new(AuthorStateResponse { items: a })).into_status()
     }
 
     async fn witness_log(&self, request: Request<WitnessLogRequest>) -> Result<Response<WitnessLogResponse>, Status> {
         let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_witness_log(id).await
-            .map(|e| Response::new(WitnessLogResponse { items: e.into_iter().map(Into::into).collect() }))
+            .and_then(|entries| {
+                let items: Result<Vec<_>, _> = entries.into_iter().map(TryInto::try_into).collect();
+                items.map(|i| Response::new(WitnessLogResponse { items: i }))
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+            })
             .into_status()
     }
 
     async fn floating_intentions(&self, request: Request<StoreId>) -> Result<Response<FloatingIntentionsResponse>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
+        let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_floating(id).await
-            .map(|i| Response::new(FloatingIntentionsResponse { items: i.into_iter().map(Into::into).collect() }))
+            .map(|items| Response::new(FloatingIntentionsResponse { items }))
             .into_status()
     }
 
@@ -90,12 +94,12 @@ impl StoreService for InProcessBackend {
             Ok(mut results) if results.len() == 1 => {
                 let d = results.remove(0);
                 Ok(Response::new(GetIntentionResponse {
-                    intention: Some(d.intention), ops: d.ops.into_iter().map(Into::into).collect(),
+                    intention: Some(d.into()),
                 }))
             }
             Ok(results) if results.is_empty() => Err(Status::not_found("intention not found")),
             Ok(results) => {
-                let hashes: Vec<String> = results.iter().map(|d| hex::encode(&d.intention.hash)).collect();
+                let hashes: Vec<String> = results.iter().map(|d| hex::encode(d.hash.as_bytes())).collect();
                 Err(Status::failed_precondition(format!("ambiguous prefix, matches: {}", hashes.join(", "))))
             }
             Err(e) => Err(Status::internal(e.to_string())),
@@ -103,7 +107,7 @@ impl StoreService for InProcessBackend {
     }
 
     async fn system_list(&self, request: Request<StoreId>) -> Result<Response<SystemListResponse>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
+        let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_system_list(id).await
             .map(|e| Response::new(SystemListResponse {
                 items: e.into_iter().map(|(key, value)| SystemEntry { key, value }).collect(),
@@ -111,7 +115,7 @@ impl StoreService for InProcessBackend {
     }
 
     async fn list_peers(&self, request: Request<StoreId>) -> Result<Response<lattice_api::proto::PeerList>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
+        let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_peers(id).await.map(|p| Response::new(lattice_api::proto::PeerList { items: p })).into_status()
     }
 
@@ -122,7 +126,7 @@ impl StoreService for InProcessBackend {
     }
 
     async fn get_peer_strategy(&self, request: Request<StoreId>) -> Result<Response<PeerStrategyResponse>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
+        let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_peer_strategy(id).await.map(|s| Response::new(PeerStrategyResponse { strategy: s })).into_status()
     }
 
@@ -133,7 +137,7 @@ impl StoreService for InProcessBackend {
     }
 
     async fn invite(&self, request: Request<StoreId>) -> Result<Response<lattice_api::proto::InviteToken>, Status> {
-        let id = parse_uuid(&request.into_inner().id)?;
+        let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_peer_invite(id).await.map(|t| Response::new(lattice_api::proto::InviteToken { token: t })).into_status()
     }
 

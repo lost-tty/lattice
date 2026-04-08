@@ -30,7 +30,7 @@ function DebugNav({ storeId, debugView }) {
 }
 
 async function loadDebugTips(storeId) {
-  const authors = (await sdk.api.store.Debug({ id: storeId })).items || [];
+  const authors = (await sdk.api.store.GetAuthorTips({ store_id: storeId })).items || [];
   return html`
     <${DebugNav} storeId=${storeId} debugView="tips" />
     ${authors.length === 0
@@ -52,7 +52,6 @@ async function loadDebugTips(storeId) {
 
 async function loadDebugLog(storeId) {
   const entries = (await sdk.api.store.WitnessLog({ store_id: storeId })).items || [];
-  const WitnessContent = sdk.proto.lookup('lattice.weaver.WitnessContent');
   return html`
     <${DebugNav} storeId=${storeId} debugView="log" />
     ${entries.length === 0
@@ -60,27 +59,16 @@ async function loadDebugLog(storeId) {
       : html`
         <table>
           <tr><th>Seq</th><th>Hash</th><th>Intention</th><th>Wall Time</th><th>Prev</th><th>Sig</th></tr>
-          ${entries.map(w => {
-            let intentionHash = '-', wallTime = '-', prevHash = '-';
-            if (w.content && w.content.length > 0) {
-              try {
-                const wc = WitnessContent.decode(w.content);
-                intentionHash = hex(wc.intention_hash) || '-';
-                wallTime = wc.wall_time ? fmtTime(wc.wall_time) : '-';
-                prevHash = hex(wc.prev_hash) || '-';
-              } catch (e) { /* decode failed */ }
-            }
-            return html`
+          ${entries.map(w => html`
               <tr>
                 <td>${w.seq}</td>
                 <td class="mono">${hex(w.hash) || '-'}</td>
-                <td class="mono">${intentionHash}</td>
-                <td>${wallTime}</td>
-                <td class="mono">${prevHash}</td>
+                <td class="mono">${hex(w.intention_hash) || '-'}</td>
+                <td>${w.wall_time ? fmtTime(w.wall_time) : '-'}</td>
+                <td class="mono">${hex(w.prev_hash) || '-'}</td>
                 <td class="mono">${hex(w.signature) || '-'}</td>
               </tr>
-            `;
-          })}
+          `)}
         </table>
       `
     }
@@ -104,7 +92,7 @@ async function loadDebugIntentions(storeId) {
     try {
       const resp = await sdk.api.store.GetIntention({ store_id: storeId, hash_prefix: hashBytes.slice(0, 4) });
       if (!resp.intention) continue;
-      rows.push({ intention: resp.intention, ops: resp.ops || [] });
+      rows.push(resp);
     } catch (e) {
       rows.push({ _error: e.message, _hash: h });
     }
@@ -122,7 +110,7 @@ async function loadDebugIntentions(storeId) {
             <td class="mono">${hex(r.intention.author)}</td>
             <td class="mono">${hex(r.intention.store_prev) || '-'}</td>
             <td>${r.intention.timestamp ? fmtTime(r.intention.timestamp.wall_time) : '-'}</td>
-            <td class="mono pre-wrap">${fmtOps(r.ops)}</td>
+            <td class="mono pre-wrap">${fmtOps(r.intention.ops)}</td>
           </tr>
         `
       )}
@@ -131,7 +119,7 @@ async function loadDebugIntentions(storeId) {
 }
 
 async function loadDebugFloating(storeId) {
-  const floating = (await sdk.api.store.FloatingIntentions({ id: storeId })).items || [];
+  const floating = (await sdk.api.store.FloatingIntentions({ store_id: storeId })).items || [];
   return html`
     <${DebugNav} storeId=${storeId} debugView="floating" />
     ${floating.length === 0
@@ -188,7 +176,6 @@ export function IntentionDetail({ intention, ops, hexStr, error }) {
         <div class="k">Wall Time</div><div class="v">${ts ? fmtTime(ts.wall_time) : '-'}</div>
         <div class="k">Store Prev</div><div class="v mono">${hex(i.store_prev) || '-'}</div>
         <div class="k">Condition</div><div class="v mono">${condStr}</div>
-        <div class="k">Signature</div><div class="v mono">${hex(i.signature) || '-'}</div>
         <div class="k">Ops</div><div class="v mono pre-wrap">${fmtOps(ops)}</div>
       </div>
     </div>

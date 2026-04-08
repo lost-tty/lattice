@@ -296,7 +296,7 @@ function InspectIntentionModal() {
     closeModal();
     try {
       const resp = await sdk.api.store.GetIntention({ store_id: currentStoreId, hash_prefix: hashBytes });
-      setPanelOverride({ type: 'intention', intention: resp.intention, ops: resp.ops || [], hexStr });
+      setPanelOverride({ type: 'intention', intention: resp.intention, ops: resp.intention.ops || [], hexStr });
     } catch (e) {
       setPanelOverride({ type: 'intention', intention: null, ops: [], hexStr, error: e.message });
     }

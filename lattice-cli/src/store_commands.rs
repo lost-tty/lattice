@@ -6,7 +6,7 @@ use crate::graph_renderer;
 use crate::subscriptions::SubscriptionRegistry;
 use futures_util::StreamExt;
 use lattice_runtime::RpcClient;
-use lattice_runtime::{dynamic_message_to_sexpr, Hash, PubKey, SExpr};
+use lattice_runtime::{dynamic_message_to_sexpr, Hash, SExpr};
 use prost_reflect::prost::Message as ProstMessage;
 use prost_reflect::{DescriptorPool, DynamicMessage, Value};
 use std::collections::HashMap;
@@ -479,7 +479,7 @@ pub async fn cmd_store_debug_tips(
         }
     };
 
-    let authors = backend.store_debug(store_id).await.unwrap_or_default();
+    let authors = backend.store_author_tips(store_id).await.unwrap_or_default();
     let mut tips = vec![SExpr::sym("author-tips")];
     for a in &authors {
         tips.push(SExpr::list(vec![
@@ -600,9 +600,9 @@ pub async fn cmd_store_debug_floating(
     let floating = backend.store_floating(store_id).await.unwrap_or_default();
     let mut floats = vec![SExpr::sym("floating")];
     for f in &floating {
-        let hash = f.signed.intention.hash();
+        let hash = f.intention.as_ref().map(|i| &i.hash).cloned().unwrap_or_default();
         let details = backend
-            .store_get_intention(store_id, hash.as_bytes())
+            .store_get_intention(store_id, &hash)
             .await
             .unwrap_or_default();
         if let Some(detail) = details.into_iter().next() {
@@ -708,7 +708,7 @@ pub async fn cmd_store_debug_branch(
     for prefix in &head_bytes {
         match backend.store_get_intention(store_id, prefix).await {
             Ok(results) if results.len() == 1 => {
-                full_hashes.push(results[0].intention.hash.clone());
+                full_hashes.push(results[0].hash.to_vec());
             }
             Ok(results) if results.is_empty() => {
                 let _ = writeln!(w, "No intention found for prefix {}", hex::encode(prefix));
@@ -716,7 +716,7 @@ pub async fn cmd_store_debug_branch(
             }
             Ok(results) => {
                 let matches: Vec<String> =
-                    results.iter().map(|d| hex::encode(&d.intention.hash)).collect();
+                    results.iter().map(|d| hex::encode(d.hash.as_bytes())).collect();
                 let _ = writeln!(
                     w,
                     "Ambiguous prefix {}: {}",
@@ -778,158 +778,60 @@ pub async fn cmd_store_debug_branch(
 }
 
 fn detail_to_sexpr(detail: &lattice_runtime::IntentionDetail) -> SExpr {
-    let intention = &detail.intention;
     let mut fields: Vec<SExpr> = vec![SExpr::sym("intention")];
-
+    fields.push(SExpr::list(vec![SExpr::sym("hash"), SExpr::raw(detail.hash.to_vec())]));
+    fields.push(SExpr::list(vec![SExpr::sym("author"), SExpr::raw(detail.author.to_vec())]));
+    fields.push(SExpr::list(vec![SExpr::sym("store-prev"), SExpr::raw(detail.store_prev.to_vec())]));
+    let lattice_runtime::ModelCondition::V1(ref deps) = detail.condition;
+    let mut cond = vec![SExpr::sym("condition")];
+    cond.extend(deps.iter().map(|h| SExpr::raw(h.to_vec())));
+    fields.push(SExpr::list(cond));
     fields.push(SExpr::list(vec![
-        SExpr::sym("hash"),
-        SExpr::raw(intention.hash.clone()),
+        SExpr::sym("timestamp"),
+        SExpr::num(detail.timestamp.wall_time),
+        SExpr::sym(":counter"),
+        SExpr::num(detail.timestamp.counter as u64),
     ]));
-    fields.push(SExpr::list(vec![
-        SExpr::sym("author"),
-        SExpr::raw(intention.author.clone()),
-    ]));
-    fields.push(SExpr::list(vec![
-        SExpr::sym("store-id"),
-        SExpr::raw(intention.store_id.clone()),
-    ]));
-    fields.push(SExpr::list(vec![
-        SExpr::sym("store-prev"),
-        SExpr::raw(intention.store_prev.clone()),
-    ]));
-
-    // Condition
-    if let Some(ref cond) = intention.condition {
-        if let Some(ref c) = cond.kind {
-            match c {
-                lattice_runtime::condition::Kind::V1(deps) => {
-                    let mut cond_items = vec![SExpr::sym("v1")];
-                    for h in &deps.hashes {
-                        cond_items.push(SExpr::raw(h.clone()));
-                    }
-                    fields.push(SExpr::list(vec![
-                        SExpr::sym("condition"),
-                        SExpr::list(cond_items),
-                    ]));
-                }
-            }
-        }
-    }
-
-    // Timestamp
-    if let Some(ref ts) = intention.timestamp {
-        fields.push(SExpr::list(vec![
-            SExpr::sym("timestamp"),
-            SExpr::num(ts.wall_time),
-            SExpr::sym(":counter"),
-            SExpr::num(ts.counter as u64),
-        ]));
-    }
-
-    // Signature
-    fields.push(SExpr::list(vec![
-        SExpr::sym("signature"),
-        SExpr::raw(intention.signature.clone()),
-    ]));
-
-    // Decoded ops
     if !detail.ops.is_empty() {
         let mut ops_items = vec![SExpr::sym("ops")];
         ops_items.extend(detail.ops.clone());
         fields.push(SExpr::list(ops_items));
     }
-
     SExpr::list(fields)
 }
 
 /// Table-friendly format: every field is a strict `(sym val)` pair.
 /// Suitable for table rendering in `debug intentions` and `debug floating`.
 fn detail_to_sexpr_row(detail: &lattice_runtime::IntentionDetail) -> SExpr {
-    let intention = &detail.intention;
     let mut fields: Vec<SExpr> = vec![SExpr::sym("Intention")];
-
-    fields.push(SExpr::list(vec![
-        SExpr::sym("hash"),
-        SExpr::raw(intention.hash.clone()),
-    ]));
-    fields.push(SExpr::list(vec![
-        SExpr::sym("author"),
-        SExpr::raw(intention.author.clone()),
-    ]));
-    fields.push(SExpr::list(vec![
-        SExpr::sym("store-prev"),
-        SExpr::raw(intention.store_prev.clone()),
-    ]));
-
-    // Condition as a single value
-    let cond_val = if let Some(ref cond) = intention.condition {
-        if let Some(ref c) = cond.kind {
-            match c {
-                lattice_runtime::condition::Kind::V1(deps) => {
-                    let mut items = vec![SExpr::sym("v1")];
-                    for h in &deps.hashes {
-                        items.push(SExpr::raw(h.clone()));
-                    }
-                    SExpr::list(items)
-                }
-            }
-        } else {
-            SExpr::sym("none")
-        }
-    } else {
-        SExpr::sym("none")
-    };
-    fields.push(SExpr::list(vec![SExpr::sym("condition"), cond_val]));
-
-    // Timestamp as wall time
-    let wall = intention
-        .timestamp
-        .as_ref()
-        .map(|ts| ts.wall_time)
-        .unwrap_or(0);
-    fields.push(SExpr::list(vec![SExpr::sym("wall"), SExpr::num(wall)]));
-
-    // Ops as a single value
+    fields.push(SExpr::list(vec![SExpr::sym("hash"), SExpr::raw(detail.hash.to_vec())]));
+    fields.push(SExpr::list(vec![SExpr::sym("author"), SExpr::raw(detail.author.to_vec())]));
+    fields.push(SExpr::list(vec![SExpr::sym("store-prev"), SExpr::raw(detail.store_prev.to_vec())]));
+    fields.push(SExpr::list(vec![SExpr::sym("wall"), SExpr::num(detail.timestamp.wall_time)]));
     let ops_val = if detail.ops.len() == 1 {
         detail.ops[0].clone()
     } else {
         SExpr::list(detail.ops.clone())
     };
     fields.push(SExpr::list(vec![SExpr::sym("ops"), ops_val]));
-
     SExpr::list(fields)
 }
 
-/// Short format: (intention (hash ..) (author ..) (timestamp ..) (ops ..))
-/// Omits store-id, store-prev, condition, signature — clear from context.
 fn detail_to_sexpr_short(detail: &lattice_runtime::IntentionDetail) -> SExpr {
-    let intention = &detail.intention;
     let mut fields: Vec<SExpr> = vec![SExpr::sym("intention")];
-
+    fields.push(SExpr::list(vec![SExpr::sym("hash"), SExpr::raw(detail.hash.to_vec())]));
+    fields.push(SExpr::list(vec![SExpr::sym("author"), SExpr::raw(detail.author.to_vec())]));
     fields.push(SExpr::list(vec![
-        SExpr::sym("hash"),
-        SExpr::raw(intention.hash.clone()),
+        SExpr::sym("timestamp"),
+        SExpr::num(detail.timestamp.wall_time),
+        SExpr::sym(":counter"),
+        SExpr::num(detail.timestamp.counter as u64),
     ]));
-    fields.push(SExpr::list(vec![
-        SExpr::sym("author"),
-        SExpr::raw(intention.author.clone()),
-    ]));
-
-    if let Some(ref ts) = intention.timestamp {
-        fields.push(SExpr::list(vec![
-            SExpr::sym("timestamp"),
-            SExpr::num(ts.wall_time),
-            SExpr::sym(":counter"),
-            SExpr::num(ts.counter as u64),
-        ]));
-    }
-
     if !detail.ops.is_empty() {
         let mut ops_items = vec![SExpr::sym("ops")];
         ops_items.extend(detail.ops.clone());
         fields.push(SExpr::list(ops_items));
     }
-
     SExpr::list(fields)
 }
 
@@ -979,22 +881,9 @@ pub async fn cmd_history(
             Some(d) => d,
             None => continue,
         };
-        let intention = &detail.intention;
-
-        let hash = Hash::try_from(intention.hash.as_slice()).unwrap_or(Hash::ZERO);
-        let author = PubKey::try_from(intention.author.as_slice()).unwrap_or(PubKey::default());
-        let causal_deps: Vec<Hash> = intention
-            .condition
-            .as_ref()
-            .and_then(|c| match c.kind.as_ref()? {
-                lattice_runtime::condition::Kind::V1(d) => Some(
-                    d.hashes
-                        .iter()
-                        .filter_map(|h| Hash::try_from(h.as_slice()).ok())
-                        .collect(),
-                ),
-            })
-            .unwrap_or_default();
+        let hash = detail.hash;
+        let author = detail.author;
+        let lattice_runtime::ModelCondition::V1(causal_deps) = &detail.condition;
 
         let intention_sexpr = detail_to_sexpr_short(&detail);
 
@@ -1003,11 +892,7 @@ pub async fn cmd_history(
             graph_renderer::RenderEntry {
                 intention: intention_sexpr,
                 author,
-                hlc: intention
-                    .timestamp
-                    .as_ref()
-                    .map(|t| (t.wall_time << 16) | (t.counter as u64))
-                    .unwrap_or(0),
+                hlc: (detail.timestamp.wall_time << 16) | (detail.timestamp.counter as u64),
                 causal_deps: causal_deps.clone(),
                 is_merge: causal_deps.len() > 1,
             },

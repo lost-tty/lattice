@@ -6,7 +6,7 @@ import { showSubscribeStream, clearSubEvents, doUnsubscribe } from './actions.js
 import { sdk } from '../sdk.js';
 
 export async function loadStreams(storeId) {
-  const streams = (await sdk.api.dynamic.ListStreams({ id: storeId })).items || [];
+  const streams = (await sdk.api.dynamic.ListStreams({ store_id: storeId })).items || [];
   return html`<${StreamsView} streams=${streams} storeId=${storeId} />`;
 }
 

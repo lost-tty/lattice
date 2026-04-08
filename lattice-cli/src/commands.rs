@@ -83,6 +83,13 @@ pub enum LatticeCommand {
         #[command(subcommand)]
         subcommand: AppSubcommand,
     },
+    /// Call any gRPC method directly (debug tool)
+    #[command(next_help_heading = "Debug")]
+    Rpc {
+        /// Service.Method (e.g. StoreService.GetStatus) or just Method
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
     /// Exit the CLI
     #[command(next_help_heading = "General")]
     Quit,
@@ -439,6 +446,12 @@ pub async fn handle_command(
                 app_commands::cmd_app_toggle(backend, store_id, subdomain, enabled, writer).await
             }
         },
+
+        LatticeCommand::Rpc { args } => {
+            let method = args.first().cloned();
+            let field_args: Vec<String> = args.iter().skip(1).cloned().collect();
+            crate::rpc_command::cmd_rpc(backend, ctx.store_id, method, field_args, writer).await
+        }
 
         LatticeCommand::Quit => {
             // Stop all subscriptions before quitting

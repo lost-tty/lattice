@@ -15,6 +15,7 @@ pub fn summarize_intention_ops(
     use prost::Message;
 
     let Ok(universal) = UniversalOp::decode(ops) else {
+        tracing::debug!(hash = %hash, ops_len = ops.len(), ops_hex = %hex::encode(&ops[..ops.len().min(32)]), "Failed to decode UniversalOp");
         return vec![SExpr::raw(hash.0[..4].to_vec())];
     };
 

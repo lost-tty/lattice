@@ -14,8 +14,12 @@ default = ["web"]
 web = ["lattice-runtime/web"]
 
 [dependencies]
+lattice-api = { workspace = true }
 lattice-runtime = { workspace = true }
+tonic = "0.14"
+http = "1"
 rustyline-async = "0.4"
+bytes = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

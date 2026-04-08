@@ -118,18 +118,46 @@ use prost_reflect::{DynamicMessage, ReflectMessage, Value};
 /// to the natural SExpr variant, and repeated fields become nested lists.
 pub fn dynamic_message_to_sexpr(msg: &DynamicMessage) -> SExpr {
     let desc = msg.descriptor();
-    let fields: Vec<_> = desc.fields().collect();
 
-    if fields.is_empty() {
+    // Include all fields — oneof fields only if set, regular fields always
+    // (proto3 defaults like false/0/"" are rendered explicitly for consistency)
+    let active_fields: Vec<_> = desc
+        .fields()
+        .filter(|f| f.containing_oneof().is_none() || msg.has_field(f))
+        .collect();
+
+    if active_fields.is_empty() {
         return SExpr::sym("ok");
     }
 
-    let mut items: Vec<SExpr> = vec![SExpr::sym(desc.name())];
-    for field in &fields {
-        if let Some(value) = msg.get_field_by_name(field.name()) {
-            let val_sexpr = dynamic_value_to_sexpr(value.as_ref());
-            items.push(SExpr::list(vec![SExpr::sym(field.name()), val_sexpr]));
+    // Transparent wrapper detection:
+    // 1. Pure oneof wrapper (e.g., SExpr) — render just the value
+    // 2. Single repeated field wrapper (e.g., SExprList) — render as list
+    let set_fields: Vec<_> = active_fields
+        .iter()
+        .filter(|f| msg.has_field(f) || f.is_list())
+        .collect();
+    if set_fields.len() == 1 {
+        let field = set_fields[0];
+        if field.containing_oneof().is_some() {
+            let value = msg.get_field(field);
+            // Use the field name to distinguish symbol vs string for oneof variants
+            return match (field.name(), value.as_ref()) {
+                ("symbol", Value::String(s)) => SExpr::sym(s),
+                ("raw", Value::Bytes(b)) => SExpr::raw(b.to_vec()),
+                _ => dynamic_value_to_sexpr(value.as_ref()),
+            };
         }
+        if field.is_list() {
+            return dynamic_value_to_sexpr(msg.get_field(field).as_ref());
+        }
+    }
+
+    let mut items: Vec<SExpr> = vec![SExpr::sym(desc.name())];
+    for field in &active_fields {
+        let value = msg.get_field(field);
+        let val_sexpr = dynamic_value_to_sexpr(value.as_ref());
+        items.push(SExpr::list(vec![SExpr::sym(field.name()), val_sexpr]));
     }
     SExpr::list(items)
 }

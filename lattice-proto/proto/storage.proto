@@ -55,14 +55,14 @@ message UniversalOp {
     }
 }
 
-// Genesis intention payload -- the very first intention in a store.
+// Genesis intention payload — the very first intention in a store.
 // The blake3(borsh(intention)) of the genesis intention becomes the
 // store's cryptographic identity (replacing UUIDs in a future step).
-// The state machine never processes this -- SystemLayer writes the
+// The state machine never processes this — SystemLayer writes the
 // genesis hash to TABLE_META and skips routing.
 message GenesisOp {
     string store_type = 1;  // e.g. "core:rootstore", "core:kvstore"
-    uint32 nonce = 2;       // random -- ensures unique genesis hash
+    uint32 nonce = 2;       // random — ensures unique genesis hash
 }
 
 message SystemOp {

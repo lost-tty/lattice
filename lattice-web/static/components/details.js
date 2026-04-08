@@ -5,7 +5,7 @@ import { doSync, doInvite } from './actions.js';
 import { sdk } from '../sdk.js';
 
 export async function loadDetails(storeId) {
-  const sid = { id: storeId };
+  const sid = { store_id: storeId };
   const [details, meta, peerStrategyResp] = await Promise.all([
     sdk.api.store.GetDetails(sid),
     sdk.api.store.GetStatus(sid),

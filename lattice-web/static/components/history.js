@@ -20,7 +20,7 @@ function sexprList(items) { return { value: 'list', list: { items } }; }
 async function buildAuthorNames(storeId) {
   const names = new Map();
   try {
-    const peers = (await sdk.api.store.ListPeers({ id: storeId })).items || [];
+    const peers = (await sdk.api.store.ListPeers({ store_id: storeId })).items || [];
     for (const p of peers) {
       if (p.name) names.set(hex(p.public_key), p.name);
     }
@@ -77,7 +77,7 @@ async function fetchHistoryLayout(storeId) {
       causalDeps,
       isMerge: causalDeps.length > 1,
       intention: i,
-      ops: resp.ops || [],
+      ops: i.ops || [],
     });
   }
 

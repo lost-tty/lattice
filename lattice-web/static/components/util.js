@@ -78,7 +78,16 @@ function ppSExpr(sexpr, depth) {
 
 export function fmtFieldValue(fld) {
   if (Array.isArray(fld.value)) {
-    return html`<span class="sexpr-block">${ppSExpr(fieldsToSExpr(fld.value), 0)}</span>`;
+    // repeated message → nested field arrays → render as S-expr
+    if (fld.value.length > 0 && Array.isArray(fld.value[0])) {
+      return html`<span class="sexpr-block">${ppSExpr(fieldsToSExpr(fld.value), 0)}</span>`;
+    }
+    // repeated scalar (bytes, string, etc.) → render as list
+    return fld.value.map(v => String(v)).join(', ');
+  }
+  if (fld.value instanceof Uint8Array) {
+    try { return new TextDecoder().decode(fld.value); }
+    catch { return hex(fld.value); }
   }
   return String(fld.value);
 }
@@ -90,7 +99,19 @@ export function tryRenderTable(fields) {
   const itemsField = fields.find(f => f.name === 'items' && f.type === 'repeated');
   if (!itemsField || !Array.isArray(itemsField.value)) return null;
   const rows = itemsField.value;
-  if (rows.length === 0 || !rows.every(item => Array.isArray(item))) return null;
+  if (rows.length === 0) return null;
+
+  // repeated scalar (bytes, string) → single-column table
+  if (!Array.isArray(rows[0])) {
+    return html`
+      <table class="data">
+        <tr><th>VALUE</th></tr>
+        ${rows.map(v => html`<tr><td class="mono">${String(v)}</td></tr>`)}
+      </table>
+      <div class="muted">(${rows.length} items)</div>`;
+  }
+
+  if (!rows.every(item => Array.isArray(item))) return null;
 
   const headers = rows[0].map(f => f.name);
   for (const row of rows) {
@@ -161,15 +182,12 @@ export function fmtOps(ops) {
 // Extract unique intention hashes from witness log entries.
 // Returns [{ hex, bytes }] — deduped, order-preserving.
 export function extractIntentionHashes(entries) {
-  const WitnessContent = sdk.proto.lookup('lattice.weaver.WitnessContent');
   const seen = new Set();
   const result = [];
   for (const w of entries) {
-    if (!w.content || w.content.length === 0) continue;
-    const wc = WitnessContent.decode(w.content);
-    if (wc.intention_hash && wc.intention_hash.length > 0) {
-      const h = hex(wc.intention_hash);
-      if (!seen.has(h)) { seen.add(h); result.push({ hex: h, bytes: wc.intention_hash }); }
+    if (w.intention_hash && w.intention_hash.length > 0) {
+      const h = hex(w.intention_hash);
+      if (!seen.has(h)) { seen.add(h); result.push({ hex: h, bytes: w.intention_hash }); }
     }
   }
   return result;

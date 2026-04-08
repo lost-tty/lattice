@@ -52,7 +52,7 @@ fn extract_store_id(method: &str, payload: &[u8]) -> Option<uuid::Uuid> {
         "Exec" => ExecRequest::decode(payload).ok().map(|r| r.store_id),
         "Subscribe" => SubscribeRequest::decode(payload).ok().map(|r| r.store_id),
         "GetDescriptor" | "ListMethods" | "ListStreams" => {
-            StoreId::decode(payload).ok().map(|r| r.id)
+            StoreId::decode(payload).ok().map(|r| r.store_id)
         }
         _ => None,
     }?;
@@ -253,7 +253,7 @@ mod tests {
 
     fn make_store_id_payload(uuid: uuid::Uuid) -> Vec<u8> {
         StoreId {
-            id: uuid.as_bytes().to_vec(),
+            store_id: uuid.as_bytes().to_vec(),
         }
         .encode_to_vec()
     }

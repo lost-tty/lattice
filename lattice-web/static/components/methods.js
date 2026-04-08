@@ -4,7 +4,7 @@ import * as Schema from '../schema.js';
 import { sdk } from '../sdk.js';
 
 export async function loadMethods(storeId) {
-  const methods = (await sdk.api.dynamic.ListMethods({ id: storeId })).items || [];
+  const methods = (await sdk.api.dynamic.ListMethods({ store_id: storeId })).items || [];
   const schema = await Schema.getSchema(storeId);
   return html`<${MethodsView} methods=${methods} schema=${schema} storeId=${storeId} />`;
 }

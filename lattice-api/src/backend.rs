@@ -15,7 +15,6 @@ pub use crate::proto::{
     JoinFailedEvent,
     NodeStatus,
     PeerInfo,
-    SignedIntention,
     StoreDetails,
     StoreMeta,
     // Event types - inner enum for consumer matching
@@ -27,9 +26,13 @@ pub use crate::proto::{
 };
 pub use lattice_model::SExpr;
 
-/// An intention with its decoded operations.
+/// An intention with its decoded operations (mirrors proto::Intention).
 pub struct IntentionDetail {
-    pub intention: SignedIntention,
+    pub hash: lattice_model::types::Hash,
+    pub author: lattice_model::types::PubKey,
+    pub timestamp: lattice_model::hlc::HLC,
+    pub store_prev: lattice_model::types::Hash,
+    pub condition: lattice_model::weaver::Condition,
     pub ops: Vec<SExpr>,
 }
 

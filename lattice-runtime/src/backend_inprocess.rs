@@ -5,12 +5,12 @@
 use crate::backend::*;
 use crate::NetworkService;
 use crate::StoreHandle;
-use lattice_api::proto::{StoreMeta, StoreRef};
+use lattice_api::proto::{self, StoreMeta, StoreRef};
 use lattice_model::store_info::PeerStrategy;
 use lattice_model::types::{Hash, PubKey};
 
 use lattice_model::AppBinding;
-use lattice_model::weaver::FloatingIntention;
+
 use lattice_node::Node;
 use lattice_systemstore::SystemBatch;
 use prost_reflect::prost::Message;
@@ -425,10 +425,28 @@ impl InProcessBackend {
         })
     }
 
-    pub fn store_floating(&self, store_id: Uuid) -> AsyncResult<'_, Vec<FloatingIntention>> {
+    pub fn store_floating(&self, store_id: Uuid) -> AsyncResult<'_, Vec<proto::FloatingIntention>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
-            Ok(store.as_inspector().floating_intentions().await)
+            let floating = store.as_inspector().floating_intentions().await;
+            let dispatcher = store.as_dispatcher();
+            Ok(floating.into_iter().map(|fi| {
+                let hash = fi.signed.intention.hash();
+                let ops = crate::ops_summary::summarize_intention_ops(
+                    &fi.signed.intention.ops, dispatcher.as_ref(), &hash,
+                );
+                proto::FloatingIntention {
+                    intention: Some(proto::Intention {
+                        hash: hash.to_vec(),
+                        author: fi.signed.intention.author.to_vec(),
+                        timestamp: Some(fi.signed.intention.timestamp.into()),
+                        store_prev: fi.signed.intention.store_prev.to_vec(),
+                        condition: Some(fi.signed.intention.condition.into()),
+                        ops: ops.into_iter().map(Into::into).collect(),
+                    }),
+                    received_at: fi.received_at,
+                }
+            }).collect())
         })
     }
 
@@ -454,7 +472,11 @@ impl InProcessBackend {
                         &hash,
                     );
                     IntentionDetail {
-                        intention: si.into(),
+                        hash,
+                        author: si.intention.author,
+                        timestamp: si.intention.timestamp,
+                        store_prev: si.intention.store_prev,
+                        condition: si.intention.condition,
                         ops,
                     }
                 })

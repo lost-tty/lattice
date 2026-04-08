@@ -219,7 +219,7 @@ fn try_render_table(
         _ => return None,
     };
 
-    if rows.is_empty() {
+    if rows.len() < 2 {
         return None;
     }
 
@@ -489,6 +489,7 @@ mod tests {
 
     #[test]
     fn table_renders_for_single_row() {
+        // A single row should NOT render as a table (minimum 2 rows)
         let expr = SExpr::list(vec![
             SExpr::sym("items"),
             SExpr::list(vec![
@@ -500,17 +501,12 @@ mod tests {
 
         let rendered = render_sexpr_pretty_colored(&expr, 8);
         let plain = strip_ansi(&rendered);
-        let lines: Vec<&str> = plain.lines().collect();
-        assert_eq!(
-            lines.len(),
-            3,
-            "expected 3 lines: header, row, footer: {:?}",
-            lines
+        // Should render as nested S-expression, not a table
+        assert!(
+            !plain.contains("KEY"),
+            "single row should not render as table"
         );
-        assert!(lines[0].contains("KEY"), "header should contain KEY");
-        assert!(lines[0].contains("VALUE"), "header should contain VALUE");
-        assert!(lines[1].contains("\"a\""), "row should contain key");
-        assert!(lines[2].contains("(1 items)"), "footer should show count");
+        assert!(plain.contains("\"a\""), "value should be present");
     }
 
     #[test]

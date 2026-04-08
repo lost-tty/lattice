@@ -62,7 +62,7 @@ impl DynamicStoreService for InProcessBackend {
         &self,
         request: Request<StoreId>,
     ) -> Result<Response<DescriptorResponse>, Status> {
-        let store_id = parse_uuid(&request.into_inner().id)?;
+        let store_id = parse_uuid(&request.into_inner().store_id)?;
         self
             .store_get_descriptor(store_id)
             .await
@@ -79,7 +79,7 @@ impl DynamicStoreService for InProcessBackend {
         &self,
         request: Request<StoreId>,
     ) -> Result<Response<MethodList>, Status> {
-        let store_id = parse_uuid(&request.into_inner().id)?;
+        let store_id = parse_uuid(&request.into_inner().store_id)?;
         self
             .store_list_methods(store_id)
             .await
@@ -94,7 +94,7 @@ impl DynamicStoreService for InProcessBackend {
         &self,
         request: Request<StoreId>,
     ) -> Result<Response<StreamList>, Status> {
-        let store_id = parse_uuid(&request.into_inner().id)?;
+        let store_id = parse_uuid(&request.into_inner().store_id)?;
         self
             .store_list_streams(store_id)
             .await

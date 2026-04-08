@@ -7,6 +7,7 @@ mod display_helpers;
 mod graph_renderer;
 mod node_commands;
 mod peer_commands;
+mod rpc_command;
 mod store_commands;
 mod subscriptions;
 mod tracing_writer;
@@ -152,7 +153,7 @@ async fn dispatch_command(
     DispatchResult::Continue
 }
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "lattice", about = "Lattice — local-first mesh platform", version)]
@@ -178,6 +179,31 @@ struct CliArgs {
     /// Verbose logging (-v for debug, -vv for trace)
     #[arg(long, short, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Direct subcommand (e.g. `lattice rpc list`)
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+enum CliCommand {
+    /// Call any gRPC or store method
+    #[command(after_long_help = "\
+Examples:
+  lattice rpc                              List all methods
+  lattice rpc list                         List root stores
+  lattice rpc list af878c11...             Sub-stores of parent
+  lattice rpc -s 183bae1a Read 5           Read last 5 log entries
+  lattice rpc -s 183bae1a Append \"hello\"   Append to log store
+  lattice rpc -s af878c11 ListPeers        List peers")]
+    Rpc {
+        /// Store UUID context
+        #[arg(short, long)]
+        store: Option<String>,
+        /// Method name + positional field arguments
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
 }
 
 impl CliArgs {
@@ -203,12 +229,40 @@ impl CliArgs {
 async fn main() {
     let args = CliArgs::parse();
 
-    if args.daemon {
+    if let Some(cmd) = args.command {
+        run_oneshot(cmd).await;
+    } else if args.daemon {
         run_headless_daemon(&args).await;
     } else if args.embedded {
         run_embedded_mode(&args).await;
     } else {
         run_rpc_client().await;
+    }
+}
+
+/// One-shot mode: connect to daemon, run a single command, print to stdout, exit.
+async fn run_oneshot(cmd: CliCommand) {
+    let backend = match lattice_runtime::RpcClient::connect_default().await {
+        Ok(b) => std::sync::Arc::new(b),
+        Err(e) => {
+            eprintln!("Cannot connect to daemon: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    match cmd {
+        CliCommand::Rpc { store, args } => {
+            let store_id = store.as_ref().and_then(|s| uuid::Uuid::parse_str(s).ok());
+            let method = args.first().cloned();
+            let field_args: Vec<String> = args.into_iter().skip(1).collect();
+            match crate::rpc_command::cmd_rpc_exec(&backend, store_id, method, field_args).await {
+                Ok(output) => println!("{}", output),
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 

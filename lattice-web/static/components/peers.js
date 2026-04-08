@@ -4,7 +4,7 @@ import { doRevokePeer } from './actions.js';
 import { sdk } from '../sdk.js';
 
 export async function loadPeers(storeId) {
-  const peers = (await sdk.api.store.ListPeers({ id: storeId })).items || [];
+  const peers = (await sdk.api.store.ListPeers({ store_id: storeId })).items || [];
   return html`<${PeersView} peers=${peers} storeId=${storeId} />`;
 }
 

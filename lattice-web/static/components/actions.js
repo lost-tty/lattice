@@ -13,14 +13,14 @@ import { sdk } from '../sdk.js';
 
 export async function doSync(storeId) {
   try {
-    await sdk.api.store.Sync({ id: storeId });
+    await sdk.api.store.Sync({ store_id: storeId });
     toast('Sync initiated', 'ok');
   } catch (e) { toast('Sync error: ' + e.message, 'err'); }
 }
 
 export async function doInvite(storeId) {
   try {
-    const resp = await sdk.api.store.Invite({ id: storeId });
+    const resp = await sdk.api.store.Invite({ store_id: storeId });
     showModal('invite', { token: resp.token });
   } catch (e) { toast('Invite error: ' + e.message, 'err'); }
 }

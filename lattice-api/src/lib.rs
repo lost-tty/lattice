@@ -57,18 +57,15 @@ impl From<lattice_model::weaver::Condition> for proto::Condition {
     }
 }
 
-impl From<lattice_model::weaver::SignedIntention> for proto::SignedIntention {
-    fn from(s: lattice_model::weaver::SignedIntention) -> Self {
-        let hash = s.intention.hash();
-        proto::SignedIntention {
-            hash: hash.to_vec(),
-            author: s.intention.author.to_vec(),
-            signature: s.signature.0.to_vec(),
-            timestamp: Some(s.intention.timestamp.into()),
-            store_id: s.intention.store_id.as_bytes().to_vec(),
-            store_prev: s.intention.store_prev.to_vec(),
-            condition: Some(s.intention.condition.into()),
-            ops: s.intention.ops,
+impl From<crate::backend::IntentionDetail> for proto::Intention {
+    fn from(d: crate::backend::IntentionDetail) -> Self {
+        proto::Intention {
+            hash: d.hash.to_vec(),
+            author: d.author.to_vec(),
+            timestamp: Some(d.timestamp.into()),
+            store_prev: d.store_prev.to_vec(),
+            condition: Some(d.condition.into()),
+            ops: d.ops.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -129,74 +126,38 @@ impl From<proto::Condition> for lattice_model::weaver::Condition {
     }
 }
 
-impl From<proto::SignedIntention> for lattice_model::weaver::SignedIntention {
-    fn from(p: proto::SignedIntention) -> Self {
-        let author = lattice_model::types::PubKey(p.author.try_into().unwrap_or([0u8; 32]));
-        let timestamp = p
-            .timestamp
-            .map(Into::into)
-            .unwrap_or(lattice_model::hlc::HLC::new(0, 0));
-        let store_id = uuid::Uuid::from_slice(&p.store_id).unwrap_or_default();
-        let store_prev = lattice_model::types::Hash::try_from(p.store_prev.as_slice())
-            .unwrap_or(lattice_model::types::Hash::ZERO);
-        let condition = p
-            .condition
-            .map(Into::into)
-            .unwrap_or(lattice_model::weaver::Condition::V1(vec![]));
-        let sig_bytes: [u8; 64] = p.signature.try_into().unwrap_or([0u8; 64]);
-
-        lattice_model::weaver::SignedIntention {
-            intention: lattice_model::weaver::Intention {
-                author,
-                timestamp,
-                store_id,
-                store_prev,
-                condition,
-                ops: p.ops,
-            },
-            signature: lattice_model::types::Signature(sig_bytes),
+impl From<proto::Intention> for crate::backend::IntentionDetail {
+    fn from(p: proto::Intention) -> Self {
+        crate::backend::IntentionDetail {
+            hash: lattice_model::types::Hash::try_from(p.hash.as_slice())
+                .unwrap_or(lattice_model::types::Hash::ZERO),
+            author: lattice_model::types::PubKey(p.author.try_into().unwrap_or([0u8; 32])),
+            timestamp: p.timestamp.map(Into::into).unwrap_or(lattice_model::hlc::HLC::new(0, 0)),
+            store_prev: lattice_model::types::Hash::try_from(p.store_prev.as_slice())
+                .unwrap_or(lattice_model::types::Hash::ZERO),
+            condition: p.condition.map(Into::into).unwrap_or(lattice_model::weaver::Condition::V1(vec![])),
+            ops: p.ops.into_iter().map(Into::into).collect(),
         }
     }
 }
 
-impl From<proto::FloatingIntention> for lattice_model::weaver::FloatingIntention {
-    fn from(p: proto::FloatingIntention) -> Self {
-        lattice_model::weaver::FloatingIntention {
-            signed: p.intention.map(Into::into).unwrap_or_else(|| {
-                lattice_model::weaver::SignedIntention {
-                    intention: lattice_model::weaver::Intention {
-                        author: lattice_model::types::PubKey([0u8; 32]),
-                        timestamp: lattice_model::hlc::HLC::new(0, 0),
-                        store_id: uuid::Uuid::nil(),
-                        store_prev: lattice_model::types::Hash::ZERO,
-                        condition: lattice_model::weaver::Condition::V1(vec![]),
-                        ops: vec![],
-                    },
-                    signature: lattice_model::types::Signature([0u8; 64]),
-                }
-            }),
-            received_at: p.received_at,
-        }
-    }
-}
 
-impl From<lattice_model::weaver::FloatingIntention> for proto::FloatingIntention {
-    fn from(fi: lattice_model::weaver::FloatingIntention) -> Self {
-        proto::FloatingIntention {
-            intention: Some(fi.signed.into()),
-            received_at: fi.received_at,
-        }
-    }
-}
 
-impl From<lattice_model::weaver::WitnessEntry> for proto::WitnessLogEntry {
-    fn from(e: lattice_model::weaver::WitnessEntry) -> Self {
-        proto::WitnessLogEntry {
-            seq: e.seq,
-            hash: e.content_hash.to_vec(),
-            content: e.content,
-            signature: e.signature,
-        }
+impl TryFrom<lattice_model::weaver::WitnessEntry> for proto::WitnessLogEntry {
+    type Error = prost::DecodeError;
+
+    fn try_from(entry: lattice_model::weaver::WitnessEntry) -> Result<Self, Self::Error> {
+        let wc = <lattice_proto::weaver::WitnessContent as prost::Message>::decode(
+            entry.content.as_slice(),
+        )?;
+        Ok(proto::WitnessLogEntry {
+            seq: entry.seq,
+            hash: entry.content_hash.to_vec(),
+            signature: entry.signature,
+            intention_hash: wc.intention_hash,
+            wall_time: wc.wall_time,
+            prev_hash: wc.prev_hash,
+        })
     }
 }
 
@@ -204,10 +165,17 @@ impl From<proto::WitnessLogEntry> for lattice_model::weaver::WitnessEntry {
     fn from(e: proto::WitnessLogEntry) -> Self {
         let content_hash = lattice_model::types::Hash::try_from(e.hash.as_slice())
             .unwrap_or(lattice_model::types::Hash::ZERO);
+        // Re-encode WitnessContent from the resolved fields
+        let wc = lattice_proto::weaver::WitnessContent {
+            store_id: vec![],
+            intention_hash: e.intention_hash,
+            wall_time: e.wall_time,
+            prev_hash: e.prev_hash,
+        };
         lattice_model::weaver::WitnessEntry {
             seq: e.seq,
             content_hash,
-            content: e.content,
+            content: prost::Message::encode_to_vec(&wc),
             signature: e.signature,
         }
     }
@@ -368,7 +336,7 @@ mod tests {
     use super::proto;
     use lattice_model::hlc::HLC;
     use lattice_model::types::Hash;
-    use lattice_model::weaver::{Condition, Intention, SignedIntention};
+    use lattice_model::weaver::Condition;
 
     #[test]
     fn hlc_to_proto_preserves_fields() {
@@ -392,39 +360,35 @@ mod tests {
     }
 
     #[test]
-    fn signed_intention_to_proto_roundtrips() {
-        let identity = lattice_model::NodeIdentity::generate();
-        let pk = identity.public_key();
-        let store_id = uuid::Uuid::from_bytes([0xBB; 16]);
+    fn intention_detail_to_proto_roundtrips() {
+        use crate::backend::IntentionDetail;
+        use lattice_model::SExpr;
+
+        let pk = lattice_model::types::PubKey([0xAA; 32]);
         let prev = Hash([0xCC; 32]);
         let dep = Hash([0xDD; 32]);
+        let hash = Hash([0xEE; 32]);
 
-        let intention = Intention {
+        let detail = IntentionDetail {
+            hash,
             author: pk,
             timestamp: HLC::new(999, 7),
-            store_id,
             store_prev: prev,
             condition: Condition::v1(vec![dep]),
-            ops: vec![1, 2, 3, 4],
+            ops: vec![SExpr::sym("test-op")],
         };
-        let hash = intention.hash();
-        let signed = SignedIntention::sign(intention, &identity);
 
-        let p: proto::SignedIntention = signed.into();
+        let p: proto::Intention = detail.into();
 
         assert_eq!(p.hash, hash.to_vec(), "hash");
         assert_eq!(p.author, pk.0.to_vec(), "author");
-        assert_eq!(p.signature.len(), 64, "signature length");
-        assert_eq!(p.store_id, store_id.as_bytes().to_vec(), "store_id");
         assert_eq!(p.store_prev, prev.to_vec(), "store_prev");
-        assert_eq!(p.ops, vec![1, 2, 3, 4], "ops");
+        assert_eq!(p.ops.len(), 1, "ops count");
 
-        // HLC
         let ts = p.timestamp.unwrap();
         assert_eq!(ts.wall_time, 999);
         assert_eq!(ts.counter, 7);
 
-        // Condition
         let cond = p.condition.unwrap();
         match cond.kind.unwrap() {
             proto::condition::Kind::V1(deps) => {

@@ -13,11 +13,11 @@ pub use lattice_api::backend::{
 // Re-export proto types for consumers
 pub use lattice_api::proto::{
     condition, AuthorState, CausalDeps, Condition, Hlc, NodeStatus, PeerInfo, SExpr as ProtoSExpr,
-    SignedIntention, StoreDetails, StoreMeta, StoreRef, SyncResult, WitnessLogEntry,
+    StoreDetails, StoreMeta, StoreRef, SyncResult, WitnessLogEntry,
 };
 
 // Re-export weaver proto types for CLI access (avoids lattice-proto dependency)
 pub use lattice_proto::weaver::WitnessContent;
 
-// Re-export model type used in backend trait
-pub use lattice_model::weaver::WitnessEntry;
+// Re-export model types used in backend trait
+pub use lattice_model::weaver::{Condition as ModelCondition, WitnessEntry};

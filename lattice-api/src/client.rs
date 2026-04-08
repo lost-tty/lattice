@@ -13,7 +13,7 @@ use crate::proto::{
 };
 use hyper_util::rt::TokioIo;
 use lattice_model::types::Hash;
-use lattice_model::weaver::{FloatingIntention, WitnessEntry};
+use lattice_model::weaver::WitnessEntry;
 use std::collections::HashMap;
 use std::path::Path;
 use tokio::net::UnixStream;
@@ -28,20 +28,20 @@ use uuid::Uuid;
 macro_rules! rpc_store {
     ($self:ident, $svc:ident . $method:ident, $id:expr) => {{
         let mut c = $self.$svc.clone();
-        Ok(c.$method(StoreId { id: $id.as_bytes().to_vec() }).await?.into_inner())
+        Ok(c.$method(StoreId { store_id: $id.as_bytes().to_vec() }).await?.into_inner())
     }};
     ($self:ident, $svc:ident . $method:ident, $id:expr, . $field:ident) => {{
         let mut c = $self.$svc.clone();
-        Ok(c.$method(StoreId { id: $id.as_bytes().to_vec() }).await?.into_inner().$field)
+        Ok(c.$method(StoreId { store_id: $id.as_bytes().to_vec() }).await?.into_inner().$field)
     }};
     ($self:ident, $svc:ident . $method:ident, $id:expr, .items into) => {{
         let mut c = $self.$svc.clone();
-        Ok(c.$method(StoreId { id: $id.as_bytes().to_vec() }).await?.into_inner()
+        Ok(c.$method(StoreId { store_id: $id.as_bytes().to_vec() }).await?.into_inner()
             .items.into_iter().map(Into::into).collect())
     }};
     ($self:ident, $svc:ident . $method:ident, $id:expr, ()) => {{
         let mut c = $self.$svc.clone();
-        c.$method(StoreId { id: $id.as_bytes().to_vec() }).await?; Ok(())
+        c.$method(StoreId { store_id: $id.as_bytes().to_vec() }).await?; Ok(())
     }};
 }
 
@@ -49,6 +49,7 @@ macro_rules! rpc_store {
 
 #[derive(Clone)]
 pub struct RpcClient {
+    pub channel: Channel,
     pub node: NodeServiceClient<Channel>,
     pub store: StoreServiceClient<Channel>,
     pub dynamic: DynamicStoreServiceClient<Channel>,
@@ -61,7 +62,8 @@ impl RpcClient {
         Self {
             node: NodeServiceClient::new(channel.clone()),
             store: StoreServiceClient::new(channel.clone()),
-            dynamic: DynamicStoreServiceClient::new(channel),
+            dynamic: DynamicStoreServiceClient::new(channel.clone()),
+            channel,
             node_id,
             descriptor_cache: std::sync::Arc::new(Mutex::new(HashMap::new())),
         }
@@ -164,8 +166,8 @@ impl RpcClient {
     pub fn store_peers(&self, id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>> {
         Box::pin(async move { rpc_store!(self, store.list_peers, id, .items) })
     }
-    pub fn store_debug(&self, id: Uuid) -> AsyncResult<'_, Vec<AuthorState>> {
-        Box::pin(async move { rpc_store!(self, store.debug, id, .items) })
+    pub fn store_author_tips(&self, id: Uuid) -> AsyncResult<'_, Vec<AuthorState>> {
+        Box::pin(async move { rpc_store!(self, store.get_author_tips, id, .items) })
     }
     pub fn store_get_name(&self, id: Uuid) -> AsyncResult<'_, Option<String>> {
         Box::pin(async move { rpc_store!(self, store.get_name, id, .name) })
@@ -179,8 +181,8 @@ impl RpcClient {
     pub fn store_rebuild(&self, id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move { rpc_store!(self, store.rebuild, id, ()) })
     }
-    pub fn store_floating(&self, id: Uuid) -> AsyncResult<'_, Vec<FloatingIntention>> {
-        Box::pin(async move { rpc_store!(self, store.floating_intentions, id, .items into) })
+    pub fn store_floating(&self, id: Uuid) -> AsyncResult<'_, Vec<crate::proto::FloatingIntention>> {
+        Box::pin(async move { rpc_store!(self, store.floating_intentions, id, .items) })
     }
     pub fn store_list_methods(&self, id: Uuid) -> AsyncResult<'_, Vec<MethodInfo>> {
         Box::pin(async move { rpc_store!(self, dynamic.list_methods, id, .items into) })
@@ -215,7 +217,7 @@ impl RpcClient {
 
     pub fn store_peer_invite(&self, id: Uuid) -> AsyncResult<'_, String> {
         Box::pin(async move {
-            Ok(self.store.clone().invite(StoreId { id: id.as_bytes().to_vec() }).await?.into_inner().token)
+            Ok(self.store.clone().invite(StoreId { store_id: id.as_bytes().to_vec() }).await?.into_inner().token)
         })
     }
 
@@ -259,9 +261,10 @@ impl RpcClient {
             match self.store.clone().get_intention(GetIntentionRequest {
                 store_id: id.as_bytes().to_vec(), hash_prefix: prefix,
             }).await {
-                Ok(r) => { let r = r.into_inner(); Ok(vec![IntentionDetail {
-                    intention: r.intention.unwrap(), ops: r.ops.into_iter().map(Into::into).collect(),
-                }]) }
+                Ok(r) => {
+                    let r = r.into_inner();
+                    Ok(r.intention.into_iter().map(|i| i.into()).collect())
+                }
                 Err(e) if e.code() == tonic::Code::NotFound => Ok(vec![]),
                 Err(e) => Err(e.into()),
             }
@@ -284,7 +287,7 @@ impl RpcClient {
 
     pub fn store_system_list(&self, id: Uuid) -> AsyncResult<'_, Vec<(String, Vec<u8>)>> {
         Box::pin(async move {
-            Ok(self.store.clone().system_list(StoreId { id: id.as_bytes().to_vec() })
+            Ok(self.store.clone().system_list(StoreId { store_id: id.as_bytes().to_vec() })
                 .await?.into_inner().items.into_iter().map(|e| (e.key, e.value)).collect())
         })
     }
@@ -311,7 +314,7 @@ impl RpcClient {
     pub fn store_get_descriptor(&self, id: Uuid) -> AsyncResult<'_, (Vec<u8>, String)> {
         Box::pin(async move {
             { let c = self.descriptor_cache.lock().await; if let Some(e) = c.get(&id) { return Ok(e.clone()); } }
-            let desc = self.dynamic.clone().get_descriptor(StoreId { id: id.as_bytes().to_vec() }).await?.into_inner();
+            let desc = self.dynamic.clone().get_descriptor(StoreId { store_id: id.as_bytes().to_vec() }).await?.into_inner();
             let result = (desc.file_descriptor_set, desc.service_name);
             { self.descriptor_cache.lock().await.insert(id, result.clone()); }
             Ok(result)
@@ -320,7 +323,7 @@ impl RpcClient {
 
     pub fn store_list_streams(&self, id: Uuid) -> AsyncResult<'_, Vec<StreamDescriptor>> {
         Box::pin(async move {
-            Ok(self.dynamic.clone().list_streams(StoreId { id: id.as_bytes().to_vec() })
+            Ok(self.dynamic.clone().list_streams(StoreId { store_id: id.as_bytes().to_vec() })
                 .await?.into_inner().items.into_iter().map(|s| StreamDescriptor {
                     name: s.name, description: s.description,
                     param_schema: if s.param_schema.is_empty() { None } else { Some(s.param_schema) },

@@ -100,7 +100,7 @@ message RevokePeerRequest {
 // ============================================================================
 
 message StoreId {
-  bytes id = 1;
+  bytes store_id = 1;
 }
 
 message CreateStoreRequest {
@@ -164,10 +164,6 @@ message SyncResult {
   uint64 entries_received = 3;
 }
 
-message DebugInfo {
-  repeated AuthorState items = 1;
-}
-
 message WitnessLogRequest {
   bytes store_id = 1;
 }
@@ -188,26 +184,26 @@ message HLC {
   uint32 counter = 2;    // Logical counter for same-ms ordering
 }
 
-// Signed intention — structured API representation.
-// (Internal storage uses Borsh for deterministic hashing; this is the user-facing view.)
-message SignedIntention {
+// Intention — user-facing API representation.
+// Ops are resolved to S-expressions. No raw bytes or signatures.
+message Intention {
   bytes hash = 1;               // blake3 content hash (32 bytes)
   bytes author = 2;             // Ed25519 public key (32 bytes)
-  bytes signature = 3;          // Ed25519 signature (64 bytes)
   HLC timestamp = 4;            // Hybrid logical clock
-  bytes store_id = 5;           // Target store UUID (16 bytes)
   bytes store_prev = 6;         // Previous intention hash in author's chain
   Condition condition = 7;      // Causal dependency condition
-  bytes ops = 8;                // Opaque operation payload
+  repeated SExpr ops = 8;       // Resolved operations
 }
 
 // Transport wrapper: weaver.WitnessRecord + sequence number.
 // content/signature fields mirror weaver.proto WitnessRecord exactly.
 message WitnessLogEntry {
-  uint64 seq = 1;               // Witness sequence (apply order)
+  uint64 seq = 1;
+  bytes intention_hash = 2;     // blake3 of the witnessed intention
+  bytes signature = 3;
   bytes hash = 4;               // blake3(content) — the chain hash
-  bytes content = 2;            // protobuf-encoded WitnessContent
-  bytes signature = 3;          // Ed25519 signature over blake3(content)
+  uint64 wall_time = 5;         // Wall-clock time when witnessed (Unix ms)
+  bytes prev_hash = 6;          // Hash of previous witness entry (zeros for first)
 }
 
 // Structured s-expression for operation summaries.
@@ -230,7 +226,7 @@ message WitnessLogResponse {
 }
 
 message FloatingIntention {
-  SignedIntention intention = 1;
+  Intention intention = 1;
   uint64 received_at = 2;   // Wall-clock time when received (Unix ms)
 }
 
@@ -244,8 +240,7 @@ message GetIntentionRequest {
 }
 
 message GetIntentionResponse {
-  SignedIntention intention = 1;
-  repeated SExpr ops = 2;
+  Intention intention = 1;
 }
 
 message AuthorStateRequest {
