@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 // Re-export proto types directly (have UniFFI derives via lattice-api ffi feature)
 pub use lattice_api::proto::{
-    AuthorState, JoinResponse, NodeStatus, PeerInfo, StoreDetails, StoreMeta, StoreRef,
-    WitnessLogEntry,
+    AppBindingProto, AuthorState, JoinResponse, NodeStatus, PeerInfo, StoreDetails, StoreMeta,
+    StoreRef, WitnessLogEntry,
 };
 
 // FFI-compatible event type (uses Vec<u8> for IDs which UniFFI supports)
@@ -309,6 +309,45 @@ impl Lattice {
         *w = Some(rt);
         Ok(())
     }
+
+    /// Subscribe to app lifecycle events. Initial state is replayed as
+    /// `AppAvailable` events before live updates arrive.
+    ///
+    /// Not async — spawns bridge task on `self.rt` so tokio finds the reactor.
+    pub fn subscribe_apps(&self) -> Result<Arc<AppEventStream>, LatticeError> {
+        let r_guard = self.rt.block_on(self.runtime.read());
+        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+
+        let app_manager = r.node().app_manager().clone();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        self.rt.spawn(async move {
+            let (initial, mut bus) = app_manager.attach().await;
+            for event in initial {
+                if tx.send(event).is_err() {
+                    return;
+                }
+            }
+            loop {
+                match bus.recv().await {
+                    Ok(event) => {
+                        if tx.send(event).is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(lagged = n, "App event bridge lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        Ok(Arc::new(AppEventStream {
+            rx: Arc::new(tokio::sync::Mutex::new(rx)),
+        }))
+    }
+
 
     pub fn is_started(&self) -> bool {
         self.rt.block_on(self.runtime.read()).is_some()
@@ -849,6 +888,55 @@ impl StoreStream {
                 message: format!("Decode error: {}", e),
             })?;
         Ok(dynamic_message_to_reflect_value(&msg))
+    }
+}
+
+/// App lifecycle event delivered to FFI consumers.
+///
+/// Mirrors `lattice_node::AppEvent` but drops bundle bytes — clients only
+/// need a signal that a bundle changed, not the contents.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum FfiAppEvent {
+    /// An app is available to serve (new or updated binding).
+    AppAvailable { binding: AppBindingProto },
+    /// An app binding was removed or disabled.
+    AppRemoved { subdomain: String },
+    /// A new bundle was published for this app_id.
+    BundleChanged { app_id: String },
+    /// The bundle for this app_id was removed.
+    BundleRemoved { app_id: String },
+}
+
+impl From<lattice_runtime::AppEvent> for FfiAppEvent {
+    fn from(e: lattice_runtime::AppEvent) -> Self {
+        match e {
+            lattice_runtime::AppEvent::AppAvailable(binding) => FfiAppEvent::AppAvailable {
+                binding: binding.into(),
+            },
+            lattice_runtime::AppEvent::AppRemoved { subdomain } => {
+                FfiAppEvent::AppRemoved { subdomain }
+            }
+            lattice_runtime::AppEvent::BundleUpdated { app_id, .. } => {
+                FfiAppEvent::BundleChanged { app_id }
+            }
+            lattice_runtime::AppEvent::BundleRemoved { app_id } => {
+                FfiAppEvent::BundleRemoved { app_id }
+            }
+        }
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct AppEventStream {
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<lattice_runtime::AppEvent>>>,
+}
+
+#[uniffi::export]
+impl AppEventStream {
+    /// Async next() — returns None when the underlying node shuts down.
+    pub async fn next(&self) -> Option<FfiAppEvent> {
+        let mut rx = self.rx.lock().await;
+        rx.recv().await.map(Into::into)
     }
 }
 

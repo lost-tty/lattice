@@ -30,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "SExpr",
             "SExprList",
             "GetIntentionRequest",
+            "AppBindingProto",
         ];
 
         let mut config = config;
