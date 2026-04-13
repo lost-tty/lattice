@@ -430,10 +430,18 @@ impl Lattice {
         let r_guard = self.rt.block_on(self.runtime.read());
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         let id = Uuid::parse_str(&store_id)?;
-        self.rt
+        let entries = self
+            .rt
             .block_on(r.backend().store_witness_log(id))
-            .map(|entries| entries.into_iter().map(Into::into).collect())
-            .map_err(LatticeError::from_backend)
+            .map_err(LatticeError::from_backend)?;
+        entries
+            .into_iter()
+            .map(|e| {
+                WitnessLogEntry::try_from(e).map_err(|err| LatticeError::Internal {
+                    message: format!("Failed to decode witness entry: {}", err),
+                })
+            })
+            .collect()
     }
 
     pub fn store_peers(&self, store_id: String) -> Result<Vec<PeerInfo>, LatticeError> {
