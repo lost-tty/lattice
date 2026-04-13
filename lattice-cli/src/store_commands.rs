@@ -1106,9 +1106,15 @@ pub async fn cmd_dynamic_exec(
     let op_args = &args[1..];
 
     match lookup_operation_type(backend, store_id, operation).await {
-        Some(OperationType::Stream) => {
-            cmd_stream_subscribe(backend, store_id, operation, op_args, &ctx.registry, writer).await
-        }
+        Some(OperationType::Stream) => match &ctx.registry {
+            Some(r) => {
+                cmd_stream_subscribe(backend, store_id, operation, op_args, r, writer).await
+            }
+            None => {
+                let _ = writeln!(w, "Error: stream subscriptions are only available in the REPL.");
+                Ok(Continue)
+            }
+        },
         Some(OperationType::Command) => {
             cmd_dynamic_command(backend, store_id, operation, op_args, writer).await
         }

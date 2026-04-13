@@ -16,6 +16,7 @@ web = ["lattice-runtime/web"]
 [dependencies]
 lattice-api = { workspace = true }
 lattice-runtime = { workspace = true }
+lattice-rootstore = { workspace = true }
 tonic = "0.14"
 http = "1"
 rustyline-async = "0.4"

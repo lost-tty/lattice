@@ -5,12 +5,12 @@ use crate::{app_commands, node_commands, peer_commands, store_commands};
 use clap::{CommandFactory, Parser, Subcommand};
 use lattice_runtime::RpcClient;
 use rustyline_async::SharedWriter;
-use std::io::Write;
+use std::io::{self, Write};
 use std::sync::Arc;
 use uuid::Uuid;
 use CommandOutput::*;
 
-/// Macro for writing to SharedWriter with less boilerplate
+/// Macro for writing to a `Writer` with less boilerplate.
 #[macro_export]
 macro_rules! wout {
     ($writer:expr, $($arg:tt)*) => {{
@@ -20,8 +20,36 @@ macro_rules! wout {
     }}
 }
 
-/// Shared writer type for async output
-pub type Writer = SharedWriter;
+/// Output sink for command handlers. Clone-cheap so handlers can hold one by
+/// value and hand out `.clone()` to each `writeln!`. Covers REPL's async shared
+/// writer and a plain stdout for one-shot invocations.
+#[derive(Clone)]
+pub enum Writer {
+    Shared(SharedWriter),
+    Stdout,
+}
+
+impl Write for Writer {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Writer::Shared(w) => w.write(buf),
+            Writer::Stdout => io::stdout().lock().write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Writer::Shared(w) => w.flush(),
+            Writer::Stdout => io::stdout().lock().flush(),
+        }
+    }
+}
+
+impl From<SharedWriter> for Writer {
+    fn from(w: SharedWriter) -> Self {
+        Writer::Shared(w)
+    }
+}
 
 /// Output from a command
 #[derive(Debug, Clone)]
@@ -37,10 +65,12 @@ pub enum CommandOutput {
 /// Result type for commands
 pub type CmdResult = Result<CommandOutput, anyhow::Error>;
 
-/// Context for command dispatch
+/// Context for command dispatch. `registry` is only populated in REPL mode —
+/// handlers that manage subscription state error out gracefully when it's
+/// absent (e.g. under `lattice` one-shot invocation from a shell).
 pub struct CommandContext {
     pub store_id: Option<Uuid>,
-    pub registry: Arc<SubscriptionRegistry>,
+    pub registry: Option<Arc<SubscriptionRegistry>>,
 }
 
 #[derive(Parser)]
@@ -55,6 +85,10 @@ pub struct LatticeCli {
     pub command: LatticeCommand,
 }
 
+/// All CLI commands. Shared between the interactive REPL and `lattice <cmd>`
+/// one-shot invocations from a shell. Commands that depend on REPL session
+/// state (subscription registry, `quit`) check `CommandContext.registry` and
+/// surface a graceful error when it's absent.
 #[derive(Subcommand, Debug)]
 #[command(allow_external_subcommands = true)]
 pub enum LatticeCommand {
@@ -84,8 +118,18 @@ pub enum LatticeCommand {
         subcommand: AppSubcommand,
     },
     /// Call any gRPC method directly (debug tool)
-    #[command(next_help_heading = "Debug")]
+    #[command(next_help_heading = "Debug", after_long_help = "\
+Examples:
+  lattice rpc                              List all methods
+  lattice rpc list                         List root stores
+  lattice rpc list af878c11...             Sub-stores of parent
+  lattice rpc -s 183bae1a Read 5           Read last 5 log entries
+  lattice rpc -s 183bae1a Append \"hello\"   Append to log store
+  lattice rpc -s af878c11 ListPeers        List peers")]
     Rpc {
+        /// Store UUID context (overrides the REPL's currently-selected store)
+        #[arg(short, long)]
+        store: Option<String>,
         /// Service.Method (e.g. StoreService.GetStatus) or just Method
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -283,6 +327,15 @@ pub enum AppSubcommand {
         /// Subdomain of the app to disable
         subdomain: String,
     },
+    /// Upload a bundle (zip with manifest.toml) to a root store.
+    /// The app_id is taken from the bundle's manifest.
+    Upload {
+        /// Root store UUID to upload the bundle to
+        root_id: Uuid,
+        /// Path to the bundle file
+        #[arg(short = 'f', long = "file")]
+        file: std::path::PathBuf,
+    },
 }
 
 
@@ -315,6 +368,11 @@ async fn format_help(
     output
 }
 
+/// Single dispatcher for all commands. Called from both the REPL loop and
+/// `lattice <cmd>` one-shot invocations. Commands that require REPL session
+/// state (`Quit`'s subscription cleanup, `StoreSubcommand::Subs`/`Unsub`,
+/// stream subscriptions under `External`) check `ctx.registry` and error
+/// gracefully when it's absent.
 pub async fn handle_command(
     backend: &RpcClient,
     ctx: &CommandContext,
@@ -329,6 +387,20 @@ pub async fn handle_command(
             Ok(Continue)
         }
 
+        LatticeCommand::Quit => {
+            // Stop all subscriptions before quitting (REPL only).
+            if let Some(r) = &ctx.registry {
+                r.stop_all().await;
+            }
+            let mut w = writer.clone();
+            let _ = writeln!(w, "Goodbye!");
+            Ok(Quit)
+        }
+
+        LatticeCommand::External(args) => {
+            store_commands::cmd_dynamic_exec(backend, ctx, &args, writer).await
+        }
+
         LatticeCommand::Node { subcommand } => match subcommand {
             NodeSubcommand::Status => node_commands::cmd_status(backend, writer).await,
             NodeSubcommand::Meta => node_commands::cmd_meta(backend, writer).await,
@@ -340,7 +412,6 @@ pub async fn handle_command(
             }
         },
 
-        // Mesh command removed in favor of fractal stores
         LatticeCommand::Store { subcommand } => match subcommand {
             StoreSubcommand::Create { name, r#type, root } => {
                 let parent_id = if root { None } else { ctx.store_id };
@@ -406,10 +477,20 @@ pub async fn handle_command(
                 )
                 .await
             }
-            StoreSubcommand::Subs => store_commands::cmd_subs(&ctx.registry, writer),
-            StoreSubcommand::Unsub { target } => {
-                store_commands::cmd_unsub(&ctx.registry, &target, writer).await
-            }
+            StoreSubcommand::Subs => match &ctx.registry {
+                Some(r) => store_commands::cmd_subs(r, writer),
+                None => {
+                    wout!(writer, "Error: 'store subs' is only available in the REPL.");
+                    Ok(Continue)
+                }
+            },
+            StoreSubcommand::Unsub { target } => match &ctx.registry {
+                Some(r) => store_commands::cmd_unsub(r, &target, writer).await,
+                None => {
+                    wout!(writer, "Error: 'store unsub' is only available in the REPL.");
+                    Ok(Continue)
+                }
+            },
             StoreSubcommand::System { subcommand } => match subcommand {
                 SystemSubcommand::Show => {
                     store_commands::cmd_store_system_show(backend, ctx.store_id, writer).await
@@ -445,24 +526,19 @@ pub async fn handle_command(
                 let enabled = matches!(subcommand, AppSubcommand::Enable { .. });
                 app_commands::cmd_app_toggle(backend, store_id, subdomain, enabled, writer).await
             }
+            AppSubcommand::Upload { root_id, file } => {
+                app_commands::cmd_app_upload(backend, root_id, &file, writer).await
+            }
         },
 
-        LatticeCommand::Rpc { args } => {
+        LatticeCommand::Rpc { store, args } => {
+            let store_id = store
+                .as_ref()
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .or(ctx.store_id);
             let method = args.first().cloned();
             let field_args: Vec<String> = args.iter().skip(1).cloned().collect();
-            crate::rpc_command::cmd_rpc(backend, ctx.store_id, method, field_args, writer).await
-        }
-
-        LatticeCommand::Quit => {
-            // Stop all subscriptions before quitting
-            ctx.registry.stop_all().await;
-            let mut w = writer.clone();
-            let _ = writeln!(w, "Goodbye!");
-            Ok(Quit)
-        }
-
-        LatticeCommand::External(args) => {
-            store_commands::cmd_dynamic_exec(backend, ctx, &args, writer).await
+            crate::rpc_command::cmd_rpc(backend, store_id, method, field_args, writer).await
         }
     }
 }

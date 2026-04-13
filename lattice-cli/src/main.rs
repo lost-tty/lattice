@@ -57,7 +57,7 @@ macro_rules! wout {
 }
 
 /// Handle incoming node events - extracted for testability
-fn handle_node_event(event: NodeEvent, writer: &rustyline_async::SharedWriter) {
+fn handle_node_event(event: NodeEvent, writer: &commands::Writer) {
     match event {
         NodeEvent::StoreReady(e) => {
             if let Ok(uuid) = Uuid::from_slice(&e.store_id) {
@@ -102,7 +102,7 @@ async fn dispatch_command(
     backend: &Arc<RpcClient>,
     current_store: &Arc<RwLock<Option<Uuid>>>,
     registry: &Arc<subscriptions::SubscriptionRegistry>,
-    writer: &rustyline_async::SharedWriter,
+    writer: &commands::Writer,
 ) -> DispatchResult {
     use commands::{handle_command, LatticeCommand};
 
@@ -119,7 +119,7 @@ async fn dispatch_command(
         let store_id = *current_store.read().unwrap();
         CommandContext {
             store_id,
-            registry: registry.clone(),
+            registry: Some(registry.clone()),
         }
     };
 
@@ -141,11 +141,12 @@ async fn dispatch_command(
     } else {
         // Non-blocking: spawn in background
         let backend = backend.clone();
-        let writer = writer.clone();
+        let out = writer.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_command(&*backend, &ctx, cli, writer.clone()).await {
-                wout!(writer, "Error: {}", e);
+            if let Err(e) = handle_command(&*backend, &ctx, cli, out.clone()).await {
+                let mut w = out.clone();
+                let _ = writeln!(w, "Error: {}", e);
             }
         });
     }
@@ -153,10 +154,15 @@ async fn dispatch_command(
     DispatchResult::Continue
 }
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "lattice", about = "Lattice — local-first mesh platform", version)]
+#[command(
+    name = "lattice",
+    about = "Lattice — local-first mesh platform",
+    version,
+    disable_help_subcommand = true
+)]
 struct CliArgs {
     /// Run as headless daemon (no REPL)
     #[arg(short, long)]
@@ -180,30 +186,12 @@ struct CliArgs {
     #[arg(long, short, action = clap::ArgAction::Count)]
     verbose: u8,
 
-    /// Direct subcommand (e.g. `lattice rpc list`)
+    /// Direct subcommand — connects to a running daemon, runs the command,
+    /// prints to stdout, exits. Same command set as the REPL. Commands that
+    /// require REPL session state (`quit`, subscription management) error
+    /// gracefully when invoked this way.
     #[command(subcommand)]
-    command: Option<CliCommand>,
-}
-
-#[derive(Subcommand, Debug)]
-enum CliCommand {
-    /// Call any gRPC or store method
-    #[command(after_long_help = "\
-Examples:
-  lattice rpc                              List all methods
-  lattice rpc list                         List root stores
-  lattice rpc list af878c11...             Sub-stores of parent
-  lattice rpc -s 183bae1a Read 5           Read last 5 log entries
-  lattice rpc -s 183bae1a Append \"hello\"   Append to log store
-  lattice rpc -s af878c11 ListPeers        List peers")]
-    Rpc {
-        /// Store UUID context
-        #[arg(short, long)]
-        store: Option<String>,
-        /// Method name + positional field arguments
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
-    },
+    command: Option<commands::LatticeCommand>,
 }
 
 impl CliArgs {
@@ -241,7 +229,7 @@ async fn main() {
 }
 
 /// One-shot mode: connect to daemon, run a single command, print to stdout, exit.
-async fn run_oneshot(cmd: CliCommand) {
+async fn run_oneshot(cmd: commands::LatticeCommand) {
     let backend = match lattice_runtime::RpcClient::connect_default().await {
         Ok(b) => std::sync::Arc::new(b),
         Err(e) => {
@@ -250,18 +238,21 @@ async fn run_oneshot(cmd: CliCommand) {
         }
     };
 
-    match cmd {
-        CliCommand::Rpc { store, args } => {
-            let store_id = store.as_ref().and_then(|s| uuid::Uuid::parse_str(s).ok());
-            let method = args.first().cloned();
-            let field_args: Vec<String> = args.into_iter().skip(1).collect();
-            match crate::rpc_command::cmd_rpc_exec(&backend, store_id, method, field_args).await {
-                Ok(output) => println!("{}", output),
-                Err(e) => {
-                    eprintln!("{}", e);
-                    std::process::exit(1);
-                }
-            }
+    let ctx = CommandContext {
+        store_id: None,
+        registry: None,
+    };
+
+    let cli = commands::LatticeCli { command: cmd };
+    match commands::handle_command(&backend, &ctx, cli, commands::Writer::Stdout).await {
+        Ok(CommandOutput::Continue) | Ok(CommandOutput::Quit) => {}
+        Ok(CommandOutput::Switch { .. }) => {
+            eprintln!("Note: 'store use' has no effect in one-shot mode.");
+            std::process::exit(2);
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
         }
     }
 }
@@ -418,7 +409,7 @@ async fn run_rpc_client() {
         "Connected. Type 'help' for commands, 'quit' to exit.\n"
     );
 
-    run_cli(backend, rl, writer).await;
+    run_cli(backend, rl, commands::Writer::Shared(writer)).await;
 }
 
 /// Embedded mode: run Node in-process with REPL
@@ -474,7 +465,9 @@ async fn run_embedded_mode(args: &CliArgs) {
     );
 
     // Start runtime (Node + NetworkService + backend)
-    let builder = lattice_runtime::Runtime::builder().with_core_stores();
+    let builder = lattice_runtime::Runtime::builder()
+        .with_core_stores()
+        .with_rpc();
 
     #[cfg(feature = "web")]
     let builder = if let Some(port) = args.web_port() {
@@ -501,7 +494,7 @@ async fn run_embedded_mode(args: &CliArgs) {
 
     let backend = runtime.backend().clone();
 
-    run_cli(backend, rl, writer).await;
+    run_cli(backend, rl, commands::Writer::Shared(writer)).await;
 }
 
 /// Unified CLI loop - works for both embedded and daemon modes
