@@ -4,6 +4,7 @@ import WebKit
 #if os(macOS)
 struct WebView: NSViewRepresentable {
     let url: URL
+    var reloadToken: Int = 0
     var onNavigate: ((URL) -> Bool)?
 
     func makeCoordinator() -> Coordinator {
@@ -16,16 +17,22 @@ struct WebView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.load(URLRequest(url: url))
+        context.coordinator.lastReloadToken = reloadToken
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onNavigate = onNavigate
+        if reloadToken != context.coordinator.lastReloadToken {
+            context.coordinator.lastReloadToken = reloadToken
+            webView.reload()
+        }
     }
 }
 #else
 struct WebView: UIViewRepresentable {
     let url: URL
+    var reloadToken: Int = 0
     var onNavigate: ((URL) -> Bool)?
 
     func makeCoordinator() -> Coordinator {
@@ -37,11 +44,16 @@ struct WebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.load(URLRequest(url: url))
+        context.coordinator.lastReloadToken = reloadToken
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.onNavigate = onNavigate
+        if reloadToken != context.coordinator.lastReloadToken {
+            context.coordinator.lastReloadToken = reloadToken
+            webView.reload()
+        }
     }
 }
 #endif
@@ -49,6 +61,7 @@ struct WebView: UIViewRepresentable {
 class Coordinator: NSObject, WKNavigationDelegate {
     let origin: String?
     var onNavigate: ((URL) -> Bool)?
+    var lastReloadToken: Int = 0
 
     init(origin: String?, onNavigate: ((URL) -> Bool)?) {
         self.origin = origin

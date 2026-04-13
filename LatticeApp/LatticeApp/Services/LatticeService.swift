@@ -17,10 +17,32 @@ class LatticeService: ObservableObject {
     }
 
     @Published var state: State = .stopped
-    @Published var apps: [AppBindingProto] = []
+    @Published var apps: [AppState] = []
 
     private var lattice: Lattice?
     private let ffiQueue = DispatchQueue(label: "com.lattice.ffi", qos: .default)
+    private var appStreamTask: Task<Void, Never>?
+
+    /// Observable per-app UI state. The "update available" signal falls out of
+    /// comparing `bundleUpdatedAt` (most recent `BundleChanged` for this
+    /// app_id) with `lastReloadedAt` (most recent time this tab's content was
+    /// (re)loaded). No explicit initial-vs-delta flag is needed: if the user
+    /// has never loaded the tab, there's nothing to be "newer than", so no
+    /// badge; once they load, any later bundle change is naturally pending.
+    struct AppState: Identifiable {
+        var binding: AppBindingProto
+        var bundleUpdatedAt: Date?
+        var lastReloadedAt: Date?
+
+        var id: String { binding.subdomain }
+
+        var hasPendingUpdate: Bool {
+            guard let updated = bundleUpdatedAt, let reloaded = lastReloadedAt else {
+                return false
+            }
+            return updated > reloaded
+        }
+    }
 
     var baseURL: String? {
         if case .running(let url) = state { return url }
@@ -82,7 +104,7 @@ class LatticeService: ObservableObject {
             }
 
             state = .running(url: url)
-            await refreshApps()
+            startAppEventStream(instance: instance)
         } catch {
             state = .failed(error.localizedDescription)
         }
@@ -90,23 +112,56 @@ class LatticeService: ObservableObject {
 
     // MARK: - Apps
 
-    func refreshApps() async {
-        guard let lattice else { return }
-        let instance = lattice
-        do {
-            let list = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[AppBindingProto], Error>) in
-                ffiQueue.async {
-                    do {
-                        let apps = try instance.listApps()
-                        continuation.resume(returning: apps)
-                    } catch {
-                        continuation.resume(throwing: error)
+    /// Record that the user just (re)loaded the tab for this subdomain.
+    /// Called on first tab activation and on explicit reload. Subsequent bundle
+    /// updates compare their timestamp against this to decide if a badge shows.
+    func markReloaded(subdomain: String) {
+        guard let i = apps.firstIndex(where: { $0.binding.subdomain == subdomain }) else { return }
+        apps[i].lastReloadedAt = .now
+    }
+
+    private func startAppEventStream(instance: Lattice) {
+        appStreamTask?.cancel()
+        appStreamTask = Task { [weak self] in
+            let stream: AppEventStream
+            do {
+                stream = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<AppEventStream, Error>) in
+                    self?.ffiQueue.async {
+                        do {
+                            continuation.resume(returning: try instance.subscribeApps())
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
                     }
                 }
+            } catch {
+                return
             }
-            self.apps = list.sorted(by: { $0.subdomain < $1.subdomain })
-        } catch {
-            // Apps may not be ready yet during startup
+
+            while !Task.isCancelled {
+                guard let event = await stream.next() else { break }
+                await MainActor.run { self?.apply(event) }
+            }
+        }
+    }
+
+    private func apply(_ event: FfiAppEvent) {
+        switch event {
+        case .appAvailable(let binding):
+            if let i = apps.firstIndex(where: { $0.binding.subdomain == binding.subdomain }) {
+                apps[i].binding = binding
+            } else {
+                apps.append(AppState(binding: binding))
+                apps.sort { $0.binding.subdomain < $1.binding.subdomain }
+            }
+        case .appRemoved(let subdomain):
+            apps.removeAll { $0.binding.subdomain == subdomain }
+        case .bundleChanged(let appId):
+            if let i = apps.firstIndex(where: { $0.binding.appId == appId }) {
+                apps[i].bundleUpdatedAt = .now
+            }
+        case .bundleRemoved:
+            break
         }
     }
 
