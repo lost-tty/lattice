@@ -15,7 +15,8 @@ async fn test_iroh_stack_with_mock_provider() {
 
     let (_net_tx, net_rx) = tokio::sync::broadcast::channel(64);
 
-    let backend = lattice_net_iroh::IrohBackend::new(&identity, provider.clone())
+    let backend =
+        lattice_net_iroh::IrohBackend::new(&identity, provider.clone(), Default::default())
         .await
         .expect("Failed to create iroh backend");
 

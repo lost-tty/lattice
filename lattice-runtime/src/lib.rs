@@ -22,6 +22,7 @@ pub use runtime::{Runtime, RuntimeBuilder, RuntimeError};
 // Re-export types consumers need
 pub use lattice_model::types::{Hash, PubKey};
 pub use lattice_model::{dynamic_message_to_sexpr, dynamic_value_to_sexpr, SExpr};
+pub use lattice_net_iroh::TransportOptions;
 pub use lattice_node::AppEvent;
 pub use lattice_store_base::FieldFormat;
 

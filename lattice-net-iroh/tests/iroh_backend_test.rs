@@ -19,7 +19,7 @@ async fn test_iroh_backend_creates_transport_and_gossip() {
 
     let (_net_tx, net_rx) = tokio::sync::broadcast::channel(64);
 
-    let backend = lattice_net_iroh::IrohBackend::new(&identity, provider.clone())
+    let backend = lattice_net_iroh::IrohBackend::new(&identity, provider.clone(), Default::default())
         .await
         .expect("IrohBackend::new should succeed");
 
@@ -50,14 +50,16 @@ async fn test_two_iroh_nodes_can_discover_each_other() {
     let (_, rx_a) = tokio::sync::broadcast::channel(64);
     let (_, rx_b) = tokio::sync::broadcast::channel(64);
 
-    let backend_a = lattice_net_iroh::IrohBackend::new(&identity_a, provider_a.clone())
+    let backend_a =
+        lattice_net_iroh::IrohBackend::new(&identity_a, provider_a.clone(), Default::default())
         .await
         .expect("Backend A");
 
     // Grab A's address before consuming the backend
     let addr_a = backend_a.transport.addr();
 
-    let backend_b = lattice_net_iroh::IrohBackend::new(&identity_b, provider_b.clone())
+    let backend_b =
+        lattice_net_iroh::IrohBackend::new(&identity_b, provider_b.clone(), Default::default())
         .await
         .expect("Backend B");
 

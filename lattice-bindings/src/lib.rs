@@ -283,18 +283,30 @@ impl Lattice {
         })
     }
 
-    // Synchronous blocking start
+    // Synchronous blocking start.
+    //
+    // `enable_mdns` / `enable_dht` default to `true` when `None`. Clients on
+    // platforms where those backends are broken (iOS without the multicast
+    // entitlement, or where mainline's DHT spam-loops under network
+    // transitions) should pass `Some(false)`.
     pub fn start(
         &self,
         data_dir: Option<String>,
         name: Option<String>,
+        enable_mdns: Option<bool>,
+        enable_dht: Option<bool>,
     ) -> Result<(), LatticeError> {
         let mut w = self.rt.block_on(self.runtime.write());
         if w.is_some() {
             return Ok(());
         }
 
-        let mut builder = lattice_runtime::Runtime::builder().with_core_stores();
+        let mut builder = lattice_runtime::Runtime::builder()
+            .with_core_stores()
+            .with_transport_options(lattice_runtime::TransportOptions {
+                enable_mdns: enable_mdns.unwrap_or(true),
+                enable_dht: enable_dht.unwrap_or(true),
+            });
         if let Some(path) = data_dir {
             builder = builder.data_dir(std::path::PathBuf::from(path));
         }

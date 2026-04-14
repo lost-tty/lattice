@@ -53,7 +53,7 @@ async fn test_iroh_backend_starts_successfully() {
 
     let (node, net_rx, _net_tx) = build_node("iroh_start_a");
 
-    let backend = IrohBackend::new(node.identity(), node.clone())
+    let backend = IrohBackend::new(node.identity(), node.clone(), Default::default())
         .await
         .expect("IrohBackend::new should succeed");
 
@@ -78,7 +78,7 @@ async fn test_gossip_actor_survives_backend_creation() {
     let (node, net_rx, _net_tx) = build_node("gossip_lifecycle");
 
     // Step 1: Create transport
-    let transport = lattice_net_iroh::IrohTransport::new(node.identity())
+    let transport = lattice_net_iroh::IrohTransport::new(node.identity(), Default::default())
         .await
         .expect("transport");
     tracing::info!("Transport created");
@@ -150,7 +150,7 @@ async fn test_two_iroh_nodes_store_sync() {
 
     // === Node A ===
     let (node_a, net_rx_a, _net_tx_a) = build_node("iroh_sync_a");
-    let backend_a = IrohBackend::new(node_a.identity(), node_a.clone())
+    let backend_a = IrohBackend::new(node_a.identity(), node_a.clone(), Default::default())
         .await
         .expect("IrohBackend A");
 
@@ -162,7 +162,7 @@ async fn test_two_iroh_nodes_store_sync() {
 
     // === Node B ===
     let (node_b, net_rx_b, _net_tx_b) = build_node("iroh_sync_b");
-    let backend_b = IrohBackend::new(node_b.identity(), node_b.clone())
+    let backend_b = IrohBackend::new(node_b.identity(), node_b.clone(), Default::default())
         .await
         .expect("IrohBackend B");
 

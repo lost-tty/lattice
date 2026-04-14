@@ -1,13 +1,13 @@
 //! Tests for gossip auto-reconnect after stream death.
 
-use lattice_net_iroh::{GossipManager, IrohTransport};
+use lattice_net_iroh::{GossipManager, IrohTransport, TransportOptions};
 use lattice_net_types::GossipLayer;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 async fn setup_gossip() -> Arc<GossipManager> {
     let identity = lattice_model::NodeIdentity::generate();
-    let transport = IrohTransport::new(&identity).await.unwrap();
+    let transport = IrohTransport::new(&identity, TransportOptions::default()).await.unwrap();
     let gossip = Arc::new(GossipManager::new(&transport).await.unwrap());
     std::mem::forget(transport); // keep endpoint alive
     gossip
@@ -42,14 +42,14 @@ async fn test_broadcast_works_after_reconnect() {
     let store_id = uuid::Uuid::new_v4();
 
     let id_a = lattice_model::NodeIdentity::generate();
-    let t_a = IrohTransport::new(&id_a).await.unwrap();
+    let t_a = IrohTransport::new(&id_a, TransportOptions::default()).await.unwrap();
     let g_a = Arc::new(GossipManager::new(&t_a).await.unwrap());
     let _r_a = iroh::protocol::Router::builder(t_a.endpoint().clone())
         .accept(iroh_gossip::ALPN, g_a.gossip().clone())
         .spawn();
 
     let id_b = lattice_model::NodeIdentity::generate();
-    let t_b = IrohTransport::new(&id_b).await.unwrap();
+    let t_b = IrohTransport::new(&id_b, TransportOptions::default()).await.unwrap();
     t_b.add_peer_addr(t_a.addr());
     let g_b = Arc::new(GossipManager::new(&t_b).await.unwrap());
     let _r_b = iroh::protocol::Router::builder(t_b.endpoint().clone())

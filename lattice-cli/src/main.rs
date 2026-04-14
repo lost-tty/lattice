@@ -182,6 +182,14 @@ struct CliArgs {
     #[arg(long)]
     no_web: bool,
 
+    /// Disable mDNS peer discovery (useful where raw-UDP multicast is blocked)
+    #[arg(long)]
+    no_mdns: bool,
+
+    /// Disable the mainline DHT for peer discovery
+    #[arg(long)]
+    no_dht: bool,
+
     /// Verbose logging (-v for debug, -vv for trace)
     #[arg(long, short, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -264,7 +272,11 @@ async fn run_headless_daemon(args: &CliArgs) {
 
     let builder = lattice_runtime::Runtime::builder()
         .with_core_stores()
-        .with_rpc();
+        .with_rpc()
+        .with_transport_options(lattice_runtime::TransportOptions {
+            enable_mdns: !args.no_mdns,
+            enable_dht: !args.no_dht,
+        });
 
     #[cfg(feature = "web")]
     let builder = if let Some(port) = args.web_port() {
@@ -467,7 +479,11 @@ async fn run_embedded_mode(args: &CliArgs) {
     // Start runtime (Node + NetworkService + backend)
     let builder = lattice_runtime::Runtime::builder()
         .with_core_stores()
-        .with_rpc();
+        .with_rpc()
+        .with_transport_options(lattice_runtime::TransportOptions {
+            enable_mdns: !args.no_mdns,
+            enable_dht: !args.no_dht,
+        });
 
     #[cfg(feature = "web")]
     let builder = if let Some(port) = args.web_port() {

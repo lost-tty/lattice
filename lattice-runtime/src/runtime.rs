@@ -80,6 +80,7 @@ pub struct RuntimeBuilder {
     web_port: Option<u16>,
     name: Option<String>,
     opener_factories: Vec<(String, OpenerFactory)>,
+    transport_opts: lattice_net_iroh::TransportOptions,
 }
 
 impl RuntimeBuilder {
@@ -91,6 +92,7 @@ impl RuntimeBuilder {
             web_port: None,
             name: None,
             opener_factories: Vec::new(),
+            transport_opts: lattice_net_iroh::TransportOptions::default(),
         }
     }
 
@@ -102,6 +104,14 @@ impl RuntimeBuilder {
     /// Enable RPC server (for daemon mode).
     pub fn with_rpc(mut self) -> Self {
         self.with_rpc = true;
+        self
+    }
+
+    /// Configure peer-discovery backends. Default: mDNS + DHT both on. Disable
+    /// mDNS on platforms without multicast (iOS without entitlement) and DHT
+    /// where mainline's socket loop spams under network transitions.
+    pub fn with_transport_options(mut self, opts: lattice_net_iroh::TransportOptions) -> Self {
+        self.transport_opts = opts;
         self
     }
 
@@ -203,9 +213,13 @@ impl RuntimeBuilder {
 
         // --- Create networking stack ---
 
-        let backend = lattice_net_iroh::IrohBackend::new(node.identity(), node.clone())
-            .await
-            .map_err(|e| RuntimeError::Network(e.to_string()))?;
+        let backend = lattice_net_iroh::IrohBackend::new(
+            node.identity(),
+            node.clone(),
+            self.transport_opts,
+        )
+        .await
+        .map_err(|e| RuntimeError::Network(e.to_string()))?;
 
         let mesh_service = lattice_net::network::NetworkService::new(node.clone(), backend, net_rx);
 

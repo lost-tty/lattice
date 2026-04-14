@@ -41,32 +41,51 @@ impl std::fmt::Debug for IrohTransport {
     }
 }
 
+/// Per-endpoint discovery toggles. Default: both on. Callers on platforms
+/// where raw-UDP multicast isn't allowed (iOS without the multicast
+/// entitlement) or where the mainline DHT socket is prone to `ENOTCONN` spin
+/// can disable either independently.
+#[derive(Clone, Copy, Debug)]
+pub struct TransportOptions {
+    pub enable_mdns: bool,
+    pub enable_dht: bool,
+}
+
+impl Default for TransportOptions {
+    fn default() -> Self {
+        Self { enable_mdns: true, enable_dht: true }
+    }
+}
+
 impl IrohTransport {
-    /// Create a new endpoint from a `NodeIdentity`.
-    /// Enables N0 preset (DNS + relay) plus mDNS (local) and DHT (internet).
-    pub async fn new(identity: &NodeIdentity) -> Result<Self, BindError> {
+    /// Create a new endpoint from a `NodeIdentity` with the given discovery
+    /// options. Enables N0 preset (DNS + relay) plus the chosen local-network
+    /// / DHT address-lookup backends.
+    pub async fn new(
+        identity: &NodeIdentity,
+        opts: TransportOptions,
+    ) -> Result<Self, BindError> {
         let secret_key = iroh::SecretKey::from(identity.signing_key().to_bytes());
 
-        // Memory lookup for direct peer address addition (highest priority)
+        // Memory lookup for direct peer address addition (highest priority).
         let memory_lookup = MemoryLookup::new();
 
-        // mDNS for local network discovery
-        let mdns = MdnsAddressLookup::builder();
-
-        // DHT for internet-wide discovery (pkarr/mainline)
-        let dht = DhtAddressLookup::builder();
-
-        let endpoint = Endpoint::builder(presets::N0)
+        let mut builder = Endpoint::builder(presets::N0)
             .secret_key(secret_key)
             .alpns(vec![
                 LATTICE_ALPN.to_vec(),
                 iroh_gossip::ALPN.to_vec(),
             ])
-            .address_lookup(memory_lookup.clone())
-            .address_lookup(mdns)
-            .address_lookup(dht)
-            .bind()
-            .await?;
+            .address_lookup(memory_lookup.clone());
+
+        if opts.enable_mdns {
+            builder = builder.address_lookup(MdnsAddressLookup::builder());
+        }
+        if opts.enable_dht {
+            builder = builder.address_lookup(DhtAddressLookup::builder());
+        }
+
+        let endpoint = builder.bind().await?;
 
         // Create background connection event broadcaster
         let (events_tx, _) = tokio::sync::broadcast::channel(256);

@@ -13,7 +13,9 @@ pub mod protocol;
 pub mod transport;
 
 pub use gossip::GossipManager;
-pub use transport::{IrohBiStream, IrohConnection, IrohTransport, PublicKey, LATTICE_ALPN};
+pub use transport::{
+    IrohBiStream, IrohConnection, IrohTransport, PublicKey, TransportOptions, LATTICE_ALPN,
+};
 
 use lattice_model::types::PubKey;
 use std::sync::Arc;
@@ -71,12 +73,14 @@ impl ShutdownHandle for IrohShutdownHandle {
 pub struct IrohBackend;
 
 impl IrohBackend {
-    /// Create a complete Iroh networking stack.
+    /// Create a complete Iroh networking stack with the given discovery
+    /// options. Pass `TransportOptions::default()` for the usual mDNS + DHT.
     pub async fn new(
         identity: &lattice_model::NodeIdentity,
         provider: Arc<dyn NodeProviderExt>,
+        opts: TransportOptions,
     ) -> Result<NetworkBackend<IrohTransport>, lattice_net_types::GossipError> {
-        let transport = IrohTransport::new(identity)
+        let transport = IrohTransport::new(identity, opts)
             .await
             .map_err(|e| lattice_net_types::GossipError::Setup(e.to_string()))?;
 
