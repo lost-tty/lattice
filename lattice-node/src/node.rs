@@ -13,7 +13,6 @@ use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::broadcast;
-use tracing::error;
 
 #[derive(Error, Debug)]
 pub enum NodeError {
