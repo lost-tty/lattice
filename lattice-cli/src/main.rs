@@ -278,13 +278,6 @@ async fn run_headless_daemon(args: &CliArgs) {
             enable_dht: !args.no_dht,
         });
 
-    #[cfg(feature = "web")]
-    let builder = if let Some(port) = args.web_port() {
-        builder.with_web(port)
-    } else {
-        builder
-    };
-
     let runtime = match builder.build().await {
         Ok(r) => r,
         Err(e) => {
@@ -293,8 +286,12 @@ async fn run_headless_daemon(args: &CliArgs) {
         }
     };
 
-    if let Some(url) = runtime.web_url() {
-        eprint!("{}", format_url_box(url));
+    #[cfg(feature = "web")]
+    if let Some(port) = args.web_port() {
+        match runtime.start_web(port).await {
+            Ok(url) => eprint!("{}", format_url_box(&url)),
+            Err(e) => tracing::error!("Web server failed to start: {}", e),
+        }
     }
     tracing::info!(
         "Ready — node {} — press Ctrl+C to stop",
@@ -485,13 +482,6 @@ async fn run_embedded_mode(args: &CliArgs) {
             enable_dht: !args.no_dht,
         });
 
-    #[cfg(feature = "web")]
-    let builder = if let Some(port) = args.web_port() {
-        builder.with_web(port)
-    } else {
-        builder
-    };
-
     let runtime = match builder.build().await {
         Ok(r) => r,
         Err(e) => {
@@ -504,8 +494,12 @@ async fn run_embedded_mode(args: &CliArgs) {
         }
     };
 
-    if let Some(url) = runtime.web_url() {
-        wout!(writer, "{}", format_url_box(url));
+    #[cfg(feature = "web")]
+    if let Some(port) = args.web_port() {
+        match runtime.start_web(port).await {
+            Ok(url) => wout!(writer, "{}", format_url_box(&url)),
+            Err(e) => wout!(writer, "Web server failed to start: {}", e),
+        }
     }
 
     let backend = runtime.backend().clone();

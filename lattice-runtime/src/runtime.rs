@@ -3,7 +3,7 @@
 use crate::{NetworkService, Node, NodeBuilder, RpcServer};
 use lattice_node::StoreOpener;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
@@ -15,14 +15,29 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Type alias for opener factory closures (matches NodeBuilder's signature).
 type OpenerFactory = Box<dyn FnOnce() -> Box<dyn StoreOpener> + Send>;
 
-/// A running Lattice runtime with Node, network, and optional RPC/Web servers.
+#[cfg(feature = "web")]
+struct WebHandle {
+    handle: JoinHandle<()>,
+    url: String,
+}
+
+/// A running Lattice runtime with Node, network, and optional RPC server.
+///
+/// The web UI server has explicit lifecycle: callers (CLI, FFI, tests) decide
+/// when to `start_web` / `stop_web`. `RuntimeBuilder::with_web(port)` is just a
+/// convenience that calls `start_web(port)` once after build, so daemon /
+/// embedded modes get the historical "start once, run forever" behavior. iOS
+/// hooks `start_web(0)` / `stop_web()` into UIApplication lifecycle so the
+/// listener is rebound on foreground (where iOS leaves it half-dead).
 pub struct Runtime {
     node: Arc<Node>,
     mesh_service: Arc<NetworkService>,
     backend: Arc<lattice_api::RpcClient>,
     rpc_handle: Option<JoinHandle<()>>,
-    web_handle: Option<JoinHandle<()>>,
-    web_url: Option<String>,
+    #[cfg(feature = "web")]
+    web: Arc<Mutex<Option<WebHandle>>>,
+    #[cfg(feature = "web")]
+    routes: tonic::service::Routes,
 }
 
 impl Runtime {
@@ -41,9 +56,53 @@ impl Runtime {
         &self.backend
     }
 
-    /// Get the web server URL, if running.
-    pub fn web_url(&self) -> Option<&str> {
-        self.web_url.as_deref()
+    /// Current web UI URL, or `None` if the server is not running.
+    #[cfg(feature = "web")]
+    pub fn web_url(&self) -> Option<String> {
+        self.web.lock().ok().and_then(|g| g.as_ref().map(|w| w.url.clone()))
+    }
+
+    #[cfg(not(feature = "web"))]
+    pub fn web_url(&self) -> Option<String> {
+        None
+    }
+
+    /// Start (or replace) the web UI server on `port`. `port = 0` lets the OS
+    /// pick a free port; the returned URL reflects the actual bound address.
+    /// If a previous instance is still running it's stopped first.
+    #[cfg(feature = "web")]
+    pub async fn start_web(&self, port: u16) -> Result<String, RuntimeError> {
+        self.stop_web();
+
+        let server = lattice_web::WebServer::new(
+            self.routes.clone(),
+            (*self.backend).clone(),
+            self.node.app_manager().clone(),
+            port,
+        );
+        let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = server.run_with_url(url_tx).await {
+                tracing::error!("Web server exited: {}", e);
+            }
+        });
+        let url = url_rx
+            .await
+            .map_err(|_| RuntimeError::Network("web server did not report a URL".into()))?;
+        if let Ok(mut g) = self.web.lock() {
+            *g = Some(WebHandle { handle, url: url.clone() });
+        }
+        Ok(url)
+    }
+
+    /// Stop the web UI server if running. No-op otherwise.
+    #[cfg(feature = "web")]
+    pub fn stop_web(&self) {
+        if let Ok(mut g) = self.web.lock() {
+            if let Some(wh) = g.take() {
+                wh.handle.abort();
+            }
+        }
     }
 
     /// Shutdown the runtime gracefully.
@@ -54,9 +113,8 @@ impl Runtime {
         }
 
         // Abort web server if running
-        if let Some(handle) = &self.web_handle {
-            handle.abort();
-        }
+        #[cfg(feature = "web")]
+        self.stop_web();
 
         // Shutdown mesh service (with timeout — iroh transport can be slow to close)
         match tokio::time::timeout(SHUTDOWN_TIMEOUT, self.mesh_service.shutdown()).await {
@@ -76,8 +134,6 @@ impl Runtime {
 pub struct RuntimeBuilder {
     data_dir: Option<PathBuf>,
     with_rpc: bool,
-    #[cfg(feature = "web")]
-    web_port: Option<u16>,
     name: Option<String>,
     opener_factories: Vec<(String, OpenerFactory)>,
     transport_opts: lattice_net_iroh::TransportOptions,
@@ -88,8 +144,6 @@ impl RuntimeBuilder {
         Self {
             data_dir: None,
             with_rpc: false,
-            #[cfg(feature = "web")]
-            web_port: None,
             name: None,
             opener_factories: Vec::new(),
             transport_opts: lattice_net_iroh::TransportOptions::default(),
@@ -112,24 +166,6 @@ impl RuntimeBuilder {
     /// where mainline's socket loop spams under network transitions.
     pub fn with_transport_options(mut self, opts: lattice_net_iroh::TransportOptions) -> Self {
         self.transport_opts = opts;
-        self
-    }
-
-    /// Enable the web UI server on the given port.
-    ///
-    /// Starts an HTTP server with a WebSocket endpoint that tunnels gRPC calls
-    /// and serves a browser-based UI mirroring the CLI functionality.
-    ///
-    /// # Example
-    /// ```ignore
-    /// Runtime::builder()
-    ///     .with_core_stores()
-    ///     .with_web(8080)
-    ///     .build().await
-    /// ```
-    #[cfg(feature = "web")]
-    pub fn with_web(mut self, port: u16) -> Self {
-        self.web_port = Some(port);
         self
     }
 
@@ -258,38 +294,15 @@ impl RuntimeBuilder {
             None
         };
 
-        // Start web server if requested
-        #[cfg(feature = "web")]
-        let mut web_url: Option<String> = None;
-        #[cfg(feature = "web")]
-        let web_handle = if let Some(port) = self.web_port {
-            let web_server = lattice_web::WebServer::new(
-                routes.clone(),
-                (*backend).clone(),
-                node.app_manager().clone(),
-                port,
-            );
-            web_url = Some(web_server.url());
-            Some(tokio::spawn(async move {
-                if let Err(e) = web_server.run().await {
-                    tracing::error!("Web server error: {}", e);
-                }
-            }))
-        } else {
-            None
-        };
-        #[cfg(not(feature = "web"))]
-        let web_handle: Option<JoinHandle<()>> = None;
-        #[cfg(not(feature = "web"))]
-        let web_url: Option<String> = None;
-
         Ok(Runtime {
             node,
             mesh_service,
             backend,
             rpc_handle,
-            web_handle,
-            web_url,
+            #[cfg(feature = "web")]
+            web: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "web")]
+            routes,
         })
     }
 }

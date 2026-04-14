@@ -322,6 +322,39 @@ impl Lattice {
         Ok(())
     }
 
+    /// Returns the web UI URL if the web server is running.
+    pub fn web_url(&self) -> Result<Option<String>, LatticeError> {
+        let r = self.rt.block_on(self.runtime.read());
+        let rt = r.as_ref().ok_or(LatticeError::NotInitialized)?;
+        Ok(rt.web_url())
+    }
+
+    /// Start (or restart) the embedded web UI server on `port`. `port = 0`
+    /// lets the OS pick. Returns the actual bound URL. If the server is
+    /// already running it's stopped first.
+    pub fn start_web(&self, port: u16) -> Result<String, LatticeError> {
+        let r_guard = self.rt.block_on(self.runtime.read());
+        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+        self.rt.block_on(r.start_web(port)).map_err(LatticeError::from_backend)
+    }
+
+    /// Stop the web UI server if running. No-op otherwise.
+    pub fn stop_web(&self) -> Result<(), LatticeError> {
+        let r_guard = self.rt.block_on(self.runtime.read());
+        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+        r.stop_web();
+        Ok(())
+    }
+
+    /// List active (enabled) apps.
+    pub fn list_apps(&self) -> Result<Vec<AppBindingProto>, LatticeError> {
+        let r = self.rt.block_on(self.runtime.read());
+        let rt = r.as_ref().ok_or(LatticeError::NotInitialized)?;
+        Ok(self.rt.block_on(rt.node().app_manager().list_active())
+            .into_iter().map(AppBindingProto::from).collect())
+    }
+
+
     /// Subscribe to app lifecycle events. Initial state is replayed as
     /// `AppAvailable` events before live updates arrive.
     ///
