@@ -1800,8 +1800,8 @@ mod tests {
 
         // Create enough real intentions to exceed MAX_CAUSAL_DEPS
         let mut deps = Vec::new();
-        for i in 0u8..(lattice_model::weaver::MAX_CAUSAL_DEPS as u8 + 1) {
-            let h = handle.submit(vec![i], vec![]).await.unwrap();
+        for i in 0..(lattice_model::weaver::MAX_CAUSAL_DEPS + 1) {
+            let h = handle.submit((i as u32).to_le_bytes().to_vec(), vec![]).await.unwrap();
             deps.push(h);
         }
 
@@ -1822,8 +1822,8 @@ mod tests {
             open_test_store(TEST_STORE, identity.clone()).unwrap();
 
         let mut deps = Vec::new();
-        for i in 0u8..(lattice_model::weaver::MAX_CAUSAL_DEPS as u8) {
-            let h = handle.submit(vec![i], vec![]).await.unwrap();
+        for i in 0..lattice_model::weaver::MAX_CAUSAL_DEPS {
+            let h = handle.submit((i as u32).to_le_bytes().to_vec(), vec![]).await.unwrap();
             deps.push(h);
         }
 

@@ -10,13 +10,10 @@ pub use ingest::{IngestResult, MissingDep};
 pub use intention::{Condition, FloatingIntention, Intention, SignedIntention};
 
 /// Maximum size of the `ops` payload in an intention.
-pub const MAX_PAYLOAD_SIZE: usize = 128 * 1024;
+pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024;
 
 /// Maximum number of causal dependencies an intention may declare.
-///
-/// If a state machine needs to depend on more intentions, it can
-/// structure them as a tree.
-pub const MAX_CAUSAL_DEPS: usize = 16;
+pub const MAX_CAUSAL_DEPS: usize = 1024;
 
 use crate::types::Hash;
 

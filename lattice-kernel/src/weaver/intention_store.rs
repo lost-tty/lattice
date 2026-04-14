@@ -2765,7 +2765,11 @@ mod tests {
         let (key, pk) = make_key();
 
         let deps: Vec<Hash> = (0..lattice_model::weaver::MAX_CAUSAL_DEPS + 1)
-            .map(|i| Hash([i as u8; 32]))
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[..4].copy_from_slice(&(i as u32).to_le_bytes());
+                Hash(h)
+            })
             .collect();
         let intention = Intention {
             author: pk,
