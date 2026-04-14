@@ -27,6 +27,10 @@ export const modal       = signal(null);
 export const toasts      = signal([]);
 export const subscriptions = signal(new Map());
 export const panelOverride = signal(null);
+// Mobile sidebar drawer. Desktop CSS ignores this — the sidebar is always
+// visible there. On narrow viewports a media query turns the sidebar into an
+// off-canvas drawer toggled by this signal.
+export const sidebarOpen = signal(false);
 
 let nextToastId = 1;
 let nextSubId = 1;
@@ -52,6 +56,7 @@ export function setStatus(s, text) {
 export function applyRoute(route) {
   batch(() => {
     panelOverride.value = null;
+    sidebarOpen.value = false;
     if (route.page === 'store') {
       activeStoreId.value = uuidToBytes(route.storeId);
       activeTab.value = route.tab || 'details';
@@ -60,6 +65,15 @@ export function applyRoute(route) {
       activeStoreId.value = null;
     }
   });
+}
+
+// --- Sidebar drawer (mobile) ---
+export function toggleSidebar() {
+  sidebarOpen.value = !sidebarOpen.value;
+}
+
+export function closeSidebar() {
+  sidebarOpen.value = false;
 }
 
 // --- Modal ---

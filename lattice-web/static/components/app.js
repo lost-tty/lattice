@@ -1,5 +1,5 @@
 import { html, useState, useEffect } from './util.js';
-import { applyRoute, stores, activeStoreId as activeStoreIdSignal, activeTab as activeTabSignal, debugView as debugViewSignal, toast, showModal } from '../state.js';
+import { applyRoute, stores, activeStoreId as activeStoreIdSignal, activeTab as activeTabSignal, debugView as debugViewSignal, toast, showModal, sidebarOpen, closeSidebar } from '../state.js';
 import { uuidFromBytes, getRootStores } from '../helpers.js';
 import { parse, listen } from '../router.js';
 import { uploadBundleToStore } from './actions.js';
@@ -71,9 +71,11 @@ export function App() {
     await uploadBundleToStore(targetStore.id, file);
   };
 
+  const drawerOpen = sidebarOpen.value;
+
   return html`
     <div
-      class="app-root ${dragging ? 'drag-over' : ''}"
+      class="app-root ${dragging ? 'drag-over' : ''} ${drawerOpen ? 'sidebar-open' : ''}"
       onDragOver=${onDragOver}
       onDragLeave=${onDragLeave}
       onDrop=${onDrop}
@@ -85,6 +87,7 @@ export function App() {
           <${TabBar} storeId=${activeStoreId} activeTab=${activeTab} />
           <${Panel} storeId=${activeStoreId} tab=${activeTab} debugView=${debugViewVal} />
         </div>
+        <div class="sidebar-backdrop" onClick=${closeSidebar} aria-hidden="true"></div>
       </div>
       <${Toasts} />
       <${ModalContainer} />

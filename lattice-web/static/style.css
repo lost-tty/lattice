@@ -36,6 +36,19 @@
   --sm: 0.8rem;
   --lg: 1.25rem;
   --r: 6px;
+
+  /* --- Layout --- */
+  --sidebar-w: 260px;
+  --sidebar-mobile-w: min(280px, 85vw);
+  --mobile-breakpoint: 768px;
+  --transition-drawer: 200ms ease;
+  --z-sticky: 10;
+  --z-drawer-backdrop: 40;
+  --z-drawer: 50;
+  /* Explicit header height so sticky tabs + sticky sidebar can offset by it.
+   * Must match the actual rendered header height — header sets `height` to
+   * this var, so padding/content stay inside. */
+  --header-h: 3.1rem;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -66,13 +79,11 @@ body {
   font: 15px/1.5 var(--font);
   color: var(--fg);
   background: var(--bg);
-  height: 100vh;
 }
 
 #app {
   display: flex;
   flex-direction: column;
-  height: 100%;
 }
 
 h1, h2, h3 { font-size: var(--lg); }
@@ -92,12 +103,16 @@ small, th, .label, .meta, .badge, .mono, label { font-size: var(--sm); }
 /* Layout: header | sidebar + content */
 
 header {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   padding: 0.6rem 1.2rem;
   display: flex;
   align-items: center;
   gap: 1rem;
+  min-height: var(--header-h);
 }
 
 #status {
@@ -106,6 +121,9 @@ header {
   align-items: center;
   gap: 0.4rem;
 }
+
+/* Hamburger toggle — hidden on desktop, shown by the mobile media query. */
+.sidebar-toggle { display: none; }
 
 .dot {
   width: 7px;
@@ -121,18 +139,30 @@ header {
 #main {
   display: flex;
   flex: 1;
-  overflow: hidden;
 }
+
+/* Backdrop behind the mobile drawer. Inert on desktop; the mobile media
+ * query turns it on when .sidebar-open is set on the app root. */
+.sidebar-backdrop { display: none; }
 
 /* Sidebar */
 
+/* Desktop sidebar: sticky under the header so it stays visible as the
+ * document scrolls. `align-self: flex-start` prevents the flex row from
+ * stretching the nav to match #content's height, which would break sticky.
+ * The nav itself is the single scroll container for its list contents —
+ * no per-list overflow-y, no nested scrollbars. */
 nav {
-  width: 260px;
+  position: sticky;
+  top: var(--header-h);
+  align-self: flex-start;
+  height: calc(100dvh - var(--header-h));
+  width: var(--sidebar-w);
   background: var(--surface);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 /* --- Sidebar --- */
@@ -167,17 +197,12 @@ nav {
 .sidebar-section .btn-icon { opacity: 0.5; }
 .sidebar-section:hover .btn-icon { opacity: 1; }
 
-/* Scrollable sidebar lists */
 .sidebar-list {
-  overflow-y: auto;
   padding: 0.3rem 0.5rem;
 }
-.sidebar-list::-webkit-scrollbar { width: 6px; }
-.sidebar-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-.sidebar-list::-webkit-scrollbar-track { background: transparent; }
-
-#app-list { max-height: 30%; }
-#store-list { flex: 1; min-height: 0; }
+nav::-webkit-scrollbar { width: 6px; }
+nav::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+nav::-webkit-scrollbar-track { background: transparent; }
 
 /* Sidebar items (stores + apps) */
 .sidebar-item {
@@ -237,10 +262,59 @@ nav {
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  min-width: 0;
+}
+
+/* --- Mobile: sidebar becomes an off-canvas drawer ---
+ * The breakpoint value must be hardcoded — `@media` queries can't read CSS
+ * custom properties. Keep in sync with --mobile-breakpoint in :root. */
+@media (max-width: 768px) {
+  .sidebar-toggle {
+    display: inline-flex;
+    margin-right: 0.2rem;
+  }
+
+  nav {
+    /* Fixed — anchored to the viewport rather than #main, which now grows
+     * with the document. Also overrides the desktop sticky-aside rules. */
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    height: auto;
+    align-self: auto;
+    z-index: var(--z-drawer);
+    width: var(--sidebar-mobile-w);
+    transform: translateX(-100%);
+    transition: transform var(--transition-drawer);
+    box-shadow: 2px 0 12px var(--shadow);
+  }
+
+  .app-root.sidebar-open nav {
+    transform: translateX(0);
+  }
+
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: var(--overlay);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--transition-drawer);
+    z-index: var(--z-drawer-backdrop);
+  }
+
+  .app-root.sidebar-open .sidebar-backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 #tabs {
+  position: sticky;
+  top: var(--header-h);
+  z-index: calc(var(--z-sticky) - 1);
   display: flex;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
@@ -259,8 +333,6 @@ nav {
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
 #panel {
-  flex: 1;
-  overflow-y: auto;
   padding: 1.2rem;
 }
 
@@ -602,7 +674,7 @@ table.data td { word-break: break-all; }
 .error-page a { color: var(--accent); }
 
 /* --- Drop overlay for app bundle upload --- */
-.app-root { position: relative; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+.app-root { position: relative; display: flex; flex-direction: column; }
 .app-root.drag-over { outline: 2px solid var(--accent); outline-offset: -2px; }
 .drop-overlay {
   position: fixed;
@@ -619,9 +691,10 @@ table.data td { word-break: break-all; }
 }
 
 /* --- Dashboard --- */
+/* No overflow-y here — #panel already scrolls; a second scroller would nest. */
 .dashboard {
   display: flex; flex-direction: column; gap: 1.5rem;
-  padding: 1.5rem; overflow-y: auto; max-width: 720px;
+  padding: 1.5rem; max-width: 720px;
 }
 .dashboard-section-header {
   display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.8rem;

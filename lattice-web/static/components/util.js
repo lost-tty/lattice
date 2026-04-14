@@ -21,6 +21,7 @@ const ICONS = {
   pause: html`<line x1="8" y1="6" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="18"/>`,
   play: html`<polygon points="6,4 20,12 6,20"/>`,
   'log-in': html`<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>`,
+  menu: html`<line x1="3" y1="7" x2="21" y2="7"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="17" x2="21" y2="17"/>`,
 };
 
 export function Icon({ name, size }) {
