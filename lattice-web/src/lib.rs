@@ -1,19 +1,22 @@
-//! Lattice Web - WebSocket/gRPC tunnel and browser UI
+//! Lattice Web — HTTP API + browser UI
 //!
-//! Provides a web interface that mirrors the CLI's functionality. Embeds into
-//! the runtime alongside the Node and NetworkService. Exposes:
+//! Mirrors the CLI's functionality through HTTP. Embeds into the runtime
+//! alongside the Node and NetworkService. Exposes:
 //!
-//! - `GET /`          → Browser UI (single-page app)
-//! - `GET /ws`        → WebSocket endpoint (gRPC tunnel)
+//! - `GET /`                            → Browser UI (single-page app)
+//! - `POST /rpc/{service}/{method}`     → Unary RPC (proto in/out)
+//! - `POST /sse/{service}/{method}`     → Server-streaming RPC over SSE
 //!
-//! ## WebSocket Protocol
+//! ## RPC protocol
 //!
-//! The WebSocket carries binary protobuf-framed RPC messages using
-//! `WsRequest`/`WsResponse` envelopes (defined in `proto/tunnel.proto`).
-//! The browser uses protobufjs to encode/decode these envelopes and all
-//! API types. Binary `FileDescriptorSet`s are served at `/proto/*.bin`
-//! and converted to protobufjs `Root` objects client-side via
-//! `Root.fromDescriptor()`.
+//! Both endpoints take the request as a raw protobuf body and dispatch it
+//! through the same in-process tonic gRPC stack used by the CLI. Unary
+//! responses are raw protobuf bytes; SSE responses base64-encode each
+//! message in `data:` lines and signal terminal errors via `event: error`.
+//! See `rpc.rs` for the wire-level details.
+//!
+//! Browser code uses protobufjs to encode/decode the request/response
+//! types. Binary `FileDescriptorSet`s are served at `/proto/*.bin`.
 //!
 //! ## Embedding
 //!
@@ -25,18 +28,9 @@
 //! ```
 
 pub mod apps;
-mod tunnel;
+mod rpc;
 mod ui;
 mod web_server;
-
-/// WebSocket tunnel envelope types (generated from proto/tunnel.proto).
-mod ws_proto {
-    include!(concat!(env!("OUT_DIR"), "/lattice.web.rs"));
-}
-
-/// Tunnel proto `FileDescriptorSet` (binary), served to the browser at `/proto/tunnel.bin`.
-const TUNNEL_DESCRIPTOR: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/tunnel_descriptor.bin"));
 
 pub use web_server::WebServer;
 

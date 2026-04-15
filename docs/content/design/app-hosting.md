@@ -104,7 +104,7 @@ When a request arrives at `inventory.localhost:8080`:
 3. Check meta.db: is `store_id` bound and enabled on this node?
 4. Serve app shell HTML with `<meta>` tags for `store_id`, `app_id`, `subdomain`
 5. App JS loads, reads `<meta>` tags, calls `LatticeSDK.connect()` with the store UUID
-6. SDK opens WebSocket to `/ws`, issues gRPC calls to the store
+6. SDK calls the store via `POST /rpc/{service}/{method}` (unary) and `POST /sse/{service}/{method}` (streaming)
 
 ### Unregistering
 
@@ -172,7 +172,7 @@ This moves the app identity from a separate KV registry into the store itself, s
 - Embedded app bundles (`rust-embed` for inventory app)
 - Subdomain extraction from `Host` header
 - App shell HTML generation with `<meta>` tags
-- WebSocket tunnel shared between management UI and apps
+- HTTP RPC + SSE bridge shared between management UI and apps
 - Lattice SDK reads `<meta>` tags and connects to the correct store
 
 ### Not Yet Done

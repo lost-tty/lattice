@@ -4,12 +4,17 @@
 // Used by both the management UI and hosted apps.
 //
 //   const sdk = await LatticeSDK.connect(options);
-//   sdk.api.node.GetStatus()           // auto-generated stubs
-//   sdk.rpc.subscribe(...)             // raw WebSocket RPC
+//   sdk.api.node.GetStatus()           // auto-generated unary stubs
+//   sdk.rpc.subscribe(...)             // raw SSE streaming
 //   sdk.proto.lookup('...')            // proto type lookup
 //   const store = await sdk.openStore(uuid);     // explicit store
 //   const store = await sdk.openAppStore();       // auto-detect from subdomain
 //   await store.Put({ key, value });              // auto-generated store methods
+//
+// Wire protocol:
+//   POST /rpc/{service}/{method}   — unary;  body = proto in, response = proto out
+//   POST /sse/{service}/{method}   — server-streaming; body = proto in,
+//                                    response = SSE stream (data: base64-proto)
 //
 // Requires: window.protobuf (protobuf.min.js + protobuf-descriptor.js)
 // ============================================================================
@@ -36,7 +41,14 @@
 
   function resolveService(s) { return SERVICES[s] || s; }
 
-  const RECONNECT_MAX = 30000;
+  // --- Base64 (used for SSE event payloads) ---
+
+  function base64ToBytes(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
 
   // --- Store schema loader ---
 
@@ -61,17 +73,8 @@
     const statusCb = opts.onStatus || null;
     const extraProtos = opts.extraProtos || [];
 
-    // --- Connection-scoped state ---
-    let ws = null;
-    let nextId = 1;
-    const pending = new Map();
-    const streamHandlers = new Map();
-    let reconnectDelay = 1000;
-    let closed = false;
-    const activeStreams = new Map();
-
     // Load proto descriptors
-    const urls = ['/proto/api.bin', '/proto/tunnel.bin'].concat(extraProtos);
+    const urls = ['/proto/api.bin'].concat(extraProtos);
     const responses = await Promise.all(urls.map(function (url) { return fetch(url); }));
     for (let i = 0; i < responses.length; i++) {
       if (!responses[i].ok) throw new Error('Failed to load descriptor: ' + urls[i]);
@@ -79,165 +82,140 @@
     const buffers = await Promise.all(responses.map(function (r) { return r.arrayBuffer(); }));
 
     const apiRoot = protobuf.Root.fromDescriptor(new Uint8Array(buffers[0]));
-    const tunnelRoot = protobuf.Root.fromDescriptor(new Uint8Array(buffers[1]));
     const extraRoots = [];
-    for (let j = 2; j < buffers.length; j++) {
+    for (let j = 1; j < buffers.length; j++) {
       extraRoots.push(protobuf.Root.fromDescriptor(new Uint8Array(buffers[j])));
     }
 
-    // Set up WS envelope types
-    const WsRequest = tunnelRoot.lookupType('lattice.web.WsRequest');
-    const WsResponse = tunnelRoot.lookupType('lattice.web.WsResponse');
+    // --- HTTP RPC internals ---
 
-    // --- WebSocket RPC internals ---
-
-    function wsConnect(retryOnFail) {
-      return new Promise(function (resolve, reject) {
-        statusCb?.('connecting');
-        let settled = false;
-
-        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        ws = new WebSocket(proto + '//' + location.host + '/ws');
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = function () {
-          settled = true;
-          reconnectDelay = 1000;
-
-          // Re-subscribe all active streams before firing statusCb,
-          // so any new subscriptions created by statusCb aren't clobbered.
-          const oldIds = Array.from(activeStreams.keys());
-          const streamsToReconnect = oldIds.map(function (k) { return activeStreams.get(k); });
-          for (let i = 0; i < oldIds.length; i++) activeStreams.delete(oldIds[i]);
-
-          for (let i = 0; i < streamsToReconnect.length; i++) {
-            const reg = streamsToReconnect[i];
-            const newId = nextId++;
-            reg.ref.currentId = newId;
-            streamHandlers.set(newId, { onEvent: reg.onEvent, onEnd: reg.onEnd });
-            const buf = WsRequest.encode(WsRequest.create({
-              id: newId,
-              service: resolveService(reg.service),
-              method: reg.method,
-              payload: reg.payload,
-              server_streaming: true,
-            })).finish();
-            ws.send(buf);
-            activeStreams.set(newId, reg);
-          }
-
-          statusCb?.('connected');
-          resolve();
-        };
-
-        ws.onclose = function () {
-          statusCb?.('disconnected');
-          for (const [, p] of pending) p.reject(new Error('WebSocket disconnected'));
-          pending.clear();
-          // Don't fire onEnd for active streams — they will be re-subscribed on reconnect.
-          // Only clear the handler map so stale IDs don't dispatch events.
-          streamHandlers.clear();
-
-          if (closed) return;
-
-          if (!settled && !retryOnFail) {
-            reject(new Error('WebSocket connection failed'));
-            return;
-          }
-
-          // Exponential backoff with jitter
-          const jitter = Math.random() * reconnectDelay * 0.3;
-          setTimeout(function () {
-            wsConnect(true).catch(function (err) {
-              console.debug('[LatticeSDK] reconnect failed:', err.message || err);
-            });
-          }, reconnectDelay + jitter);
-          reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
-        };
-
-        ws.onerror = function () {
-          statusCb?.('error');
-        };
-
-        ws.onmessage = function (e) {
-          const resp = WsResponse.decode(new Uint8Array(e.data));
-          const id = typeof resp.id?.toNumber === 'function'
-            ? resp.id.toNumber()
-            : Number(resp.id);
-
-          // Stream event or end
-          const streamData = resp.stream;
-          if ((streamData && streamData.length > 0) || resp.stream_end) {
-            const handler = streamHandlers.get(id);
-            if (handler) {
-              if (resp.stream_end) { handler.onEnd?.(); streamHandlers.delete(id); }
-              else handler.onEvent(streamData);
-            }
-            return;
-          }
-
-          // Unary response
-          const p = pending.get(id);
-          if (p) {
-            pending.delete(id);
-            if (resp.error) p.reject(new Error(resp.error));
-            else p.resolve(resp.payload || new Uint8Array(0));
-          }
-        };
-      });
-    }
-
-    function rpcCall(service, method, payload) {
-      return new Promise(function (resolve, reject) {
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          return reject(new Error('WebSocket not connected'));
-        }
-        const id = nextId++;
-        pending.set(id, { resolve: resolve, reject: reject });
-        const buf = WsRequest.encode(WsRequest.create({
-          id: id,
-          service: resolveService(service),
-          method: method,
-          payload: payload || new Uint8Array(0),
-        })).finish();
-        ws.send(buf);
-      });
-    }
-
-    function rpcSubscribe(service, method, payload, onEvent, onEnd) {
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        console.error('[LatticeSDK] rpcSubscribe called while WebSocket not connected');
-        return { currentId: -1 };
+    async function rpcCall(service, method, payload) {
+      const url = '/rpc/' + resolveService(service) + '/' + method;
+      let resp;
+      try {
+        resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/octet-stream' },
+          body: payload || new Uint8Array(0),
+        });
+      } catch (e) {
+        statusCb?.('error');
+        throw new Error('Network error: ' + (e.message || e));
       }
-      const id = nextId++;
-      const ref = { currentId: id };
-      streamHandlers.set(id, { onEvent: onEvent, onEnd: onEnd });
-      const buf = WsRequest.encode(WsRequest.create({
-        id: id,
-        service: resolveService(service),
-        method: method,
-        payload: payload || new Uint8Array(0),
-        server_streaming: true,
-      })).finish();
-      ws.send(buf);
+      if (!resp.ok) {
+        const text = await resp.text().catch(function () { return ''; });
+        throw new Error(text || ('HTTP ' + resp.status));
+      }
+      const buf = await resp.arrayBuffer();
+      return new Uint8Array(buf);
+    }
 
-      // Track for re-subscription on reconnect
-      activeStreams.set(id, {
-        ref: ref,
-        service: service,
-        method: method,
-        payload: payload,
-        onEvent: onEvent,
-        onEnd: onEnd,
-      });
+    /**
+     * Open a server-streaming RPC over SSE. Returns a handle whose
+     * `unsubscribe()` aborts the underlying fetch — the server-side stream
+     * is dropped naturally when the response body reader is canceled.
+     *
+     * `onOpen` is invoked once when the SSE response arrives successfully
+     * (status 200 + readable body). Useful as a connectivity signal for
+     * long-lived subscriptions. `onError` is invoked once with the gRPC
+     * error message if the stream terminates with a server-side error
+     * (e.g. Unimplemented). `onEnd` is invoked exactly once when the
+     * stream closes (after `onError` if any).
+     */
+    function rpcSubscribe(service, method, payload, onEvent, onEnd, onError, onOpen) {
+      const url = '/sse/' + resolveService(service) + '/' + method;
+      const ctrl = new AbortController();
+      const ref = { aborted: false };
 
+      (async () => {
+        let resp;
+        try {
+          resp = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/octet-stream',
+              'accept': 'text/event-stream',
+            },
+            body: payload || new Uint8Array(0),
+            signal: ctrl.signal,
+          });
+        } catch (e) {
+          if (!ref.aborted) onError?.(e.message || String(e));
+          onEnd?.();
+          return;
+        }
+        if (!resp.ok) {
+          const text = await resp.text().catch(function () { return ''; });
+          onError?.(text || ('HTTP ' + resp.status));
+          onEnd?.();
+          return;
+        }
+        if (!resp.body) {
+          onEnd?.();
+          return;
+        }
+        onOpen?.();
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            // Normalize CRLF and bare CR to LF so the event splitter only
+            // has to handle one line-terminator shape (SSE permits all three).
+            buf += decoder.decode(value, { stream: true })
+              .replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            // SSE events are separated by a blank line ("\n\n").
+            let idx;
+            while ((idx = buf.indexOf('\n\n')) >= 0) {
+              const raw = buf.slice(0, idx);
+              buf = buf.slice(idx + 2);
+              const evt = parseSseEvent(raw);
+              if (evt.event === 'error') {
+                onError?.(evt.data);
+              } else if (evt.data) {
+                try {
+                  onEvent(base64ToBytes(evt.data));
+                } catch (e) {
+                  console.error('[LatticeSDK] decode error:', e);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          if (!ref.aborted) onError?.(e.message || String(e));
+        } finally {
+          onEnd?.();
+        }
+      })();
+
+      ref.unsubscribe = function () {
+        ref.aborted = true;
+        ctrl.abort();
+      };
       return ref;
     }
 
     function rpcUnsubscribe(ref) {
-      const id = ref.currentId;
-      streamHandlers.delete(id);
-      activeStreams.delete(id);
+      ref?.unsubscribe?.();
+    }
+
+    /** Parse one SSE event block (lines until the blank separator). */
+    function parseSseEvent(raw) {
+      let event = 'message';
+      const dataLines = [];
+      const lines = raw.split('\n');
+      for (const line of lines) {
+        if (line.startsWith(':')) continue; // comment / keep-alive
+        const colon = line.indexOf(':');
+        const field = colon === -1 ? line : line.slice(0, colon);
+        let value = colon === -1 ? '' : line.slice(colon + 1);
+        if (value.startsWith(' ')) value = value.slice(1);
+        if (field === 'event') event = value;
+        else if (field === 'data') dataLines.push(value);
+      }
+      return { event: event, data: dataLines.join('\n') };
     }
 
     // --- API stub builder ---
@@ -385,7 +363,6 @@
     const allRoots = [apiRoot].concat(extraRoots);
     const proto = {
       api: apiRoot,
-      tunnel: tunnelRoot,
       extras: extraRoots,
       lookup: function (name) {
         for (let k = 0; k < allRoots.length; k++) {
@@ -395,8 +372,11 @@
       },
     };
 
-    // Connect WebSocket
-    await wsConnect();
+    // No persistent connection to establish — every RPC is a fresh HTTP
+    // request. The SDK no longer fires a synthetic `connected` here: that
+    // would lie if the server is unreachable. Callers wire status to a
+    // long-lived subscription's `onOpen`/`onError`/`onEnd` (see state.js
+    // in the management UI) so the badge reflects real reachability.
 
     return {
       api: api,
@@ -410,13 +390,7 @@
       proto: proto,
 
       close: function () {
-        closed = true;
-        for (const [, h] of streamHandlers) h.onEnd?.();
-        streamHandlers.clear();
-        activeStreams.clear();
-        for (const [, p] of pending) p.reject(new Error('SDK closed'));
-        pending.clear();
-        if (ws) { ws.close(); ws = null; }
+        statusCb?.('disconnected');
       },
 
       openStore: async function (storeId) {

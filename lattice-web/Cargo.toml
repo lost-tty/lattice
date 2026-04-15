@@ -1,6 +1,6 @@
 [package]
 name = "lattice-web"
-description = "Web interface for Lattice - WebSocket/gRPC tunnel and browser UI"
+description = "Web interface for Lattice - HTTP RPC + SSE bridge and browser UI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,7 +13,10 @@ lattice-proto = { workspace = true }
 lattice-kvstore = { workspace = true }
 lattice-rootstore = { workspace = true }
 
-axum = { version = "0.8", features = ["ws", "json", "query"] }
+axum = { version = "0.8", features = ["json", "query"] }
+async-stream = "0.3"
+base64 = "0.22"
+tokio-stream = "0.1"
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tonic = "0.14"
@@ -32,6 +35,3 @@ serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 boa_engine = "0.21"
-
-[build-dependencies]
-prost-build = { workspace = true }

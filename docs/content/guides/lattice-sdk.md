@@ -3,7 +3,7 @@ title: "Lattice SDK"
 weight: 1
 ---
 
-The Lattice SDK is a browser-side JavaScript library used by both the management UI and hosted apps. It handles WebSocket connection, protobuf schema loading, and API stub generation.
+The Lattice SDK is a browser-side JavaScript library used by both the management UI and hosted apps. It speaks HTTP RPC + SSE to the Lattice web server, handles protobuf schema loading, and generates API stubs from the loaded service definitions.
 
 ## Loading the SDK
 
@@ -29,9 +29,9 @@ const sdk = await LatticeSDK.connect({
 });
 ```
 
-`connect()` is async. It fetches protobuf descriptors, builds API stubs for all gRPC services, and opens a WebSocket. The promise resolves once the connection is open.
+`connect()` is async. It fetches protobuf descriptors and builds API stubs for all gRPC services. The promise resolves once initialization completes; no persistent connection is opened — every RPC is its own HTTP request.
 
-Reconnects automatically on disconnect with exponential backoff. Active stream subscriptions are re-established on reconnect.
+`onStatus` reflects SDK state, not server reachability. Drive a real "is the server reachable" badge from the lifecycle of a long-lived `sdk.rpc.subscribe(...)` (e.g. `node.Subscribe`) — its `onOpen`/`onError`/`onEnd` callbacks fire when the SSE stream opens, errors, or ends.
 
 ## API Stubs
 
@@ -55,7 +55,7 @@ Fields are plain objects matching the protobuf request message. Return values ar
 
 ## Raw RPC
 
-`sdk.rpc` provides low-level WebSocket RPC access for cases where the auto-generated stubs don't apply (e.g., server-streaming RPCs).
+`sdk.rpc` provides low-level RPC access for cases where the auto-generated stubs don't apply (e.g., server-streaming RPCs). Unary calls go to `POST /rpc/{service}/{method}`; subscriptions go to `POST /sse/{service}/{method}` and read the SSE response.
 
 ```js
 // Unary call
@@ -65,9 +65,11 @@ const result = await sdk.rpc.call('node', 'GetStatus', payload);
 const sub = sdk.rpc.subscribe('node', 'Subscribe', new Uint8Array(0),
   function onEvent(data) { /* Uint8Array */ },
   function onEnd() { /* stream ended */ },
+  function onError(msg) { /* server-side gRPC error */ },
+  function onOpen() { /* SSE response established */ },
 );
 
-// Stop receiving events
+// Stop receiving events (aborts the underlying fetch)
 sdk.rpc.unsubscribe(sub);
 ```
 
@@ -86,7 +88,6 @@ const decoded = NodeEvent.decode(bytes);
 
 // Direct root access
 sdk.proto.api     // api.bin root
-sdk.proto.tunnel  // tunnel.bin root
 sdk.proto.extras  // array of extra roots from extraProtos option
 ```
 
@@ -240,8 +241,8 @@ A minimal counter app using a KV store:
 
 ## Security Notes
 
-- Apps served at subdomains can only access `DynamicStoreService` over the WebSocket. The tunnel rejects calls to `NodeService` or `StoreService`.
-- Each app's WebSocket connection is scoped to its bound store.
+- Apps served at subdomains can only access `DynamicStoreService`. The RPC bridge rejects calls to `NodeService` or `StoreService` from app subdomains.
+- Each app's RPC + SSE calls are scoped to its bound store; cross-store access from the subdomain is rejected.
 - App bindings are node-local. A remote peer cannot force your node to serve an app.
 
 ## Type Reference

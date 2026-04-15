@@ -1,4 +1,4 @@
-//! Axum HTTP + WebSocket server
+//! Axum HTTP server
 //!
 //! Supports two modes depending on the `Host` header:
 //!
@@ -9,13 +9,12 @@
 //!   app bundle.
 
 use crate::apps;
-use crate::tunnel;
+use crate::rpc::{self, RpcState};
 use crate::ui::StaticFiles;
-use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use lattice_api::RpcClient;
 use lattice_model::AppBinding;
@@ -26,9 +25,15 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::service::Routes;
 
-/// Shared state for the web server.
+/// Maximum request body size accepted by the RPC endpoints. Sized to
+/// comfortably hold a max-size intention payload (1 MB ops + protobuf
+/// overhead + the dispatch envelope) without leaving extra headroom for
+/// abuse. Set explicitly so the limit isn't an axum default that may shift.
+const MAX_RPC_BODY: usize = 2 * 1024 * 1024;
+
+/// Shared state for the static-serving handlers. The RPC handlers use a
+/// separate `RpcState` so they don't pull in bundle storage.
 struct AppState {
-    routes: Routes,
     client: RpcClient,
     /// subdomain → binding (routing)
     apps: Arc<RwLock<HashMap<String, AppBinding>>>,
@@ -36,7 +41,8 @@ struct AppState {
     bundles: Arc<RwLock<HashMap<String, apps::AppBundle>>>,
 }
 
-/// The web server: serves UI on `/` and WebSocket tunnel on `/ws`.
+/// The web server: serves the UI on `/` and the RPC + SSE bridge on
+/// `/rpc/{service}/{method}` and `/sse/{service}/{method}`.
 pub struct WebServer {
     routes: Routes,
     client: RpcClient,
@@ -115,10 +121,13 @@ impl WebServer {
         });
 
         let state = Arc::new(AppState {
-            routes,
             client: self.client.clone(),
             apps: apps.clone(),
             bundles: bundles.clone(),
+        });
+        let rpc_state = Arc::new(RpcState {
+            routes,
+            apps: apps.clone(),
         });
 
         let app = Router::new()
@@ -128,12 +137,17 @@ impl WebServer {
             .route("/sdk/vendor/{*path}", get(serve_sdk_vendor))
             .route("/sdk/store-id", get(serve_store_id))
             .route("/proto/api.bin", get(serve_api_proto))
-            .route("/proto/tunnel.bin", get(serve_tunnel_proto))
             .route("/proto/weaver.bin", get(serve_weaver_proto))
             .route("/proto/store/{uuid}", get(serve_store_proto))
-            .route("/ws", get(ws_handler))
             .route("/{*path}", get(serve_catchall))
-            .with_state(state);
+            .with_state(state)
+            .merge(
+                Router::new()
+                    .route("/rpc/{service}/{method}", post(rpc::handle_unary))
+                    .route("/sse/{service}/{method}", post(rpc::handle_sse))
+                    .layer(DefaultBodyLimit::max(MAX_RPC_BODY))
+                    .with_state(rpc_state),
+            );
 
         // Bind to both IPv4 and IPv6 localhost for dual-stack.
         // Either may fail (e.g. IPv6 disabled), but at least one must succeed.
@@ -382,13 +396,6 @@ async fn serve_api_proto() -> Response {
     ).into_response()
 }
 
-async fn serve_tunnel_proto() -> Response {
-    (
-        [(header::CONTENT_TYPE, "application/octet-stream")],
-        crate::TUNNEL_DESCRIPTOR,
-    ).into_response()
-}
-
 async fn serve_weaver_proto(headers: HeaderMap) -> Response {
     if is_app_subdomain(&headers) {
         return StatusCode::NOT_FOUND.into_response();
@@ -415,25 +422,6 @@ async fn serve_store_proto(
             .into_response(),
         Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
-}
-
-async fn ws_handler(
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-) -> Response {
-    let routes = state.routes.clone();
-
-    let allowed_store = if is_app_subdomain(&headers) {
-        match get_active_app_binding(&headers, &state).await {
-            Ok(b) => Some(b.store_id),
-            Err(resp) => return resp,
-        }
-    } else {
-        None
-    };
-
-    ws.on_upgrade(move |socket| tunnel::handle_ws(socket, routes, allowed_store))
 }
 
 // ============================================================================

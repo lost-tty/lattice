@@ -147,24 +147,40 @@ async function refreshNodeStatus() {
 export { refreshStores, refreshApps, refreshNodeStatus };
 
 // --- Node event stream ---
+//
+// This long-lived SSE stream doubles as the connectivity indicator: its
+// `onOpen`/`onError`/`onEnd` lifecycle drives the status badge so the UI
+// reflects whether the server is actually reachable, not just whether the
+// SDK module loaded.
 function subscribeNodeEvents() {
   const NodeEvent = sdk.proto.lookup('lattice.daemon.v1.NodeEvent');
 
-  sdk.rpc.subscribe('node', 'Subscribe', new Uint8Array(0), function (eventData) {
-    const ev = NodeEvent.decode(eventData);
-    if (ev.store_ready) {
-      toast('Store ready: ' + uuidFromBytes(ev.store_ready.store_id), 'ok');
-      refreshStores();
-    } else if (ev.join_failed) {
-      toast('Join failed: ' + (ev.join_failed.reason || 'unknown'), 'err');
-    } else if (ev.sync_result) {
-      const sr = ev.sync_result;
-      toast('Sync: ' + (sr.peers_synced || 0) + ' peers, ' + (sr.entries_sent || 0) + ' sent, ' + (sr.entries_received || 0) + ' received', 'ok');
-      refreshStores();
-    }
-  }, function () {
-    toast('Node event stream ended', 'err');
-  });
+  sdk.rpc.subscribe(
+    'node', 'Subscribe', new Uint8Array(0),
+    function onEvent(eventData) {
+      const ev = NodeEvent.decode(eventData);
+      if (ev.store_ready) {
+        toast('Store ready: ' + uuidFromBytes(ev.store_ready.store_id), 'ok');
+        refreshStores();
+      } else if (ev.join_failed) {
+        toast('Join failed: ' + (ev.join_failed.reason || 'unknown'), 'err');
+      } else if (ev.sync_result) {
+        const sr = ev.sync_result;
+        toast('Sync: ' + (sr.peers_synced || 0) + ' peers, ' + (sr.entries_sent || 0) + ' sent, ' + (sr.entries_received || 0) + ' received', 'ok');
+        refreshStores();
+      }
+    },
+    function onEnd() {
+      setStatus('err', 'Disconnected');
+      toast('Node event stream ended', 'err');
+    },
+    function onError(msg) {
+      setStatus('err', msg || 'Error');
+    },
+    function onOpen() {
+      setStatus('ok', 'Connected');
+    },
+  );
 }
 
 // --- Root store watch-apps streams ---

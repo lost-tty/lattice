@@ -236,7 +236,7 @@ Serve web applications at subdomains, backed by Lattice stores. Independent of m
 - [x] REST API: `GET/POST/DELETE /api/apps/{subdomain}`
 - [x] Subdomain extraction from `Host` header, app shell serving
 - [x] Embedded inventory app bundle via `rust-embed`
-- [x] Lattice SDK reads `<meta>` tags and connects to store via WebSocket
+- [x] Lattice SDK reads `<meta>` tags and calls the store over HTTP RPC + SSE
 
 ### A½: App Hosting Hardening ✅
 Security, architecture, and web UI improvements.

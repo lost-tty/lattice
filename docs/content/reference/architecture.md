@@ -87,7 +87,7 @@ graph TB
     end
     
     CLI --> RPC
-    WEB -->|WebSocket tunnel| RPC
+    WEB -->|HTTP RPC + SSE| RPC
     MOBILE -->|InProcessBackend| RT
     DAEMON --> RT
     RT --> NODE
@@ -134,7 +134,7 @@ For child stores discovered via the fractal hierarchy, the `RecursiveWatcher` au
 - **`lattice-api`:** gRPC services (`NodeService`, `StoreService`, `DynamicStoreService`) over Unix Domain Sockets. Domain↔DTO conversion between `lattice-model` types and Protobuf. Event streaming via `mpsc` channel bridging.
 - **`lattice-bindings`:** UniFFI bridge for Swift/Kotlin. Uses a "hidden runtime" pattern (owns a dedicated Tokio runtime). Dynamic Protobuf reflection (`prost-reflect` → `ReflectValue` enum tree) lets mobile apps discover and interact with arbitrary store schemas without recompilation.
 - **`lattice-cli` (`lattice`):** Single binary with three modes: REPL connecting to daemon (default), headless daemon (`--daemon`), and embedded mode (`--embedded`). Dynamic command execution pipeline: fetches Protobuf descriptors at runtime, parses S-expression input, reflects into `DynamicMessage`, executes, and renders. Includes a Unicode graph renderer (Kahn's algorithm + HLC priority) for visualizing DAG history. Daemon mode enables the web UI by default on port 8123.
-- **`lattice-web`:** Browser-based SPA served directly from the node. Preact + htm + Signals (no build step, no JSX transpiler). Communicates via WebSocket-tunneled gRPC — the WS tunnel routes synthetic `http::Request`s through `tonic::service::Routes`. Protobuf descriptors are served as binary `FileDescriptorSet` and converted in-browser via `protobufjs`. Features: dashboard, app management, store CRUD, peer management, dynamic method execution, live event subscriptions, system table inspection, and an SVG DAG history graph.
+- **`lattice-web`:** Browser-based SPA served directly from the node. Preact + htm + Signals (no build step, no JSX transpiler). Communicates over plain HTTP: unary RPCs to `POST /rpc/{service}/{method}` (raw protobuf in/out) and server-streaming RPCs to `POST /sse/{service}/{method}` (SSE with base64 `data:` lines). Both endpoints route synthetic `http::Request`s through `tonic::service::Routes`. Protobuf descriptors are served as binary `FileDescriptorSet` and converted in-browser via `protobufjs`. Features: dashboard, app management, store CRUD, peer management, dynamic method execution, live event subscriptions, system table inspection, and an SVG DAG history graph.
 
 ## Cryptographic Primitives
 
