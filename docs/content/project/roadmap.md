@@ -57,6 +57,9 @@ Open sub-questions:
 **3. Offline node returns after multiple epochs.**
 A node offline during epoch 1 and epoch 2 receives both on reconnect. It must ack both. If it acks epoch 2 (which transitively cites epoch 1 via the DAG), does that satisfy the epoch 1 `required_acks` check? The answer depends on whether the settlement check is "B's tip cites epoch N directly" or "transitively." If transitive, one ack for epoch 2 satisfies both — simpler. Needs to be made explicit.
 
+**4. Transitive convergence after a multi-peer sync round.**
+B pulls from A then from C. C had newer data; B now knows A is behind, but only catches A up when A initiates a session. Star topologies converge slowly. Options: push back to A in the same round, make Negentropy symmetric, or keep status quo and rely on gossip / next opportunistic sync.
+
 ### 18-Lifecycle: Store & Mesh Lifecycle
 Complete the store/mesh lifecycle operations. Currently only create, join, and archive-child exist.
 
