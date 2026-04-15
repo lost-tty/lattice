@@ -1,74 +1,80 @@
 :root {
   color-scheme: light dark;
 
-  /* --- Tuning knobs --- */
-  --hue: 40;
-  --chroma: 0.44;
-  --chroma-min: 0.01;
-  --chroma-max: 0.20;
-  --chroma-range: calc(var(--chroma-max) - var(--chroma-min));
-  --ch: calc(var(--chroma-min) + clamp(0, var(--chroma), 1) * var(--chroma-range));
+  /* --- Backgrounds & surfaces --- */
+  --bg: oklch(1 0 129.6);
+  --surface: oklch(0.983 0 129.6);
+  --hover: oklch(0.957 0.004 263.5);
 
-  /* --- Light-mode palette --- */
-  --bg: oklch(0.97 calc(var(--ch) * 0.001) var(--hue));
-  --surface: oklch(0.995 calc(var(--ch) * 0.001) var(--hue));
-  --fg: oklch(0.32 calc(var(--ch) * 0.003) var(--hue));
-  --muted: oklch(0.54 calc(var(--ch) * 0.005) var(--hue));
-  --border: oklch(0.92 calc(var(--ch) * 0.0015) var(--hue));
-  --accent: oklch(0.61 calc(0.16 * clamp(0.0001, var(--ch), 1) / 0.1) var(--hue));
-  --accent-hover: oklch(0.70 calc(0.12 * clamp(0.0001, var(--ch), 1) / 0.1) var(--hue));
-  --on-accent: oklch(1 0 0);
+  /* --- Text --- */
+  --fg: oklch(0.164 0.006 262.8);
+  --muted: oklch(0.63 0.012 256.2);
+  --faint: oklch(0.698 0.008 252.1);
 
-  /* --- Status --- */
-  --green: oklch(0.68 0.16 140);
-  --red: oklch(0.64 0.2 25);
-  --yellow: oklch(0.76 0.17 85);
-  --magenta: oklch(0.68 0.16 320);
+  /* --- Interactive --- */
+  --accent: oklch(0.503 0.171 254.4);
+  --accent-hover: oklch(0.58 0.168 257.8);
+  --on-accent: oklch(1 0 129.6);
+
+  /* --- Structural --- */
+  /* Used only for real outlines (tables, cards, inputs, modal). Content
+   * separation (header/main, sidebar/main, tabs/panel) is by background
+   * contrast, not borders. */
+  --border: oklch(0.966 0.004 264.7);
+
+  /* --- Status (kept as oklch for hue stability across light/dark) --- */
+  --green: okoklch(0.091 0.002 142.5);
+  --red: okoklch(0.089 0.003 22.9);
+  --yellow: okoklch(0.094 0.002 85.1);
+  --magenta: okoklch(0.091 0.002 322.9);
 
   /* --- Shadows & overlays --- */
-  --shadow: oklch(0 0 0 / 0.12);
-  --shadow-strong: oklch(0 0 0 / 0.25);
-  --overlay: oklch(0 0 0 / 0.5);
+  --shadow: oklch(0 0 0 / 0.1);
+  --shadow-strong: oklch(0 0 0 / 0.16);
+  --overlay: oklch(0 0 0 / 0.4);
 
   /* --- Typography & spacing --- */
   --font: system-ui, sans-serif;
   --mono: ui-monospace, 'SF Mono', monospace;
-  --sm: 0.8rem;
-  --lg: 1.25rem;
+  --sm: 11px;
+  --lg: 16px;
   --r: 6px;
 
   /* --- Layout --- */
-  --sidebar-w: 260px;
+  --sidebar-w: 240px;
   --sidebar-mobile-w: min(280px, 85vw);
   --mobile-breakpoint: 768px;
   --transition-drawer: 200ms ease;
   --z-sticky: 10;
   --z-drawer-backdrop: 40;
   --z-drawer: 50;
-  /* Explicit header height so sticky tabs + sticky sidebar can offset by it.
-   * Must match the actual rendered header height — header sets `height` to
-   * this var, so padding/content stay inside. */
-  --header-h: 3.1rem;
+  --header-h: 44px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: oklch(0.18 calc(var(--ch) * 0.1) var(--hue));
-    --surface: oklch(0.22 calc(var(--ch) * 0.12) var(--hue));
-    --fg: oklch(0.9 calc(var(--ch) * 0.04) var(--hue));
-    --muted: oklch(0.72 calc(var(--ch) * 0.06) var(--hue));
-    --border: oklch(0.33 calc(var(--ch) * 0.03) var(--hue));
-    --accent: oklch(0.75 calc(0.16 * clamp(0.0001, var(--ch), 1) / 0.1) var(--hue));
-    --accent-hover: oklch(0.82 calc(0.13 * clamp(0.0001, var(--ch), 1) / 0.1) var(--hue));
-    --on-accent: oklch(0.15 0.015 var(--hue));
+    /* Warm-neutral dark mode (~87deg hue family) */
+    --bg: oklch(0.293 0 129.6);
+    --surface: oklch(0.241 0 129.6);
+    --hover: oklch(0.319 0.004 86.6);
 
-    --green: oklch(0.62 0.16 140);
-    --red: oklch(0.60 0.2 25);
-    --yellow: oklch(0.68 0.17 85);
-    --magenta: oklch(0.65 0.16 320);
+    --fg: oklch(0.948 0.004 86.2);
+    --muted: oklch(0.655 0.008 86.5);
+    --faint: oklch(0.534 0.008 86.7);
 
-    --shadow: oklch(0 0 0 / 0.50);
-    --shadow-strong: oklch(0 0 0 / 0.70);
+    --accent: oklch(0.708 0.147 263.2);
+    --accent-hover: oklch(0.768 0.146 264.3);
+    --on-accent: oklch(0.267 0.004 274.2);
+
+    --border: oklch(0.327 0.004 86.5);
+
+    --green: okoklch(0.088 0.003 142.5);
+    --red: okoklch(0.088 0.003 22.9);
+    --yellow: okoklch(0.091 0.002 85.2);
+    --magenta: okoklch(0.09 0.002 322.9);
+
+    --shadow: oklch(0 0 0 / 0.3);
+    --shadow-strong: oklch(0 0 0 / 0.5);
     --overlay: oklch(0 0 0 / 0.7);
   }
 }
@@ -76,7 +82,7 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
-  font: 15px/1.5 var(--font);
+  font: 13px/1.5 var(--font);
   color: var(--fg);
   background: var(--bg);
 }
@@ -159,7 +165,6 @@ nav {
   height: calc(100dvh - var(--header-h));
   width: var(--sidebar-w);
   background: var(--surface);
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
@@ -172,7 +177,7 @@ nav {
   cursor: pointer;
   transition: background 150ms ease;
 }
-#node-info:hover { background: var(--bg); }
+#node-info:hover { background: var(--hover); }
 #node-info.active { background: color-mix(in oklch, var(--accent) 15%, var(--surface)); }
 #node-info.active .value { color: var(--accent); }
 
@@ -187,8 +192,7 @@ nav {
 .value:last-child { margin-bottom: 0; }
 
 .sidebar-section {
-  padding: 0.5rem 0.5rem 0.3rem 1rem;
-  border-top: 1px solid var(--border);
+  padding: 1rem 0.5rem 0.3rem 1rem;
   display: flex;
   align-items: center;
   gap: 0.4rem;
@@ -214,7 +218,7 @@ nav::-webkit-scrollbar-track { background: transparent; }
   margin-left: calc(var(--depth, 0) * 12px);
   transition: background 150ms ease;
 }
-.sidebar-item:hover { background: var(--bg); }
+.sidebar-item:hover { background: var(--hover); }
 .sidebar-item.active { background: color-mix(in oklch, var(--accent) 15%, var(--surface)); }
 .sidebar-item.active .name { color: var(--accent); }
 .sidebar-item .name { font-weight: 500; }
@@ -241,7 +245,7 @@ nav::-webkit-scrollbar-track { background: transparent; }
   line-height: 0; display: inline-flex; align-items: center; justify-content: center;
   transition: background 150ms ease, color 150ms ease;
 }
-.btn-icon:hover { color: var(--fg); background: var(--bg); }
+.btn-icon:hover { color: var(--fg); background: var(--hover); }
 .btn-icon svg { display: block; }
 
 .editable { cursor: pointer; border-bottom: 1px dashed var(--muted); }
@@ -419,12 +423,12 @@ pre {
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--fg);
-  font: 500 1rem var(--font);
+  font: 500 13px var(--font);
   cursor: pointer;
   border-radius: var(--r);
 }
 
-.btn:hover { background: var(--bg); }
+.btn:hover { background: var(--hover); }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .btn-primary:hover { opacity: 0.9; background: var(--accent); }
 .btn-danger:hover { background: color-mix(in oklch, var(--red) 15%, var(--surface)); border-color: var(--red); color: var(--red); }
@@ -518,7 +522,7 @@ pre {
   background: var(--bg);
   border: 1px solid var(--border);
   color: var(--fg);
-  font: 1rem var(--font);
+  font: 13px var(--font);
   border-radius: var(--r);
 }
 
@@ -669,7 +673,7 @@ table.data td { word-break: break-all; }
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   min-height: 100vh; text-align: center; padding: 2rem;
 }
-.error-page h1 { font-size: 4rem; margin: 0; color: var(--text-muted); }
+.error-page h1 { font-size: 4rem; margin: 0; color: var(--muted); }
 .error-page p { margin: 0.8rem 0; }
 .error-page a { color: var(--accent); }
 
@@ -682,7 +686,7 @@ table.data td { word-break: break-all; }
   display: flex;
   align-items: center;
   justify-content: center;
-  background: oklch(0 0 0 / 0.6);
+  background: okoklch(0 0 0 / 0.6);
   color: white;
   font-size: 1.4rem;
   font-weight: 600;
