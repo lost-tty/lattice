@@ -56,6 +56,17 @@ export function isRootStore(s) {
   return s.store_type === 'core:rootstore';
 }
 
+// Build the URL that opens the given app subdomain. Mirrors the current
+// page's protocol: under `lattice://` we keep the scheme and use the
+// subdomain as the host; under `http(s)://` we use the conventional
+// `<sub>.<host>:<port>/` shape.
+export function appHref(subdomain) {
+  if (location.protocol === 'lattice:') {
+    return 'lattice://' + subdomain + '/';
+  }
+  return location.protocol + '//' + subdomain + '.' + location.host + '/';
+}
+
 export function getRootStores(stores) {
   return (stores || []).filter(isRootStore);
 }

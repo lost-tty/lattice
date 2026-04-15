@@ -3,7 +3,7 @@
 import { html, useState, useEffect } from './util.js';
 import { nodeStatus, stores, apps as appsSignal, showModal, toast } from '../state.js';
 import { sdk } from '../sdk.js';
-import { uuidFromBytes, hexFromBytes } from '../helpers.js';
+import { uuidFromBytes, hexFromBytes, appHref } from '../helpers.js';
 import { navigate } from '../router.js';
 import { Icon } from './util.js';
 import { NodeName, toggleApp } from './sidebar.js';
@@ -59,7 +59,7 @@ export function Dashboard() {
                     <div class="dashboard-card-meta">${app.app_id}</div>
                     <div class="dashboard-card-actions">
                       ${enabled
-                        ? html`<a class="dashboard-card-link" href=${'http://' + app.subdomain + '.' + location.host + '/'} target="_blank" rel="noopener">Open</a>`
+                        ? html`<a class="dashboard-card-link" href=${appHref(app.subdomain)} target="_blank" rel="noopener">Open</a>`
                         : html`<span />`
                       }
                       <div class="dashboard-card-btns">

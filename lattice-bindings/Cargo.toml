@@ -22,6 +22,9 @@ uuid = { workspace = true }
 prost-reflect.workspace = true
 bytes.workspace = true
 tokio-stream.workspace = true
+http = "1"
+http-body-util = "0.1"
+axum = { version = "0.8", default-features = false }
 
 [lints]
 workspace = true

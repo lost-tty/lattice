@@ -1,5 +1,5 @@
 import { nodeStatus, stores, apps as appsSignal, showModal, toast, refreshNodeStatus, refreshApps } from '../state.js';
-import { uuidFromBytes } from '../helpers.js';
+import { uuidFromBytes, appHref } from '../helpers.js';
 import { navigate } from '../router.js';
 import { html, useState, useEffect, useRef, Icon } from './util.js';
 import { sdk } from '../sdk.js';
@@ -100,7 +100,7 @@ function AppsList() {
         return html`
           <div class="sidebar-item app-item ${!enabled ? 'disabled' : ''}">
             <a class="name ${!enabled ? 'muted' : ''}"
-               href="${enabled ? location.protocol + '//' + app.subdomain + '.' + location.host + '/' : '#'}"
+               href="${enabled ? appHref(app.subdomain) : '#'}"
                target=${enabled ? '_blank' : ''}
                rel="noopener"
                onClick=${!enabled ? (e) => e.preventDefault() : null}

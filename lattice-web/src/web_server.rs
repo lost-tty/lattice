@@ -24,6 +24,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::service::Routes;
+use tower::ServiceExt as _;
 
 /// Maximum request body size accepted by the RPC endpoints. Sized to
 /// comfortably hold a max-size intention payload (1 MB ops + protobuf
@@ -41,54 +42,35 @@ struct AppState {
     bundles: Arc<RwLock<HashMap<String, apps::AppBundle>>>,
 }
 
-/// The web server: serves the UI on `/` and the RPC + SSE bridge on
-/// `/rpc/{service}/{method}` and `/sse/{service}/{method}`.
-pub struct WebServer {
-    routes: Routes,
-    client: RpcClient,
-    app_manager: Arc<AppManager>,
-    port: u16,
+/// Transport-agnostic Lattice web router: assembles all routes (UI, static
+/// assets, proto descriptors, `/rpc/`, `/sse/`) and owns the live mirror of
+/// app/bundle state subscribed from the [`AppManager`]. Drop aborts the
+/// subscription task so dropped routers don't pin AppManager event capacity.
+///
+/// Construct once via [`WebRouter::new`], then drive it from any number of
+/// transports: [`WebServer`] for TCP/HTTP, or invoke [`WebRouter::handle`]
+/// directly from FFI / a custom URL scheme handler.
+pub struct WebRouter {
+    router: Router,
+    sub_task: tokio::task::AbortHandle,
 }
 
-impl WebServer {
-    pub fn new(
+impl Drop for WebRouter {
+    fn drop(&mut self) {
+        self.sub_task.abort();
+    }
+}
+
+impl WebRouter {
+    /// Build the router and start mirroring [`AppEvent`]s from `app_manager`
+    /// into the in-memory app/bundle maps. The subscription task lives until
+    /// the returned router is dropped.
+    pub async fn new(
         routes: Routes,
         client: RpcClient,
         app_manager: Arc<AppManager>,
-        port: u16,
     ) -> Self {
-        Self {
-            routes,
-            client,
-            app_manager,
-            port,
-        }
-    }
-
-    /// The URL the web UI will be reachable at.
-    pub fn url(&self) -> String {
-        crate::web_url(self.port)
-    }
-
-    /// Run the web server (blocks until shutdown).
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.run_inner(None).await
-    }
-
-    /// Like [`run`], but sends the actual bound URL via `url_tx` after the
-    /// listener is up. Useful when the configured port is 0 and the OS picks.
-    pub async fn run_with_url(
-        self,
-        url_tx: tokio::sync::oneshot::Sender<String>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.run_inner(Some(url_tx)).await
-    }
-
-    async fn run_inner(
-        self,
-        url_tx: Option<tokio::sync::oneshot::Sender<String>>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let routes = self.routes.prepare();
+        let routes = routes.prepare();
 
         let apps: Arc<RwLock<HashMap<String, AppBinding>>> =
             Arc::new(RwLock::new(HashMap::new()));
@@ -96,18 +78,18 @@ impl WebServer {
             Arc::new(RwLock::new(HashMap::new()));
 
         // Attach to the app manager: get current state + subscribe to changes
-        let (initial_events, mut rx) = self.app_manager.attach().await;
+        let (initial_events, mut rx) = app_manager.attach().await;
         for event in initial_events {
             apply_app_event(&apps, &bundles, event).await;
         }
 
         let app_count = apps.read().await.len();
         let bundle_count = bundles.read().await.len();
-        tracing::debug!(apps = app_count, bundles = bundle_count, "Web server: ready");
+        tracing::debug!(apps = app_count, bundles = bundle_count, "Web router: ready");
 
         let apps_ref = apps.clone();
         let bundles_ref = bundles.clone();
-        tokio::spawn(async move {
+        let sub_task = tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => apply_app_event(&apps_ref, &bundles_ref, event).await,
@@ -118,19 +100,20 @@ impl WebServer {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
-        });
+        })
+        .abort_handle();
 
         let state = Arc::new(AppState {
-            client: self.client.clone(),
+            client,
             apps: apps.clone(),
-            bundles: bundles.clone(),
+            bundles,
         });
         let rpc_state = Arc::new(RpcState {
             routes,
-            apps: apps.clone(),
+            apps,
         });
 
-        let app = Router::new()
+        let router = Router::new()
             .route("/", get(serve_root))
             .route("/static/{*path}", get(serve_static))
             .route("/sdk/lattice-sdk.js", get(serve_sdk_js))
@@ -148,6 +131,62 @@ impl WebServer {
                     .layer(DefaultBodyLimit::max(MAX_RPC_BODY))
                     .with_state(rpc_state),
             );
+
+        Self { router, sub_task }
+    }
+
+    /// Dispatch a single HTTP request through the router and return the
+    /// response. The body is a stream so SSE responses don't buffer in
+    /// memory. Skip TCP entirely by calling this directly.
+    pub async fn handle(
+        &self,
+        req: http::Request<axum::body::Body>,
+    ) -> http::Response<axum::body::Body> {
+        match self.router.clone().oneshot(req).await {
+            Ok(resp) => resp,
+            Err(e) => match e {},
+        }
+    }
+
+    /// The underlying axum [`Router`]. Useful for transports that want to
+    /// run their own listener loop (see [`WebServer::run`]).
+    pub fn axum_router(&self) -> Router {
+        self.router.clone()
+    }
+}
+
+/// TCP/HTTP driver for a [`WebRouter`]. Binds to dual-stack localhost and
+/// serves the router; one of many possible transports.
+pub struct WebServer {
+    router: Arc<WebRouter>,
+    port: u16,
+}
+
+impl WebServer {
+    pub fn new(router: Arc<WebRouter>, port: u16) -> Self {
+        Self { router, port }
+    }
+
+    /// Run the TCP server (blocks until shutdown).
+    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.run_inner(None).await
+    }
+
+    /// Like [`Self::run`], but sends the actual bound URL via `url_tx` once
+    /// the listener is up — useful when the configured port is 0 and the OS
+    /// picks.
+    pub async fn run_with_url(
+        self,
+        url_tx: tokio::sync::oneshot::Sender<String>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.run_inner(Some(url_tx)).await
+    }
+
+    async fn run_inner(
+        self,
+        url_tx: Option<tokio::sync::oneshot::Sender<String>>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let app = self.router.axum_router();
 
         // Bind to both IPv4 and IPv6 localhost for dual-stack.
         // Either may fail (e.g. IPv6 disabled), but at least one must succeed.

@@ -1,6 +1,6 @@
 import { html, useState, useEffect, useRef, FieldInput, collectFormFields } from './util.js';
 import { closeModal, modal, toast, refreshStores, refreshApps, stores, activeStoreId, setPanelOverride } from '../state.js';
-import { uuidFromBytes, uuidToBytes, bytesFromHex, getRootStores } from '../helpers.js';
+import { uuidFromBytes, uuidToBytes, bytesFromHex, getRootStores, appHref } from '../helpers.js';
 import { getSchema, encodeMessage } from '../schema.js';
 import { navigate } from '../router.js';
 import { runExecAndShow, doSubscribe, uploadBundleToStore } from './actions.js';
@@ -391,7 +391,7 @@ function RegisterAppModal({ registryStoreId }) {
       const store = await sdk.openStore(selectedRegId);
       await store.RegisterApp({ subdomain, app_id: selectedAppId, store_id: storeId });
       closeModal();
-      toast('App registered: ' + subdomain + '.' + location.hostname, 'ok');
+      toast('App registered at ' + appHref(subdomain), 'ok');
       await refreshStores();
       await refreshApps();
     } catch (e) { toast('Register error: ' + e.message, 'err'); }
@@ -421,7 +421,7 @@ function RegisterAppModal({ registryStoreId }) {
       </select>
       <label>Subdomain</label>
       <input ref=${subdomainRef} placeholder="e.g. inventory" />
-      <p class="muted small">Served at <em>subdomain</em>.${location.hostname}:${location.port}</p>
+      <p class="muted small">Served at <code>${appHref('<subdomain>')}</code></p>
       <label>Data Store</label>
       <div class="radio-group">
         <label class="radio-label">

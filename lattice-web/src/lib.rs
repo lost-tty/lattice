@@ -32,7 +32,7 @@ mod rpc;
 mod ui;
 mod web_server;
 
-pub use web_server::WebServer;
+pub use web_server::{WebRouter, WebServer};
 
 /// Returns the URL the web UI will be reachable at for a given port.
 pub fn web_url(port: u16) -> String {

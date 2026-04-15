@@ -23,21 +23,19 @@ struct WebHandle {
 
 /// A running Lattice runtime with Node, network, and optional RPC server.
 ///
-/// The web UI server has explicit lifecycle: callers (CLI, FFI, tests) decide
-/// when to `start_web` / `stop_web`. `RuntimeBuilder::with_web(port)` is just a
-/// convenience that calls `start_web(port)` once after build, so daemon /
-/// embedded modes get the historical "start once, run forever" behavior. iOS
-/// hooks `start_web(0)` / `stop_web()` into UIApplication lifecycle so the
-/// listener is rebound on foreground (where iOS leaves it half-dead).
+/// The web router is built once at runtime construction and always
+/// available via [`Runtime::web_router`] — call it directly to skip TCP.
+/// The TCP front-end has explicit lifecycle: callers decide when to
+/// `start_web` / `stop_web`.
 pub struct Runtime {
     node: Arc<Node>,
     mesh_service: Arc<NetworkService>,
     backend: Arc<lattice_api::RpcClient>,
     rpc_handle: Option<JoinHandle<()>>,
     #[cfg(feature = "web")]
-    web: Arc<Mutex<Option<WebHandle>>>,
+    web_router: Arc<lattice_web::WebRouter>,
     #[cfg(feature = "web")]
-    routes: tonic::service::Routes,
+    web: Arc<Mutex<Option<WebHandle>>>,
 }
 
 impl Runtime {
@@ -56,7 +54,7 @@ impl Runtime {
         &self.backend
     }
 
-    /// Current web UI URL, or `None` if the server is not running.
+    /// Current web UI URL, or `None` if no TCP front-end is running.
     #[cfg(feature = "web")]
     pub fn web_url(&self) -> Option<String> {
         self.web.lock().ok().and_then(|g| g.as_ref().map(|w| w.url.clone()))
@@ -67,19 +65,22 @@ impl Runtime {
         None
     }
 
-    /// Start (or replace) the web UI server on `port`. `port = 0` lets the OS
-    /// pick a free port; the returned URL reflects the actual bound address.
-    /// If a previous instance is still running it's stopped first.
+    /// The transport-agnostic web router. Dispatch HTTP requests directly
+    /// through it without binding a TCP listener.
+    #[cfg(feature = "web")]
+    pub fn web_router(&self) -> Arc<lattice_web::WebRouter> {
+        self.web_router.clone()
+    }
+
+    /// Start (or replace) the TCP front-end on `port`. `port = 0` lets the
+    /// OS pick a free port; the returned URL reflects the actual bound
+    /// address. If a previous instance is still running it's stopped first.
+    /// The router itself is shared with any other active driver (FFI, etc.).
     #[cfg(feature = "web")]
     pub async fn start_web(&self, port: u16) -> Result<String, RuntimeError> {
         self.stop_web();
 
-        let server = lattice_web::WebServer::new(
-            self.routes.clone(),
-            (*self.backend).clone(),
-            self.node.app_manager().clone(),
-            port,
-        );
+        let server = lattice_web::WebServer::new(self.web_router.clone(), port);
         let (url_tx, url_rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(async move {
             if let Err(e) = server.run_with_url(url_tx).await {
@@ -95,7 +96,8 @@ impl Runtime {
         Ok(url)
     }
 
-    /// Stop the web UI server if running. No-op otherwise.
+    /// Stop the TCP front-end if running. The router stays alive for any
+    /// other active driver (FFI, etc.). No-op if not bound.
     #[cfg(feature = "web")]
     pub fn stop_web(&self) {
         if let Ok(mut g) = self.web.lock() {
@@ -294,15 +296,28 @@ impl RuntimeBuilder {
             None
         };
 
+        // Build the web router up-front so any driver (TCP, FFI, scheme
+        // handler) can dispatch through it. The TCP front-end is started
+        // separately via `start_web`.
+        #[cfg(feature = "web")]
+        let web_router = Arc::new(
+            lattice_web::WebRouter::new(
+                routes,
+                (*backend).clone(),
+                node.app_manager().clone(),
+            )
+            .await,
+        );
+
         Ok(Runtime {
             node,
             mesh_service,
             backend,
             rpc_handle,
             #[cfg(feature = "web")]
-            web: Arc::new(Mutex::new(None)),
+            web_router,
             #[cfg(feature = "web")]
-            routes,
+            web: Arc::new(Mutex::new(None)),
         })
     }
 }

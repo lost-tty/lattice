@@ -258,6 +258,104 @@ pub struct Lattice {
     runtime: RwLock<Option<lattice_runtime::Runtime>>,
 }
 
+// ---------------------------------------------------------------------------
+// Web request bridge
+//
+// Hand a fully-formed HTTP request to the embedded web router from any
+// caller (FFI consumer, custom scheme handler, etc.) and stream the
+// response back. Same router code as the TCP front-end — no second
+// routing table, no second access-control implementation.
+// ---------------------------------------------------------------------------
+
+#[derive(uniffi::Record, Clone)]
+pub struct WebHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct WebRequest {
+    /// HTTP method (e.g. "GET", "POST"). Case-insensitive.
+    pub method: String,
+    /// Full URL. The `Host` header (set in `headers`) drives app-subdomain
+    /// routing; the URL itself is used for path/query.
+    pub url: String,
+    pub headers: Vec<WebHeader>,
+    pub body: Vec<u8>,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct WebResponseHead {
+    pub status: u16,
+    pub headers: Vec<WebHeader>,
+}
+
+/// Streaming response body. Call [`Self::head`] once to get status+headers,
+/// then loop on [`Self::next_chunk`] until it returns `Ok(None)`. Drop the
+/// stream to cancel — the body and any upstream RPC are released.
+#[derive(uniffi::Object)]
+pub struct WebResponseStream {
+    head: WebResponseHead,
+    body: tokio::sync::Mutex<axum::body::Body>,
+}
+
+#[uniffi::export]
+impl WebResponseStream {
+    pub fn head(&self) -> WebResponseHead {
+        self.head.clone()
+    }
+
+    /// Next body chunk, or `Ok(None)` when the response has fully ended.
+    /// Errors mid-stream surface as `Err`. Backpressure flows naturally:
+    /// each call awaits one frame from the upstream body, which in turn
+    /// awaits the stream's own backpressure (e.g. lattice-web's SSE
+    /// `decouple` buffer).
+    pub async fn next_chunk(&self) -> Result<Option<Vec<u8>>, LatticeError> {
+        use http_body_util::BodyExt as _;
+        let mut body = self.body.lock().await;
+        loop {
+            match body.frame().await {
+                Some(Ok(frame)) => match frame.into_data() {
+                    Ok(bytes) => return Ok(Some(bytes.to_vec())),
+                    Err(_) => continue, // trailers — irrelevant to the FFI consumer
+                },
+                Some(Err(e)) => {
+                    return Err(LatticeError::Internal {
+                        message: format!("body error: {e}"),
+                    })
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+}
+
+/// Translate a [`WebRequest`] into the `http::Request<axum::body::Body>`
+/// shape the router expects. Header parsing errors surface as `LatticeError`
+/// rather than panicking — Swift might pass anything.
+fn build_http_request(
+    req: WebRequest,
+) -> Result<http::Request<axum::body::Body>, LatticeError> {
+    let method = http::Method::from_bytes(req.method.as_bytes()).map_err(|e| {
+        LatticeError::InvalidArgument {
+            message: format!("invalid method: {e}"),
+        }
+    })?;
+    let uri: http::Uri = req.url.parse().map_err(|e| LatticeError::InvalidArgument {
+        message: format!("invalid url: {e}"),
+    })?;
+
+    let mut builder = http::Request::builder().method(method).uri(uri);
+    for h in &req.headers {
+        builder = builder.header(h.name.as_str(), h.value.as_str());
+    }
+    builder
+        .body(axum::body::Body::from(req.body))
+        .map_err(|e| LatticeError::InvalidArgument {
+            message: format!("failed to build request: {e}"),
+        })
+}
+
 #[uniffi::export]
 impl Lattice {
     #[uniffi::constructor]
@@ -344,6 +442,47 @@ impl Lattice {
         let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
         r.stop_web();
         Ok(())
+    }
+
+    /// Dispatch one HTTP request through the embedded web router and
+    /// return a streaming response. Skips TCP entirely.
+    ///
+    /// Cancellation: drop the returned [`WebResponseStream`] to abort the
+    /// request; the response body and any upstream gRPC stream are
+    /// released as soon as the body is dropped.
+    pub fn handle_web_request(
+        &self,
+        req: WebRequest,
+    ) -> Result<Arc<WebResponseStream>, LatticeError> {
+        let r_guard = self.rt.block_on(self.runtime.read());
+        let runtime = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+        let router = runtime.web_router();
+
+        let http_req = build_http_request(req)?;
+
+        // The router resolves immediately with the head; body frames stream
+        // out lazily as the consumer pulls them via WebResponseStream.
+        let response = self.rt.block_on(async move { router.handle(http_req).await });
+
+        let (parts, body) = response.into_parts();
+        let head = WebResponseHead {
+            status: parts.status.as_u16(),
+            headers: parts
+                .headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    Some(WebHeader {
+                        name: name.as_str().to_string(),
+                        value: value.to_str().ok()?.to_string(),
+                    })
+                })
+                .collect(),
+        };
+
+        Ok(Arc::new(WebResponseStream {
+            head,
+            body: tokio::sync::Mutex::new(body),
+        }))
     }
 
     /// List active (enabled) apps.
