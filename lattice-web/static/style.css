@@ -23,10 +23,10 @@
   --border: oklch(0.966 0.004 264.7);
 
   /* --- Status (kept as oklch for hue stability across light/dark) --- */
-  --green: okoklch(0.091 0.002 142.5);
-  --red: okoklch(0.089 0.003 22.9);
-  --yellow: okoklch(0.094 0.002 85.1);
-  --magenta: okoklch(0.091 0.002 322.9);
+  --green: oklch(0.7 0.15 142.5);
+  --red: oklch(0.7 0.15 22.9);
+  --yellow: oklch(0.8 0.15 85.1);
+  --magenta: oklch(0.7 0.15 322.9);
 
   /* --- Shadows & overlays --- */
   --shadow: oklch(0 0 0 / 0.1);
@@ -68,10 +68,10 @@
 
     --border: oklch(0.327 0.004 86.5);
 
-    --green: okoklch(0.088 0.003 142.5);
-    --red: okoklch(0.088 0.003 22.9);
-    --yellow: okoklch(0.091 0.002 85.2);
-    --magenta: okoklch(0.09 0.002 322.9);
+    --green: oklch(0.7 0.15 142.5);
+    --red: oklch(0.7 0.15 22.9);
+    --yellow: oklch(0.8 0.15 85.1);
+    --magenta: oklch(0.7 0.15 322.9);
 
     --shadow: oklch(0 0 0 / 0.3);
     --shadow-strong: oklch(0 0 0 / 0.5);
@@ -686,7 +686,7 @@ table.data td { word-break: break-all; }
   display: flex;
   align-items: center;
   justify-content: center;
-  background: okoklch(0 0 0 / 0.6);
+  background: oklch(0 0 0 / 0.6);
   color: white;
   font-size: 1.4rem;
   font-weight: 600;
