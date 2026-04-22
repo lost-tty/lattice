@@ -260,6 +260,23 @@ message AuthorStateResponse {
   repeated AuthorState items = 1;
 }
 
+message AuthorStateObservation {
+  bytes observer = 1;
+  bytes observed_author = 2;
+  uint64 witness_seq = 3;
+}
+
+message AuthorStateObserver {
+  bytes public_key = 1;
+  optional string peer_status = 2;
+  optional string peer_name = 3;
+}
+
+message AuthorStateObservationsResponse {
+  repeated AuthorStateObservation items = 1;
+  repeated AuthorStateObserver observers = 2;
+}
+
 message CleanupResult {
   uint32 orphans_removed = 1;
 }

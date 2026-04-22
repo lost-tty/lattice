@@ -30,6 +30,10 @@ pub enum ReplicationControllerCmd {
     AuthorTipsWithSeq {
         resp: oneshot::Sender<Result<HashMap<PubKey, crate::store::AuthorTip>, StateError>>,
     },
+    /// Observations of max witness seq per (observer, observed author) derived from causal deps.
+    AuthorStateObservations {
+        resp: oneshot::Sender<Result<Vec<(PubKey, PubKey, u64)>, StateError>>,
+    },
     /// Ingest a batch of signed intentions from network (replaces single ingest)
     IngestBatch {
         intentions: Vec<SignedIntention>,
@@ -205,6 +209,13 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                     })
                     .collect();
                 let _ = resp.send(Ok(tips));
+            }
+
+            ReplicationControllerCmd::AuthorStateObservations { resp } => {
+                let store = self.intention_store.read().await;
+                let result = compute_author_state_observations(&store)
+                    .map_err(|e| StateError::Backend(e.to_string()));
+                let _ = resp.send(result);
             }
 
             ReplicationControllerCmd::IngestBatch { intentions, resp } => {
@@ -724,6 +735,37 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
             None
         }
     }
+}
+
+/// For every author A in this store, walk A's chain and record the max witness seq
+/// seen per referenced author via causal deps. Returned as a flat list of
+/// (observer, observed, seq) triples.
+fn compute_author_state_observations(
+    store: &IntentionStore,
+) -> Result<Vec<(PubKey, PubKey, u64)>, IntentionStoreError> {
+    const WALK_LIMIT: usize = 1_000_000;
+    let mut observations: Vec<(PubKey, PubKey, u64)> = Vec::new();
+
+    for (observer, tip) in store.all_author_tips() {
+        let chain = store.walk_back_until(tip, Some(&Hash::ZERO), WALK_LIMIT)?;
+        let mut per_author: HashMap<PubKey, u64> = HashMap::new();
+        for signed in chain {
+            let Condition::V1(deps) = &signed.intention.condition;
+            for dep in deps {
+                let Some(seq) = store.get_witness_seq_for(dep) else { continue };
+                let Some(dep_intent) = store.get(dep)? else { continue };
+                let dep_author = dep_intent.intention.author;
+                per_author
+                    .entry(dep_author)
+                    .and_modify(|s| *s = (*s).max(seq))
+                    .or_insert(seq);
+            }
+        }
+        for (observed, seq) in per_author {
+            observations.push((*observer, observed, seq));
+        }
+    }
+    Ok(observations)
 }
 
 #[cfg(test)]

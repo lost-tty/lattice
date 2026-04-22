@@ -436,6 +436,63 @@ impl InProcessBackend {
         })
     }
 
+    pub fn store_author_state_observations(
+        &self,
+        store_id: Uuid,
+    ) -> AsyncResult<'_, proto::AuthorStateObservationsResponse> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            let inspector = store.as_inspector();
+            let observations = inspector.author_state_observations().await?;
+
+            let peer_by_key: std::collections::HashMap<PubKey, (String, Option<String>)> =
+                match self.node.store_manager().get_peer_manager(&store_id) {
+                    Some(pm) => pm
+                        .list_peers()
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|p| (p.pubkey, (p.status.as_str().to_string(), p.name)))
+                        .collect(),
+                    None => Default::default(),
+                };
+
+            let mut observer_keys: std::collections::BTreeSet<PubKey> =
+                observations.iter().map(|(o, _, _)| *o).collect();
+            for k in peer_by_key.keys() {
+                observer_keys.insert(*k);
+            }
+
+            let items = observations
+                .into_iter()
+                .map(|(observer, observed, seq)| proto::AuthorStateObservation {
+                    observer: observer.to_vec(),
+                    observed_author: observed.to_vec(),
+                    witness_seq: seq,
+                })
+                .collect();
+
+            let mut observers: Vec<proto::AuthorStateObserver> = observer_keys
+                .into_iter()
+                .map(|k| {
+                    let peer = peer_by_key.get(&k);
+                    proto::AuthorStateObserver {
+                        public_key: k.to_vec(),
+                        peer_status: peer.map(|(s, _)| s.clone()),
+                        peer_name: peer.and_then(|(_, n)| n.clone()),
+                    }
+                })
+                .collect();
+            observers.sort_by(|a, b| {
+                a.peer_status
+                    .cmp(&b.peer_status)
+                    .then_with(|| a.public_key.cmp(&b.public_key))
+            });
+
+            Ok(proto::AuthorStateObservationsResponse { items, observers })
+        })
+    }
+
     pub fn store_witness_log(&self, store_id: Uuid) -> AsyncResult<'_, Vec<WitnessEntry>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;

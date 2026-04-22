@@ -7,6 +7,7 @@ import { sdk } from '../sdk.js';
 export async function loadDebug(storeId, debugView) {
   switch (debugView) {
     case 'tips': return await loadDebugTips(storeId);
+    case 'authorstate': return await loadDebugAuthorState(storeId);
     case 'log': return await loadDebugLog(storeId);
     case 'intentions': return await loadDebugIntentions(storeId);
     case 'floating': return await loadDebugFloating(storeId);
@@ -15,7 +16,7 @@ export async function loadDebug(storeId, debugView) {
 
 function DebugNav({ storeId, debugView }) {
   const uuid = Helpers.uuidFromBytes(storeId);
-  const views = ['tips', 'log', 'intentions', 'floating'];
+  const views = ['tips', 'authorstate', 'log', 'intentions', 'floating'];
   return html`
     <div class="action-bar">
       ${views.map(v => html`
@@ -50,6 +51,69 @@ async function loadDebugTips(storeId) {
         </table>
       `
     }
+  `;
+}
+
+async function loadDebugAuthorState(storeId) {
+  const [resp, tipsResp] = await Promise.all([
+    sdk.api.store.GetAuthorStateObservations({ store_id: storeId }),
+    sdk.api.store.GetAuthorTips({ store_id: storeId }),
+  ]);
+  const observers = resp.observers || [];
+  const observations = resp.items || [];
+  const tips = tipsResp.items || [];
+
+  if (observers.length === 0) {
+    return html`<${DebugNav} storeId=${storeId} debugView="authorstate" /><div class="empty-state">No authors</div>`;
+  }
+
+  // Ground truth: observed author → witness_seq (from local tips).
+  const groundTruth = new Map();
+  for (const a of tips) {
+    if (a.witness_seq != null) groundTruth.set(hex(a.public_key), a.witness_seq);
+  }
+
+  // (observer_hex, observed_hex) → seq
+  const cell = new Map();
+  for (const o of observations) {
+    cell.set(hex(o.observer) + '|' + hex(o.observed_author), o.witness_seq);
+  }
+
+  const colIds = observers.map(o => hex(o.public_key));
+  const labelFor = (obs) => obs.peer_name && obs.peer_name.length > 0
+    ? obs.peer_name
+    : Helpers.pubkeyShort(obs.public_key);
+  const colHeaders = observers.map(labelFor);
+
+  return html`
+    <${DebugNav} storeId=${storeId} debugView="authorstate" />
+    <table>
+      <tr>
+        <th>Observer</th><th>Status</th>
+        ${colHeaders.map(h => html`<th>${h}</th>`)}
+      </tr>
+      ${observers.map(obs => {
+        const observerHex = hex(obs.public_key);
+        return html`
+          <tr>
+            <td>${labelFor(obs)}</td>
+            <td>${obs.peer_status ?? '-'}</td>
+            ${colIds.map(observedHex => {
+              if (observedHex === observerHex) return html`<td class="muted">n/a</td>`;
+              const seq = cell.get(observerHex + '|' + observedHex);
+              if (seq == null) return html`<td>-</td>`;
+              const gt = groundTruth.get(observedHex);
+              const delta = gt != null ? gt - seq : null;
+              return html`<td>
+                <span class="sexpr-num">${seq}</span>${delta != null
+                  ? html` <span class="err">-${delta}</span>`
+                  : null}
+              </td>`;
+            })}
+          </tr>
+        `;
+      })}
+    </table>
   `;
 }
 

@@ -35,6 +35,7 @@ service StoreService {
   rpc Sync(StoreId) returns (Empty);
   rpc ReconnectPeers(StoreId) returns (Empty);
   rpc GetAuthorTips(StoreId) returns (AuthorStateResponse);
+  rpc GetAuthorStateObservations(StoreId) returns (AuthorStateObservationsResponse);
   rpc WitnessLog(WitnessLogRequest) returns (WitnessLogResponse);
   rpc FloatingIntentions(StoreId) returns (FloatingIntentionsResponse);
   rpc GetIntention(GetIntentionRequest) returns (GetIntentionResponse);

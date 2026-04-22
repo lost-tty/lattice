@@ -169,6 +169,12 @@ impl RpcClient {
     pub fn store_author_tips(&self, id: Uuid) -> AsyncResult<'_, Vec<AuthorState>> {
         Box::pin(async move { rpc_store!(self, store.get_author_tips, id, .items) })
     }
+    pub fn store_author_state_observations(
+        &self,
+        id: Uuid,
+    ) -> AsyncResult<'_, crate::proto::AuthorStateObservationsResponse> {
+        Box::pin(async move { rpc_store!(self, store.get_author_state_observations, id) })
+    }
     pub fn store_get_name(&self, id: Uuid) -> AsyncResult<'_, Option<String>> {
         Box::pin(async move { rpc_store!(self, store.get_name, id, .name) })
     }

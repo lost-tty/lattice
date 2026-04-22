@@ -540,6 +540,91 @@ pub async fn cmd_store_debug_tips(
     Ok(Continue)
 }
 
+pub async fn cmd_store_debug_authorstate(
+    backend: &RpcClient,
+    store_id: Option<Uuid>,
+    writer: Writer,
+) -> CmdResult {
+    let mut w = writer.clone();
+
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "No store selected.");
+            return Ok(Continue);
+        }
+    };
+
+    let resp = match backend.store_author_state_observations(store_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = writeln!(w, "[AuthorState] Failed: {}", e);
+            return Ok(Continue);
+        }
+    };
+    let tips = backend.store_author_tips(store_id).await.unwrap_or_default();
+    let ground_truth: std::collections::HashMap<Vec<u8>, u64> = tips
+        .iter()
+        .filter_map(|a| a.witness_seq.map(|s| (a.public_key.clone(), s)))
+        .collect();
+
+    // Stable order: server returns observers sorted by peer_status then pubkey.
+    // Use the same list for both rows and columns so the diagonal stays a diagonal.
+    let ordered: Vec<&Vec<u8>> = resp.observers.iter().map(|o| &o.public_key).collect();
+
+    let mut cell: std::collections::HashMap<(Vec<u8>, Vec<u8>), u64> = std::collections::HashMap::new();
+    for o in &resp.items {
+        cell.insert((o.observer.clone(), o.observed_author.clone()), o.witness_seq);
+    }
+
+    let col_labels: Vec<String> = resp.observers.iter()
+        .map(|obs| match obs.peer_name.as_deref().filter(|s| !s.is_empty()) {
+            Some(n) => n.to_string(),
+            None => hex::encode(&obs.public_key[..4.min(obs.public_key.len())]),
+        })
+        .collect();
+
+    use owo_colors::OwoColorize;
+    let mut rows = vec![SExpr::sym("author-state")];
+    for observer in &resp.observers {
+        let mut row = vec![SExpr::sym("Row")];
+        let name = observer.peer_name.as_deref().filter(|s| !s.is_empty()).unwrap_or("-");
+        let status = observer.peer_status.as_deref().unwrap_or("-");
+        row.push(SExpr::list(vec![SExpr::sym("observer"), SExpr::raw(observer.public_key.clone())]));
+        row.push(SExpr::list(vec![SExpr::sym("name"), SExpr::sym(name)]));
+        row.push(SExpr::list(vec![SExpr::sym("status"), SExpr::sym(status)]));
+        for (observed, col_label) in ordered.iter().zip(col_labels.iter()) {
+            let val = if &observer.public_key == *observed {
+                SExpr::sym("n/a")
+            } else {
+                match cell.get(&(observer.public_key.clone(), (*observed).clone())) {
+                    Some(seq) => {
+                        let delta = ground_truth
+                            .get(*observed)
+                            .map(|gt| gt.saturating_sub(*seq));
+                        let text = match delta {
+                            Some(d) => format!("{} {}", seq.yellow(), format!("-{}", d).red()),
+                            None => format!("{}", seq.yellow()),
+                        };
+                        SExpr::sym(&text)
+                    }
+                    None => SExpr::sym("-"),
+                }
+            };
+            row.push(SExpr::list(vec![SExpr::sym(col_label), val]));
+        }
+        rows.push(SExpr::list(row));
+    }
+
+    let _ = writeln!(
+        w,
+        "{}",
+        crate::display_helpers::render_sexpr_pretty_colored(&SExpr::list(rows), 4)
+    );
+
+    Ok(Continue)
+}
+
 pub async fn cmd_store_debug_log(
     backend: &RpcClient,
     store_id: Option<Uuid>,

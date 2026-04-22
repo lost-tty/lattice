@@ -316,6 +316,18 @@ impl<S: StateMachine> Store<S> {
         Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
     }
 
+    /// Observations of max witness seq per (observer, observed author) derived from causal deps.
+    pub async fn author_state_observations(
+        &self,
+    ) -> Result<Vec<(PubKey, PubKey, u64)>, StoreError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ReplicationControllerCmd::AuthorStateObservations { resp: resp_tx })
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?;
+        Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
+    }
+
     /// Ingest a signed intention from a peer
     pub async fn ingest_intention(
         &self,
@@ -668,6 +680,14 @@ impl<S: StateMachine + StoreIdentity + 'static> StoreInspector for Store<S> {
         Box<dyn Future<Output = Result<HashMap<PubKey, AuthorTip>, StoreError>> + Send + '_>,
     > {
         Box::pin(Store::author_tips_with_seq(self))
+    }
+
+    fn author_state_observations(
+        &self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<(PubKey, PubKey, u64)>, StoreError>> + Send + '_>,
+    > {
+        Box::pin(Store::author_state_observations(self))
     }
 
     fn intention_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>> {

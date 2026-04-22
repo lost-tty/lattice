@@ -278,6 +278,8 @@ pub enum StoreSubcommand {
 pub enum DebugSubcommand {
     /// Show per-author tip hashes
     Tips,
+    /// Show observer × observed-author state inferred from causal deps
+    Authorstate,
     /// Show the witness log chain
     Log,
     /// Show all intentions (via witness log)
@@ -440,6 +442,9 @@ pub async fn handle_command(
             StoreSubcommand::Debug { sub } => match sub {
                 DebugSubcommand::Tips => {
                     store_commands::cmd_store_debug_tips(backend, ctx.store_id, writer).await
+                }
+                DebugSubcommand::Authorstate => {
+                    store_commands::cmd_store_debug_authorstate(backend, ctx.store_id, writer).await
                 }
                 DebugSubcommand::Log => {
                     store_commands::cmd_store_debug_log(backend, ctx.store_id, writer).await

@@ -74,6 +74,17 @@ impl StoreService for InProcessBackend {
         self.store_debug(id).await.map(|a| Response::new(AuthorStateResponse { items: a })).into_status()
     }
 
+    async fn get_author_state_observations(
+        &self,
+        request: Request<StoreId>,
+    ) -> Result<Response<lattice_api::proto::AuthorStateObservationsResponse>, Status> {
+        let id = parse_uuid(&request.into_inner().store_id)?;
+        self.store_author_state_observations(id)
+            .await
+            .map(Response::new)
+            .into_status()
+    }
+
     async fn witness_log(&self, request: Request<WitnessLogRequest>) -> Result<Response<WitnessLogResponse>, Status> {
         let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_witness_log(id).await
