@@ -251,6 +251,9 @@ message AuthorStateRequest {
 message AuthorState {
   bytes public_key = 1;
   bytes hash = 2;
+  optional uint64 witness_seq = 3;
+  optional string peer_status = 4;
+  optional string peer_name = 5;
 }
 
 message AuthorStateResponse {

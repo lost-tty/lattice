@@ -32,6 +32,14 @@ pub struct ProjectionStatus {
     pub witness_head_hash: Hash,
 }
 
+/// An author's latest intention hash and its witness-log seq.
+/// `witness_seq` is `None` if the tip hasn't been witnessed yet.
+#[derive(Debug, Clone)]
+pub struct AuthorTip {
+    pub hash: Hash,
+    pub witness_seq: Option<u64>,
+}
+
 use std::any::Any;
 
 /// Trait for type-erased store handles in the registry.
@@ -291,6 +299,18 @@ impl<S: StateMachine> Store<S> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
             .send(ReplicationControllerCmd::AuthorTips { resp: resp_tx })
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?;
+        Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
+    }
+
+    /// Get author tips with witness seq for diagnostics
+    pub async fn author_tips_with_seq(
+        &self,
+    ) -> Result<HashMap<PubKey, AuthorTip>, StoreError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ReplicationControllerCmd::AuthorTipsWithSeq { resp: resp_tx })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
         Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
@@ -644,8 +664,10 @@ impl<S: StateMachine + StoreIdentity + 'static> StoreInspector for Store<S> {
 
     fn author_tips(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, StoreError>> + Send + '_>> {
-        Box::pin(Store::author_tips(self))
+    ) -> Pin<
+        Box<dyn Future<Output = Result<HashMap<PubKey, AuthorTip>, StoreError>> + Send + '_>,
+    > {
+        Box::pin(Store::author_tips_with_seq(self))
     }
 
     fn intention_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>> {

@@ -411,11 +411,26 @@ impl InProcessBackend {
             let inspector = store.as_inspector();
             let tips = inspector.author_tips().await?;
 
+            let peers = match self.node.store_manager().get_peer_manager(&store_id) {
+                Some(pm) => pm.list_peers().await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let peer_by_author: std::collections::HashMap<PubKey, (String, Option<String>)> = peers
+                .into_iter()
+                .map(|p| (p.pubkey, (p.status.as_str().to_string(), p.name)))
+                .collect();
+
             Ok(tips
                 .into_iter()
-                .map(|(author, hash)| AuthorState {
-                    public_key: author.to_vec(),
-                    hash: hash.to_vec(),
+                .map(|(author, tip)| {
+                    let peer = peer_by_author.get(&author);
+                    AuthorState {
+                        public_key: author.to_vec(),
+                        hash: tip.hash.to_vec(),
+                        witness_seq: tip.witness_seq,
+                        peer_status: peer.map(|(s, _)| s.clone()),
+                        peer_name: peer.and_then(|(_, n)| n.clone()),
+                    }
                 })
                 .collect())
         })

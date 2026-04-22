@@ -3,7 +3,7 @@
 //! Provides async methods for inspecting store state.
 //! Implemented by Store<S> for any StateMachine S.
 
-use crate::store::{ProjectionStatus, StoreError};
+use crate::store::{AuthorTip, ProjectionStatus, StoreError};
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, SignedIntention, WitnessEntry};
 use lattice_model::{BranchInspection, Uuid};
@@ -20,10 +20,12 @@ pub trait StoreInspector: Send + Sync {
     /// Store ID
     fn id(&self) -> Uuid;
 
-    /// Get author tips (PubKey → latest intention hash) for diagnostics
+    /// Get author tips (PubKey → latest intention hash + witness seq) for diagnostics.
     fn author_tips(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<HashMap<PubKey, Hash>, StoreError>> + Send + '_>>;
+    ) -> Pin<
+        Box<dyn Future<Output = Result<HashMap<PubKey, AuthorTip>, StoreError>> + Send + '_>,
+    >;
 
     /// Get number of intentions in the store
     fn intention_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>>;

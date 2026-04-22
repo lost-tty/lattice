@@ -37,11 +37,14 @@ async function loadDebugTips(storeId) {
       ? html`<div class="empty-state">No author state</div>`
       : html`
         <table>
-          <tr><th>Author</th><th>Tip</th></tr>
+          <tr><th>Name</th><th>Author</th><th>Tip</th><th>Seq</th><th>Status</th></tr>
           ${authors.map(a => html`
             <tr>
+              <td>${a.peer_name || '-'}</td>
               <td class="mono">${Helpers.pubkeyShort(a.public_key)}</td>
               <td class="mono">${hex(a.hash) || '-'}</td>
+              <td>${a.witness_seq ?? '-'}</td>
+              <td>${a.peer_status ?? '-'}</td>
             </tr>
           `)}
         </table>

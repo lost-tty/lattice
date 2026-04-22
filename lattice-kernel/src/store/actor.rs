@@ -26,6 +26,10 @@ pub enum ReplicationControllerCmd {
     AuthorTips {
         resp: oneshot::Sender<Result<HashMap<PubKey, Hash>, StateError>>,
     },
+    /// Get author tips with witness seq for diagnostics
+    AuthorTipsWithSeq {
+        resp: oneshot::Sender<Result<HashMap<PubKey, crate::store::AuthorTip>, StateError>>,
+    },
     /// Ingest a batch of signed intentions from network (replaces single ingest)
     IngestBatch {
         intentions: Vec<SignedIntention>,
@@ -183,6 +187,24 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 let store = self.intention_store.read().await;
                 let result = Ok(store.all_author_tips().clone());
                 let _ = resp.send(result);
+            }
+
+            ReplicationControllerCmd::AuthorTipsWithSeq { resp } => {
+                let store = self.intention_store.read().await;
+                let tips = store
+                    .all_author_tips()
+                    .iter()
+                    .map(|(a, h)| {
+                        (
+                            *a,
+                            crate::store::AuthorTip {
+                                hash: *h,
+                                witness_seq: store.get_witness_seq_for(h),
+                            },
+                        )
+                    })
+                    .collect();
+                let _ = resp.send(Ok(tips));
             }
 
             ReplicationControllerCmd::IngestBatch { intentions, resp } => {

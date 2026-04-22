@@ -509,10 +509,25 @@ pub async fn cmd_store_debug_tips(
     let authors = backend.store_author_tips(store_id).await.unwrap_or_default();
     let mut tips = vec![SExpr::sym("author-tips")];
     for a in &authors {
+        let seq_expr = match a.witness_seq {
+            Some(s) => SExpr::num(s),
+            None => SExpr::sym("-"),
+        };
+        let status_expr = match &a.peer_status {
+            Some(s) => SExpr::sym(s),
+            None => SExpr::sym("-"),
+        };
+        let name_expr = match &a.peer_name {
+            Some(s) if !s.is_empty() => SExpr::sym(s),
+            _ => SExpr::sym("-"),
+        };
         tips.push(SExpr::list(vec![
             SExpr::sym("AuthorTip"),
+            SExpr::list(vec![SExpr::sym("name"), name_expr]),
             SExpr::list(vec![SExpr::sym("author"), SExpr::raw(a.public_key.clone())]),
             SExpr::list(vec![SExpr::sym("tip"), SExpr::raw(a.hash.clone())]),
+            SExpr::list(vec![SExpr::sym("seq"), seq_expr]),
+            SExpr::list(vec![SExpr::sym("status"), status_expr]),
         ]));
     }
 
