@@ -285,17 +285,14 @@ impl InProcessBackend {
 
     pub fn store_peers(&self, store_id: Uuid) -> AsyncResult<'_, Vec<PeerInfo>> {
         Box::pin(async move {
-            let store = self.get_store(store_id)?;
+            let peer_manager = self
+                .node
+                .store_manager()
+                .get_peer_manager(&store_id)
+                .ok_or(BackendApiError::NotSupported("Peer manager not found for store"))?;
 
-            let system = store
-                .clone()
-                .as_system()
-                .ok_or(BackendApiError::NotSupported("Store does not support system table"))?;
+            let peers = peer_manager.list_peers().await?;
 
-            let peers = system.get_peers()?;
-
-            // Get online status from network layer
-            // Note: Currently online status is global (by PubKey), but we filter by peers known to this store
             let online_peers: std::collections::HashMap<PubKey, std::time::Instant> = self
                 .network
                 .as_ref()
