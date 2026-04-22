@@ -45,4 +45,7 @@ pub enum LatticeNetError {
 
     #[error("Bootstrap error: {0}")]
     Bootstrap(String),
+
+    #[error("Gossip error: {0}")]
+    Gossip(String),
 }

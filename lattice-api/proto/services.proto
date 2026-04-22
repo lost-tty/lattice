@@ -33,6 +33,7 @@ service StoreService {
   rpc SetName(SetStoreNameRequest) returns (Empty);
   rpc GetName(StoreId) returns (StoreNameResponse);
   rpc Sync(StoreId) returns (Empty);
+  rpc ReconnectPeers(StoreId) returns (Empty);
   rpc GetAuthorTips(StoreId) returns (AuthorStateResponse);
   rpc WitnessLog(WitnessLogRequest) returns (WitnessLogResponse);
   rpc FloatingIntentions(StoreId) returns (FloatingIntentionsResponse);

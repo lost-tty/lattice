@@ -344,6 +344,11 @@ impl Node {
         self.emit_net(NetEvent::SyncStore { store_id });
     }
 
+    /// Ask the gossip layer to (re)dial the store's known peers.
+    pub fn trigger_reconnect_peers(&self, store_id: Uuid) {
+        self.emit_net(NetEvent::ReconnectPeers { store_id });
+    }
+
     /// Start the node - loads all root stores from meta.db.
     pub async fn start(&self) -> Result<(), NodeError> {
         crate::migrations::run_all(&self.meta, &self.data_dir);

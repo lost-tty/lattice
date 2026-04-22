@@ -250,6 +250,8 @@ pub enum StoreSubcommand {
     History,
     /// Sync with all peers
     Sync,
+    /// Ask gossip to (re)dial this store's peers
+    Reconnect,
     /// Explore a message type's schema
     InspectType {
         /// Full type name (e.g., lattice.kv.Entry), or omit to list all types
@@ -467,6 +469,9 @@ pub async fn handle_command(
             }
             StoreSubcommand::Sync => {
                 store_commands::cmd_store_sync(backend, ctx.store_id, writer).await
+            }
+            StoreSubcommand::Reconnect => {
+                store_commands::cmd_store_reconnect(backend, ctx.store_id, writer).await
             }
             StoreSubcommand::InspectType { type_name } => {
                 store_commands::cmd_store_inspect_type(

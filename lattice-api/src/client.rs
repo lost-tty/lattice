@@ -178,6 +178,9 @@ impl RpcClient {
     pub fn store_sync(&self, id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move { rpc_store!(self, store.sync, id, ()) })
     }
+    pub fn store_reconnect_peers(&self, id: Uuid) -> AsyncResult<'_, ()> {
+        Box::pin(async move { rpc_store!(self, store.reconnect_peers, id, ()) })
+    }
     pub fn store_rebuild(&self, id: Uuid) -> AsyncResult<'_, ()> {
         Box::pin(async move { rpc_store!(self, store.rebuild, id, ()) })
     }

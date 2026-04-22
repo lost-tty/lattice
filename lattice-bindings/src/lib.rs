@@ -646,6 +646,16 @@ impl Lattice {
             .map_err(LatticeError::from_backend)
     }
 
+    pub fn store_reconnect_peers(&self, store_id: String) -> Result<(), LatticeError> {
+        let r_guard = self.rt.block_on(self.runtime.read());
+        let r = r_guard.as_ref().ok_or(LatticeError::NotInitialized)?;
+        let id = Uuid::parse_str(&store_id)?;
+        self.rt
+            .block_on(r.backend().store_reconnect_peers(id))
+            .map(|_| ())
+            .map_err(LatticeError::from_backend)
+    }
+
     pub fn store_witness_log(
         &self,
         store_id: String,

@@ -64,6 +64,11 @@ impl StoreService for InProcessBackend {
         self.store_sync(id).await.map(|_| Response::new(Empty {})).into_status()
     }
 
+    async fn reconnect_peers(&self, request: Request<StoreId>) -> Result<Response<Empty>, Status> {
+        let id = parse_uuid(&request.into_inner().store_id)?;
+        self.store_reconnect_peers(id).await.map(|_| Response::new(Empty {})).into_status()
+    }
+
     async fn get_author_tips(&self, request: Request<StoreId>) -> Result<Response<AuthorStateResponse>, Status> {
         let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_debug(id).await.map(|a| Response::new(AuthorStateResponse { items: a })).into_status()

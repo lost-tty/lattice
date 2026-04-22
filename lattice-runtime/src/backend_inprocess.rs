@@ -401,6 +401,13 @@ impl InProcessBackend {
         })
     }
 
+    pub fn store_reconnect_peers(&self, store_id: Uuid) -> AsyncResult<'_, ()> {
+        Box::pin(async move {
+            self.node.trigger_reconnect_peers(store_id);
+            Ok(())
+        })
+    }
+
     pub fn store_debug(&self, store_id: Uuid) -> AsyncResult<'_, Vec<AuthorState>> {
         Box::pin(async move {
             let store = self.get_store(store_id)?;

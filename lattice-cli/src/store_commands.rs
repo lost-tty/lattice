@@ -464,6 +464,33 @@ pub async fn cmd_store_sync(
     Ok(Continue)
 }
 
+pub async fn cmd_store_reconnect(
+    backend: &RpcClient,
+    store_id: Option<Uuid>,
+    writer: Writer,
+) -> CmdResult {
+    let mut w = writer.clone();
+
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "No store selected.");
+            return Ok(Continue);
+        }
+    };
+
+    match backend.store_reconnect_peers(store_id).await {
+        Ok(_) => {
+            let _ = writeln!(w, "[Reconnect] Re-dialing peers...");
+        }
+        Err(e) => {
+            let _ = writeln!(w, "[Reconnect] Failed: {}", e);
+        }
+    }
+
+    Ok(Continue)
+}
+
 pub async fn cmd_store_debug_tips(
     backend: &RpcClient,
     store_id: Option<Uuid>,

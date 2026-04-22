@@ -20,4 +20,6 @@ pub enum NetEvent {
     },
     /// Sync with specific peer (after join)
     SyncWithPeer { store_id: Uuid, peer: PubKey },
+    /// Re-dial the store's known peers via gossip (e.g. after network change)
+    ReconnectPeers { store_id: Uuid },
 }

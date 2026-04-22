@@ -782,6 +782,13 @@ impl<T: Transport> NetworkService<T> {
                         let _ = service.sync_with_peer_by_id(store_id, peer, &[]).await;
                     });
                 }
+                NetEvent::ReconnectPeers { store_id } => {
+                    tokio::spawn(async move {
+                        if let Err(e) = service.reconnect_peers_by_id(store_id).await {
+                            tracing::warn!(store_id = %store_id, error = %e, "Reconnect peers failed");
+                        }
+                    });
+                }
                 NetEvent::SyncStore { store_id } => {
                     tokio::spawn(async move {
                         let _ = service.sync_all_by_id(store_id).await;
@@ -1124,6 +1131,26 @@ impl<T: Transport> NetworkService<T> {
     pub async fn sync_all_by_id(&self, store_id: Uuid) -> Result<Vec<SyncResult>, LatticeNetError> {
         let store = self.registered_store(store_id)?;
         self.sync_all(&store).await
+    }
+
+    /// Ask the gossip layer to (re)dial the store's known peers.
+    ///
+    /// Useful after a network change (wifi flip, sleep/wake) where the
+    /// underlying neighbor connections may be silently dead but the gossip
+    /// topic is still subscribed. No-op if gossip is disabled or the store
+    /// has no peer provider.
+    pub async fn reconnect_peers_by_id(&self, store_id: Uuid) -> Result<(), LatticeNetError> {
+        let Some(gossip) = &self.gossip else {
+            return Ok(());
+        };
+        let Some(pm) = self.provider.get_peer_provider(&store_id) else {
+            return Err(LatticeNetError::StoreNotRegistered(store_id));
+        };
+        let peers: Vec<PubKey> = pm.list_peers().iter().map(|p| p.pubkey).collect();
+        gossip
+            .join_peers(store_id, peers)
+            .await
+            .map_err(|e| LatticeNetError::Gossip(e.to_string()))
     }
 
     /// Sync with a specific peer (by store ID).
