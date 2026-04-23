@@ -562,27 +562,24 @@ pub async fn cmd_store_debug_authorstate(
             return Ok(Continue);
         }
     };
-    let tips = backend.store_author_tips(store_id).await.unwrap_or_default();
-    let ground_truth: std::collections::HashMap<Vec<u8>, u64> = tips
+    let totals: std::collections::HashMap<Vec<u8>, u64> = resp
+        .author_totals
         .iter()
-        .filter_map(|a| a.witness_seq.map(|s| (a.public_key.clone(), s)))
+        .map(|t| (t.author.clone(), t.count))
         .collect();
-
-    // Stable order: server returns observers sorted by peer_status then pubkey.
-    // Use the same list for both rows and columns so the diagonal stays a diagonal.
-    let ordered: Vec<&Vec<u8>> = resp.observers.iter().map(|o| &o.public_key).collect();
 
     let mut cell: std::collections::HashMap<(Vec<u8>, Vec<u8>), u64> = std::collections::HashMap::new();
     for o in &resp.items {
-        cell.insert((o.observer.clone(), o.observed_author.clone()), o.witness_seq);
+        cell.insert((o.observer.clone(), o.observed_author.clone()), o.seen);
     }
 
-    let col_labels: Vec<String> = resp.observers.iter()
-        .map(|obs| match obs.peer_name.as_deref().filter(|s| !s.is_empty()) {
+    let label_for = |info: &lattice_api::proto::AuthorPeerInfo| -> String {
+        match info.peer_name.as_deref().filter(|s| !s.is_empty()) {
             Some(n) => n.to_string(),
-            None => hex::encode(&obs.public_key[..4.min(obs.public_key.len())]),
-        })
-        .collect();
+            None => hex::encode(&info.public_key[..4.min(info.public_key.len())]),
+        }
+    };
+    let col_labels: Vec<String> = resp.columns.iter().map(&label_for).collect();
 
     use owo_colors::OwoColorize;
     let mut rows = vec![SExpr::sym("author-state")];
@@ -593,28 +590,73 @@ pub async fn cmd_store_debug_authorstate(
         row.push(SExpr::list(vec![SExpr::sym("observer"), SExpr::raw(observer.public_key.clone())]));
         row.push(SExpr::list(vec![SExpr::sym("name"), SExpr::sym(name)]));
         row.push(SExpr::list(vec![SExpr::sym("status"), SExpr::sym(status)]));
-        for (observed, col_label) in ordered.iter().zip(col_labels.iter()) {
-            let val = if &observer.public_key == *observed {
-                SExpr::sym("n/a")
-            } else {
-                match cell.get(&(observer.public_key.clone(), (*observed).clone())) {
-                    Some(seq) => {
-                        let delta = ground_truth
-                            .get(*observed)
-                            .map(|gt| gt.saturating_sub(*seq));
-                        let text = match delta {
-                            Some(d) => format!("{} {}", seq.yellow(), format!("-{}", d).red()),
-                            None => format!("{}", seq.yellow()),
-                        };
-                        SExpr::sym(&text)
-                    }
-                    None => SExpr::sym("-"),
+        for (column, col_label) in resp.columns.iter().zip(col_labels.iter()) {
+            let observed = &column.public_key;
+            let val = if &observer.public_key == observed {
+                match totals.get(observed) {
+                    Some(&total) => SExpr::sym(&format!("{}", total.green())),
+                    None => SExpr::sym("n/a"),
                 }
+            } else {
+                let seen = cell
+                    .get(&(observer.public_key.clone(), observed.clone()))
+                    .copied()
+                    .unwrap_or(0);
+                let total = totals.get(observed).copied().unwrap_or(0);
+                let behind = total.saturating_sub(seen);
+                let text = if behind == 0 {
+                    format!("{}", seen.green())
+                } else {
+                    format!("{} {}", seen.yellow(), format!("-{}", behind).red())
+                };
+                SExpr::sym(&text)
             };
             row.push(SExpr::list(vec![SExpr::sym(col_label), val]));
         }
         rows.push(SExpr::list(row));
     }
+
+    // Footer 1: ground truth — what the local node actually has.
+    let mut footer = vec![SExpr::sym("Row")];
+    footer.push(SExpr::list(vec![SExpr::sym("observer"), SExpr::sym("have (local)")]));
+    footer.push(SExpr::list(vec![SExpr::sym("name"), SExpr::sym("-")]));
+    footer.push(SExpr::list(vec![SExpr::sym("status"), SExpr::sym("-")]));
+    for (column, col_label) in resp.columns.iter().zip(col_labels.iter()) {
+        let total = totals.get(&column.public_key).copied().unwrap_or(0);
+        footer.push(SExpr::list(vec![
+            SExpr::sym(col_label),
+            SExpr::sym(&format!("{}", total.green())),
+        ]));
+    }
+    rows.push(SExpr::list(footer));
+
+    // Footer 2: mesh floor — min(seen) across all observers per column.
+    let mut mesh = vec![SExpr::sym("Row")];
+    mesh.push(SExpr::list(vec![SExpr::sym("observer"), SExpr::sym("mesh (min)")]));
+    mesh.push(SExpr::list(vec![SExpr::sym("name"), SExpr::sym("-")]));
+    mesh.push(SExpr::list(vec![SExpr::sym("status"), SExpr::sym("-")]));
+    for (column, col_label) in resp.columns.iter().zip(col_labels.iter()) {
+        let observed = &column.public_key;
+        let min_seen = resp
+            .observers
+            .iter()
+            .map(|obs| {
+                cell.get(&(obs.public_key.clone(), observed.clone()))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .min()
+            .unwrap_or(0);
+        let total = totals.get(observed).copied().unwrap_or(0);
+        let behind = total.saturating_sub(min_seen);
+        let text = if behind == 0 {
+            format!("{}", min_seen.green())
+        } else {
+            format!("{} {}", min_seen.yellow(), format!("-{}", behind).red())
+        };
+        mesh.push(SExpr::list(vec![SExpr::sym(col_label), SExpr::sym(&text)]));
+    }
+    rows.push(SExpr::list(mesh));
 
     let _ = writeln!(
         w,

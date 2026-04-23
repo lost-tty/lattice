@@ -359,8 +359,6 @@ th, td {
 th {
   font-weight: 600;
   color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
 }

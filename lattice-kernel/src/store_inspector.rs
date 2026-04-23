@@ -27,11 +27,19 @@ pub trait StoreInspector: Send + Sync {
         Box<dyn Future<Output = Result<HashMap<PubKey, AuthorTip>, StoreError>> + Send + '_>,
     >;
 
-    /// Observations of max witness seq per (observer, observed author) derived from causal deps.
+    /// Per-observer per-author observation counts plus per-author totals.
     fn author_state_observations(
         &self,
     ) -> Pin<
-        Box<dyn Future<Output = Result<Vec<(PubKey, PubKey, u64)>, StoreError>> + Send + '_>,
+        Box<
+            dyn Future<
+                    Output = Result<
+                        (Vec<(PubKey, PubKey, u64)>, HashMap<PubKey, u64>),
+                        StoreError,
+                    >,
+                > + Send
+                + '_,
+        >,
     >;
 
     /// Get number of intentions in the store

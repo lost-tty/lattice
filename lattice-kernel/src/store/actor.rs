@@ -30,9 +30,14 @@ pub enum ReplicationControllerCmd {
     AuthorTipsWithSeq {
         resp: oneshot::Sender<Result<HashMap<PubKey, crate::store::AuthorTip>, StateError>>,
     },
-    /// Observations of max witness seq per (observer, observed author) derived from causal deps.
+    /// Observations per (observer, observed author) plus per-author totals.
+    /// Each observation is (observer, observed, seen) — number of observed's
+    /// intentions observer has acknowledged via transitive causal deps.
+    /// author_totals gives each author's total intention count in the local log.
     AuthorStateObservations {
-        resp: oneshot::Sender<Result<Vec<(PubKey, PubKey, u64)>, StateError>>,
+        resp: oneshot::Sender<
+            Result<(Vec<(PubKey, PubKey, u64)>, HashMap<PubKey, u64>), StateError>,
+        >,
     },
     /// Ingest a batch of signed intentions from network (replaces single ingest)
     IngestBatch {
@@ -737,35 +742,47 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
     }
 }
 
-/// For every author A in this store, walk A's chain and record the max witness seq
-/// seen per referenced author via causal deps. Returned as a flat list of
-/// (observer, observed, seq) triples.
+/// For each observer (author X), compute transitive per-author frontier —
+/// max witness seq per observed author reachable via causal deps + store_prev.
+/// Returns (observations, author_totals):
+///   observations: (observer, observed, seen) where `seen` is the count of
+///     observed-author intentions in our local log at or before the frontier seq.
+///   author_totals: observed → total count of their intentions in our local log.
 fn compute_author_state_observations(
     store: &IntentionStore,
-) -> Result<Vec<(PubKey, PubKey, u64)>, IntentionStoreError> {
+) -> Result<
+    (Vec<(PubKey, PubKey, u64)>, HashMap<PubKey, u64>),
+    IntentionStoreError,
+> {
+    // Per-author sorted list of witness seqs, built by walking each author's
+    // chain once. Each chain is linear (self-referential store_prev) so this
+    // is O(total intentions across all authors).
     const WALK_LIMIT: usize = 1_000_000;
-    let mut observations: Vec<(PubKey, PubKey, u64)> = Vec::new();
+    let mut author_seqs: HashMap<PubKey, Vec<u64>> = HashMap::new();
+    for (author, tip) in store.all_author_tips() {
+        let chain = store.walk_back_hashed(tip, Some(&Hash::ZERO), WALK_LIMIT)?;
+        let mut seqs: Vec<u64> = chain
+            .iter()
+            .filter_map(|(hash, _)| store.get_witness_seq_for(hash))
+            .collect();
+        seqs.sort_unstable();
+        author_seqs.insert(*author, seqs);
+    }
+    let author_totals: HashMap<PubKey, u64> =
+        author_seqs.iter().map(|(k, v)| (*k, v.len() as u64)).collect();
 
+    let mut observations: Vec<(PubKey, PubKey, u64)> = Vec::new();
     for (observer, tip) in store.all_author_tips() {
-        let chain = store.walk_back_until(tip, Some(&Hash::ZERO), WALK_LIMIT)?;
-        let mut per_author: HashMap<PubKey, u64> = HashMap::new();
-        for signed in chain {
-            let Condition::V1(deps) = &signed.intention.condition;
-            for dep in deps {
-                let Some(seq) = store.get_witness_seq_for(dep) else { continue };
-                let Some(dep_intent) = store.get(dep)? else { continue };
-                let dep_author = dep_intent.intention.author;
-                per_author
-                    .entry(dep_author)
-                    .and_modify(|s| *s = (*s).max(seq))
-                    .or_insert(seq);
-            }
-        }
-        for (observed, seq) in per_author {
-            observations.push((*observer, observed, seq));
+        let frontier = store.get_frontier(tip)?.unwrap_or_default();
+        for (observed, max_seq) in frontier.iter() {
+            let seen = author_seqs
+                .get(observed)
+                .map(|seqs| seqs.partition_point(|s| *s <= *max_seq) as u64)
+                .unwrap_or(0);
+            observations.push((*observer, *observed, seen));
         }
     }
-    Ok(observations)
+    Ok((observations, author_totals))
 }
 
 #[cfg(test)]
@@ -1934,6 +1951,223 @@ mod tests {
         let result = handle.ingest_intention(signed).await;
         assert!(result.is_err(), "Should reject too many deps from peer");
 
+        handle.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_author_state_observations_transitive() {
+        // Scenario: C authors C1, C2, C3. B references C2. A references B.
+        //   A has never directly referenced C, but transitively acknowledges
+        //   C up to C2 (not C3) via B's dep.
+        // Open store under a neutral observer identity so none of A/B/C
+        // is the "local node" (which would bypass transitive closure and
+        // report ground truth directly).
+        let local = NodeIdentity::generate();
+        let identity_a = NodeIdentity::generate();
+        let identity_b = NodeIdentity::generate();
+        let identity_c = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, local).unwrap();
+
+        let a = identity_a.public_key();
+        let b = identity_b.public_key();
+        let c = identity_c.public_key();
+
+        // Build C's self-chain of three intentions: C1 -> C2 -> C3.
+        let author_chain = |prev: Hash, tag: &[u8], identity: &NodeIdentity| -> SignedIntention {
+            let intent = Intention {
+                author: identity.public_key(),
+                timestamp: lattice_model::hlc::HLC::now(),
+                store_id: TEST_STORE,
+                store_prev: prev,
+                condition: Condition::v1(vec![]),
+                ops: tag.to_vec(),
+            };
+            SignedIntention::sign(intent, identity)
+        };
+        let c1 = author_chain(Hash::ZERO, b"c1", &identity_c);
+        let h_c1 = c1.intention.hash();
+        handle.ingest_intention(c1).await.unwrap();
+        let c2 = author_chain(h_c1, b"c2", &identity_c);
+        let h_c2 = c2.intention.hash();
+        handle.ingest_intention(c2).await.unwrap();
+        let c3 = author_chain(h_c2, b"c3", &identity_c);
+        handle.ingest_intention(c3).await.unwrap();
+
+        // B references C2 (not C's tip).
+        let b1 = Intention {
+            author: b,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![h_c2]),
+            ops: b"b1".to_vec(),
+        };
+        let signed_b1 = SignedIntention::sign(b1, &identity_b);
+        let h_b1 = signed_b1.intention.hash();
+        handle.ingest_intention(signed_b1).await.unwrap();
+
+        // A references B (not C).
+        let a1 = Intention {
+            author: a,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![h_b1]),
+            ops: b"a1".to_vec(),
+        };
+        let signed_a1 = SignedIntention::sign(a1, &identity_a);
+        handle.ingest_intention(signed_a1).await.unwrap();
+
+        let (observations, totals) = handle.author_state_observations().await.unwrap();
+        assert_eq!(totals.get(&a).copied(), Some(1));
+        assert_eq!(totals.get(&b).copied(), Some(1));
+        assert_eq!(totals.get(&c).copied(), Some(3), "C has 3 intentions");
+
+        let as_map: HashMap<(PubKey, PubKey), u64> = observations
+            .iter()
+            .map(|(o, t, s)| ((*o, *t), *s))
+            .collect();
+
+        // A transitively saw C only up to C2, not C3.
+        assert_eq!(as_map.get(&(a, b)).copied(), Some(1), "A sees B directly");
+        assert_eq!(
+            as_map.get(&(a, c)).copied(),
+            Some(2),
+            "A sees C up to C2 transitively (not C3)"
+        );
+        // B directly acknowledges C up to C2.
+        assert_eq!(
+            as_map.get(&(b, c)).copied(),
+            Some(2),
+            "B sees C up to C2 directly"
+        );
+        // C has no outgoing observations.
+        assert!(!as_map.contains_key(&(c, a)), "C does not observe A");
+        assert!(!as_map.contains_key(&(c, b)), "C does not observe B");
+
+        handle.close().await;
+    }
+
+    /// Covers three things the simple transitive test misses:
+    ///   - store_prev walking: frontier of A's tip must include deps from A's
+    ///     earlier self-intentions, not only from the tip itself.
+    ///   - shared ancestor: two paths reach C; cached frontier must not
+    ///     double-count or drop entries.
+    ///   - deeper transitivity: A -> B -> C -> D across multiple hops.
+    #[tokio::test]
+    async fn test_author_state_observations_deep_transitive() {
+        // Open store under a neutral identity so none of A/B/C/D is the local node.
+        let local = NodeIdentity::generate();
+        let id_a = NodeIdentity::generate();
+        let id_b = NodeIdentity::generate();
+        let id_c = NodeIdentity::generate();
+        let id_d = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, local).unwrap();
+
+        let a = id_a.public_key();
+        let b = id_b.public_key();
+        let c = id_c.public_key();
+        let d = id_d.public_key();
+
+        let sign = |author: PubKey,
+                    prev: Hash,
+                    deps: Vec<Hash>,
+                    tag: &[u8],
+                    identity: &NodeIdentity|
+         -> SignedIntention {
+            let intent = Intention {
+                author,
+                timestamp: lattice_model::hlc::HLC::now(),
+                store_id: TEST_STORE,
+                store_prev: prev,
+                condition: Condition::v1(deps),
+                ops: tag.to_vec(),
+            };
+            SignedIntention::sign(intent, identity)
+        };
+
+        // D's self-chain: D1 -> D2.
+        let d1 = sign(d, Hash::ZERO, vec![], b"d1", &id_d);
+        let h_d1 = d1.intention.hash();
+        handle.ingest_intention(d1).await.unwrap();
+        let d2 = sign(d, h_d1, vec![], b"d2", &id_d);
+        let h_d2 = d2.intention.hash();
+        handle.ingest_intention(d2).await.unwrap();
+
+        // C's self-chain: C1 -> C2, C1 references D1.
+        let c1 = sign(c, Hash::ZERO, vec![h_d1], b"c1", &id_c);
+        let h_c1 = c1.intention.hash();
+        handle.ingest_intention(c1).await.unwrap();
+        let c2 = sign(c, h_c1, vec![h_d2], b"c2", &id_c);
+        let h_c2 = c2.intention.hash();
+        handle.ingest_intention(c2).await.unwrap();
+
+        // B's self-chain: B1 references C1, B2 references D2 (diamond — two
+        // paths to D2: via B2 directly and via C2 through B's own store_prev).
+        let b1 = sign(b, Hash::ZERO, vec![h_c1], b"b1", &id_b);
+        let h_b1 = b1.intention.hash();
+        handle.ingest_intention(b1).await.unwrap();
+        let b2 = sign(b, h_b1, vec![h_d2], b"b2", &id_b);
+        let h_b2 = b2.intention.hash();
+        handle.ingest_intention(b2).await.unwrap();
+
+        // A's chain: A1 references C2, A2 references B2.
+        //   - A's tip frontier must pick up C (via A1's store_prev, not A2's deps).
+        //   - A transitively reaches D through TWO paths: A1 -> C2 -> D2,
+        //     and A2 -> B2 -> D2. Both resolve to D2 (seq 2), so cache hits
+        //     on shared ancestor D2 must merge consistently.
+        let a1 = sign(a, Hash::ZERO, vec![h_c2], b"a1", &id_a);
+        let h_a1 = a1.intention.hash();
+        handle.ingest_intention(a1).await.unwrap();
+        let a2 = sign(a, h_a1, vec![h_b2], b"a2", &id_a);
+        handle.ingest_intention(a2).await.unwrap();
+
+        let (observations, totals) = handle.author_state_observations().await.unwrap();
+        assert_eq!(totals.get(&a).copied(), Some(2));
+        assert_eq!(totals.get(&b).copied(), Some(2));
+        assert_eq!(totals.get(&c).copied(), Some(2));
+        assert_eq!(totals.get(&d).copied(), Some(2));
+
+        let as_map: HashMap<(PubKey, PubKey), u64> = observations
+            .iter()
+            .map(|(o, t, s)| ((*o, *t), *s))
+            .collect();
+
+        // A's frontier: direct dep on C (via A1), direct dep on B (via A2),
+        // transitive dep on D (via both C2 -> D2 and B2 -> D2; both reach D2).
+        assert_eq!(as_map.get(&(a, c)).copied(), Some(2), "A sees C via store_prev into A1's dep");
+        assert_eq!(as_map.get(&(a, b)).copied(), Some(2), "A sees B directly");
+        assert_eq!(as_map.get(&(a, d)).copied(), Some(2), "A sees D transitively via C and B");
+
+        // B's frontier: references C1 (via B1) and D2 (via B2).
+        // So B sees C up to C1 (seq 1) via store_prev, D up to D2 (seq 2) directly.
+        assert_eq!(as_map.get(&(b, c)).copied(), Some(1), "B sees C only up to C1");
+        assert_eq!(as_map.get(&(b, d)).copied(), Some(2), "B sees D via direct dep");
+
+        // C's frontier: C1 and C2 reference D1 and D2 respectively.
+        // Walking C's tip picks up both via store_prev; D up to D2.
+        assert_eq!(as_map.get(&(c, d)).copied(), Some(2), "C sees D via store_prev");
+
+        // D observes nobody (no outgoing deps).
+        assert!(!as_map.contains_key(&(d, a)));
+        assert!(!as_map.contains_key(&(d, b)));
+        assert!(!as_map.contains_key(&(d, c)));
+
+        handle.close().await;
+    }
+
+    /// Empty store produces empty observations and totals, no panic.
+    #[tokio::test]
+    async fn test_author_state_observations_empty() {
+        let identity = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, identity.clone()).unwrap();
+
+        let (observations, totals) = handle.author_state_observations().await.unwrap();
+        assert!(observations.is_empty());
+        assert!(totals.is_empty());
         handle.close().await;
     }
 }

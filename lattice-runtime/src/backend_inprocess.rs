@@ -443,53 +443,78 @@ impl InProcessBackend {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
-            let observations = inspector.author_state_observations().await?;
+            let (observations, author_totals) = inspector.author_state_observations().await?;
 
-            let peer_by_key: std::collections::HashMap<PubKey, (String, Option<String>)> =
-                match self.node.store_manager().get_peer_manager(&store_id) {
-                    Some(pm) => pm
-                        .list_peers()
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|p| (p.pubkey, (p.status.as_str().to_string(), p.name)))
-                        .collect(),
-                    None => Default::default(),
-                };
+            // All peers this store knows about, keyed by pubkey.
+            let all_peers: std::collections::HashMap<
+                PubKey,
+                (lattice_model::PeerStatus, Option<String>),
+            > = match self.node.store_manager().get_peer_manager(&store_id) {
+                Some(pm) => pm
+                    .list_peers()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| (p.pubkey, (p.status, p.name)))
+                    .collect(),
+                None => Default::default(),
+            };
+            let peer_info = |k: &PubKey| -> proto::AuthorPeerInfo {
+                let meta = all_peers.get(k);
+                proto::AuthorPeerInfo {
+                    public_key: k.to_vec(),
+                    peer_status: meta.map(|(s, _)| s.as_str().to_string()),
+                    peer_name: meta.and_then(|(_, n)| n.clone()),
+                }
+            };
 
-            let mut observer_keys: std::collections::BTreeSet<PubKey> =
-                observations.iter().map(|(o, _, _)| *o).collect();
-            for k in peer_by_key.keys() {
-                observer_keys.insert(*k);
-            }
-
-            let items = observations
-                .into_iter()
-                .map(|(observer, observed, seq)| proto::AuthorStateObservation {
-                    observer: observer.to_vec(),
-                    observed_author: observed.to_vec(),
-                    witness_seq: seq,
-                })
+            // Observers (rows): Active + Dormant peers only.
+            let observer_keys: std::collections::BTreeSet<PubKey> = all_peers
+                .iter()
+                .filter(|(_, (s, _))| matches!(
+                    s,
+                    lattice_model::PeerStatus::Active | lattice_model::PeerStatus::Dormant,
+                ))
+                .map(|(k, _)| *k)
                 .collect();
-
-            let mut observers: Vec<proto::AuthorStateObserver> = observer_keys
-                .into_iter()
-                .map(|k| {
-                    let peer = peer_by_key.get(&k);
-                    proto::AuthorStateObserver {
-                        public_key: k.to_vec(),
-                        peer_status: peer.map(|(s, _)| s.clone()),
-                        peer_name: peer.and_then(|(_, n)| n.clone()),
-                    }
-                })
-                .collect();
+            let mut observers: Vec<proto::AuthorPeerInfo> =
+                observer_keys.iter().map(peer_info).collect();
             observers.sort_by(|a, b| {
                 a.peer_status
                     .cmp(&b.peer_status)
                     .then_with(|| a.public_key.cmp(&b.public_key))
             });
 
-            Ok(proto::AuthorStateObservationsResponse { items, observers })
+            // Columns: every author who has contributed intentions (from author_totals).
+            let column_keys: std::collections::BTreeSet<PubKey> =
+                author_totals.keys().copied().collect();
+            let columns: Vec<proto::AuthorPeerInfo> =
+                column_keys.iter().map(peer_info).collect();
+
+            let items = observations
+                .into_iter()
+                .filter(|(observer, _, _)| observer_keys.contains(observer))
+                .map(|(observer, observed, seen)| proto::AuthorStateObservation {
+                    observer: observer.to_vec(),
+                    observed_author: observed.to_vec(),
+                    seen,
+                })
+                .collect();
+
+            let author_totals = author_totals
+                .into_iter()
+                .map(|(author, count)| proto::AuthorIntentionCount {
+                    author: author.to_vec(),
+                    count,
+                })
+                .collect();
+
+            Ok(proto::AuthorStateObservationsResponse {
+                items,
+                observers,
+                columns,
+                author_totals,
+            })
         })
     }
 

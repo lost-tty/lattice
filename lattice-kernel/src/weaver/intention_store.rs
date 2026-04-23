@@ -16,7 +16,7 @@ use lattice_model::types::{Hash, PubKey};
 pub use lattice_model::weaver::WitnessEntry;
 use lattice_model::weaver::{FloatingIntention, Intention, SignedIntention};
 use lattice_model::StorageConfig;
-use lattice_proto::weaver::{FloatingMeta, WitnessContent, WitnessRecord};
+use lattice_proto::weaver::{FloatingMeta, Frontier, FrontierEntry, WitnessContent, WitnessRecord};
 use prost::Message;
 use redb::{
     Database, MultimapTableDefinition, ReadableTable, ReadableTableMetadata, TableDefinition,
@@ -47,6 +47,12 @@ const TABLE_FLOATING: TableDefinition<&[u8], &[u8]> = TableDefinition::new("floa
 /// Reverse index: store_prev hash → intention hash (multimap, multiple authors can share a prev)
 const TABLE_FLOATING_BY_PREV: MultimapTableDefinition<&[u8], &[u8]> =
     MultimapTableDefinition::new("floating_by_prev");
+
+/// Frontier index: intention hash → protobuf Frontier bytes.
+/// Frontier(I) is the per-author max witness seq visible from I via
+/// transitive causal deps and store_prev — i.e. what I's author had
+/// acknowledged at authoring time. Maintained incrementally on witness().
+const TABLE_FRONTIER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("frontier");
 
 /// Maximum number of hashes to return in `hashes_in_range` to prevent DoS.
 const MAX_RANGE_HASHES: usize = 2048;
@@ -166,6 +172,7 @@ impl IntentionStore {
             let _ = write_txn.open_table(TABLE_AUTHOR_TIPS)?;
             let _ = write_txn.open_table(TABLE_FLOATING)?;
             let _ = write_txn.open_multimap_table(TABLE_FLOATING_BY_PREV)?;
+            let _ = write_txn.open_table(TABLE_FRONTIER)?;
             write_txn.commit()?;
         }
 
@@ -190,7 +197,11 @@ impl IntentionStore {
                 let tips = read_txn.open_table(TABLE_AUTHOR_TIPS)?;
                 let witness_idx = read_txn.open_table(TABLE_WITNESS_INDEX)?;
                 let content_idx = read_txn.open_table(TABLE_WITNESS_CONTENT_INDEX)?;
-                tips.len()? == 0 || witness_idx.len()? == 0 || content_idx.len()? == 0
+                let frontier = read_txn.open_table(TABLE_FRONTIER)?;
+                tips.len()? == 0
+                    || witness_idx.len()? == 0
+                    || content_idx.len()? == 0
+                    || frontier.len()? == 0
             } else {
                 false
             }
@@ -226,6 +237,39 @@ impl IntentionStore {
             intention,
             signature: lattice_model::types::Signature(sig_bytes),
         })
+    }
+
+    /// Merge the frontier stored at `hash` (if any) into `frontier`. A merge
+    /// keeps the maximum witness seq per author.
+    /// No-op for `Hash::ZERO` or if the hash has no stored frontier yet.
+    fn merge_frontier_from(
+        frontier_tbl: &redb::Table<&[u8], &[u8]>,
+        hash: &Hash,
+        frontier: &mut HashMap<PubKey, u64>,
+    ) -> Result<(), IntentionStoreError> {
+        if *hash == Hash::ZERO {
+            return Ok(());
+        }
+        let Some(v) = frontier_tbl.get(hash.as_bytes().as_slice())? else {
+            return Ok(());
+        };
+        let proto = Frontier::decode(v.value())?;
+        for e in proto.entries {
+            let key: [u8; 32] = e.author.as_slice().try_into().map_err(|_| {
+                Corruption::FieldLength {
+                    table: "frontier",
+                    field: "author",
+                    expected: 32,
+                    actual: e.author.len(),
+                }
+            })?;
+            let author = PubKey(key);
+            frontier
+                .entry(author)
+                .and_modify(|s| *s = (*s).max(e.seq))
+                .or_insert(e.seq);
+        }
+        Ok(())
     }
 
     /// Load persisted state from TABLE_AUTHOR_TIPS and TABLE_WITNESS.
@@ -281,6 +325,7 @@ impl IntentionStore {
             let witness_table = write_txn.open_table(TABLE_WITNESS)?;
             let mut witness_index = write_txn.open_table(TABLE_WITNESS_INDEX)?;
             let mut content_index = write_txn.open_table(TABLE_WITNESS_CONTENT_INDEX)?;
+            let mut frontier_tbl = write_txn.open_table(TABLE_FRONTIER)?;
 
             let mut max_seq = 0;
             let mut expected_prev = Hash::ZERO;
@@ -344,6 +389,38 @@ impl IntentionStore {
                 content_index.insert(
                     witness_content_hash.as_bytes().as_slice(),
                     seq_key.as_slice(),
+                )?;
+
+                // Rebuild frontier: merge parent + deps + self. The witness
+                // log iterates in seq order, and deps must be witnessed
+                // before their dependents, so parent/dep frontiers are
+                // already written by the time we get here.
+                let mut frontier: HashMap<PubKey, u64> = HashMap::new();
+                Self::merge_frontier_from(&frontier_tbl, &signed.intention.store_prev, &mut frontier)?;
+                match &signed.intention.condition {
+                    lattice_model::weaver::Condition::V1(deps) => {
+                        for dep in deps {
+                            Self::merge_frontier_from(&frontier_tbl, dep, &mut frontier)?;
+                        }
+                    }
+                }
+                frontier
+                    .entry(signed.intention.author)
+                    .and_modify(|s| *s = (*s).max(seq))
+                    .or_insert(seq);
+
+                let frontier_proto = Frontier {
+                    entries: frontier
+                        .into_iter()
+                        .map(|(author, seq)| FrontierEntry {
+                            author: author.0.to_vec(),
+                            seq,
+                        })
+                        .collect(),
+                };
+                frontier_tbl.insert(
+                    intention_hash.as_bytes().as_slice(),
+                    frontier_proto.encode_to_vec().as_slice(),
                 )?;
             }
 
@@ -498,6 +575,33 @@ impl IntentionStore {
                 intention.store_prev.as_bytes().as_slice(),
                 hash.as_bytes().as_slice(),
             )?;
+
+            // Update frontier index: merge parent + deps + self.
+            let mut frontier_tbl = write_txn.open_table(TABLE_FRONTIER)?;
+            let mut frontier: HashMap<PubKey, u64> = HashMap::new();
+            Self::merge_frontier_from(&frontier_tbl, &intention.store_prev, &mut frontier)?;
+            match &intention.condition {
+                lattice_model::weaver::Condition::V1(deps) => {
+                    for dep in deps {
+                        Self::merge_frontier_from(&frontier_tbl, dep, &mut frontier)?;
+                    }
+                }
+            }
+            frontier
+                .entry(intention.author)
+                .and_modify(|s| *s = (*s).max(seq))
+                .or_insert(seq);
+
+            let frontier_proto = Frontier {
+                entries: frontier
+                    .into_iter()
+                    .map(|(author, seq)| FrontierEntry {
+                        author: author.0.to_vec(),
+                        seq,
+                    })
+                    .collect(),
+            };
+            frontier_tbl.insert(hash.as_bytes().as_slice(), frontier_proto.encode_to_vec().as_slice())?;
         }
         write_txn.commit()?;
 
@@ -679,6 +783,32 @@ impl IntentionStore {
     /// Returns `None` if the intention has not been witnessed.
     pub fn get_witness_seq_for(&self, hash: &Hash) -> Option<u64> {
         self.get_witness_seq(hash).ok().flatten()
+    }
+
+    /// Read the per-author frontier stored for an intention. Returns `None`
+    /// if the intention has no frontier yet (not witnessed, pre-migration).
+    pub fn get_frontier(&self, hash: &Hash) -> Result<Option<HashMap<PubKey, u64>>, IntentionStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_FRONTIER)?;
+        match table.get(hash.as_bytes().as_slice())? {
+            None => Ok(None),
+            Some(v) => {
+                let proto = Frontier::decode(v.value())?;
+                let mut map = HashMap::with_capacity(proto.entries.len());
+                for e in proto.entries {
+                    let key: [u8; 32] = e.author.as_slice().try_into().map_err(|_| {
+                        Corruption::FieldLength {
+                            table: "frontier",
+                            field: "author",
+                            expected: 32,
+                            actual: e.author.len(),
+                        }
+                    })?;
+                    map.insert(PubKey(key), e.seq);
+                }
+                Ok(Some(map))
+            }
+        }
     }
 
     /// Look up the witness sequence number for a witness content hash.
@@ -873,6 +1003,50 @@ impl IntentionStore {
         }
 
         // Failure: Hit limit without finding ancestor
+        Err(IntentionStoreError::ChainWalkFailed {
+            from: *target,
+            ancestor: *since_hash,
+            reason: "exceeded iteration limit",
+        })
+    }
+
+    /// Like `walk_back_until` but returns the intention hash alongside each
+    /// entry, saving callers a re-hash via borsh.
+    pub fn walk_back_hashed(
+        &self,
+        target: &Hash,
+        since: Option<&Hash>,
+        limit: usize,
+    ) -> Result<Vec<(Hash, SignedIntention)>, IntentionStoreError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE_INTENTIONS)?;
+        let mut results = Vec::with_capacity(limit);
+        let mut current_hash = *target;
+        let since_hash = since.ok_or_else(|| IntentionStoreError::MalformedInput {
+            field: "since (required for walk_back_hashed)",
+        })?;
+
+        for _ in 0..limit {
+            match current_hash {
+                h if h == *since_hash => return Ok(results),
+                Hash::ZERO => {
+                    return Err(IntentionStoreError::ChainWalkFailed {
+                        from: *target,
+                        ancestor: *since_hash,
+                        reason: "hit genesis",
+                    })
+                }
+                hash => {
+                    let val = table
+                        .get(hash.as_bytes().as_slice())?
+                        .ok_or_else(|| IntentionStoreError::MissingIntention(hash))?;
+                    let signed = Self::decode_signed(val.value())?;
+                    current_hash = signed.intention.store_prev;
+                    results.push((hash, signed));
+                }
+            }
+        }
+
         Err(IntentionStoreError::ChainWalkFailed {
             from: *target,
             ancestor: *since_hash,
@@ -2797,5 +2971,99 @@ mod tests {
         let signed = SignedIntention::sign(intention, &key);
 
         assert!(store.insert(&signed).is_ok());
+    }
+
+    fn make_key_seeded(seed: u8) -> (ed25519_dalek::SigningKey, PubKey) {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let pk = PubKey(key.verifying_key().to_bytes());
+        (key, pk)
+    }
+
+    #[test]
+    fn frontier_persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key_a, pk_a) = make_key_seeded(0xA1);
+        let (key_b, pk_b) = make_key_seeded(0xB1);
+
+        let a1 = make_intention_with_deps(pk_a, Hash::ZERO, vec![], b"a1".to_vec());
+        let h_a1 = a1.hash();
+        let b1 = make_intention_with_deps(pk_b, Hash::ZERO, vec![h_a1], b"b1".to_vec());
+        let h_b1 = b1.hash();
+
+        {
+            let mut store = open_store(dir.path());
+            store.insert(&SignedIntention::sign(a1.clone(), &key_a)).unwrap();
+            store.insert(&SignedIntention::sign(b1.clone(), &key_b)).unwrap();
+            store.witness(&a1, 100, &test_signing_key()).unwrap();
+            store.witness(&b1, 200, &test_signing_key()).unwrap();
+
+            let f = store.get_frontier(&h_b1).unwrap().unwrap();
+            assert_eq!(f.get(&pk_a).copied(), Some(1));
+            assert_eq!(f.get(&pk_b).copied(), Some(2));
+        }
+
+        // Reopen: frontier must be present without rebuild.
+        let store = open_store(dir.path());
+        let f = store.get_frontier(&h_b1).unwrap().unwrap();
+        assert_eq!(f.get(&pk_a).copied(), Some(1));
+        assert_eq!(f.get(&pk_b).copied(), Some(2));
+    }
+
+    #[test]
+    fn frontier_rebuild_matches_incremental() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key_a, pk_a) = make_key_seeded(0xA2);
+        let (key_b, pk_b) = make_key_seeded(0xB2);
+        let (key_c, pk_c) = make_key_seeded(0xC2);
+
+        // A1, B1 references A1, C1 references B1 → transitive chain.
+        let a1 = make_intention_with_deps(pk_a, Hash::ZERO, vec![], b"a".to_vec());
+        let h_a1 = a1.hash();
+        let b1 = make_intention_with_deps(pk_b, Hash::ZERO, vec![h_a1], b"b".to_vec());
+        let h_b1 = b1.hash();
+        let c1 = make_intention_with_deps(pk_c, Hash::ZERO, vec![h_b1], b"c".to_vec());
+        let h_c1 = c1.hash();
+
+        // Build store incrementally and capture expected frontiers.
+        let (expected_a, expected_b, expected_c) = {
+            let mut store = open_store(dir.path());
+            store.insert(&SignedIntention::sign(a1.clone(), &key_a)).unwrap();
+            store.insert(&SignedIntention::sign(b1.clone(), &key_b)).unwrap();
+            store.insert(&SignedIntention::sign(c1.clone(), &key_c)).unwrap();
+            store.witness(&a1, 100, &test_signing_key()).unwrap();
+            store.witness(&b1, 200, &test_signing_key()).unwrap();
+            store.witness(&c1, 300, &test_signing_key()).unwrap();
+            (
+                store.get_frontier(&h_a1).unwrap().unwrap(),
+                store.get_frontier(&h_b1).unwrap().unwrap(),
+                store.get_frontier(&h_c1).unwrap().unwrap(),
+            )
+        };
+        // Sanity: transitive closure — C's frontier contains A, B, C.
+        assert_eq!(expected_c.get(&pk_a).copied(), Some(1));
+        assert_eq!(expected_c.get(&pk_b).copied(), Some(2));
+        assert_eq!(expected_c.get(&pk_c).copied(), Some(3));
+
+        // Wipe TABLE_FRONTIER directly to simulate pre-migration / corruption.
+        {
+            let store = open_store(dir.path());
+            let write_txn = store.db.begin_write().unwrap();
+            {
+                let mut t = write_txn.open_table(TABLE_FRONTIER).unwrap();
+                for key in [h_a1, h_b1, h_c1].iter() {
+                    t.remove(key.as_bytes().as_slice()).unwrap();
+                }
+            }
+            write_txn.commit().unwrap();
+        }
+
+        // Reopen — needs_rebuild must fire and rebuild produces identical frontiers.
+        let store = open_store(dir.path());
+        let rebuilt_a = store.get_frontier(&h_a1).unwrap().unwrap();
+        let rebuilt_b = store.get_frontier(&h_b1).unwrap().unwrap();
+        let rebuilt_c = store.get_frontier(&h_c1).unwrap().unwrap();
+        assert_eq!(rebuilt_a, expected_a);
+        assert_eq!(rebuilt_b, expected_b);
+        assert_eq!(rebuilt_c, expected_c);
     }
 }

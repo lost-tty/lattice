@@ -316,10 +316,10 @@ impl<S: StateMachine> Store<S> {
         Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
     }
 
-    /// Observations of max witness seq per (observer, observed author) derived from causal deps.
+    /// Per-observer per-author observation counts plus per-author totals.
     pub async fn author_state_observations(
         &self,
-    ) -> Result<Vec<(PubKey, PubKey, u64)>, StoreError> {
+    ) -> Result<(Vec<(PubKey, PubKey, u64)>, HashMap<PubKey, u64>), StoreError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
             .send(ReplicationControllerCmd::AuthorStateObservations { resp: resp_tx })
@@ -685,7 +685,15 @@ impl<S: StateMachine + StoreIdentity + 'static> StoreInspector for Store<S> {
     fn author_state_observations(
         &self,
     ) -> Pin<
-        Box<dyn Future<Output = Result<Vec<(PubKey, PubKey, u64)>, StoreError>> + Send + '_>,
+        Box<
+            dyn Future<
+                    Output = Result<
+                        (Vec<(PubKey, PubKey, u64)>, HashMap<PubKey, u64>),
+                        StoreError,
+                    >,
+                > + Send
+                + '_,
+        >,
     > {
         Box::pin(Store::author_state_observations(self))
     }

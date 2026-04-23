@@ -55,42 +55,43 @@ async function loadDebugTips(storeId) {
 }
 
 async function loadDebugAuthorState(storeId) {
-  const [resp, tipsResp] = await Promise.all([
-    sdk.api.store.GetAuthorStateObservations({ store_id: storeId }),
-    sdk.api.store.GetAuthorTips({ store_id: storeId }),
-  ]);
+  const resp = await sdk.api.store.GetAuthorStateObservations({ store_id: storeId });
   const observers = resp.observers || [];
+  const columns = resp.columns || [];
   const observations = resp.items || [];
-  const tips = tipsResp.items || [];
+  const totalsList = resp.author_totals || [];
 
   if (observers.length === 0) {
     return html`<${DebugNav} storeId=${storeId} debugView="authorstate" /><div class="empty-state">No authors</div>`;
   }
 
-  // Ground truth: observed author → witness_seq (from local tips).
-  const groundTruth = new Map();
-  for (const a of tips) {
-    if (a.witness_seq != null) groundTruth.set(hex(a.public_key), a.witness_seq);
-  }
+  const totals = new Map();
+  for (const t of totalsList) totals.set(hex(t.author), t.count);
 
-  // (observer_hex, observed_hex) → seq
   const cell = new Map();
   for (const o of observations) {
-    cell.set(hex(o.observer) + '|' + hex(o.observed_author), o.witness_seq);
+    cell.set(`${hex(o.observer)}|${hex(o.observed_author)}`, o.seen);
   }
 
-  const colIds = observers.map(o => hex(o.public_key));
-  const labelFor = (obs) => obs.peer_name && obs.peer_name.length > 0
-    ? obs.peer_name
-    : Helpers.pubkeyShort(obs.public_key);
-  const colHeaders = observers.map(labelFor);
+  const shortHex = (u8) => Array.from(u8.slice(0, 4))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+  const labelFor = (info) => info.peer_name && info.peer_name.length > 0
+    ? info.peer_name
+    : '-';
+  const colIds = columns.map(c => hex(c.public_key));
 
   return html`
     <${DebugNav} storeId=${storeId} debugView="authorstate" />
     <table>
       <tr>
         <th>Observer</th><th>Status</th>
-        ${colHeaders.map(h => html`<th>${h}</th>`)}
+        ${columns.map(c => html`
+          <th>
+            <div>${labelFor(c)}</div>
+            <div class="mono muted">${shortHex(c.public_key)}</div>
+          </th>
+        `)}
       </tr>
       ${observers.map(obs => {
         const observerHex = hex(obs.public_key);
@@ -99,20 +100,55 @@ async function loadDebugAuthorState(storeId) {
             <td>${labelFor(obs)}</td>
             <td>${obs.peer_status ?? '-'}</td>
             ${colIds.map(observedHex => {
-              if (observedHex === observerHex) return html`<td class="muted">n/a</td>`;
-              const seq = cell.get(observerHex + '|' + observedHex);
-              if (seq == null) return html`<td>-</td>`;
-              const gt = groundTruth.get(observedHex);
-              const delta = gt != null ? gt - seq : null;
+              if (observedHex === observerHex) {
+                const selfTotal = totals.get(observerHex);
+                return selfTotal != null
+                  ? html`<td><span class="ok">${selfTotal}</span></td>`
+                  : html`<td class="muted">n/a</td>`;
+              }
+              const key = `${observerHex}|${observedHex}`;
+              const seen = cell.get(key) ?? 0;
+              const total = totals.get(observedHex) ?? 0;
+              const behind = total > seen ? total - seen : 0;
+              const seenClass = behind === 0 ? 'ok' : 'sexpr-num';
               return html`<td>
-                <span class="sexpr-num">${seq}</span>${delta != null
-                  ? html` <span class="err">-${delta}</span>`
+                <span class=${seenClass}>${seen}</span>${behind > 0
+                  ? html` <span class="err">-${behind}</span>`
                   : null}
               </td>`;
             })}
           </tr>
         `;
       })}
+      <tr>
+        <td><em>have (local)</em></td>
+        <td>-</td>
+        ${colIds.map(observedHex => {
+          const total = totals.get(observedHex) ?? 0;
+          return html`<td><span class="ok">${total}</span></td>`;
+        })}
+      </tr>
+      <tr>
+        <td><em>mesh (min)</em></td>
+        <td>-</td>
+        ${colIds.map(observedHex => {
+          let minSeen = null;
+          for (const obs of observers) {
+            const key = `${hex(obs.public_key)}|${observedHex}`;
+            const s = cell.get(key) ?? 0;
+            if (minSeen == null || s < minSeen) minSeen = s;
+          }
+          minSeen = minSeen ?? 0;
+          const total = totals.get(observedHex) ?? 0;
+          const behind = total > minSeen ? total - minSeen : 0;
+          const klass = behind === 0 ? 'ok' : 'sexpr-num';
+          return html`<td>
+            <span class=${klass}>${minSeen}</span>${behind > 0
+              ? html` <span class="err">-${behind}</span>`
+              : null}
+          </td>`;
+        })}
+      </tr>
     </table>
   `;
 }

@@ -263,18 +263,25 @@ message AuthorStateResponse {
 message AuthorStateObservation {
   bytes observer = 1;
   bytes observed_author = 2;
-  uint64 witness_seq = 3;
+  uint64 seen = 3;
 }
 
-message AuthorStateObserver {
+message AuthorPeerInfo {
   bytes public_key = 1;
   optional string peer_status = 2;
   optional string peer_name = 3;
 }
 
+message AuthorIntentionCount {
+  bytes author = 1;
+  uint64 count = 2;
+}
+
 message AuthorStateObservationsResponse {
   repeated AuthorStateObservation items = 1;
-  repeated AuthorStateObserver observers = 2;
+  repeated AuthorPeerInfo observers = 2;
+  repeated AuthorPeerInfo columns = 3;
+  repeated AuthorIntentionCount author_totals = 4;
 }
 
 message CleanupResult {
