@@ -66,7 +66,7 @@ pub struct NodeInfo {
 }
 
 // Re-export StoreInfo from store module
-pub use lattice_kernel::store::StoreInfo;
+pub use lattice_kernel::store::{AckEntry, StoreInfo};
 
 /// Result of accepting a peer's join request
 pub struct JoinAcceptance {

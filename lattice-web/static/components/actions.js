@@ -18,6 +18,15 @@ export async function doSync(storeId) {
   } catch (e) { toast('Sync error: ' + e.message, 'err'); }
 }
 
+export async function doAck(storeId) {
+  try {
+    const resp = await sdk.api.store.EmitAck({ store_id: storeId });
+    const n = (resp.entries || []).length;
+    if (n === 0) toast('Nothing to ack', 'ok');
+    else toast(`Emitted ack referencing ${n} tip${n === 1 ? '' : 's'}`, 'ok');
+  } catch (e) { toast('Ack error: ' + e.message, 'err'); }
+}
+
 export async function doInvite(storeId) {
   try {
     const resp = await sdk.api.store.Invite({ store_id: storeId });

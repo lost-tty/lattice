@@ -252,6 +252,8 @@ pub enum StoreSubcommand {
     Sync,
     /// Ask gossip to (re)dial this store's peers
     Reconnect,
+    /// Emit a frontier-ack intention referencing all foreign tips not yet acknowledged
+    Ack,
     /// Explore a message type's schema
     InspectType {
         /// Full type name (e.g., lattice.kv.Entry), or omit to list all types
@@ -477,6 +479,9 @@ pub async fn handle_command(
             }
             StoreSubcommand::Reconnect => {
                 store_commands::cmd_store_reconnect(backend, ctx.store_id, writer).await
+            }
+            StoreSubcommand::Ack => {
+                store_commands::cmd_store_ack(backend, ctx.store_id, writer).await
             }
             StoreSubcommand::InspectType { type_name } => {
                 store_commands::cmd_store_inspect_type(

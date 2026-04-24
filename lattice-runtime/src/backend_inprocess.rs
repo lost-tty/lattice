@@ -11,7 +11,7 @@ use lattice_model::types::{Hash, PubKey};
 
 use lattice_model::AppBinding;
 
-use lattice_node::Node;
+use lattice_node::{AckEntry, Node};
 use lattice_systemstore::SystemBatch;
 use prost_reflect::prost::Message;
 use std::sync::Arc;
@@ -68,6 +68,18 @@ impl InProcessBackend {
             .ok_or_else(|| BackendApiError::StoreNotFound(store_id).into())
     }
 
+}
+
+fn ack_entries_to_proto(entries: Vec<AckEntry>) -> Vec<proto::AckDeltaEntry> {
+    entries
+        .into_iter()
+        .map(|e| proto::AckDeltaEntry {
+            author: e.author.to_vec(),
+            tip_hash: e.tip_hash.to_vec(),
+            tip_count: e.tip_count,
+            acknowledged_count: e.acknowledged_count,
+        })
+        .collect()
 }
 
 /// Backend methods — called by gRPC service trait impls.
@@ -515,6 +527,33 @@ impl InProcessBackend {
                 columns,
                 author_totals,
             })
+        })
+    }
+
+    pub fn store_emit_ack(
+        &self,
+        store_id: Uuid,
+    ) -> AsyncResult<'_, proto::EmitAckResponse> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            let inspector = store.as_inspector();
+            let (intention_hash, entries) = match inspector.emit_ack().await? {
+                Some((hash, delta)) => (hash.to_vec(), ack_entries_to_proto(delta)),
+                None => (Vec::new(), Vec::new()),
+            };
+            Ok(proto::EmitAckResponse { intention_hash, entries })
+        })
+    }
+
+    pub fn store_ack_delta(
+        &self,
+        store_id: Uuid,
+    ) -> AsyncResult<'_, Vec<proto::AckDeltaEntry>> {
+        Box::pin(async move {
+            let store = self.get_store(store_id)?;
+            let inspector = store.as_inspector();
+            let entries = inspector.ack_delta(self.node.node_id()).await?;
+            Ok(ack_entries_to_proto(entries))
         })
     }
 

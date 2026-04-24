@@ -40,6 +40,15 @@ pub struct AuthorTip {
     pub witness_seq: Option<u64>,
 }
 
+/// One foreign author's contribution to the ack delta.
+#[derive(Debug, Clone)]
+pub struct AckEntry {
+    pub author: PubKey,
+    pub tip_hash: Hash,
+    pub tip_count: u64,
+    pub acknowledged_count: u64,
+}
+
 use std::any::Any;
 
 /// Trait for type-erased store handles in the registry.
@@ -323,6 +332,34 @@ impl<S: StateMachine> Store<S> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
             .send(ReplicationControllerCmd::AuthorStateObservations { resp: resp_tx })
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?;
+        Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
+    }
+
+    /// Ack delta: foreign authors whose tips have advanced beyond what
+    /// `self_pubkey`'s own tip transitively references.
+    pub async fn ack_delta(
+        &self,
+        self_pubkey: PubKey,
+    ) -> Result<Vec<AckEntry>, StoreError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ReplicationControllerCmd::AckDelta { self_pubkey, resp: resp_tx })
+            .await
+            .map_err(|_| StoreError::ChannelClosed)?;
+        Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
+    }
+
+    /// Emit an ack intention covering the current ack delta. Returns the
+    /// committed intention's hash alongside the delta it pinned, or
+    /// `Ok(None)` when nothing was pending.
+    pub async fn emit_ack(
+        &self,
+    ) -> Result<Option<(Hash, Vec<AckEntry>)>, StoreError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ReplicationControllerCmd::EmitAck { resp: resp_tx })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
         Ok(resp_rx.await.map_err(|_| StoreError::ChannelClosed)??)
@@ -696,6 +733,25 @@ impl<S: StateMachine + StoreIdentity + 'static> StoreInspector for Store<S> {
         >,
     > {
         Box::pin(Store::author_state_observations(self))
+    }
+
+    fn ack_delta(
+        &self,
+        self_pubkey: PubKey,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AckEntry>, StoreError>> + Send + '_>> {
+        Box::pin(Store::ack_delta(self, self_pubkey))
+    }
+
+    fn emit_ack(
+        &self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Option<(Hash, Vec<AckEntry>)>, StoreError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(Store::emit_ack(self))
     }
 
     fn intention_count(&self) -> Pin<Box<dyn Future<Output = u64> + Send + '_>> {

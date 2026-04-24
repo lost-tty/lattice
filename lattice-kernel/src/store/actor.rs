@@ -4,7 +4,7 @@
 //! Intentions are persisted in the IntentionStore. The store is "dumb" — the actor handles
 //! authorization and applies intentions to the state machine.
 
-use crate::store::{IngestResult, StateError};
+use crate::store::{AckEntry, IngestResult, StateError};
 use crate::weaver::intention_store::{IntentionStore, IntentionStoreError};
 use lattice_model::types::Hash;
 use lattice_model::types::PubKey;
@@ -19,6 +19,10 @@ use uuid::Uuid;
 
 use std::collections::HashMap;
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+/// Upper bound on chain walks from any author tip back to Hash::ZERO.
+/// Shared by observation, ack-delta, and content-tip traversals.
+const WALK_LIMIT: usize = 1_000_000;
 
 /// Commands sent to the ReplicationController actor
 pub enum ReplicationControllerCmd {
@@ -38,6 +42,18 @@ pub enum ReplicationControllerCmd {
         resp: oneshot::Sender<
             Result<(Vec<(PubKey, PubKey, u64)>, HashMap<PubKey, u64>), StateError>,
         >,
+    },
+    /// Compute ack delta: foreign authors (excluding self) whose tips have
+    /// advanced beyond what `self_pubkey`'s own tip transitively references.
+    AckDelta {
+        self_pubkey: PubKey,
+        resp: oneshot::Sender<Result<Vec<AckEntry>, StateError>>,
+    },
+    /// Build and commit an ack intention (empty ops) referencing the current
+    /// ack delta. Returns Some((hash, entries)) with the tips the commit
+    /// actually referenced, or None if the delta was empty.
+    EmitAck {
+        resp: oneshot::Sender<Result<Option<(Hash, Vec<AckEntry>)>, StateError>>,
     },
     /// Ingest a batch of signed intentions from network (replaces single ingest)
     IngestBatch {
@@ -220,6 +236,37 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 let store = self.intention_store.read().await;
                 let result = compute_author_state_observations(&store)
                     .map_err(|e| StateError::Backend(e.to_string()));
+                let _ = resp.send(result);
+            }
+
+            ReplicationControllerCmd::AckDelta { self_pubkey, resp } => {
+                let store = self.intention_store.read().await;
+                let result = compute_ack_delta(&store, &self_pubkey)
+                    .map_err(|e| StateError::Backend(e.to_string()));
+                let _ = resp.send(result);
+            }
+
+            ReplicationControllerCmd::EmitAck { resp } => {
+                let store_arc = self.intention_store.clone();
+                let mut store = store_arc.write().await;
+                let self_pubkey = self.node_identity.public_key();
+                let delta_result = compute_ack_delta(&store, &self_pubkey)
+                    .map_err(|e| StateError::Backend(e.to_string()));
+                let result = match delta_result {
+                    Err(e) => Err(e),
+                    Ok(delta) if delta.is_empty() => Ok(None),
+                    Ok(delta) => {
+                        let deps: Vec<Hash> = delta.iter().map(|e| e.tip_hash).collect();
+                        self.create_and_commit_local_intention(&mut store, vec![], deps)
+                            .map(|hash| Some((hash, delta)))
+                            .map_err(|e| match e {
+                                ReplicationControllerError::IntentionStore(e) => {
+                                    StateError::Backend(e.to_string())
+                                }
+                                ReplicationControllerError::State(e) => e,
+                            })
+                    }
+                };
                 let _ = resp.send(result);
             }
 
@@ -742,12 +789,20 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
     }
 }
 
+/// True when the intention carries payload ops. Empty-ops intentions (today's
+/// ack shape) are filtered out of observation and ack-delta counts — they
+/// advance the chain but carry no state the observer would consume.
+fn has_ops(signed: &SignedIntention) -> bool {
+    !signed.intention.ops.is_empty()
+}
+
 /// For each observer (author X), compute transitive per-author frontier —
 /// max witness seq per observed author reachable via causal deps + store_prev.
+/// Ack intentions (empty ops) are infrastructure and excluded from the counts.
 /// Returns (observations, author_totals):
 ///   observations: (observer, observed, seen) where `seen` is the count of
-///     observed-author intentions in our local log at or before the frontier seq.
-///   author_totals: observed → total count of their intentions in our local log.
+///     observed-author content intentions at or before the frontier seq.
+///   author_totals: observed → total count of their content intentions locally.
 fn compute_author_state_observations(
     store: &IntentionStore,
 ) -> Result<
@@ -757,12 +812,12 @@ fn compute_author_state_observations(
     // Per-author sorted list of witness seqs, built by walking each author's
     // chain once. Each chain is linear (self-referential store_prev) so this
     // is O(total intentions across all authors).
-    const WALK_LIMIT: usize = 1_000_000;
     let mut author_seqs: HashMap<PubKey, Vec<u64>> = HashMap::new();
     for (author, tip) in store.all_author_tips() {
         let chain = store.walk_back_hashed(tip, Some(&Hash::ZERO), WALK_LIMIT)?;
         let mut seqs: Vec<u64> = chain
             .iter()
+            .filter(|(_, signed)| has_ops(signed))
             .filter_map(|(hash, _)| store.get_witness_seq_for(hash))
             .collect();
         seqs.sort_unstable();
@@ -783,6 +838,94 @@ fn compute_author_state_observations(
         }
     }
     Ok((observations, author_totals))
+}
+
+/// Foreign authors whose current tip has advanced beyond what `self_pubkey`'s
+/// own tip transitively references via the frontier index.
+///
+/// For each foreign author A included in the delta:
+///   tip_count         = number of A's intentions in our local log
+///   acknowledged_count = how many of those self has already referenced
+///                        (via transitive causal closure)
+///
+/// Acks (empty-ops intentions) at A's tip are skipped — the walker looks for
+/// the latest content intention. Entries only appear when A has content newer
+/// than what self has acknowledged.
+fn compute_ack_delta(
+    store: &IntentionStore,
+    self_pubkey: &PubKey,
+) -> Result<Vec<AckEntry>, IntentionStoreError> {
+    let tips = store.all_author_tips().clone();
+    let self_frontier: HashMap<PubKey, u64> = match tips.get(self_pubkey) {
+        Some(self_tip) => store.get_frontier(self_tip)?.unwrap_or_default(),
+        None => HashMap::new(),
+    };
+
+    // Per-author sorted witness seqs so we can translate seq → count via
+    // partition_point. Built lazily per author (only for those in the delta).
+    let mut delta: Vec<AckEntry> = Vec::new();
+    for (author, tip_hash) in tips.iter() {
+        if author == self_pubkey {
+            continue;
+        }
+        let ack_seq = self_frontier.get(author).copied().unwrap_or(0);
+        let Some((content_hash, content_seq)) =
+            find_content_tip(store, tip_hash, ack_seq)?
+        else {
+            continue;
+        };
+
+        // Sorted seqs of this author's content intentions (acks excluded) so
+        // we can translate seq → count via partition_point.
+        let chain = store.walk_back_hashed(tip_hash, Some(&Hash::ZERO), WALK_LIMIT)?;
+        let mut seqs: Vec<u64> = chain
+            .iter()
+            .filter(|(_, signed)| has_ops(signed))
+            .filter_map(|(h, _)| store.get_witness_seq_for(h))
+            .collect();
+        seqs.sort_unstable();
+        let tip_count = seqs.partition_point(|s| *s <= content_seq) as u64;
+        let acknowledged_count = seqs.partition_point(|s| *s <= ack_seq) as u64;
+
+        delta.push(AckEntry {
+            author: *author,
+            tip_hash: content_hash,
+            tip_count,
+            acknowledged_count,
+        });
+    }
+    Ok(delta)
+}
+
+/// Walk back from `start` along store_prev looking for the first non-ack
+/// intention whose witness seq is still above `ack_seq`. Returns `None` if
+/// we reach an already-acknowledged intention, the chain end, or a missing
+/// intention before finding one.
+fn find_content_tip(
+    store: &IntentionStore,
+    start: &Hash,
+    ack_seq: u64,
+) -> Result<Option<(Hash, u64)>, IntentionStoreError> {
+    let mut current = *start;
+    for _ in 0..WALK_LIMIT {
+        if current == Hash::ZERO {
+            return Ok(None);
+        }
+        let Some(signed) = store.get(&current)? else {
+            return Ok(None);
+        };
+        let Some(seq) = store.get_witness_seq_for(&current) else {
+            return Ok(None);
+        };
+        if seq <= ack_seq {
+            return Ok(None);
+        }
+        if has_ops(&signed) {
+            return Ok(Some((current, seq)));
+        }
+        current = signed.intention.store_prev;
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -2168,6 +2311,130 @@ mod tests {
         let (observations, totals) = handle.author_state_observations().await.unwrap();
         assert!(observations.is_empty());
         assert!(totals.is_empty());
+        handle.close().await;
+    }
+
+    /// Empty-ops intention (the ack shape) is accepted end-to-end: insert,
+    /// witness, applied, tip updated, frontier updated.
+    #[tokio::test]
+    async fn test_empty_ops_intention_accepted() {
+        let local = NodeIdentity::generate();
+        let id_a = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, local).unwrap();
+        let a = id_a.public_key();
+
+        // A authors a content intention first so the ack has something to ref.
+        let content = Intention {
+            author: a,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"content".to_vec(),
+        };
+        let content_signed = SignedIntention::sign(content, &id_a);
+        let h_content = content_signed.intention.hash();
+        handle.ingest_intention(content_signed).await.unwrap();
+
+        // Empty-ops ack intention chaining on the content.
+        let ack = Intention {
+            author: a,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h_content,
+            condition: Condition::v1(vec![]),
+            ops: vec![],
+        };
+        let ack_signed = SignedIntention::sign(ack, &id_a);
+        let h_ack = ack_signed.intention.hash();
+
+        // Must be accepted without error.
+        handle.ingest_intention(ack_signed).await.unwrap();
+
+        // Tip must advance to the ack (latest witnessed by author).
+        let tips = handle.author_tips().await.unwrap();
+        assert_eq!(tips.get(&a).copied(), Some(h_ack), "tip did not advance to ack");
+
+        handle.close().await;
+    }
+
+    /// Verify that a mutual ack exchange terminates: once both peers have
+    /// acked each other's content, both deltas are empty — no write storm.
+    #[tokio::test]
+    async fn test_ack_delta_converges_after_mutual_ack() {
+        let local = NodeIdentity::generate();
+        let id_a = NodeIdentity::generate();
+        let id_b = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, local).unwrap();
+        let a = id_a.public_key();
+        let b = id_b.public_key();
+
+        // A and B each author one content intention.
+        let a1 = Intention {
+            author: a,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"a1".to_vec(),
+        };
+        let a1_signed = SignedIntention::sign(a1, &id_a);
+        let h_a1 = a1_signed.intention.hash();
+        handle.ingest_intention(a1_signed).await.unwrap();
+
+        let b1 = Intention {
+            author: b,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"b1".to_vec(),
+        };
+        let b1_signed = SignedIntention::sign(b1, &id_b);
+        let h_b1 = b1_signed.intention.hash();
+        handle.ingest_intention(b1_signed).await.unwrap();
+
+        // Before any acks: A's delta contains B, B's delta contains A.
+        let delta_a = handle.ack_delta(a).await.unwrap();
+        let delta_b = handle.ack_delta(b).await.unwrap();
+        assert_eq!(delta_a.len(), 1, "A should see B in delta");
+        assert_eq!(delta_a[0].author, b);
+        assert_eq!(delta_b.len(), 1, "B should see A in delta");
+        assert_eq!(delta_b[0].author, a);
+
+        // A acks B: empty-ops intention with B's tip in condition.
+        let a_ack = Intention {
+            author: a,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h_a1,
+            condition: Condition::v1(vec![h_b1]),
+            ops: vec![],
+        };
+        handle.ingest_intention(SignedIntention::sign(a_ack, &id_a)).await.unwrap();
+
+        // B acks A: empty-ops intention with A's tip (the ack!) in condition.
+        // But the walker should skip the ack and reach A's content a1 — and
+        // since A's ack already references B's content, B should see that
+        // and only reference A's content intention.
+        let b_ack = Intention {
+            author: b,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h_b1,
+            condition: Condition::v1(vec![h_a1]),
+            ops: vec![],
+        };
+        handle.ingest_intention(SignedIntention::sign(b_ack, &id_b)).await.unwrap();
+
+        // After mutual acks: both deltas are empty. No further acks needed.
+        let delta_a = handle.ack_delta(a).await.unwrap();
+        let delta_b = handle.ack_delta(b).await.unwrap();
+        assert!(delta_a.is_empty(), "A's delta must be empty after mutual ack, got {:?}", delta_a);
+        assert!(delta_b.is_empty(), "B's delta must be empty after mutual ack, got {:?}", delta_b);
+
         handle.close().await;
     }
 }

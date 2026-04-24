@@ -1,7 +1,7 @@
 import { html, hex } from './util.js';
 import * as Helpers from '../helpers.js';
 import * as S from '../state.js';
-import { doSync, doInvite } from './actions.js';
+import { doSync, doInvite, doAck } from './actions.js';
 import { sdk } from '../sdk.js';
 
 export async function loadDetails(storeId) {
@@ -33,6 +33,7 @@ function DetailsView({ uuid, details, meta, peerStrategy, storeId }) {
   return html`
     <div class="action-bar">
       <button class="btn" onClick=${() => doSync(storeId)}>Sync</button>
+      <button class="btn" onClick=${() => doAck(storeId)}>Ack</button>
       <button class="btn" onClick=${() => doInvite(storeId)}>Invite Peer</button>
       <button class="btn" onClick=${() => S.showModal('createStore', { parentId: storeId })}>Create Child Store</button>
       ${isRootStore && html`<button class="btn" onClick=${() => S.showModal('registerApp', { registryStoreId: storeId })}>Create App</button>`}

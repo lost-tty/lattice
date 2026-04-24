@@ -85,6 +85,25 @@ impl StoreService for InProcessBackend {
             .into_status()
     }
 
+    async fn get_ack_delta(
+        &self,
+        request: Request<StoreId>,
+    ) -> Result<Response<lattice_api::proto::AckDeltaResponse>, Status> {
+        let id = parse_uuid(&request.into_inner().store_id)?;
+        self.store_ack_delta(id)
+            .await
+            .map(|entries| Response::new(lattice_api::proto::AckDeltaResponse { entries }))
+            .into_status()
+    }
+
+    async fn emit_ack(
+        &self,
+        request: Request<StoreId>,
+    ) -> Result<Response<lattice_api::proto::EmitAckResponse>, Status> {
+        let id = parse_uuid(&request.into_inner().store_id)?;
+        self.store_emit_ack(id).await.map(Response::new).into_status()
+    }
+
     async fn witness_log(&self, request: Request<WitnessLogRequest>) -> Result<Response<WitnessLogResponse>, Status> {
         let id = parse_uuid(&request.into_inner().store_id)?;
         self.store_witness_log(id).await

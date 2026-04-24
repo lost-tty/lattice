@@ -35,7 +35,7 @@ pub use lattice_model::{
 
 // Node-level exports
 pub use auth::{PeerEvent, PeerProvider};
-pub use node::{JoinAcceptance, Node, NodeBuilder, NodeError, NodeEvent, NodeInfo, PeerInfo};
+pub use node::{AckEntry, JoinAcceptance, Node, NodeBuilder, NodeError, NodeEvent, NodeInfo, PeerInfo};
 pub use peer_manager::{PeerManager, PeerManagerError};
 
 // Other exports

@@ -55,11 +55,15 @@ async function loadDebugTips(storeId) {
 }
 
 async function loadDebugAuthorState(storeId) {
-  const resp = await sdk.api.store.GetAuthorStateObservations({ store_id: storeId });
+  const [resp, ackResp] = await Promise.all([
+    sdk.api.store.GetAuthorStateObservations({ store_id: storeId }),
+    sdk.api.store.GetAckDelta({ store_id: storeId }),
+  ]);
   const observers = resp.observers || [];
   const columns = resp.columns || [];
   const observations = resp.items || [];
   const totalsList = resp.author_totals || [];
+  const ackEntries = ackResp.entries || [];
 
   if (observers.length === 0) {
     return html`<${DebugNav} storeId=${storeId} debugView="authorstate" /><div class="empty-state">No authors</div>`;
@@ -147,6 +151,16 @@ async function loadDebugAuthorState(storeId) {
               ? html` <span class="err">-${behind}</span>`
               : null}
           </td>`;
+        })}
+      </tr>
+      <tr>
+        <td><em>pending ack</em></td>
+        <td>-</td>
+        ${colIds.map(observedHex => {
+          const entry = ackEntries.find(e => hex(e.author) === observedHex);
+          if (!entry) return html`<td class="muted">-</td>`;
+          const gap = Number(entry.tip_count) - Number(entry.acknowledged_count);
+          return html`<td><span class="err">+${gap}</span></td>`;
         })}
       </tr>
     </table>

@@ -175,6 +175,18 @@ impl RpcClient {
     ) -> AsyncResult<'_, crate::proto::AuthorStateObservationsResponse> {
         Box::pin(async move { rpc_store!(self, store.get_author_state_observations, id) })
     }
+    pub fn store_ack_delta(
+        &self,
+        id: Uuid,
+    ) -> AsyncResult<'_, Vec<crate::proto::AckDeltaEntry>> {
+        Box::pin(async move { rpc_store!(self, store.get_ack_delta, id, .entries) })
+    }
+    pub fn store_emit_ack(
+        &self,
+        id: Uuid,
+    ) -> AsyncResult<'_, crate::proto::EmitAckResponse> {
+        Box::pin(async move { rpc_store!(self, store.emit_ack, id) })
+    }
     pub fn store_get_name(&self, id: Uuid) -> AsyncResult<'_, Option<String>> {
         Box::pin(async move { rpc_store!(self, store.get_name, id, .name) })
     }

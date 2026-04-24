@@ -13,5 +13,5 @@ mod handle;
 // Public API - types needed by consumers
 pub use actor::{ReplicationController, ReplicationControllerCmd, ReplicationControllerError};
 pub use error::{StateError, StoreError};
-pub use handle::{ActorRunner, AuthorTip, OpenedStore, ProjectionStatus, RegistryEntry, Store, StoreInfo};
+pub use handle::{AckEntry, ActorRunner, AuthorTip, OpenedStore, ProjectionStatus, RegistryEntry, Store, StoreInfo};
 pub use lattice_model::weaver::ingest::{IngestResult, MissingDep};

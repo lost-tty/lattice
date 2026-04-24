@@ -284,6 +284,22 @@ message AuthorStateObservationsResponse {
   repeated AuthorIntentionCount author_totals = 4;
 }
 
+message AckDeltaEntry {
+  bytes author = 1;
+  bytes tip_hash = 2;
+  uint64 tip_count = 3;
+  uint64 acknowledged_count = 4;
+}
+
+message AckDeltaResponse {
+  repeated AckDeltaEntry entries = 1;
+}
+
+message EmitAckResponse {
+  bytes intention_hash = 1;
+  repeated AckDeltaEntry entries = 2;
+}
+
 message CleanupResult {
   uint32 orphans_removed = 1;
 }

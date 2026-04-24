@@ -3,7 +3,7 @@
 //! Provides async methods for inspecting store state.
 //! Implemented by Store<S> for any StateMachine S.
 
-use crate::store::{AuthorTip, ProjectionStatus, StoreError};
+use crate::store::{AckEntry, AuthorTip, ProjectionStatus, StoreError};
 use lattice_model::types::{Hash, PubKey};
 use lattice_model::weaver::{FloatingIntention, SignedIntention, WitnessEntry};
 use lattice_model::{BranchInspection, Uuid};
@@ -73,4 +73,24 @@ pub trait StoreInspector: Send + Sync {
 
     /// Projection status: cursor position vs witness log head.
     fn projection_status(&self) -> Pin<Box<dyn Future<Output = ProjectionStatus> + Send + '_>>;
+
+    /// Compute the ack delta for `self_pubkey`: foreign authors whose current
+    /// tip has advanced beyond what `self`'s own tip transitively references.
+    fn ack_delta(
+        &self,
+        self_pubkey: PubKey,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AckEntry>, StoreError>> + Send + '_>>;
+
+    /// Emit an ack intention covering the current ack delta. Returns the
+    /// new intention's hash along with the delta it pinned, or `None` if
+    /// the delta is empty.
+    fn emit_ack(
+        &self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Option<(Hash, Vec<AckEntry>)>, StoreError>>
+                + Send
+                + '_,
+        >,
+    >;
 }

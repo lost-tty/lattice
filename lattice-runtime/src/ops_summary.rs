@@ -14,6 +14,11 @@ pub fn summarize_intention_ops(
     use lattice_proto::storage::{universal_op, UniversalOp};
     use prost::Message;
 
+    // Empty ops carry no payload — render as an empty list.
+    if ops.is_empty() {
+        return vec![SExpr::list(vec![])];
+    }
+
     let Ok(universal) = UniversalOp::decode(ops) else {
         tracing::debug!(hash = %hash, ops_len = ops.len(), ops_hex = %hex::encode(&ops[..ops.len().min(32)]), "Failed to decode UniversalOp");
         return vec![SExpr::raw(hash.0[..4].to_vec())];

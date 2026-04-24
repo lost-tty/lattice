@@ -562,6 +562,11 @@ pub async fn cmd_store_debug_authorstate(
             return Ok(Continue);
         }
     };
+    let ack_entries = backend.store_ack_delta(store_id).await.unwrap_or_default();
+    let ack_gap_by_author: std::collections::HashMap<Vec<u8>, u64> = ack_entries
+        .iter()
+        .map(|e| (e.author.clone(), e.tip_count.saturating_sub(e.acknowledged_count)))
+        .collect();
     let totals: std::collections::HashMap<Vec<u8>, u64> = resp
         .author_totals
         .iter()
@@ -658,11 +663,92 @@ pub async fn cmd_store_debug_authorstate(
     }
     rows.push(SExpr::list(mesh));
 
+    // Footer 3: pending ack — what emitting an ack now would newly reference per column.
+    let mut ack_row = vec![SExpr::sym("Row")];
+    ack_row.push(SExpr::list(vec![SExpr::sym("observer"), SExpr::sym("pending ack")]));
+    ack_row.push(SExpr::list(vec![SExpr::sym("name"), SExpr::sym("-")]));
+    ack_row.push(SExpr::list(vec![SExpr::sym("status"), SExpr::sym("-")]));
+    for (column, col_label) in resp.columns.iter().zip(col_labels.iter()) {
+        let gap = ack_gap_by_author.get(&column.public_key).copied().unwrap_or(0);
+        let cell = if gap == 0 {
+            SExpr::sym("-")
+        } else {
+            SExpr::sym(&format!("{}", format!("+{}", gap).red()))
+        };
+        ack_row.push(SExpr::list(vec![SExpr::sym(col_label), cell]));
+    }
+    rows.push(SExpr::list(ack_row));
+
     let _ = writeln!(
         w,
         "{}",
         crate::display_helpers::render_sexpr_pretty_colored(&SExpr::list(rows), 4)
     );
+
+    Ok(Continue)
+}
+
+pub async fn cmd_store_ack(
+    backend: &RpcClient,
+    store_id: Option<Uuid>,
+    writer: Writer,
+) -> CmdResult {
+    let mut w = writer.clone();
+
+    let store_id = match store_id {
+        Some(id) => id,
+        None => {
+            let _ = writeln!(w, "No store selected.");
+            return Ok(Continue);
+        }
+    };
+
+    let resp = match backend.store_emit_ack(store_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = writeln!(w, "Error emitting ack: {}", e);
+            return Ok(Continue);
+        }
+    };
+
+    if resp.intention_hash.is_empty() {
+        let _ = writeln!(w, "Nothing to ack.");
+        return Ok(Continue);
+    }
+
+    let peers = backend.store_peers(store_id).await.unwrap_or_default();
+    let name_for: std::collections::HashMap<Vec<u8>, String> = peers
+        .into_iter()
+        .filter(|p| !p.name.is_empty())
+        .map(|p| (p.public_key, p.name))
+        .collect();
+
+    use owo_colors::OwoColorize;
+    let mut rows = vec![SExpr::sym("ack-emitted")];
+    for e in &resp.entries {
+        let name = name_for.get(&e.author).cloned().unwrap_or_else(|| "-".to_string());
+        let behind = e.tip_count.saturating_sub(e.acknowledged_count);
+        let summary = format!(
+            "{} {}",
+            e.tip_count.yellow(),
+            format!("-{}", behind).red()
+        );
+        rows.push(SExpr::list(vec![
+            SExpr::sym("Entry"),
+            SExpr::list(vec![SExpr::sym("name"), SExpr::sym(&name)]),
+            SExpr::list(vec![SExpr::sym("author"), SExpr::raw(e.author.clone())]),
+            SExpr::list(vec![SExpr::sym("tip"), SExpr::raw(e.tip_hash.clone())]),
+            SExpr::list(vec![SExpr::sym("count"), SExpr::sym(&summary)]),
+            SExpr::list(vec![SExpr::sym("acked"), SExpr::num(e.acknowledged_count)]),
+        ]));
+    }
+
+    let _ = writeln!(
+        w,
+        "{}",
+        crate::display_helpers::render_sexpr_pretty_colored(&SExpr::list(rows), 4)
+    );
+    let _ = writeln!(w, "Emitted ack referencing {} tip(s).", resp.entries.len());
 
     Ok(Continue)
 }
