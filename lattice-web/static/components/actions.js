@@ -21,9 +21,8 @@ export async function doSync(storeId) {
 export async function doAck(storeId) {
   try {
     const resp = await sdk.api.store.EmitAck({ store_id: storeId });
-    const n = (resp.entries || []).length;
-    if (n === 0) toast('Nothing to ack', 'ok');
-    else toast(`Emitted ack referencing ${n} tip${n === 1 ? '' : 's'}`, 'ok');
+    const empty = !resp.intention_hash || resp.intention_hash.length === 0;
+    toast(empty ? 'Nothing to ack' : 'Ack emitted', 'ok');
   } catch (e) { toast('Ack error: ' + e.message, 'err'); }
 }
 

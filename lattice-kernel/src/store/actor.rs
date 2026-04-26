@@ -50,10 +50,10 @@ pub enum ReplicationControllerCmd {
         resp: oneshot::Sender<Result<Vec<AckEntry>, StateError>>,
     },
     /// Build and commit an ack intention (empty ops) referencing the current
-    /// ack delta. Returns Some((hash, entries)) with the tips the commit
-    /// actually referenced, or None if the delta was empty.
+    /// ack delta. Returns Some(hash) of the committed ack, or None if the
+    /// delta was empty.
     EmitAck {
-        resp: oneshot::Sender<Result<Option<(Hash, Vec<AckEntry>)>, StateError>>,
+        resp: oneshot::Sender<Result<Option<Hash>, StateError>>,
     },
     /// Ingest a batch of signed intentions from network (replaces single ingest)
     IngestBatch {
@@ -250,15 +250,15 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                 let store_arc = self.intention_store.clone();
                 let mut store = store_arc.write().await;
                 let self_pubkey = self.node_identity.public_key();
-                let delta_result = compute_ack_delta(&store, &self_pubkey)
+                let tips_result = compute_ack_tips(&store, &self_pubkey)
                     .map_err(|e| StateError::Backend(e.to_string()));
-                let result = match delta_result {
+                let result = match tips_result {
                     Err(e) => Err(e),
-                    Ok(delta) if delta.is_empty() => Ok(None),
-                    Ok(delta) => {
-                        let deps: Vec<Hash> = delta.iter().map(|e| e.tip_hash).collect();
+                    Ok(tips) if tips.is_empty() => Ok(None),
+                    Ok(tips) => {
+                        let deps: Vec<Hash> = tips.into_iter().map(|(_, h)| h).collect();
                         self.create_and_commit_local_intention(&mut store, vec![], deps)
-                            .map(|hash| Some((hash, delta)))
+                            .map(Some)
                             .map_err(|e| match e {
                                 ReplicationControllerError::IntentionStore(e) => {
                                     StateError::Backend(e.to_string())
@@ -841,60 +841,96 @@ fn compute_author_state_observations(
 }
 
 /// Foreign authors whose current tip has advanced beyond what `self_pubkey`'s
-/// own tip transitively references via the frontier index.
+/// own tip transitively references via the frontier index. Returns just the
+/// content-tip hashes that an ack would pin — no display counts.
 ///
-/// For each foreign author A included in the delta:
-///   tip_count         = number of A's intentions in our local log
-///   acknowledged_count = how many of those self has already referenced
-///                        (via transitive causal closure)
-///
-/// Acks (empty-ops intentions) at A's tip are skipped — the walker looks for
-/// the latest content intention. Entries only appear when A has content newer
-/// than what self has acknowledged.
-fn compute_ack_delta(
+/// Per author, two `TABLE_FRONTIER` point lookups gate whether a chain walk
+/// is needed: if `frontier(foreign_tip)[A].seq <= frontier(self_tip)[A].seq`
+/// the author is fully acknowledged and we skip the walk entirely. Only
+/// authors with a real gap pay for `find_content_tip`.
+fn compute_ack_tips(
     store: &IntentionStore,
     self_pubkey: &PubKey,
-) -> Result<Vec<AckEntry>, IntentionStoreError> {
+) -> Result<Vec<(PubKey, Hash)>, IntentionStoreError> {
     let tips = store.all_author_tips().clone();
     let self_frontier: HashMap<PubKey, u64> = match tips.get(self_pubkey) {
         Some(self_tip) => store.get_frontier(self_tip)?.unwrap_or_default(),
         None => HashMap::new(),
     };
 
-    // Per-author sorted witness seqs so we can translate seq → count via
-    // partition_point. Built lazily per author (only for those in the delta).
-    let mut delta: Vec<AckEntry> = Vec::new();
+    let mut out: Vec<(PubKey, Hash)> = Vec::new();
     for (author, tip_hash) in tips.iter() {
         if author == self_pubkey {
             continue;
         }
         let ack_seq = self_frontier.get(author).copied().unwrap_or(0);
-        let Some((content_hash, content_seq)) =
+        let foreign_frontier = store.get_frontier(tip_hash)?.unwrap_or_default();
+        let tip_seq = foreign_frontier.get(author).copied().unwrap_or(0);
+        if tip_seq <= ack_seq {
+            continue;
+        }
+        let Some((content_hash, _content_seq)) =
             find_content_tip(store, tip_hash, ack_seq)?
         else {
             continue;
         };
-
-        // Sorted seqs of this author's content intentions (acks excluded) so
-        // we can translate seq → count via partition_point.
-        let chain = store.walk_back_hashed(tip_hash, Some(&Hash::ZERO), WALK_LIMIT)?;
-        let mut seqs: Vec<u64> = chain
-            .iter()
-            .filter(|(_, signed)| has_ops(signed))
-            .filter_map(|(h, _)| store.get_witness_seq_for(h))
-            .collect();
-        seqs.sort_unstable();
-        let tip_count = seqs.partition_point(|s| *s <= content_seq) as u64;
-        let acknowledged_count = seqs.partition_point(|s| *s <= ack_seq) as u64;
-
-        delta.push(AckEntry {
-            author: *author,
-            tip_hash: content_hash,
-            tip_count,
-            acknowledged_count,
-        });
+        out.push((*author, content_hash));
     }
-    Ok(delta)
+    Ok(out)
+}
+
+/// `compute_ack_tips` enriched with display counts (`tip_count` and
+/// `acknowledged_count`). The chain walk is paid per author only after the
+/// lean gap detection has confirmed there's actually pending content.
+/// Used by the user-facing `GetAckDelta` RPC; kernel emit paths use
+/// `compute_ack_tips` directly.
+fn compute_ack_delta(
+    store: &IntentionStore,
+    self_pubkey: &PubKey,
+) -> Result<Vec<AckEntry>, IntentionStoreError> {
+    let tips = compute_ack_tips(store, self_pubkey)?;
+    let self_ack_seq_for = |author: &PubKey| -> Result<u64, IntentionStoreError> {
+        let Some(self_tip) = store.all_author_tips().get(self_pubkey) else {
+            return Ok(0);
+        };
+        Ok(store
+            .get_frontier(self_tip)?
+            .unwrap_or_default()
+            .get(author)
+            .copied()
+            .unwrap_or(0))
+    };
+
+    tips.into_iter()
+        .map(|(author, content_hash)| {
+            let ack_seq = self_ack_seq_for(&author)?;
+            let content_seq = store.get_witness_seq_for(&content_hash).unwrap_or(0);
+
+            // Sorted seqs of this author's content intentions (acks excluded) so
+            // we can translate seq → count via partition_point.
+            let author_tip = store
+                .all_author_tips()
+                .get(&author)
+                .copied()
+                .unwrap_or(Hash::ZERO);
+            let chain = store.walk_back_hashed(&author_tip, Some(&Hash::ZERO), WALK_LIMIT)?;
+            let mut seqs: Vec<u64> = chain
+                .iter()
+                .filter(|(_, signed)| has_ops(signed))
+                .filter_map(|(h, _)| store.get_witness_seq_for(h))
+                .collect();
+            seqs.sort_unstable();
+            let tip_count = seqs.partition_point(|s| *s <= content_seq) as u64;
+            let acknowledged_count = seqs.partition_point(|s| *s <= ack_seq) as u64;
+
+            Ok(AckEntry {
+                author,
+                tip_hash: content_hash,
+                tip_count,
+                acknowledged_count,
+            })
+        })
+        .collect()
 }
 
 /// Walk back from `start` along store_prev looking for the first non-ack

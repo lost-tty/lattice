@@ -352,11 +352,10 @@ impl<S: StateMachine> Store<S> {
     }
 
     /// Emit an ack intention covering the current ack delta. Returns the
-    /// committed intention's hash alongside the delta it pinned, or
-    /// `Ok(None)` when nothing was pending.
-    pub async fn emit_ack(
-        &self,
-    ) -> Result<Option<(Hash, Vec<AckEntry>)>, StoreError> {
+    /// committed intention's hash, or `Ok(None)` when nothing was pending.
+    /// Display data (counts) is not computed; callers that need it issue
+    /// a separate `ack_delta` query.
+    pub async fn emit_ack(&self) -> Result<Option<Hash>, StoreError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.tx
             .send(ReplicationControllerCmd::EmitAck { resp: resp_tx })
@@ -744,13 +743,7 @@ impl<S: StateMachine + StoreIdentity + 'static> StoreInspector for Store<S> {
 
     fn emit_ack(
         &self,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Option<(Hash, Vec<AckEntry>)>, StoreError>>
-                + Send
-                + '_,
-        >,
-    > {
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Hash>, StoreError>> + Send + '_>> {
         Box::pin(Store::emit_ack(self))
     }
 

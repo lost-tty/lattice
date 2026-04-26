@@ -82,15 +82,10 @@ pub trait StoreInspector: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<AckEntry>, StoreError>> + Send + '_>>;
 
     /// Emit an ack intention covering the current ack delta. Returns the
-    /// new intention's hash along with the delta it pinned, or `None` if
-    /// the delta is empty.
+    /// new intention's hash, or `None` if the delta is empty. Display data
+    /// (counts) is not computed; callers that need it issue a separate
+    /// `ack_delta` query.
     fn emit_ack(
         &self,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Option<(Hash, Vec<AckEntry>)>, StoreError>>
-                + Send
-                + '_,
-        >,
-    >;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Hash>, StoreError>> + Send + '_>>;
 }

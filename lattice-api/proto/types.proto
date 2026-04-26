@@ -297,7 +297,6 @@ message AckDeltaResponse {
 
 message EmitAckResponse {
   bytes intention_hash = 1;
-  repeated AckDeltaEntry entries = 2;
 }
 
 message CleanupResult {

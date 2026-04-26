@@ -537,11 +537,12 @@ impl InProcessBackend {
         Box::pin(async move {
             let store = self.get_store(store_id)?;
             let inspector = store.as_inspector();
-            let (intention_hash, entries) = match inspector.emit_ack().await? {
-                Some((hash, delta)) => (hash.to_vec(), ack_entries_to_proto(delta)),
-                None => (Vec::new(), Vec::new()),
-            };
-            Ok(proto::EmitAckResponse { intention_hash, entries })
+            let intention_hash = inspector
+                .emit_ack()
+                .await?
+                .map(|h| h.to_vec())
+                .unwrap_or_default();
+            Ok(proto::EmitAckResponse { intention_hash })
         })
     }
 

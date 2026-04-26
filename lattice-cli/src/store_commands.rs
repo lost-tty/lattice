@@ -713,43 +713,9 @@ pub async fn cmd_store_ack(
 
     if resp.intention_hash.is_empty() {
         let _ = writeln!(w, "Nothing to ack.");
-        return Ok(Continue);
+    } else {
+        let _ = writeln!(w, "Ack emitted: {}", hex::encode(&resp.intention_hash));
     }
-
-    let peers = backend.store_peers(store_id).await.unwrap_or_default();
-    let name_for: std::collections::HashMap<Vec<u8>, String> = peers
-        .into_iter()
-        .filter(|p| !p.name.is_empty())
-        .map(|p| (p.public_key, p.name))
-        .collect();
-
-    use owo_colors::OwoColorize;
-    let mut rows = vec![SExpr::sym("ack-emitted")];
-    for e in &resp.entries {
-        let name = name_for.get(&e.author).cloned().unwrap_or_else(|| "-".to_string());
-        let behind = e.tip_count.saturating_sub(e.acknowledged_count);
-        let summary = format!(
-            "{} {}",
-            e.tip_count.yellow(),
-            format!("-{}", behind).red()
-        );
-        rows.push(SExpr::list(vec![
-            SExpr::sym("Entry"),
-            SExpr::list(vec![SExpr::sym("name"), SExpr::sym(&name)]),
-            SExpr::list(vec![SExpr::sym("author"), SExpr::raw(e.author.clone())]),
-            SExpr::list(vec![SExpr::sym("tip"), SExpr::raw(e.tip_hash.clone())]),
-            SExpr::list(vec![SExpr::sym("count"), SExpr::sym(&summary)]),
-            SExpr::list(vec![SExpr::sym("acked"), SExpr::num(e.acknowledged_count)]),
-        ]));
-    }
-
-    let _ = writeln!(
-        w,
-        "{}",
-        crate::display_helpers::render_sexpr_pretty_colored(&SExpr::list(rows), 4)
-    );
-    let _ = writeln!(w, "Emitted ack referencing {} tip(s).", resp.entries.len());
-
     Ok(Continue)
 }
 
