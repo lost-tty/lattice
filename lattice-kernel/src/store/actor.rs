@@ -24,6 +24,11 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// Shared by observation, ack-delta, and content-tip traversals.
 const WALK_LIMIT: usize = 1_000_000;
 
+/// Debounce window for the auto-ack timer. Each foreign-author intention we
+/// witness pushes the timer this far into the future; the ack fires once
+/// that many seconds have passed without further foreign activity.
+const AUTO_ACK_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Commands sent to the ReplicationController actor
 pub enum ReplicationControllerCmd {
     /// Get author tips for sync
@@ -152,6 +157,11 @@ pub struct ReplicationController<S: StateMachine> {
     rx: mpsc::Receiver<ReplicationControllerCmd>,
     /// Broadcast sender for emitting intentions after they're committed locally
     intention_tx: broadcast::Sender<SignedIntention>,
+
+    /// Debounced auto-ack timer. Pushed forward each time we witness a
+    /// foreign-author intention; fires once activity quiets. `None` when no
+    /// ack check is pending.
+    auto_ack_check: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
@@ -171,19 +181,33 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
             node_identity,
             rx,
             intention_tx,
+            auto_ack_check: None,
         })
     }
 
     /// Run the actor loop
     pub async fn run(mut self, shutdown_token: tokio_util::sync::CancellationToken) {
-        // Project any unapplied witness log entries from a previous session
-        {
+        // Project any unapplied witness log entries from a previous session.
+        // If we shut down with an open ack gap, arm the timer so the next tick
+        // covers it. Foreign witnesses arriving in the meantime push the timer
+        // further, batching the startup ack with fresh content.
+        let pending_at_startup = {
             let store = self.intention_store.read().await;
             match self.project_new_entries(&store) {
                 Ok(0) => {}
                 Ok(n) => info!(store_id = %self.store_id, entries = n, "startup projection"),
                 Err(e) => error!(store_id = %self.store_id, "startup projection failed: {}", e),
             }
+            match has_pending_ack(&store, &self.node_identity.public_key()) {
+                Ok(b) => b,
+                Err(e) => {
+                    error!(store_id = %self.store_id, "startup ack check failed: {}", e);
+                    false
+                }
+            }
+        };
+        if pending_at_startup {
+            self.schedule_auto_ack();
         }
 
         loop {
@@ -202,8 +226,52 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                         }
                     }
                 }
+                () = async {
+                    match self.auto_ack_check.as_mut() {
+                        Some(s) => s.as_mut().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.auto_ack_check = None;
+                    self.maybe_emit_auto_ack().await;
+                }
             }
         }
+    }
+
+    /// Push the auto-ack timer forward by the debounce window. Called from
+    /// the witness path when a foreign-author intention is applied.
+    fn schedule_auto_ack(&mut self) {
+        let deadline = tokio::time::Instant::now() + AUTO_ACK_DEBOUNCE;
+        match &mut self.auto_ack_check {
+            Some(sleep) => sleep.as_mut().reset(deadline),
+            None => self.auto_ack_check = Some(Box::pin(tokio::time::sleep_until(deadline))),
+        }
+    }
+
+    async fn maybe_emit_auto_ack(&mut self) {
+        if let Err(e) = self.try_emit_auto_ack().await {
+            error!(store_id = %self.store_id, "auto-ack failed: {}", e);
+        }
+    }
+
+    async fn try_emit_auto_ack(&mut self) -> Result<(), ReplicationControllerError> {
+        let store_arc = self.intention_store.clone();
+        let mut store = store_arc.write().await;
+        let self_pubkey = self.node_identity.public_key();
+
+        if !has_pending_ack(&store, &self_pubkey)? {
+            return Ok(());
+        }
+
+        let tips = compute_ack_tips(&store, &self_pubkey)?;
+        if tips.is_empty() {
+            return Ok(());
+        }
+
+        let deps: Vec<Hash> = tips.into_iter().map(|(_, h)| h).collect();
+        self.create_and_commit_local_intention(&mut store, vec![], deps)?;
+        Ok(())
     }
 
     async fn handle_command(&mut self, cmd: ReplicationControllerCmd) {
@@ -558,7 +626,8 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
             }
         }
 
-        // Witness all ready floating intentions, then project to state
+        // Witness all ready floating intentions, then project to state.
+        // witness_ready arms the auto-ack timer on each foreign witness.
         self.witness_ready(store)?;
         self.project_new_entries(store)?;
 
@@ -614,6 +683,7 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let self_pubkey = self.node_identity.public_key();
 
         let mut total = 0;
         loop {
@@ -645,6 +715,9 @@ impl<S: StateMachine + StoreIdentity> ReplicationController<S> {
                         Ok(_) => {
                             witnessed_any = true;
                             total += 1;
+                            if signed.intention.author != self_pubkey {
+                                self.schedule_auto_ack();
+                            }
                         }
                         Err(IntentionStoreError::AlreadyWitnessed(_)) => {}
                         Err(e) => return Err(e.into()),
@@ -852,7 +925,7 @@ fn compute_ack_tips(
     store: &IntentionStore,
     self_pubkey: &PubKey,
 ) -> Result<Vec<(PubKey, Hash)>, IntentionStoreError> {
-    let tips = store.all_author_tips().clone();
+    let tips = store.all_author_tips();
     let self_frontier: HashMap<PubKey, u64> = match tips.get(self_pubkey) {
         Some(self_tip) => store.get_frontier(self_tip)?.unwrap_or_default(),
         None => HashMap::new(),
@@ -879,6 +952,32 @@ fn compute_ack_tips(
     Ok(out)
 }
 
+/// True iff there's any foreign content the local node hasn't acknowledged.
+/// One `TABLE_FRONTIER` decode for self plus a per-author witness-seq lookup;
+/// short-circuits on the first author whose witnessed seq exceeds our
+/// acknowledged seq. Hook for the auto-ack scheduler.
+fn has_pending_ack(
+    store: &IntentionStore,
+    self_pubkey: &PubKey,
+) -> Result<bool, IntentionStoreError> {
+    let tips = store.all_author_tips();
+    let self_frontier: HashMap<PubKey, u64> = match tips.get(self_pubkey) {
+        Some(self_tip) => store.get_frontier(self_tip)?.unwrap_or_default(),
+        None => HashMap::new(),
+    };
+    for (author, tip_hash) in tips.iter() {
+        if author == self_pubkey {
+            continue;
+        }
+        let ack_seq = self_frontier.get(author).copied().unwrap_or(0);
+        let tip_seq = store.get_witness_seq_for(tip_hash).unwrap_or(0);
+        if tip_seq > ack_seq {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// `compute_ack_tips` enriched with display counts (`tip_count` and
 /// `acknowledged_count`). The chain walk is paid per author only after the
 /// lean gap detection has confirmed there's actually pending content.
@@ -888,31 +987,22 @@ fn compute_ack_delta(
     store: &IntentionStore,
     self_pubkey: &PubKey,
 ) -> Result<Vec<AckEntry>, IntentionStoreError> {
-    let tips = compute_ack_tips(store, self_pubkey)?;
-    let self_ack_seq_for = |author: &PubKey| -> Result<u64, IntentionStoreError> {
-        let Some(self_tip) = store.all_author_tips().get(self_pubkey) else {
-            return Ok(0);
-        };
-        Ok(store
-            .get_frontier(self_tip)?
-            .unwrap_or_default()
-            .get(author)
-            .copied()
-            .unwrap_or(0))
+    let ack_tips = compute_ack_tips(store, self_pubkey)?;
+    let author_tips = store.all_author_tips();
+    let self_frontier: HashMap<PubKey, u64> = match author_tips.get(self_pubkey) {
+        Some(self_tip) => store.get_frontier(self_tip)?.unwrap_or_default(),
+        None => HashMap::new(),
     };
 
-    tips.into_iter()
+    ack_tips
+        .into_iter()
         .map(|(author, content_hash)| {
-            let ack_seq = self_ack_seq_for(&author)?;
+            let ack_seq = self_frontier.get(&author).copied().unwrap_or(0);
             let content_seq = store.get_witness_seq_for(&content_hash).unwrap_or(0);
+            let author_tip = author_tips.get(&author).copied().unwrap_or(Hash::ZERO);
 
             // Sorted seqs of this author's content intentions (acks excluded) so
             // we can translate seq → count via partition_point.
-            let author_tip = store
-                .all_author_tips()
-                .get(&author)
-                .copied()
-                .unwrap_or(Hash::ZERO);
             let chain = store.walk_back_hashed(&author_tip, Some(&Hash::ZERO), WALK_LIMIT)?;
             let mut seqs: Vec<u64> = chain
                 .iter()
@@ -2470,6 +2560,168 @@ mod tests {
         let delta_b = handle.ack_delta(b).await.unwrap();
         assert!(delta_a.is_empty(), "A's delta must be empty after mutual ack, got {:?}", delta_a);
         assert!(delta_b.is_empty(), "B's delta must be empty after mutual ack, got {:?}", delta_b);
+
+        handle.close().await;
+    }
+
+    /// `has_pending_ack` flips with the gap: false when no foreign content is
+    /// unacknowledged, true once a foreign author's witnessed seq exceeds
+    /// what self's own tip transitively references.
+    #[test]
+    fn test_has_pending_ack_reflects_gap() {
+        let mut store = crate::weaver::IntentionStore::open(
+            TEST_STORE,
+            &lattice_model::StorageConfig::InMemory,
+        )
+        .unwrap();
+
+        let id_self = NodeIdentity::generate();
+        let id_a = NodeIdentity::generate();
+        let self_pk = id_self.public_key();
+        let a = id_a.public_key();
+        let now = 1000u64;
+
+        // Empty store: no pending ack.
+        assert!(!has_pending_ack(&store, &self_pk).unwrap());
+
+        // A authors content. Insert + witness through the store API.
+        let a1 = Intention {
+            author: a,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"a1".to_vec(),
+        };
+        let a1_signed = SignedIntention::sign(a1.clone(), &id_a);
+        store.insert(&a1_signed).unwrap();
+        store.witness(&a1, now, &id_self).unwrap();
+
+        // Now there is a gap: A has content, self hasn't ack'd anything.
+        assert!(has_pending_ack(&store, &self_pk).unwrap());
+
+        // Self emits an ack referencing A's tip — content + witness.
+        let h_a1 = a1.hash();
+        let self_ack = Intention {
+            author: self_pk,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![h_a1]),
+            ops: vec![],
+        };
+        let self_ack_signed = SignedIntention::sign(self_ack.clone(), &id_self);
+        store.insert(&self_ack_signed).unwrap();
+        store.witness(&self_ack, now, &id_self).unwrap();
+
+        // Self has ack'd A: gap is closed.
+        assert!(!has_pending_ack(&store, &self_pk).unwrap());
+
+        // A authors more content. Gap reopens.
+        let a2 = Intention {
+            author: a,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h_a1,
+            condition: Condition::v1(vec![]),
+            ops: b"a2".to_vec(),
+        };
+        let a2_signed = SignedIntention::sign(a2.clone(), &id_a);
+        store.insert(&a2_signed).unwrap();
+        store.witness(&a2, now, &id_self).unwrap();
+
+        assert!(has_pending_ack(&store, &self_pk).unwrap());
+    }
+
+    /// After ingesting a foreign content intention, the auto-ack timer fires
+    /// AUTO_ACK_DEBOUNCE later and commits an ack — without anyone calling
+    /// EmitAck explicitly.
+    #[tokio::test(start_paused = true)]
+    async fn test_auto_ack_fires_after_debounce() {
+        let local = NodeIdentity::generate();
+        let id_a = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, local.clone()).unwrap();
+        let a = id_a.public_key();
+        let local_pk = local.public_key();
+
+        let mut intentions = handle.subscribe_intentions();
+
+        let a1 = Intention {
+            author: a,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"a1".to_vec(),
+        };
+        handle.ingest_intention(SignedIntention::sign(a1, &id_a)).await.unwrap();
+
+        // Advance past the debounce window. The timer fires; the actor commits
+        // an ack which is broadcast on the intention channel.
+        tokio::time::advance(AUTO_ACK_DEBOUNCE + std::time::Duration::from_millis(100)).await;
+
+        let ack = intentions.recv().await.expect("intention channel closed");
+        assert_eq!(ack.intention.author, local_pk);
+        assert!(ack.intention.ops.is_empty(), "auto-ack must be empty-ops");
+
+        handle.close().await;
+    }
+
+    /// A burst of foreign intentions arriving within the debounce window
+    /// pushes the timer forward — the ack fires only once activity quiets,
+    /// covering all accumulated foreign content in a single emission.
+    #[tokio::test(start_paused = true)]
+    async fn test_auto_ack_debounces_burst() {
+        let local = NodeIdentity::generate();
+        let id_a = NodeIdentity::generate();
+        let (handle, _info, _join) =
+            open_test_store(TEST_STORE, local.clone()).unwrap();
+        let a = id_a.public_key();
+        let local_pk = local.public_key();
+
+        let mut intentions = handle.subscribe_intentions();
+
+        let a1 = Intention {
+            author: a,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: Hash::ZERO,
+            condition: Condition::v1(vec![]),
+            ops: b"a1".to_vec(),
+        };
+        let h_a1 = a1.hash();
+        handle.ingest_intention(SignedIntention::sign(a1, &id_a)).await.unwrap();
+
+        // Almost-but-not-quite the debounce window. Another foreign intention
+        // arrives — the timer pushes forward.
+        tokio::time::advance(AUTO_ACK_DEBOUNCE - std::time::Duration::from_secs(1)).await;
+        let a2 = Intention {
+            author: a,
+            timestamp: lattice_model::hlc::HLC::now(),
+            store_id: TEST_STORE,
+            store_prev: h_a1,
+            condition: Condition::v1(vec![]),
+            ops: b"a2".to_vec(),
+        };
+        handle.ingest_intention(SignedIntention::sign(a2, &id_a)).await.unwrap();
+
+        // Past the original deadline but not past the pushed-out one. The
+        // broadcast channel only carries local commits, so it must still be
+        // empty: foreign ingests don't broadcast, and the auto-ack timer
+        // should not have fired yet (the second ingest pushed it forward).
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(intentions.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)),
+            "burst should have pushed the timer; no ack yet",
+        );
+
+        // Past the pushed-out deadline.
+        tokio::time::advance(AUTO_ACK_DEBOUNCE).await;
+        let ack = intentions.recv().await.expect("intention channel closed");
+        assert_eq!(ack.intention.author, local_pk);
+        assert!(ack.intention.ops.is_empty(), "auto-ack must be empty-ops");
 
         handle.close().await;
     }

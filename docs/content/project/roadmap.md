@@ -92,6 +92,17 @@ Negentropy set reconciliation now operates on witnessed intentions only. Floatin
 - [x] Floating intentions excluded from sync — received-but-unwitnessable intentions no longer pollute fingerprints
 - [x] Renamed `table_fingerprint` → `witness_fingerprint` across codebase
 
+### 18A½: Auto-Ack ✅
+Today's `EmitAck` is manual (CLI command, web button). For pruning to track real mesh convergence, peers need to advance their acknowledged-frontier automatically. Without auto-ack, quiet observers never close the ack-delta gap — the down-set never saturates and pruning has nothing to authorize.
+
+**Trigger:** witnessing a foreign-author intention pushes a debounce timer forward. The ack fires once the timer expires (no further foreign witnesses arrive within the window) and `has_pending_ack` confirms a real gap. Bursts coalesce into one emission.
+
+- [x] Per-store auto-ack scheduler in the kernel actor (debounce timer, `tokio::time::Sleep`)
+- [x] Foreign-witness arming in `witness_ready`
+- [x] Startup catch-up: arm the timer if the store opened with an existing gap
+- [x] Suppress emission when `has_pending_ack` returns false
+- [x] Tests with `tokio::time::pause`/`advance` covering single-arrival, burst-coalescing, and the gap predicate
+
 ### 18B: Meta Table Separation
 Prerequisite for epoch indexes and headless replication. Separate store metadata into two tables reflecting the `log.db` / `state.db` split. `log.db` is the durable backbone that always exists; `state.db` is optional (only present when an opener is available and projection is active).
 
