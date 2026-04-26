@@ -136,13 +136,11 @@ async function loadDebugAuthorState(storeId) {
         <td><em>mesh (min)</em></td>
         <td>-</td>
         ${colIds.map(observedHex => {
-          let minSeen = null;
+          let minSeen = Infinity;
           for (const obs of observers) {
-            const key = `${hex(obs.public_key)}|${observedHex}`;
-            const s = cell.get(key) ?? 0;
-            if (minSeen == null || s < minSeen) minSeen = s;
+            minSeen = Math.min(minSeen, cell.get(`${hex(obs.public_key)}|${observedHex}`) ?? 0);
           }
-          minSeen = minSeen ?? 0;
+          if (minSeen === Infinity) minSeen = 0;
           const total = totals.get(observedHex) ?? 0;
           const behind = total > minSeen ? total - minSeen : 0;
           const klass = behind === 0 ? 'ok' : 'sexpr-num';
@@ -161,6 +159,18 @@ async function loadDebugAuthorState(storeId) {
           if (!entry) return html`<td class="muted">-</td>`;
           const gap = Number(entry.tip_count) - Number(entry.acknowledged_count);
           return html`<td><span class="err">+${gap}</span></td>`;
+        })}
+      </tr>
+      <tr>
+        <td><em>prunable</em></td>
+        <td>-</td>
+        ${colIds.map(observedHex => {
+          let minSeen = Infinity;
+          for (const obs of observers) {
+            minSeen = Math.min(minSeen, cell.get(`${hex(obs.public_key)}|${observedHex}`) ?? 0);
+          }
+          if (minSeen === Infinity) minSeen = 0;
+          return html`<td><span class="ok">${minSeen}</span></td>`;
         })}
       </tr>
     </table>

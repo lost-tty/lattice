@@ -3,13 +3,15 @@ import * as Helpers from '../helpers.js';
 import * as S from '../state.js';
 import { doSync, doInvite, doAck } from './actions.js';
 import { sdk } from '../sdk.js';
+import { computeUpset, UpsetPlot } from './upset.js';
 
 export async function loadDetails(storeId) {
   const sid = { store_id: storeId };
-  const [details, meta, peerStrategyResp] = await Promise.all([
+  const [details, meta, peerStrategyResp, observationsResp] = await Promise.all([
     sdk.api.store.GetDetails(sid),
     sdk.api.store.GetStatus(sid),
     sdk.api.store.GetPeerStrategy(sid).catch(() => ({})),
+    sdk.api.store.GetAuthorStateObservations(sid).catch(() => ({})),
   ]);
   const peerStrategy = peerStrategyResp.strategy || '';
   const uuid = Helpers.uuidFromBytes(storeId);
@@ -17,10 +19,38 @@ export async function loadDetails(storeId) {
   return html`<${DetailsView}
     uuid=${uuid} details=${details} meta=${meta}
     peerStrategy=${peerStrategy} storeId=${storeId}
+    observationsResp=${observationsResp}
   />`;
 }
 
-function DetailsView({ uuid, details, meta, peerStrategy, storeId }) {
+function UpsetCard({ observationsResp }) {
+  const observations = observationsResp.items || [];
+  const observers = observationsResp.observers || [];
+  const totalsList = observationsResp.author_totals || [];
+
+  if (observers.length === 0 || totalsList.length === 0) return null;
+
+  const nameFor = new Map();
+  for (const obs of observers) if (obs.peer_name) nameFor.set(hex(obs.public_key), obs.peer_name);
+
+  const { hulls, buckets, totalIntentions } = computeUpset(observations, observers, totalsList);
+  if (hulls.length === 0 || buckets.length === 0) return null;
+
+  const allHullsKey = hulls.map((_, i) => i).join(',');
+  const prunable = buckets.find(b => b.members.join(',') === allHullsKey)?.count ?? 0;
+
+  return html`
+    <div class="card">
+      <h3>Mesh Convergence</h3>
+      <${UpsetPlot} hulls=${hulls} buckets=${buckets} nameFor=${nameFor} />
+      <div class="muted table-count">
+        ${`${totalIntentions} intention(s), ${hulls.length} hull(s), ${buckets.length} distinct membership set(s), ${prunable} prunable`}
+      </div>
+    </div>
+  `;
+}
+
+function DetailsView({ uuid, details, meta, peerStrategy, storeId, observationsResp }) {
   const appliedSeq = details.last_applied_seq || 0;
   const headSeq = details.witness_head_seq || 0;
   const stalled = headSeq > 0 && appliedSeq !== headSeq;
@@ -61,5 +91,6 @@ function DetailsView({ uuid, details, meta, peerStrategy, storeId }) {
         <div class="k">Witness Head Hash</div><div class="v mono">${hex(details.witness_head_hash) || '-'}</div>
       </div>
     </div>
+    <${UpsetCard} observationsResp=${observationsResp} />
   `;
 }
